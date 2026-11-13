@@ -8,10 +8,9 @@ into calls on those objects and turns runtime events into frontend notifications
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import AsyncExitStack
-from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 import argparse
 import asyncio
@@ -19,39 +18,35 @@ import contextlib
 import sys
 
 from treekle import json_dumps, json_loads
-from wesearch.fetch import FetchSession
 
-from sagent.agent.agent import Agent, default_system_prompt
-from sagent.agent.agents_md import AgentsMdConfig
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.default_tools import build_tools, preload_builtin_tools
-from sagent.agent.pruner import Pruner
-from sagent.agent.team import Team
-from sagent.providers.catalog import ModelCatalog, default_provider
-from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.server.commands import SagentCommandService
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.projects import list_sessions, new_session_path, project_dir
-from sagent.session.types import (
-    AgentToAgentMessage,
-    AssistantMessage,
-    FileEditResult,
-    FileWriteResult,
-    Thinking,
-    ToolCall,
-    ToolResult,
-    TurnContext,
-    UserMessage,
+from sagent.server.model_settings import (
+    apply as apply_model_settings,
+    snapshot as model_settings_snapshot,
+    usage as provider_usage,
 )
-from sagent.tools.agent_self import AgentSelf
+from sagent.server.protocol import (
+    NATIVE_EVENT_METHOD,
+    NATIVE_NOTIFICATION_METHOD,
+    NATIVE_PROTOCOL,
+)
+from sagent.server.sessions import ManagedSession, SessionManager
+from sagent.server.wire import (
+    runtime_event_message,
+    session_notification_message,
+    session_record_message,
+)
+from sagent.session.controller import SubmissionMode
+from sagent.session.host import AgentSession
+from sagent.session.projects import list_sessions, new_session_path, project_dir
+from sagent.session.snapshot import SessionSnapshotProjector
 from sagent.tools.skill import Skill
 
 
 if TYPE_CHECKING:
-    from treekle import PlainTree
-
-    from sagent.model.capability import ModelCapability, ModelSettingName
+    from sagent.agent.agent import Agent
+    from sagent.agent.team import Team
     from sagent.tui.types import CommandOutput
 
 
@@ -79,8 +74,23 @@ def _resolve_prompt_text(prompt: str | None, cwd: Path) -> str | None:
 _resolve_extra_prompt = _resolve_prompt_text
 
 
+def _implementation_info() -> dict[str, str]:
+    """Return enough identity for a client to verify which daemon it reached."""
+    try:
+        package_version = version("sagent")
+    except PackageNotFoundError:
+        package_version = "unknown"
+    return {
+        "name": "sagent",
+        "version": package_version,
+        # A source path is useful for local development, where two checkouts can
+        # expose the same package version. This daemon is local-only JSONL RPC.
+        "serverPath": str(Path(__file__).resolve()),
+    }
+
+
 class SagentServer:
-    """Own one Sagent session and expose it through request/notification messages."""
+    """Host independent native sessions through one daemon process."""
 
     def __init__(
         self,
@@ -95,10 +105,6 @@ class SagentServer:
         skill_directories: Sequence[Path] = (),
         output: asyncio.Queue[dict[str, object]],
     ) -> None:
-        # These tool modules have existing Agent/Team import dependencies. Load
-        # them before the session's async resources so the runtime sees the same
-        # initialization order as the terminal surface.
-        preload_builtin_tools()
         self.cwd = cwd
         self.model_name = model_name
         self.allowed_providers = allowed_providers
@@ -110,17 +116,85 @@ class SagentServer:
             path if path.is_absolute() else cwd / path for path in skill_directories
         )
         self.output = output
-        self._resources: AsyncExitStack | None = None
-        self._agent: Agent | None = None
-        self._team: Team | None = None
+        self._sessions = SessionManager()
+        # These aliases preserve the small private surface used by existing
+        # daemon tests and by callers that have only one open session. New
+        # protocol requests resolve through SessionManager by sessionId.
+        self._session: AgentSession | None = None
         self._command_service: SagentCommandService | None = None
-        self._session_path: Path | None = None
-        self._observer: Any = None
-        self._turn: asyncio.Task[str] | None = None
-        self._turn_sequence = 0
-        self._active_turn_id: str | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._active_agent_label: str | None = None
         self._notification_agent_label: str | None = None
+        self._snapshot_projector = SessionSnapshotProjector()
+        self._session_id: str | None = None
+        self._event_sequence = 0
+        self._subscribed_agent_labels: set[str] = set()
+        self._team_watch_task: asyncio.Task[None] | None = None
+
+    @property
+    def _agent(self) -> Agent | None:
+        return self._session.agent if self._session is not None else None
+
+    @property
+    def _team(self) -> Team | None:
+        return self._session.team if self._session is not None else None
+
+    @property
+    def _session_path(self) -> Path | None:
+        return self._session.path if self._session is not None else None
+
+    def _entry_for(self, params: Mapping[str, object]) -> ManagedSession | None:
+        """Resolve a request to one session without changing global server state."""
+        requested = params.get("sessionId")
+        if requested is not None:
+            if not isinstance(requested, str) or not requested:
+                raise ValueError("sessionId must be a non-empty string")
+            entry = self._sessions.get(requested)
+            if entry is None:
+                raise ValueError(f"unknown session {requested!r}")
+            return entry
+        if self._session_id is not None:
+            entry = self._sessions.get(self._session_id)
+            if entry is not None:
+                return entry
+        if len(self._sessions) == 1:
+            return next(self._sessions.values())
+        # Private unit tests and old single-session callers may attach an
+        # already-configured native session directly. Keep that compatibility
+        # path out of the real multi-session registry.
+        if self._session is not None and not self._sessions:
+            return ManagedSession(
+                self._session_id or "legacy",
+                self._session,
+                command_service=self._command_service,
+                active_agent_label=self._active_agent_label,
+            )
+        return None
+
+    def _require_entry(self, params: Mapping[str, object]) -> ManagedSession:
+        entry = self._entry_for(params)
+        if entry is None:
+            raise RuntimeError("no Sagent session is open")
+        return entry
+
+    def _select_entry(self, entry: ManagedSession) -> None:
+        """Keep legacy aliases pointed at the most recently used session."""
+        self._session = entry.session
+        self._session_id = entry.session_id
+        self._command_service = entry.command_service
+        self._active_agent_label = entry.active_agent_label
+        self._notification_agent_label = entry.notification_agent_label
+        self._event_sequence = entry.event_sequence
+        self._subscribed_agent_labels = entry.subscribed_agent_labels
+        self._team_watch_task = entry.team_watch_task
+
+    def _sync_entry_aliases(self, entry: ManagedSession) -> None:
+        if self._session_id == entry.session_id or (
+            not self._sessions and self._session is entry.session
+        ):
+            if not self._sessions and self._session_id is None:
+                entry.session_id = "legacy"
+            self._select_entry(entry)
 
     async def handle(self, request: Mapping[str, object]) -> None:
         """Dispatch one decoded request and enqueue its response, if it has an id."""
@@ -143,48 +217,56 @@ class SagentServer:
         method: str,
         params: Mapping[str, object],
     ) -> dict[str, object]:
-        if method == "initialize":
-            return {
-                "protocol": "sagent/v1",
-                "capabilities": {
-                    "streaming": True,
-                    "sessions": True,
-                    "team": True,
-                    "agentSessions": True,
-                    "modelSettings": True,
-                    "commands": True,
-                    "nativeWorkspace": True,
-                    "skills": True,
-                },
+        if method == "system.initialize":
+            capabilities = {
+                "streaming": True,
+                "sessions": True,
+                "team": True,
+                "agentSessions": True,
+                "modelSettings": True,
+                "commands": True,
+                "nativeWorkspace": True,
+                "skills": True,
+                "nativeEvents": True,
+                "nativeRecords": True,
             }
-        if method == "getSkills":
+            return {
+                "protocol": NATIVE_PROTOCOL,
+                "implementation": _implementation_info(),
+                "capabilities": capabilities,
+            }
+        if method == "catalog.skills":
             return self._get_skills()
-        if method == "openSession":
+        if method == "session.open":
             return await self._open_session(params)
-        if method == "listSessions":
+        if method == "session.list":
             return self._list_sessions()
-        if method == "getSession":
-            return self._session_state()
-        if method == "getTeam":
-            return self._team_state()
-        if method == "getAgentSession":
+        if method == "session.state":
+            return self._session_state(params)
+        if method == "session.team.state":
+            return self._team_state(params)
+        if method == "session.agent.state":
             return self._agent_session_state(params)
-        if method == "getModelSettings":
-            return self._model_settings(params)
-        if method == "setModelSettings":
+        if method == "catalog.modelSettings":
+            return await self._model_settings(params)
+        if method == "catalog.usage":
+            return await self._get_provider_usage(params)
+        if method == "catalog.modelSettings.set":
             return await self._set_model_settings(params)
-        if method == "getCommands":
+        if method == "commands.list":
             return await self._get_commands(params)
-        if method == "executeCommand":
+        if method == "commands.execute":
             return await self._execute_command(params)
-        if method == "sendMessage":
-            return await self._send_message(params)
-        if method == "cancelTurn":
-            return self._cancel_turn()
-        if method == "closeSession":
-            await self.close()
+        if method == "session.records":
+            return self._session_records(params)
+        if method == "session.submit":
+            return self._submit_native(params)
+        if method == "session.halt":
+            return self._cancel_turn(params)
+        if method == "session.close":
+            await self._close_session(params)
             return {"closed": True}
-        if method == "shutdown":
+        if method == "system.shutdown":
             await self.close()
             return {"stopped": True}
         raise ValueError(f"unknown method {method!r}")
@@ -245,7 +327,15 @@ class SagentServer:
         # construct a second session over the current one, and reopening it is
         # already an idempotent request from the client's perspective.
         if self._session_path == path and self._agent is not None:
-            return self._session_state()
+            return self._session_state({"sessionId": self._session_id})
+
+        session_id = path.parent.name
+        existing = self._sessions.get(session_id)
+        if existing is not None:
+            if existing.session.path != path:
+                raise ValueError(f"session id {session_id!r} is already open")
+            self._select_entry(existing)
+            return self._session_state({"sessionId": session_id})
 
         model_name = params.get("model", self.model_name)
         if not isinstance(model_name, str) or not model_name:
@@ -258,207 +348,187 @@ class SagentServer:
         ):
             raise ValueError("tools must be an array of names")
 
-        resources = AsyncExitStack()
-        await resources.__aenter__()
+        session: AgentSession | None = None
         try:
-            catalog = await resources.enter_async_context(ModelCatalog())
-            if self.allowed_providers:
-                catalog.allow(_comma_list(self.allowed_providers))
-            team = await resources.enter_async_context(Team(catalog=catalog))
-            fetch = await resources.enter_async_context(FetchSession())
-            journal = await resources.enter_async_context(JsonlJournal(path))
-            model = catalog.model(model_name, current=default_provider())
-            system: str | None = self.system_prompt
-            if self.append_system_prompt:
-                base = system if system is not None else default_system_prompt()
-                system = f"{base}\n\n{self.append_system_prompt}"
-
-            agent = Agent(
-                model=model,
-                tools=build_tools(
-                    cwd=self.cwd,
-                    team=team,
-                    session=fetch,
-                    names=cast("Sequence[str] | None", tool_names),
-                    skill_directories=self.skill_directories,
-                ),
-                journal=journal,
-                compactor=SummaryCompactor,
-                pruner=Pruner,
+            session = await AgentSession.open(
                 cwd=self.cwd,
-                agents_md=AgentsMdConfig(),
-                system_prompt=system,
-                persistent_retry=True,
+                path=path,
+                model_name=model_name,
+                allowed_providers=self.allowed_providers,
+                tool_names=cast("Sequence[str] | None", tool_names),
+                system_prompt=self.system_prompt,
+                append_system_prompt=self.append_system_prompt,
+                skill_directories=self.skill_directories,
             )
-            await agent.recall(catalog)
-            await resources.enter_async_context(agent)
-            team.join(agent, label="Agent")
-
-            def observe_root(event: types.RuntimeEvent) -> None:
-                self._observe(event, "Agent")
-
-            observer = observe_root
-            agent.runtime.observers.append(observer)
         except BaseException:
-            await resources.aclose()
+            if session is not None:
+                await session.close()
             raise
 
-        # Build the replacement completely before closing the current session.
-        # A bad model, unavailable provider, journal lock, or tool construction
-        # failure must leave an already-open session usable.
-        try:
-            await self.close()
-        except BaseException:
-            await resources.aclose()
-            raise
-
-        self._resources = resources
-        self._agent = agent
-        self._team = team
-        self._session_path = path
-        self._observer = observer
-        self._command_service = SagentCommandService(
-            agent=agent,
-            team=team,
-            catalog=catalog,
-            output=self._emit_command_output,
-            focus=self._focus_agent,
+        assert session is not None
+        entry = ManagedSession(session_id=session_id, session=session)
+        entry.command_service = SagentCommandService(
+            agent=session.agent,
+            team=session.team,
+            catalog=session.catalog,
+            output=lambda label, output: self._emit_command_output(
+                session_id, label, output,
+            ),
+            focus=lambda label: self._focus_agent(session_id, label),
         )
-        snapshot = self._session_snapshot()
-        self._turn_sequence = _snapshot_turn_count(snapshot)
-        return self._session_state(snapshot=snapshot)
+        self._sessions.add(entry)
+        self._select_entry(entry)
+        self._subscribe_team_events(entry)
+        entry.team_watch_task = asyncio.create_task(self._watch_team(entry))
+        self._sync_entry_aliases(entry)
+        return self._session_state({"sessionId": session_id})
 
-    async def _send_message(self, params: Mapping[str, object]) -> dict[str, object]:
-        team = self._team
-        if team is None:
-            raise RuntimeError("no Sagent team is open")
-        if self._turn is not None and not self._turn.done():
-            raise RuntimeError("a turn is already running")
+    def _subscribe_agent_events(self, entry: ManagedSession, label: str) -> None:
+        remover = entry.session.subscribe(
+            lambda agent_label, event: self._forward_runtime_event(
+                entry.session_id, agent_label, event,
+            ),
+            agent_label=label,
+        )
+        entry.unsubscribers.append(remover)
+        entry.subscribed_agent_labels.add(label)
+
+    def _subscribe_team_events(self, entry: ManagedSession | None = None) -> None:
+        """Attach the daemon observer to every currently live team agent."""
+        entry = entry or self._entry_for({})
+        if entry is None:
+            return
+        for label in tuple(entry.session.team):
+            if label not in entry.subscribed_agent_labels:
+                self._subscribe_agent_events(entry, label)
+
+    async def _watch_team(self, entry: ManagedSession) -> None:
+        """Follow live Team membership like the TUI's periodic view watch."""
+        while self._sessions.get(entry.session_id) is entry:
+            self._subscribe_team_events(entry)
+            await asyncio.sleep(0.2)
+
+    def _forward_runtime_event(
+        self, session_id: str, agent_label: str, event: types.RuntimeEvent
+    ) -> None:
+        self._observe(event, agent_label, session_id=session_id)
+
+    def _notify_usage_soon(self, session_id: str, agent_label: str) -> None:
+        async def _notify() -> None:
+            with contextlib.suppress(Exception):
+                entry = self._sessions.get(session_id)
+                if entry is not None and agent_label in entry.session.team:
+                    usage = await provider_usage(entry.session.team[agent_label])
+                    self._notify(
+                        "usage.updated",
+                        {
+                            "agentLabel": agent_label,
+                            **usage,
+                        },
+                        session_id=session_id,
+                    )
+
+        task = asyncio.create_task(_notify())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _submit_native(self, params: Mapping[str, object]) -> dict[str, object]:
+        """Submit native runtime input without creating a frontend turn."""
+        entry = self._require_entry(params)
+        team = entry.session.team
+        session = entry.session
+        self._subscribe_team_events(entry)
         text = params.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
         agent_label = params.get("agentLabel", "Agent")
-        if not isinstance(agent_label, str) or not agent_label:
-            raise ValueError("agentLabel must be a non-empty string")
-        if agent_label not in team:
+        if not isinstance(agent_label, str) or agent_label not in team:
             raise ValueError(f"unknown agent {agent_label!r}")
-        agent = team[agent_label]
-        self._turn_sequence += 1
-        turn_id = f"turn-{self._turn_sequence}"
-        self._active_turn_id = turn_id
-        self._active_agent_label = agent_label
-        turn_observer = None
-        if agent_label != "Agent":
-
-            def observe_turn(event: types.RuntimeEvent) -> None:
-                self._observe(event, agent_label)
-
-            turn_observer = observe_turn
-        if turn_observer is not None:
-            agent.runtime.observers.append(turn_observer)
-        self._notify(
-            "turn.started",
-            {
-                "turnId": turn_id,
-                "text": text,
-                "agentLabel": agent_label,
-                "timestamp": datetime.now(UTC).isoformat(),
-                **_agent_model_identity(agent),
-            },
+        mode = params.get("mode", "immediate")
+        if mode not in ("immediate", "queued", "deferred"):
+            raise ValueError(f"unknown submission mode {mode!r}")
+        entry.active_agent_label = agent_label
+        self._sync_entry_aliases(entry)
+        submission = session.submit(
+            text,
+            agent_label=agent_label,
+            mode=cast(SubmissionMode, mode),
         )
-        self._turn = asyncio.create_task(agent.send(text))
-        try:
-            reply = await self._turn
-        except asyncio.CancelledError:
-            self._notify(
-                "turn.cancelled",
-                {"turnId": turn_id, "agentLabel": agent_label},
-            )
-            return {"cancelled": True}
-        except Exception as error:
-            self._notify(
-                "turn.failed",
-                {
-                    "turnId": turn_id,
-                    "message": str(error),
-                    "agentLabel": agent_label,
-                },
-            )
-            raise
-        finally:
-            self._turn = None
-            self._active_turn_id = None
-            self._active_agent_label = None
-            if turn_observer is not None and turn_observer in agent.runtime.observers:
-                agent.runtime.observers.remove(turn_observer)
-        self._notify(
-            "turn.completed",
-            {"turnId": turn_id, "text": reply, "agentLabel": agent_label},
-        )
-        return {"text": reply}
+        return {
+            "accepted": True,
+            "submissionId": submission.id,
+            "agentLabel": submission.agent_label,
+            "mode": submission.mode,
+        }
 
-    def _cancel_turn(self) -> dict[str, object]:
-        active_label = self._active_agent_label
-        agent = (
-            self._team[active_label]
-            if self._team is not None
-            and active_label is not None
-            and active_label in self._team
-            else self._agent
-        )
-        if self._turn is None or self._turn.done() or agent is None:
+    def _cancel_turn(
+        self, params: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
+        params = params or {}
+        entry = self._entry_for(params)
+        if entry is None:
             return {"cancelled": False}
-        agent.runtime.halt()
-        return {"cancelled": True}
+        requested_label = params.get("agentLabel")
+        if requested_label is not None and not isinstance(requested_label, str):
+            raise TypeError("agentLabel must be a string")
+        active_label = requested_label or entry.active_agent_label or "Agent"
+        session = entry.session
+        if session is None or active_label not in session.agents:
+            return {"cancelled": False}
+        return {"cancelled": session.halt(agent_label=active_label)}
 
     async def close(self) -> None:
-        """Close the live agent and all resources in their dependency order."""
-        turn = self._turn
-        self._turn = None
-        if turn is not None and not turn.done():
-            active_label = self._active_agent_label
-            active_agent = (
-                self._team[active_label]
-                if self._team is not None
-                and active_label is not None
-                and active_label in self._team
-                else self._agent
-            )
-            if active_agent is not None:
-                active_agent.runtime.halt()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await turn
-        agent = self._agent
-        observer = self._observer
-        if agent is not None and observer in agent.runtime.observers:
-            agent.runtime.observers.remove(observer)
-        resources = self._resources
-        if resources is not None:
-            try:
-                await resources.aclose()
-            except BaseException:
-                # Keep the references intact if cleanup itself fails. The
-                # caller may still need to report or retry closing this
-                # session, and replacement cleanup must not erase its handle.
-                if (
-                    agent is not None
-                    and observer is not None
-                    and observer not in agent.runtime.observers
-                ):
-                    agent.runtime.observers.append(observer)
-                raise
-        self._agent = None
-        self._resources = None
-        self._team = None
+        """Close every session and all resources in dependency order."""
+        for session_id in self._sessions.ids():
+            await self._close_session({"sessionId": session_id})
+        # Preserve the legacy direct-attachment cleanup path used by callers
+        # that never opened through SessionManager.
+        if self._session is not None and not self._sessions:
+            session = self._session
+            if self._active_agent_label and self._active_agent_label in session.agents:
+                session.halt(agent_label=self._active_agent_label)
+            await session.close()
+        self._session = None
         self._command_service = None
-        self._session_path = None
-        self._observer = None
-        self._active_turn_id = None
+        self._session_id = None
+        self._event_sequence = 0
+        self._subscribed_agent_labels.clear()
         self._active_agent_label = None
         self._notification_agent_label = None
 
+    async def _close_session(self, params: Mapping[str, object]) -> None:
+        entry = self._entry_for(params)
+        if entry is None:
+            return
+        if entry.active_agent_label and entry.active_agent_label in entry.session.agents:
+            entry.session.halt(agent_label=entry.active_agent_label)
+        if entry.team_watch_task is not None:
+            entry.team_watch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await entry.team_watch_task
+            entry.team_watch_task = None
+        for unsubscribe in entry.unsubscribers:
+            unsubscribe()
+        removed = self._sessions.remove(entry.session_id)
+        if removed is None:
+            # A directly attached legacy session is not in SessionManager.
+            await entry.session.close()
+        if self._session_id == entry.session_id:
+            remaining = next(self._sessions.values(), None)
+            if remaining is not None:
+                self._select_entry(remaining)
+            else:
+                self._session = None
+                self._command_service = None
+                self._session_id = None
+                self._event_sequence = 0
+                self._subscribed_agent_labels.clear()
+                self._active_agent_label = None
+                self._notification_agent_label = None
+
     async def _get_commands(self, params: Mapping[str, object]) -> dict[str, object]:
-        service = self._command_service
+        entry = self._require_entry(params)
+        service = entry.command_service
         if service is None:
             raise RuntimeError("no Sagent session is open")
         label = _agent_label(params)
@@ -471,7 +541,8 @@ class SagentServer:
         self,
         params: Mapping[str, object],
     ) -> dict[str, object]:
-        service = self._command_service
+        entry = self._require_entry(params)
+        service = entry.command_service
         if service is None:
             raise RuntimeError("no Sagent session is open")
         line = params.get("line")
@@ -481,7 +552,7 @@ class SagentServer:
         done = await service.execute_line(label=label, line=line)
         return {"done": done}
 
-    def _emit_command_output(self, label: str, output: CommandOutput) -> None:
+    def _emit_command_output(self, session_id: str, label: str, output: CommandOutput) -> None:
         self._notify(
             "command.output",
             {
@@ -490,313 +561,88 @@ class SagentServer:
                 "tone": output.tone,
                 "command": output.command,
             },
+            session_id=session_id,
         )
 
-    def _focus_agent(self, label: str) -> None:
-        self._notify("agent.focused", {"agentLabel": label})
+    def _focus_agent(self, session_id: str, label: str) -> None:
+        self._notify("agent.focused", {"agentLabel": label}, session_id=session_id)
 
-    def _observe(self, event: types.RuntimeEvent, agent_label: str) -> None:
+    def _observe(
+        self,
+        event: types.RuntimeEvent,
+        agent_label: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        session_id = session_id or self._session_id
+        entry = self._sessions.get(session_id) if session_id is not None else None
+        if entry is not None:
+            self._subscribe_team_events(entry)
+            entry.notification_agent_label = agent_label
         self._notification_agent_label = agent_label
         try:
-            self._emit_observed_event(event, agent_label)
+            self._emit_observed_event(event, agent_label, session_id=session_id)
         finally:
+            if entry is not None:
+                entry.notification_agent_label = None
             self._notification_agent_label = None
 
     def _emit_observed_event(
         self,
         event: types.RuntimeEvent,
         agent_label: str,
-    ) -> None:
-        """Project Sagent events without changing the runtime's source of truth.
-
-        The TUI receives both live runtime events and resumed session records. The
-        VS Code client follows the same rule: event payloads identify stable Sagent
-        records (especially tool ``callId`` values), while the client owns only
-        presentation state.
-        """
-        turn_id = (
-            self._active_turn_id if agent_label == self._active_agent_label else None
-        )
-        if isinstance(event, UserMessage):
-            self._notify(
-                "message.created",
-                {
-                    "id": _event_id(event),
-                    "kind": "user",
-                    "turnId": turn_id,
-                    "text": event.content or "",
-                    **_record_metadata(event),
-                },
-            )
-        elif isinstance(event, AgentToAgentMessage):
-            self._notify(
-                "message.created",
-                {
-                    "id": _event_id(event),
-                    "kind": "agent",
-                    "turnId": turn_id,
-                    "text": event.content or "",
-                    "sender": event.sender,
-                    "recipient": event.recipient,
-                    **_record_metadata(event),
-                },
-            )
-        elif isinstance(event, types.ModelCallStarted):
-            self._notify(
-                "status.changed",
-                {"status": "working", "text": "working", "phase": "thinking"},
-            )
-        elif isinstance(event, types.ModelResponsePartial):
-            self._notify(
-                "assistant.delta",
-                {
-                    "turnId": turn_id,
-                    "text": event.text,
-                    "record": event.record,
-                },
-            )
-        elif isinstance(event, types.ModelResponseThinking):
-            self._notify(
-                "assistant.thinking",
-                {
-                    "turnId": turn_id,
-                    "text": event.text,
-                    "record": event.record,
-                },
-            )
-        elif isinstance(event, types.ModelResponseComplete):
-            for record in event.response.records:
-                if isinstance(record, AssistantMessage):
-                    metadata = _record_metadata(
-                        record,
-                        fallback_timestamp=datetime.now(UTC).isoformat(),
-                    )
-                    self._notify(
-                        "assistant.completed",
-                        {
-                            "turnId": turn_id,
-                            "record": _event_id(record),
-                            "text": record.content or "",
-                            **metadata,
-                        },
-                    )
-                elif isinstance(record, Thinking):
-                    self._notify(
-                        "assistant.thinking.completed",
-                        {
-                            "turnId": turn_id,
-                            "record": _event_id(record),
-                            "text": record.content or "",
-                        },
-                    )
-                elif isinstance(record, ToolCall):
-                    if record.call_id.endswith(types.Markers().arrival):
-                        continue
-                    source_agent = self._team[agent_label] if self._team else None
-                    tool = source_agent.tools.get(record.name) if source_agent else None
-                    self._notify(
-                        "tool.started",
-                        {
-                            "turnId": turn_id,
-                            "callId": record.call_id,
-                            "name": record.name,
-                            "arguments": dict(record.arguments),
-                            "summary": tool.summary(record.arguments)
-                            if tool
-                            else record.name,
-                            "status": "running",
-                        },
-                    )
-        elif (
-            tool_call_started_cls := getattr(types, "ToolCallStarted", None)
-        ) is not None and isinstance(event, tool_call_started_cls):
-            source_agent = self._team[agent_label] if self._team else None
-            tool = source_agent.tools.get(event.call.name) if source_agent else None
-            summary = (
-                event.title
-                or (tool.summary(event.call.arguments) if tool else None)
-                or str(event.call.arguments.get("toolSummary") or "")
-                or str(event.call.arguments.get("CommandLine") or "")
-                or event.call.name
-            )
-            self._notify(
-                "tool.started",
-                {
-                    "turnId": turn_id,
-                    "callId": event.call.call_id,
-                    "name": event.call.name,
-                    "arguments": dict(event.call.arguments),
-                    "summary": summary,
-                    "status": "running",
-                    **(
-                        {"agentLabel": self._notification_agent_label}
-                        if self._notification_agent_label
-                        else {}
-                    ),
-                },
-            )
-        elif isinstance(event, types.DetachedResult):
-            self._notify("tool.completed", self._tool_result_params(event.result))
-        elif isinstance(event, ToolResult):
-            self._notify("tool.completed", self._tool_result_params(event))
-        elif isinstance(event, types.ChildEvent):
-            self._notify(
-                "agent.event",
-                {
-                    "label": event.label,
-                    "event": _event_name(event.inner),
-                    **self._child_event_params(event.inner),
-                },
-            )
-        elif isinstance(event, types.ChildDoneEvent):
-            self._notify(
-                "agent.completed",
-                {
-                    "label": event.label,
-                    "elapsed": event.elapsed,
-                    "tokens": event.tokens,
-                    "cost": event.cost,
-                },
-            )
-        elif isinstance(event, types.StatusChanged):
-            self._notify("status.changed", {"status": "notice", "text": event.text})
-        elif isinstance(event, types.AgentIdle):
-            self._notify("status.changed", {"status": "ready", "text": "ready"})
-        elif isinstance(event, types.CohortStarted):
-            self._notify(
-                "status.changed",
-                {"status": "tool", "text": "running tools", "phase": "tools"},
-            )
-        elif isinstance(event, types.ModelCallSuspended):
-            self._notify(
-                "retry.waiting",
-                {
-                    "attempt": event.attempt,
-                    "until": event.until,
-                    "message": str(event.exception),
-                },
-            )
-        elif isinstance(event, types.CompactStarted):
-            self._notify("compaction.started", {})
-        elif isinstance(event, types.CompactComplete):
-            self._notify(
-                "compaction.completed",
-                {
-                    "tokenBefore": event.token_before,
-                    "tokenAfter": event.token_after,
-                    "payloadEntries": event.payload_entries,
-                    "fallbackReason": event.fallback_reason,
-                    "preservedTailCount": event.preserved_tail_count,
-                },
-            )
-        elif isinstance(event, types.CompactFailed):
-            self._notify(
-                "compaction.failed",
-                {"message": str(event.exception), "tapeLength": event.tape_len},
-            )
-        elif isinstance(event, types.ModelResponseCancelled):
-            self._notify(
-                "status.changed",
-                {"status": "cancelled", "text": "cancelled"},
-            )
-        elif isinstance(event, types.ModelResponseError):
-            self._notify(
-                "turn.failed",
-                {"turnId": turn_id, "message": str(event.exception)},
-            )
-
-    def _tool_result_params(self, result: ToolResult) -> dict[str, object]:
-        """Return one stable lifecycle update for a Sagent tool result."""
-        call_id = result.call_id.removesuffix(types.Markers().arrival)
-        path = (
-            result.path
-            if isinstance(result, (FileEditResult, FileWriteResult))
-            else None
-        )
-        status = (
-            "detached"
-            if result.stub == "pending"
-            else "cancelled"
-            if result.stub == "cancelled"
-            else "failed"
-            if result.is_error is True
-            else "completed"
-        )
-        return {
-            "callId": call_id,
-            "resultCallId": result.call_id,
-            "status": status,
-            "text": result.text(),
-            "isError": result.is_error,
-            **({} if result.stub is None else {"stub": result.stub}),
-            **({} if path is None else {"path": path}),
-            **_file_change_payload(result),
-        }
-
-    def _child_event_params(self, event: types.RuntimeEvent) -> dict[str, object]:
-        """Return useful child details without flattening child state into the UI."""
-        if isinstance(event, types.ModelResponsePartial | types.ModelResponseThinking):
-            return {"text": event.text, "record": event.record}
-        if hasattr(types, "ToolCallStarted") and isinstance(
-            event, types.ToolCallStarted
-        ):
-            return {
-                "kind": "tool",
-                "callId": event.call.call_id,
-                "name": event.call.name,
-            }
-        if isinstance(event, types.ModelResponseComplete):
-            return {
-                "records": [
-                    {
-                        "kind": "tool" if isinstance(record, ToolCall) else "assistant",
-                        **(
-                            {"callId": record.call_id, "name": record.name}
-                            if isinstance(record, ToolCall)
-                            else {"text": record.content or ""}
-                        ),
-                    }
-                    for record in event.response.records
-                    if isinstance(record, (ToolCall, AssistantMessage))
-                ],
-            }
-        if isinstance(event, ToolResult):
-            return self._tool_result_params(event)
-        if isinstance(event, types.ModelResponseError):
-            return {"message": str(event.exception)}
-        if isinstance(event, types.ModelCallSuspended):
-            return {
-                "attempt": event.attempt,
-                "until": event.until,
-                "message": str(event.exception),
-            }
-        return {}
-
-    def _session_state(
-        self,
         *,
-        snapshot: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        if snapshot is None and self._agent is not None:
-            snapshot = self._session_snapshot()
+        session_id: str | None = None,
+    ) -> None:
+        """Forward native runtime events as daemon notifications."""
+        entry = self._sessions.get(session_id) if session_id is not None else None
+        if entry is not None:
+            entry.event_sequence += 1
+            sequence = entry.event_sequence
+        else:
+            self._event_sequence += 1
+            sequence = self._event_sequence
+        message = runtime_event_message(
+            event,
+            agent_label=agent_label,
+            session_id=session_id or self._session_id,
+            sequence=sequence,
+        )
+        self.output.put_nowait({"method": NATIVE_EVENT_METHOD, "params": message})
+        if isinstance(event, types.AgentIdle):
+            if session_id is not None:
+                self._notify_usage_soon(session_id, agent_label)
+
+    def _session_state(self, params: Mapping[str, object] | None = None) -> dict[str, object]:
+        """Return authoritative state from the live native session objects."""
+        entry = self._entry_for(params or {})
+        session = entry.session if entry is not None else None
+        if session is None:
+            return {
+                "open": False,
+                "sessionId": None,
+                "snapshot": {"version": 1, "items": []},
+                "records": [],
+                "team": {"open": False, "agents": []},
+            }
+        label = session.agent.runtime.tool_context.label
         return {
-            "open": self._agent is not None,
-            "path": str(self._session_path) if self._session_path is not None else None,
-            "sessionId": (
-                self._session_path.parent.name
-                if self._session_path is not None
-                else None
-            ),
-            "tools": list(self._agent.tools) if self._agent is not None else [],
-            "running": self._agent.running if self._agent is not None else False,
-            "snapshot": snapshot
-            if snapshot is not None
-            else {"version": 1, "items": []},
+            "open": True,
+            "path": str(session.path) if session.path is not None else None,
+            "sessionId": entry.session_id if entry is not None else self._session_id,
+            "agentLabel": label,
+            "tools": list(session.agent.tools),
+            "running": session.agent.running,
+            "snapshot": self._session_snapshot(entry, agent_label=label),
+            "records": self._native_records(entry, label),
+            "agent": self._agent_state(session.team, label),
+            "team": self._team_state({"sessionId": entry.session_id} if entry else {}),
         }
 
-    def _team_state(self) -> dict[str, object]:
+    def _team_state(self, params: Mapping[str, object] | None = None) -> dict[str, object]:
         """Project the live native Team without creating a second team model."""
-        team = self._team
+        entry = self._entry_for(params or {})
+        team = entry.session.team if entry is not None else None
         if team is None:
             return {"open": False, "agents": []}
         return {
@@ -829,13 +675,22 @@ class SagentServer:
             "spendUsd": agent.spend_usd,
             "maxSpendUsd": agent.max_spend_usd,
             "owedReplies": team.owes(label),
+            "runtime": {
+                "idle": agent.runtime.is_idle,
+                "acceptsUserDispatch": agent.runtime.accepts_user_dispatch,
+                "acceptsDeferredDispatch": agent.runtime.accepts_deferred_dispatch,
+                "modelCall": agent.runtime.model_call is not None,
+                "compacting": agent.runtime.compact_task is not None,
+                "cohortSize": len(agent.runtime.cohort),
+                "runningTools": len(agent.runtime.running_tools),
+                "jobs": list(agent.runtime.jobs),
+            },
         }
 
     def _agent_session_state(self, params: Mapping[str, object]) -> dict[str, object]:
-        """Return one native agent's journal-backed session snapshot."""
-        team = self._team
-        if team is None:
-            raise RuntimeError("no Sagent team is open")
+        """Return one live agent's native state and journal records."""
+        entry = self._require_entry(params)
+        team = entry.session.team
         label = params.get("label")
         if not isinstance(label, str) or not label:
             raise ValueError("label must be a non-empty string")
@@ -845,248 +700,70 @@ class SagentServer:
         journal_path = agent.session.journal.path
         return {
             "label": label,
-            "sessionId": agent.runtime.conversation,
+            "sessionId": entry.session_id,
             "path": str(journal_path) if journal_path is not None else None,
-            "snapshot": self._session_snapshot(agent),
+            "agent": self._agent_state(team, label),
+            "snapshot": self._session_snapshot(entry, agent_label=label),
+            "records": self._native_records(entry, label),
         }
 
-    def _model_settings(self, params: Mapping[str, object]) -> dict[str, object]:
-        """Project the selected native Agent's catalog and capability choices.
+    def _native_records(self, entry: ManagedSession, label: str) -> list[dict[str, object]]:
+        """Serialize the live journal window without assigning UI semantics."""
+        session = entry.session
+        try:
+            agent = session.team[label]
+        except KeyError:
+            raise ValueError(f"unknown agent {label!r}") from None
+        return [session_record_message(record) for record in agent.session]
 
-        The response is deliberately shaped from the live Sagent objects. The
-        extension never maintains a provider/model registry or guesses which
-        thinking settings a model supports.
-        """
-        agent = self._agent_for_label(params)
-        team = self._require_team()
-        model = agent.model
-        capability = model.capability
-        settings = model.settings
-        provider = model.provider
-        provider_name = provider.name
-        accounts = ["default"]
-        if isinstance(provider, HasLogin):
-            accounts.extend(
-                account
-                for account in provider.logins.accounts()
-                if account != "default"
-            )
-        acp_servers = ["agy"] if provider_name == "acp" else []
-        current_acp_server = (
-            getattr(model, "acp_server", "agy") if provider_name == "acp" else ""
+    async def _model_settings(self, params: Mapping[str, object]) -> dict[str, object]:
+        entry = self._require_entry(params)
+        return await model_settings_snapshot(
+            self._agent_for_label(entry, params),
+            entry.session.team,
         )
-        context_sizes = tuple(
-            _context_size_payload(
-                size, is_default=size == capability.default.context_size
-            )
-            for size in capability.prices.sizes(settings.service_tier)
-        )
-        return {
-            "status": "ready",
-            "agentLabel": agent.runtime.tool_context.label,
-            "availableScopes": ["current-agent"],
-            "selectedScope": "current-agent",
-            "provider": {
-                "providers": list(team.catalog.factories),
-                "currentProvider": provider_name,
-                "accounts": accounts,
-                "currentAccount": agent.account or team.catalog.account or "default",
-                "acpServers": acp_servers,
-                "currentAcpServer": current_acp_server,
-            },
-            "model": {
-                "models": list(provider),
-                "currentModel": capability.model_id,
-            },
-            "capability": {
-                "modelId": capability.model_id,
-                "contextSizes": list(context_sizes),
-                "thinkingEfforts": _setting_values(capability, "thinking_effort"),
-                "thinkingBudgets": _setting_values(capability, "thinking_budget"),
-                "thinkingOutputs": _setting_values(capability, "thinking_output"),
-                "serviceTiers": _setting_values(capability, "service_tier"),
-                "cacheTtlSeconds": _setting_values(capability, "cache_ttl_sec"),
-                "manageContextServerSide": _setting_values(
-                    capability,
-                    "manage_context_server_side",
-                ),
-                "defaults": {
-                    "context": _context_size_payload(
-                        capability.default.context_size,
-                        is_default=True,
-                    ),
-                    "thinkingEffort": capability.default.thinking_effort,
-                    "thinkingBudget": capability.default.thinking_budget,
-                    "thinkingOutput": capability.default.thinking_output,
-                    "serviceTier": capability.default.service_tier,
-                    "cacheTtlSeconds": capability.default.cache_ttl_sec,
-                    "manageContextServerSide": capability.default.manage_context_server_side,
-                },
-                "limits": {
-                    "maxRequestTokens": capability.limits.max_request_tokens,
-                    "maxResponseTokens": capability.limits.max_response_tokens,
-                    "maxContextTokens": capability.limits.context_tokens,
-                },
-            },
-            "settings": {
-                "context": _context_size_payload(settings.context_size),
-                "thinkingEffort": settings.thinking_effort,
-                "thinkingBudget": settings.thinking_budget,
-                "thinkingOutput": settings.thinking_output,
-                "serviceTier": settings.service_tier,
-                "cacheTtlSeconds": settings.cache_ttl_sec,
-                "manageContextServerSide": settings.manage_context_server_side,
-            },
-            "writableSettings": [
-                "thinking.effort",
-                "thinking.budget",
-                "thinking.output",
-                "service_tier",
-            ],
-            "diagnostics": {
-                "label": agent.runtime.tool_context.label,
-                "model": f"{provider_name}/{capability.model_id}",
-                "context": settings.context_size.display_name,
-                "thinking": {
-                    "budget": settings.thinking_budget,
-                    "output": settings.thinking_output,
-                    "effort": settings.thinking_effort,
-                },
-                "serviceTier": settings.service_tier,
-                "cacheTtlSeconds": settings.cache_ttl_sec,
-                "limits": {
-                    "maxRequestTokens": capability.limits.max_request_tokens,
-                    "maxResponseTokens": capability.limits.max_response_tokens,
-                    "maxContextTokens": capability.limits.context_tokens,
-                },
-                "cwd": str(agent.runtime.tool_context.cwd),
-                "tools": list(agent.tools),
-            },
-        }
+
+    async def _get_provider_usage(
+        self, params: Mapping[str, object]
+    ) -> dict[str, object]:
+        entry = self._require_entry(params)
+        return await provider_usage(self._agent_for_label(entry, params))
 
     async def _set_model_settings(
         self, params: Mapping[str, object]
     ) -> dict[str, object]:
-        """Apply a supported settings change through Sagent's AgentSelf tool.
+        entry = self._require_entry(params)
+        return await apply_model_settings(
+            self._agent_for_label(entry, params),
+            entry.session.team,
+            params,
+        )
 
-        AgentSelf owns model succession and capability validation. The VS Code
-        adapter only translates the typed UI intent into its existing argument
-        shape; it does not reproduce that logic.
-        """
-        scope = params.get("scope", "current-agent")
-        if scope != "current-agent":
-            raise ValueError("only current-agent settings are supported")
-        agent = self._agent_for_label(params)
-        action = _required_object(params.get("action"), "action")
-        arguments = _model_settings_arguments(action)
-        if arguments:
-            tool = agent.tools.get("AgentSelf")
-            if not isinstance(tool, AgentSelf):
-                raise RuntimeError("AgentSelf is not enabled for this Sagent agent")
-            await tool.call(
-                agent.runtime.tool_context,
-                cast("Mapping[str, PlainTree]", arguments),
-            )
-        return self._model_settings({"agentLabel": agent.runtime.tool_context.label})
+    def _session_snapshot(
+        self,
+        entry: ManagedSession | None = None,
+        *,
+        agent_label: str = "Agent",
+    ) -> dict[str, object]:
+        """Project a native session through the shared session projector."""
+        session = (entry or self._require_entry({})).session
+        try:
+            agent = session.team[agent_label]
+        except KeyError:
+            raise ValueError(f"unknown agent {agent_label!r}") from None
+        return self._snapshot_projector.project(agent)
 
-    def _session_snapshot(self, agent: Agent | None = None) -> dict[str, object]:
-        """Project the current Sagent session window using the TUI's record rules."""
-        target_agent = agent if agent is not None else self._require_agent()
-        items: list[dict[str, object]] = []
-        calls: dict[str, dict[str, object]] = {}
-        effective_model: str | None = None
-        turn = 0
-        for index, record in enumerate(target_agent.session):
-            if isinstance(record, TurnContext):
-                if record.model is not None:
-                    effective_model = record.model
-                continue
-            if isinstance(record, (UserMessage, AgentToAgentMessage)):
-                turn += 1
-                item = {
-                    "id": f"record-{index}",
-                    "type": "agent"
-                    if isinstance(record, AgentToAgentMessage)
-                    else "user",
-                    "turnId": f"turn-{turn}",
-                    "text": record.content or "",
-                    **_record_metadata(record),
-                }
-                if effective_model is not None:
-                    item["model"] = effective_model
-                if isinstance(record, AgentToAgentMessage):
-                    item.update(
-                        {"sender": record.sender, "recipient": record.recipient}
-                    )
-                items.append(item)
-            elif isinstance(record, AssistantMessage):
-                if (text := record.content or "").strip():
-                    items.append(
-                        {
-                            "id": f"record-{index}",
-                            "type": "assistant",
-                            "turnId": f"turn-{turn}",
-                            "text": text,
-                            **_record_metadata(record),
-                        },
-                    )
-            elif isinstance(record, Thinking):
-                if (text := record.content or "").strip():
-                    items.append(
-                        {
-                            "id": f"record-{index}",
-                            "type": "thinking",
-                            "turnId": f"turn-{turn}",
-                            "text": text,
-                            **_record_metadata(record),
-                        },
-                    )
-            elif isinstance(record, ToolCall):
-                if record.call_id.endswith(types.Markers().arrival):
-                    continue
-                tool = target_agent.tools.get(record.name)
-                summary = (
-                    str(record.extra.get("title") or "")
-                    or (tool.summary(record.arguments) if tool else None)
-                    or str(record.arguments.get("toolSummary") or "")
-                    or str(record.arguments.get("CommandLine") or "")
-                    or record.name
-                )
-                item = {
-                    "id": f"tool-{record.call_id}",
-                    "type": "tool",
-                    "turnId": f"turn-{turn}",
-                    "callId": record.call_id,
-                    "name": record.name,
-                    "summary": summary,
-                    "arguments": dict(record.arguments),
-                    "status": "running",
-                    **_record_metadata(record),
-                }
-                items.append(item)
-                calls[record.call_id] = item
-            elif isinstance(record, ToolResult):
-                call_id = record.call_id.removesuffix(types.Markers().arrival)
-                item = calls.get(call_id)
-                if item is None:
-                    # Match TUI replay: an orphaned successful result is not a
-                    # conversation item; an orphaned failure remains visible.
-                    if record.is_error is not True:
-                        continue
-                    orphaned_item: dict[str, object] = {
-                        "id": f"tool-{call_id}",
-                        "type": "tool",
-                        "turnId": f"turn-{turn}",
-                        "callId": call_id,
-                        "name": "unknown",
-                        "summary": "Tool result",
-                        "status": "failed",
-                    }
-                    items.append(orphaned_item)
-                    calls[call_id] = orphaned_item
-                    item = orphaned_item
-                item.update(self._tool_result_params(record))
-        return {"version": 1, "items": items}
+    def _session_records(self, params: Mapping[str, object]) -> dict[str, object]:
+        entry = self._require_entry(params)
+        label = params.get("agentLabel", "Agent")
+        if not isinstance(label, str):
+            raise TypeError("agentLabel must be a string")
+        if not label:
+            raise ValueError("agentLabel must be a non-empty string")
+        return {
+            "agentLabel": label,
+            "records": self._native_records(entry, label),
+        }
 
     def _require_agent(self) -> Agent:
         if self._agent is None:
@@ -1098,8 +775,8 @@ class SagentServer:
             raise RuntimeError("no Sagent team is open")
         return self._team
 
-    def _agent_for_label(self, params: Mapping[str, object]) -> Agent:
-        team = self._require_team()
+    def _agent_for_label(self, entry: ManagedSession, params: Mapping[str, object]) -> Agent:
+        team = entry.session.team
         label = params.get("agentLabel", "Agent")
         if not isinstance(label, str) or not label:
             raise ValueError("agentLabel must be a non-empty string")
@@ -1107,12 +784,38 @@ class SagentServer:
             raise ValueError(f"unknown agent {label!r}")
         return team[label]
 
-    def _notify(self, event: str, params: Mapping[str, object]) -> None:
+    def _notify(
+        self,
+        event: str,
+        params: Mapping[str, object],
+        *,
+        session_id: str | None = None,
+    ) -> None:
         payload = {"type": event, **params}
-        agent_label = self._notification_agent_label or self._active_agent_label
+        entry = self._sessions.get(session_id) if session_id is not None else None
+        agent_label = (
+            (entry.notification_agent_label or entry.active_agent_label)
+            if entry is not None
+            else (self._notification_agent_label or self._active_agent_label)
+        )
         if agent_label is not None:
             payload.setdefault("agentLabel", agent_label)
-        self.output.put_nowait({"method": "sagent/event", "params": payload})
+        if entry is not None:
+            entry.event_sequence += 1
+            sequence = entry.event_sequence
+        else:
+            self._event_sequence += 1
+            sequence = self._event_sequence
+        message = session_notification_message(
+            event,
+            payload,
+            agent_label=agent_label,
+            session_id=session_id or self._session_id,
+            sequence=sequence,
+        )
+        self.output.put_nowait(
+            {"method": NATIVE_NOTIFICATION_METHOD, "params": message},
+        )
 
     def _respond(self, request_id: object, result: Mapping[str, object]) -> None:
         self.output.put_nowait({"id": request_id, "result": dict(result)})
@@ -1163,7 +866,7 @@ async def serve(
         try:
             request = _required_object(json_loads(line), "request")
             await server.handle(request)
-            if request.get("method") == "shutdown":
+            if request.get("method") == "system.shutdown":
                 stop.set()
         except Exception as error:  # noqa: BLE001 -- malformed input must not kill the host.
             output.put_nowait(
@@ -1282,10 +985,6 @@ def _required_object(value: object, name: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", value)
 
 
-def _comma_list(value: str) -> list[str]:
-    return [part.strip() for part in value.split(",") if part.strip()]
-
-
 def _agent_label(params: Mapping[str, object]) -> str:
     label = params.get("agentLabel", "Agent")
     if not isinstance(label, str) or not label:
@@ -1293,173 +992,7 @@ def _agent_label(params: Mapping[str, object]) -> str:
     return label
 
 
-def _agent_model_identity(agent: Agent) -> dict[str, str]:
-    """Project the live model that will answer this turn.
-
-    The Agent owns the model object used by its runtime. Reading this at the
-    turn boundary keeps the UI label tied to Sagent's execution source rather
-    than to a separately maintained settings snapshot.
-    """
-    model = agent.model
-    return {
-        "modelProvider": model.provider.name,
-        "modelId": model.capability.model_id,
-    }
-
-
-def _setting_values(
-    capability: ModelCapability, name: ModelSettingName
-) -> list[object]:
-    """Return native JSON values from Sagent's capability catalog.
-
-    ``typed_text`` is intentionally not used here: it formats values for the
-    terminal command line, while this protocol must preserve numbers and
-    booleans for the webview's typed contract.
-    """
-    return list(capability.values(name))
-
-
-def _context_size_payload(
-    size: object,
-    *,
-    is_default: bool = False,
-) -> dict[str, object]:
-    context_name = getattr(size, "context_name", None)
-    tokens = getattr(size, "tokens", None)
-    display_name = getattr(size, "display_name", None)
-    if (
-        not isinstance(context_name, str)
-        or not isinstance(tokens, int)
-        or not isinstance(display_name, str)
-    ):
-        raise TypeError("invalid Sagent context size")
-    return {
-        "name": context_name,
-        "tokens": tokens,
-        "displayName": display_name,
-        "isDefault": is_default,
-    }
-
-
-def _model_settings_arguments(action: Mapping[str, object]) -> dict[str, object]:
-    action_type = action.get("type")
-    if action_type == "select-provider":
-        # A provider does not necessarily serve the model currently selected.
-        # Ask AgentSelf to resolve that provider's native default role in the
-        # same atomic succession, so the returned snapshot is immediately
-        # scoped to the new provider's catalog.
-        return {
-            "provider": _required_action_string(action, "provider"),
-            "model": "default",
-        }
-    if action_type == "select-acp-server":
-        # Reset to default model under the ACP provider when server changes
-        return {
-            "provider": "acp",
-            "model": "default",
-        }
-    if action_type == "select-model":
-        return {"model": _required_action_string(action, "model")}
-    if action_type == "set-setting":
-        name = action.get("name")
-        value = action.get("value")
-        if not isinstance(name, str):
-            raise ValueError("settings action name must be a string")
-        if name not in {
-            "thinking.effort",
-            "thinking.budget",
-            "thinking.output",
-            "service_tier",
-        }:
-            raise ValueError(f"setting {name!r} is not writable through AgentSelf")
-        if not isinstance(value, str):
-            raise ValueError(f"setting {name!r} requires a string value")
-        return {
-            name.rsplit(".", 1)[-1] if name.startswith("thinking.") else name: value
-        }
-    if action_type in {"select-scope", "refresh"}:
-        return {}
-    raise ValueError(f"unknown model settings action {action_type!r}")
-
-
-def _required_action_string(action: Mapping[str, object], key: str) -> str:
-    value = action.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"settings action {key} must be a non-empty string")
-    return value
-
-
-def _event_name(event: types.RuntimeEvent) -> str:
-    return type(event).__name__
-
-
 def _event_id(record: object) -> str | None:
     """Expose Sagent's record context id when the runtime assigned one."""
     context_id = getattr(record, "context_id", None)
     return f"record-{context_id}" if context_id is not None else None
-
-
-def _record_metadata(
-    record: object,
-    *,
-    fallback_timestamp: str | None = None,
-) -> dict[str, object]:
-    """Return record metadata, preserving native timestamps when available."""
-    metadata: dict[str, object] = {}
-    context_id = getattr(record, "context_id", None)
-    timestamp = getattr(record, "timestamp", None)
-    if context_id is not None:
-        metadata["contextId"] = context_id
-    if timestamp is not None:
-        metadata["timestamp"] = timestamp
-    elif fallback_timestamp is not None:
-        metadata["timestamp"] = fallback_timestamp
-    return metadata
-
-
-def _snapshot_turn_count(snapshot: Mapping[str, object]) -> int:
-    """Return the highest hydrated turn number used by a session snapshot."""
-    items = snapshot.get("items", [])
-    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
-        return 0
-    numbers = [
-        int(turn_id.removeprefix("turn-"))
-        for item in items
-        if isinstance(item, Mapping)
-        and isinstance(turn_id := item.get("turnId"), str)
-        and turn_id.startswith("turn-")
-        and turn_id.removeprefix("turn-").isdigit()
-    ]
-    return max(numbers, default=0)
-
-
-def _file_change_payload(result: ToolResult) -> dict[str, object]:
-    """Serialize Sagent's typed file result without parsing display text.
-
-    This is an adapter projection only. Edit and Write remain implemented by
-    Sagent; the VS Code client receives the structured result fields that those
-    tools already produce and can render them without depending on Git.
-    """
-    if isinstance(result, FileEditResult):
-        return {
-            "fileChange": {
-                "kind": "edit",
-                "edits": [
-                    {
-                        "before": splice.before,
-                        "after": splice.after,
-                        "start": splice.start,
-                        "count": splice.count,
-                    }
-                    for splice in result.edits
-                ],
-            },
-        }
-    if isinstance(result, FileWriteResult):
-        return {
-            "fileChange": {
-                "kind": "write",
-                "content": result.content,
-            },
-        }
-    return {}

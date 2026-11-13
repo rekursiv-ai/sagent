@@ -52,7 +52,13 @@ import time
 
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.exceptions import ContextOverflowError, RetryableError
-from sagent.model.types import Request, Response, TextChunk
+from sagent.model.types import (
+    Request,
+    Response,
+    TextChunk,
+    ToolCallChunk,
+    ToolResultChunk,
+)
 
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
 from sagent.runtime.context import (
@@ -118,6 +124,8 @@ from sagent.runtime.types import (
     RuntimeEvent,
     SaveSession,
     Scheduled,
+    ToolCallStarted,
+    ToolResultStreamed,
     UserDeferredMessage,
     UserQueuedMessage,
 )
@@ -1624,6 +1632,17 @@ class Runtime:
                         case ModelResponseThinking():
                             self.publish(item)
 
+                        case ToolCallStarted():
+                            self.append_history(
+                                Response(
+                                    records=(item.call,),
+                                    tokens=TokenCount(),
+                                    spend=TokenCost(),
+                                    stop_reason="tool_use",
+                                ),
+                            )
+                            self.publish(item)
+
                         case ModelResponseComplete(
                             response=msg,
                             generation=generation,
@@ -1708,6 +1727,10 @@ class Runtime:
                         case DetachedResult():
                             self._deliver_detached(item.result)
                             self.publish(item)
+
+                        case ToolResultStreamed(result=result):
+                            self.append_history(result)
+                            self.publish(result)
 
                         case LazyEvent(payload=payload):
                             # The call leaves the cohort now, or the round its
@@ -2433,6 +2456,12 @@ class Runtime:
                     if event.thinking
                     else ModelResponsePartial(text=event.text, record=event.record),
                 )
+            elif isinstance(event, ToolCallChunk):
+                self.inbox.push_back(
+                    ToolCallStarted(call=event.call, title=event.title),
+                )
+            elif isinstance(event, ToolResultChunk):
+                self.inbox.push_back(ToolResultStreamed(result=event.result))
             else:
                 response = event
         if response is None:

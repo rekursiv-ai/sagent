@@ -67,6 +67,8 @@ __all__ = [
     "Scheduled",
     "Skipped",
     "StatusChanged",
+    "ToolCallStarted",
+    "ToolResultStreamed",
     "UserDeferredMessage",
     "UserQueuedMessage",
     "labeled_agent_send_text",
@@ -277,6 +279,21 @@ class Detach:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelCallStarted:
     """Model streaming call has been spawned."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallStarted:
+    """A tool call initiated by an external agent or harness during streaming."""
+
+    call: ToolCall
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolResultStreamed:
+    """A tool result yielded during streaming by an external harness."""
+
+    result: AnyToolResult
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -571,6 +588,8 @@ type RuntimeEvent = (
     | CompactFailed
     | SaveSession
     | StatusChanged
+    | ToolCallStarted
+    | ToolResultStreamed
     | ChildEvent
     | ChildDoneEvent
     | Charged
