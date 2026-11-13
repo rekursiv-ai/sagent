@@ -652,6 +652,8 @@ def test_a_session_flag_is_never_abbreviated(
     out = capsys.readouterr().out
     assert "Run a coding agent: interactively on a terminal" in out
     assert "\nExamples:\n  python -m sagent " in out
+    # A flag is named with what it takes.
+    assert "--directives TIERS" in out
     del script
 
 

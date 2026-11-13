@@ -25,8 +25,10 @@ from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.session.types import (
+    AgentToAgentMessage,
     AssistantMessage,
     Attachment,
+    SystemMessage,
     Thinking,
     ToolCall,
     UserMessage,
@@ -216,6 +218,13 @@ def test_caller_must_supply_wrapper_capabilities_and_prices() -> None:
                 attachments=(Attachment(mime_descriptor="image/png", data=b"png"),),
             ),
         ),
+        (
+            AgentToAgentMessage(
+                sender="lead",
+                content="hi",
+                attachments=(Attachment(mime_descriptor="image/png", data=b"png"),),
+            ),
+        ),
     ],
 )
 def test_text_wrapper_rejects_unsupported_inputs(
@@ -236,6 +245,10 @@ def test_text_wrapper_encodes_system_and_history() -> None:
                 UserMessage(content="hi"),
                 Thinking(content="private deliberation"),
                 AssistantMessage(content="hello"),
+                # Another agent's line and a harness note are the user's side too.
+                AgentToAgentMessage(sender="lead", content="status?"),
+                AgentToAgentMessage(content="unsigned"),
+                SystemMessage(content="Saved."),
             ),
             max_response_tokens=23,
         ),
@@ -244,7 +257,8 @@ def test_text_wrapper_encodes_system_and_history() -> None:
     assert body == {
         "version": "meta/meta-llama-3-8b-instruct",
         "input": {
-            "prompt": "User: hi\n\nAssistant: hello",
+            "prompt": "User: hi\n\nAssistant: hello\n\nUser: [from lead]: status?"
+            "\n\nUser: unsigned\n\nUser: <system-reminder>\nSaved.\n</system-reminder>",
             "system_prompt": "system",
             "max_tokens": 23,
         },

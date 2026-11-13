@@ -66,6 +66,15 @@ All notable sagent changes are documented here. This project follows
   edit: the second is told the file changed since it read it.
 - Anthropic's spent monthly spend cap (`enforced_spend_limit_reached`) is a
   billing error, never retried.
+- On `anthropic-cli`, a picture or a PDF attached to a message from another
+  agent reaches the model, where only a user's own message carried its
+  attachments and the token count billed what was never sent.
+- On `google-cli`, an attachment on a message from another agent is named as
+  one `agy` cannot send, as one on a user's own message is; it was left out
+  without a word.
+- On Replicate, a message from another agent and a harness note reach the
+  prompt, on the user's side as on every OpenAI wire; both were dropped. An
+  attachment on either is refused, as on a user's own message.
 
 ### Changed
 

@@ -692,8 +692,20 @@ async def test_non_object_lines_are_passed_over(
 def test_an_image_is_named_not_sent() -> None:
     """``agy`` takes text alone; the model is told an image was left out."""
     image = Attachment(mime_descriptor="image/png", data=b"not sent")
-    assert cli._transcript((UserMessage(content="look", attachments=(image,)),)) == [
-        "User: look\n[an image/png attachment, which agy cannot send]",
+    named = "[an image/png attachment, which agy cannot send]"
+    person = UserMessage(content="look", attachments=(image,))
+    signed = AgentToAgentMessage(sender="lead", content="see", attachments=(image,))
+    unsigned = AgentToAgentMessage(content="here", attachments=(image,))
+    assert cli._transcript((person, signed, unsigned)) == [
+        f"User: look\n{named}",
+        f"Agent lead: see\n{named}",
+        f"Agent: here\n{named}",
+    ]
+    # A line to a running ``agy`` names it too, whoever sent the line.
+    assert [cli._said(line) for line in (person, signed, unsigned)] == [
+        f"look\n{named}",
+        f"[from lead]: see\n{named}",
+        f"here\n{named}",
     ]
 
 
