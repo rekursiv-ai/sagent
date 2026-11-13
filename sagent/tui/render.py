@@ -47,6 +47,7 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     EditResult,
+    Splice,
     Thinking,
     ToolCall,
     ToolResult,
@@ -145,7 +146,7 @@ class Scrollback:
             return True
         return (
             isinstance(record, ToolResult)
-            and record.stub == "pending"
+            and record.state == "pending"
             and any(h.key == _key(record.call_id) for h in self._held)
         )
 
@@ -330,7 +331,7 @@ class Scrollback:
                 # A detached call is numbered under its label; its result, when it
                 # lands, is shown under the label again with the same number. A
                 # held call's number prints when its label does.
-                if record.stub == "pending":
+                if record.state == "pending":
                     job = self._jobs.setdefault(header.key, len(self._jobs) + 1)
                     self.shown += 1
                     if not self._held:
@@ -342,7 +343,7 @@ class Scrollback:
                     return
                 del self._calls[header.key]
                 job = self._jobs.get(header.key)
-                if job is not None and record.stub is None:
+                if job is not None and record.state != "cancelled":
                     p.output(f"[undetached; #{job}]", display=_NOTED, header=header)
                 show_result(p, record, header=header)
                 self.shown += 1
@@ -372,14 +373,14 @@ class Scrollback:
                     )
                     self._calls[header.key] = header
                     p.call(header)
-        elif isinstance(event, ToolResult) and event.stub != "pending":
+        elif isinstance(event, ToolResult) and event.state != "pending":
             call_id = event.call_id.removesuffix(self.markers.arrival)
             header = self._calls.get(_key(call_id, label))
             if header is None:
                 self._orphaned(event, agent=label)
                 return
             del self._calls[header.key]
-            if event.is_error is True:
+            if event.is_error:
                 p.failed(f"{label}: {_without_reminders(event.text())}", header=header)
         elif isinstance(event, types.ModelResponseError):
             p.error(f"{label}: {error_text(event.exception)}")
@@ -395,7 +396,7 @@ class Scrollback:
     # would read as that call's. Only its failure shows, at the indent.
     def _orphaned(self, result: ToolResult, *, agent: str = "") -> None:
         """Print a result whose call this scrollback never saw: a failure, at the indent."""
-        if result.is_error is not True:
+        if not result.is_error:
             return
         text = _without_reminders(result.text())
         self.printer.error(f"{agent}: {text}" if agent else text)
@@ -552,11 +553,12 @@ def show_result(
     *,
     header: Header,
 ) -> None:
-    """Print a result by its fields: an error always, an edit or a write as a diff.
+    """Print a tool call's record: an error in full, an edit or a write as a diff.
 
-    A ``pending`` stub prints nothing: the real result prints when it lands. A
-    write's diff keeps the lines its call's display keeps of an output; any
-    other result prints what that display keeps of its text.
+    A failed call prints its whole text. A ``pending`` record prints nothing:
+    the real record prints when it arrives. A write's diff is cut to the lines
+    its call's display keeps of an output. Any other record, including a
+    command that exited nonzero, prints the part of its text that display keeps.
 
     Args:
       printer: Where it goes.
@@ -566,26 +568,29 @@ def show_result(
     """
     display = header.display
     text = _without_reminders(result.text())
-    if result.is_error is True:
+    if result.is_error:
         printer.failed(text, header=header)
         return
-    if result.stub == "pending":
+    if result.state == "pending":
         return
-    match result:
-        case EditResult(path=path, edits=edits) if edits:
-            printer.diff(splice_diff(result), path=path or "", header=header)
-        case WriteResult(path=path, content=content) if content not in (
-            None,
-            "",
-        ) and display.output.lines != (0, 0):
-            printer.diff(
-                write_diff(result),
-                path=path or "",
-                lines=display.output.lines,
-                header=header,
-            )
-        case _:
-            printer.output(text, display=display, header=header)
+    tool_result = result.result
+    edits = [item for item in result.stdout if isinstance(item, Splice)]
+    if isinstance(tool_result, EditResult) and edits:
+        printer.diff(splice_diff(edits), path=tool_result.path or "", header=header)
+    elif (
+        isinstance(tool_result, WriteResult)
+        and tool_result.content is not None
+        and tool_result.content != ""
+        and display.output.lines != (0, 0)
+    ):
+        printer.diff(
+            write_diff(tool_result.content),
+            path=tool_result.path or "",
+            lines=display.output.lines,
+            header=header,
+        )
+    else:
+        printer.output(text, display=display, header=header)
 
 
 def error_text(error: BaseException) -> str:

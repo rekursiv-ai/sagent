@@ -13,10 +13,10 @@ import stat
 import pytest
 
 from sagent.lib.userdirs import state_dir
-from sagent.session.types import UncategorizedToolResult, WriteResult
+from sagent.session.types import ToolResult, WriteResult
 from sagent.tools import write
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 from sagent.tools.write import Write, file_lock_path, write_file
 
 
@@ -82,7 +82,9 @@ async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
         ),
     ):
         writing = tasks.create_task(
-            Write().call(context, {"file_path": "notes.md", "content": "mine"}),
+            settled(
+                Write().call(context, {"file_path": "notes.md", "content": "mine"}),
+            ),
         )
         async with asyncio.timeout(1):
             await contending.wait()
@@ -106,7 +108,7 @@ async def test_a_call_missing_an_argument_is_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match="Missing argument"):
-        await Write().call(ToolContext(cwd=tmp_path), arguments)
+        await Write().call(ToolContext(cwd=tmp_path), arguments).result
 
 
 @pytest.mark.asyncio
@@ -114,8 +116,12 @@ async def test_a_new_file_is_made_with_its_directories(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     result = await _write(context, "deep/er/notes.md", "hello\n")
     target = tmp_path / "deep" / "er" / "notes.md"
-    assert result == WriteResult(call_id="", path=str(target), content="hello\n")
-    assert result.text() == f"Wrote {target}."
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=(f"Wrote {target}.",),
+        result=WriteResult(path=str(target), content="hello\n"),
+    )
     assert target.read_text() == "hello\n"
     assert target in context.files
     assert not context.files.changed(target)
@@ -126,7 +132,7 @@ async def test_a_file_just_written_may_be_written_again(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     await _write(context, "a.md", "one")
     again = await _write(context, "a.md", "two")
-    assert isinstance(again, WriteResult)
+    assert again.is_error is False
     assert (tmp_path / "a.md").read_text() == "two"
 
 
@@ -145,7 +151,7 @@ async def test_an_existing_file_must_be_read_before_it_is_replaced(
     assert (tmp_path / "a.md").read_text() == "theirs"
     context.files.saw(tmp_path / "a.md")
     replaced = await _write(context, "a.md", "mine")
-    assert replaced.is_error is None
+    assert replaced.is_error is False
     assert (tmp_path / "a.md").read_text() == "mine"
 
 
@@ -156,9 +162,9 @@ async def test_a_file_read_by_one_spelling_may_be_written_by_another(
     (tmp_path / "sub").mkdir()
     (tmp_path / "a.py").write_text("old")
     context = ToolContext(cwd=tmp_path)
-    await Read().call(context, {"file_path": "sub/../a.py"})
+    await settled(Read().call(context, {"file_path": "sub/../a.py"}))
     result = await _write(context, "a.py", "new")
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
     assert (tmp_path / "a.py").read_text() == "new"
 
 
@@ -304,11 +310,19 @@ async def _write(
     context: ToolContext,
     file_path: str,
     content: str,
-) -> WriteResult | UncategorizedToolResult:
+) -> ToolResult:
     """Write ``content`` to ``file_path``; the runtime names the call."""
-    result = await Write().call(context, {"file_path": file_path, "content": content})
+    result = await settled(
+        Write().call(context, {"file_path": file_path, "content": content}),
+    )
     assert result.call_id == ""
     return result
+
+
+@pytest.mark.asyncio
+async def test_a_refused_write_says_no_file_and_that_it_failed(tmp_path: Path) -> None:
+    refused = await _write(ToolContext(cwd=tmp_path), str(tmp_path), "x")
+    assert (refused.result, refused.is_error) == (WriteResult(exit_code=1), True)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Tests for what the Paper tools share: reading ``ids``, labels, and errors."""
+"""Tests for what the Paper tools share: reading ``ids``, labels, and listings."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ from wesearch.paper.types import PaperRecord
 
 import pytest
 
-from sagent.session.types import PaperSearchResult
-from sagent.tools.paper_common import error, listed, paper_ids, summary_ids
+from sagent.tools.paper_common import listed, paper_ids, summary_ids
 
 
 if TYPE_CHECKING:
@@ -79,14 +78,6 @@ def test_summary_ids_labels_whatever_was_passed(
 ) -> None:
     """A summary labels the call before it is checked, so it must not raise."""
     assert summary_ids(arguments) == label
-
-
-def test_error_is_an_error_result() -> None:
-    assert error(PaperSearchResult, "boom") == PaperSearchResult(
-        call_id="",
-        shown="boom",
-        is_error=True,
-    )
 
 
 @pytest.mark.parametrize("complete", [False, True])

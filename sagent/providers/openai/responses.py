@@ -340,7 +340,7 @@ def _user(
 def _output(result: ToolResult, *, limits: ModelLimits) -> object:
     """Return a tool result's output: its text, or its text and images."""
     text = result.text()
-    if result.is_error is True and text:
+    if result.is_error and text:
         text = f"[Error] {text}"
     images: list[dict[str, object]] = [
         {"type": "input_image", "detail": "auto", "image_url": url}

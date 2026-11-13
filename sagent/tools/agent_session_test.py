@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import asyncio
 import threading
+import tracemalloc
 
 import pytest
 
@@ -19,11 +20,13 @@ from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
+from sagent.session.jsonl import read_record, record_line
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     ContextClear,
+    SessionResult,
     SystemMessage,
     Thinking,
     ToolCall,
@@ -35,7 +38,7 @@ from sagent.session.types import (
 )
 from sagent.tools import agent_session
 from sagent.tools.agent_session import AgentSession
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -93,9 +96,14 @@ def _setup(
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="c0", name="Read", arguments={"file_path": "a.py"}),
-        UncategorizedToolResult(call_id="c0", content="a" * 4_000),
+        ToolResult(
+            call_id="c0",
+            state="done",
+            stdout=("a" * 4_000,),
+            result=UncategorizedToolResult(),
+        ),
         ToolCall(call_id="c1", name="Grep"),
-        UncategorizedToolResult(call_id="c1", content="b" * 400, stub="cancelled"),
+        ToolResult(call_id="c1", state="cancelled", stdout=("b" * 400,)),
         AssistantMessage(content="read it"),
         AgentToAgentMessage(content="peer says", sender="Agent_0", recipient="Agent"),
         SystemMessage(content="a note"),
@@ -111,10 +119,12 @@ async def _ask(
     *,
     label: str = "Agent",
 ) -> str:
-    result = await tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
-    # The runtime stamps the call's id; a tool leaves it empty.
-    assert (result.call_id, result.is_error) == ("", None)
-    assert result.action == arguments["action"]
+    streaming_result = tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
+    result = await settled(streaming_result)
+    # ``settled`` records a raise instead of raising; a refusal test expects the raise.
+    _ = await streaming_result.result
+    assert (result.state, result.is_error) == ("done", False)
+    assert result.result == SessionResult(action=str(arguments["action"]))
     return result.text()
 
 
@@ -161,7 +171,12 @@ async def test_list_cuts_a_head_only_past_80_and_names_unknown_and_several_calls
         UserMessage(content="y" * 81),
         ToolCall(call_id="c2", name="Read"),
         ToolCall(call_id="c3", name="Grep"),
-        UncategorizedToolResult(call_id="gone", content="orphan"),
+        ToolResult(
+            call_id="gone",
+            state="done",
+            stdout=("orphan",),
+            result=UncategorizedToolResult(),
+        ),
     )
 
     lines = (await _ask(tool, tmp_path, {"action": "list"})).splitlines()
@@ -306,7 +321,7 @@ async def test_search_without_a_journal_reads_the_session_kept_in_memory(
 
     assert found == "record 9, AgentToAgentMessage: ...peer says..."
     assert settings == "record 11, TurnContext: ...Working directory: /w..."
-    assert result.startswith("record 6, UncategorizedToolResult: ...bbbb")
+    assert result.startswith("record 6, ToolResult: ...bbbb")
 
 
 @pytest.mark.asyncio
@@ -332,7 +347,12 @@ async def test_an_estimate_of_several_names_each(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     agent.session.append(
         ToolCall(call_id="c2", name="Read"),
-        UncategorizedToolResult(call_id="c2", content="c" * 400),
+        ToolResult(
+            call_id="c2",
+            state="done",
+            stdout=("c" * 400,),
+            result=UncategorizedToolResult(),
+        ),
     )
 
     text = await _ask(tool, tmp_path, {"action": "estimate", "ids": [10, 2]})
@@ -352,32 +372,55 @@ async def test_an_unpriced_estimate_says_only_the_tokens(tmp_path: Path) -> None
     )
 
 
-@pytest.mark.parametrize("ids", [[0], [4]], ids=["not-a-result", "a-stub"])
+@pytest.mark.parametrize("which", ["not-a-result", "cancelled", "pending"])
 @pytest.mark.asyncio
-async def test_only_a_real_result_can_be_pruned(
+async def test_only_a_real_result_can_be_pruned(tmp_path: Path, which: str) -> None:
+    agent, tool = _setup(tmp_path)
+    agent.session.append(
+        ToolCall(call_id="c2", name="Grep"),
+        ToolResult(call_id="c2", state="pending", shown="[running]"),
+    )
+    entries = agent.runtime.context().messages
+    at = {
+        "not-a-result": 0,
+        **{e.state: i for i, e in enumerate(entries) if isinstance(e, ToolResult)},
+    }[which]
+    with pytest.raises(
+        ValueError,
+        match=rf"^#{at} is no tool result that can be pruned\.$",
+    ):
+        _ = await _ask(tool, tmp_path, {"action": "prune", "ids": [at], "reason": "x"})
+
+
+@pytest.mark.asyncio
+async def test_a_prune_says_why_and_drops_after_the_call(
     tmp_path: Path,
-    ids: list[PlainTree],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, tool = _setup(tmp_path)
-    with pytest.raises(ValueError, match="is no tool result that can be pruned"):
-        _ = await _ask(tool, tmp_path, {"action": "prune", "ids": ids, "reason": "x"})
-
-
-@pytest.mark.asyncio
-async def test_a_prune_says_why_and_drops_after_the_call(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     with pytest.raises(ValueError, match=r"^Say why in 'reason'\.$"):
         _ = await _ask(tool, tmp_path, {"action": "prune", "ids": [2]})
 
-    text = await _ask(
-        tool,
-        tmp_path,
+    after: list[object] = []
+    push_after = agent.runtime.push_after
+
+    def noted(task: asyncio.Future[object] | None, event: types.RuntimeEvent) -> None:
+        after.append(task)
+        push_after(task, event)
+
+    monkeypatch.setattr(agent.runtime, "push_after", noted)
+    streaming_result = tool.call(
+        ToolContext(cwd=tmp_path, label="Agent"),
         {"action": "prune", "ids": [2], "reason": "the file is read"},
     )
+    queued_prune = await settled(streaming_result)
+    text = queued_prune.text()
 
     assert text.startswith("Prune queued: the file is read\nDropping #2 saves")
-    assert agent.runtime.inbox.drain_nowait() == []
-    await asyncio.sleep(0)
+    assert queued_prune.result == SessionResult(action="prune")
+    # The drop is queued behind the result of the call the tool itself runs in.
+    assert after == [streaming_result.result]
+    # The tool ran outside a runtime call, so the event waits behind no result.
     (queued,) = agent.runtime.inbox.drain_nowait()
     assert isinstance(queued, types.Scheduled)
     assert isinstance(queued.done, asyncio.Future)
@@ -390,7 +433,7 @@ async def test_a_prune_says_why_and_drops_after_the_call(tmp_path: Path) -> None
         results["c0"].text()
         == "[pruned: old tool output removed to keep the context small]"
     )
-    assert results["c1"].stub == "cancelled"
+    assert results["c1"].state == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -430,9 +473,33 @@ async def test_clear_queues_a_clear_after_the_call(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
 
     assert await _ask(tool, tmp_path, {"action": "clear"}) == "Clear queued."
-    assert agent.runtime.inbox.drain_nowait() == []
-    await asyncio.sleep(0)
+    # The tool ran outside a runtime call, so the event waits behind no result.
     assert agent.runtime.inbox.drain_nowait() == [types.Clear()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["clear", "compact"])
+async def test_a_clear_or_compaction_is_queued_behind_the_calling_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Taken ahead of the call's result, the event would detach the call."""
+    agent, tool = _setup(tmp_path)
+    after: list[object] = []
+
+    def noted(task: asyncio.Future[object] | None, event: types.RuntimeEvent) -> None:
+        del event
+        after.append(task)
+
+    monkeypatch.setattr(agent.runtime, "push_after", noted)
+    streaming_result = tool.call(
+        ToolContext(cwd=tmp_path, label="Agent"),
+        {"action": action},
+    )
+    _ = await settled(streaming_result)
+
+    assert after == [streaming_result.result]
 
 
 @pytest.mark.asyncio
@@ -447,16 +514,20 @@ async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     )
     _ = tool.team.join(watcher, label="watcher")
     tool.team.watch("watcher", "Agent")
-    said = await tool.call(
-        tool.team["Agent"].runtime.tool_context,
-        {"agent": "parent", "action": "list"},
+    parent_list = await settled(
+        tool.call(
+            tool.team["Agent"].runtime.tool_context,
+            {"agent": "parent", "action": "list"},
+        ),
     )
-    read = await tool.call(
-        watcher.runtime.tool_context,
-        {"agent": "Agent", "action": "read", "records": [1, 1]},
+    read = await settled(
+        tool.call(
+            watcher.runtime.tool_context,
+            {"agent": "Agent", "action": "read", "records": [1, 1]},
+        ),
     )
 
-    assert said.text() == "The context is empty."
+    assert parent_list.text() == "The context is empty."
     head, result = read.text().split("\n\n")
     assert head == 'record 1, ToolCall:\nRead {"file_path": "a.py"}'
     assert result.startswith("its result, record 3:\n" + "a" * 100)
@@ -494,9 +565,39 @@ async def test_a_read_by_record_or_a_search_decodes_off_the_loop_from_the_first_
     read = await _ask(tool, tmp_path, {"action": "read", "records": [5, 3]})
     found = await _ask(tool, tmp_path, {"action": "search", "text": "peer"})
 
-    assert read.startswith("record 3, UncategorizedToolResult:\naaaa")
+    assert read.startswith("record 3, ToolResult:\naaaa")
     assert found.startswith("record 9, AgentToAgentMessage")
     assert journal.reads == [(3, False), (0, False)]
+
+
+class _Decoding(RecordingJournal):
+    """A journal that decodes each record afresh as its history is read, as a file's does."""
+
+    @override
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        return (read_record(record_line(r)) for r in super().history(start))
+
+
+@pytest.mark.asyncio
+async def test_a_read_by_record_holds_no_record_after_what_it_shows(
+    tmp_path: Path,
+) -> None:
+    """A read of an early record held the rest of the session, decoded, on a thread."""
+    agent, tool = _setup(tmp_path, journal=_Decoding())
+    system_text = "z" * (1 << 16)
+    agent.session.append(*(SystemMessage(content=system_text) for _ in range(16)))
+    tracemalloc.start()
+    try:
+        read = await _ask(tool, tmp_path, {"action": "read", "records": [1]})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert read == (
+        'record 1, ToolCall:\nRead {"file_path": "a.py"}\n\n'
+        "its result, record 3:\n" + "a" * 4_000
+    )
+    assert peak < 8 * len(system_text)
 
 
 @pytest.mark.asyncio
@@ -516,7 +617,7 @@ async def test_direct_session_calls_reject_bad_record_ids_and_target_arguments(
 ) -> None:
     _, tool = _setup(tmp_path)
     with pytest.raises(ValueError, match=match):
-        _ = await tool.call(ToolContext(cwd=tmp_path, label="Agent"), arguments)
+        _ = await tool.call(ToolContext(cwd=tmp_path, label="Agent"), arguments).result
 
 
 @pytest.mark.asyncio
@@ -529,13 +630,17 @@ async def test_list_and_search_reach_a_child_s_session(tmp_path: Path) -> None:
     _ = tool.team.join(kid, label="kid", parent="Agent")
     kid.session.append(UserMessage(content="kid's own words"))
     caller = tool.team["Agent"]
-    listed = await tool.call(
-        caller.runtime.tool_context,
-        {"agent": "kid", "action": "list"},
+    listed = await settled(
+        tool.call(
+            caller.runtime.tool_context,
+            {"agent": "kid", "action": "list"},
+        ),
     )
-    found = await tool.call(
-        caller.runtime.tool_context,
-        {"agent": "kid", "action": "search", "text": "own words"},
+    found = await settled(
+        tool.call(
+            caller.runtime.tool_context,
+            {"agent": "kid", "action": "search", "text": "own words"},
+        ),
     )
 
     assert listed.text().startswith("#0 user message")
@@ -548,11 +653,12 @@ async def test_search_reaches_an_unrelated_agents_journal(tmp_path: Path) -> Non
     peer = Agent(model=ScriptedProvider()["scripted"], environment=False)
     tool.team.join(peer, label="peer")
     peer.session.append(UserMessage(content="the peer's words"))
-    result = await tool.call(
-        tool.team["Agent"].runtime.tool_context,
-        {"agent": "peer", "action": "search", "text": "words"},
+    result = await settled(
+        tool.call(
+            tool.team["Agent"].runtime.tool_context,
+            {"agent": "peer", "action": "search", "text": "words"},
+        ),
     )
-    assert result.action == "search"
     assert "the peer's words" in result.text()
 
 

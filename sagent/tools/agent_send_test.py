@@ -19,11 +19,11 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import MessageKind, Team
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AgentToAgentMessage
+from sagent.session.types import AgentSendResult, AgentToAgentMessage
 from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -123,7 +123,9 @@ async def test_an_agent_on_another_machine_is_listed_and_sent_to(
     assert send.reminder(_context(tmp_path)) == (
         "Your agent label is 'Agent'. Active agents you can message: bob, worker."
     )
-    said = await send.call(_context(tmp_path), {"to": "worker", "content": "go"})
+    said = await settled(
+        send.call(_context(tmp_path), {"to": "worker", "content": "go"}),
+    )
     assert said.text() == "Delivered to worker."
     assert relay.sent == [("Agent", "worker", "go", "ask")]
 
@@ -143,9 +145,11 @@ async def test_a_delayed_reply_crosses_to_another_machine_as_a_reply(
     team, relay = _team(tmp_path), _Relayed()
     team.reach("worker", relay=relay)
     team.receive(sender="worker", recipient="Agent", content="ok?", kind="ask")
-    _ = await AgentSend(team=team).call(
-        _context(tmp_path),
-        {"to": "worker", "content": "yes", "delay": 1},
+    _ = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "worker", "content": "yes", "delay": 1},
+        ),
     )
     ((deliver, args),) = scheduled
     deliver(*args)
@@ -171,12 +175,16 @@ async def test_a_reply_settles_what_was_owed_and_creates_no_debt(
 ) -> None:
     team = _team(tmp_path, "helper")
     send = AgentSend(team=team)
-    _ = await send.call(_context(tmp_path), {"to": "helper", "content": "status?"})
+    _ = await settled(
+        send.call(_context(tmp_path), {"to": "helper", "content": "status?"}),
+    )
     assert team.owes("helper") == {"Agent": "status?"}
 
-    _ = await send.call(
-        _context(tmp_path, label="helper"),
-        {"to": "parent", "content": "all green"},
+    _ = await settled(
+        send.call(
+            _context(tmp_path, label="helper"),
+            {"to": "parent", "content": "all green"},
+        ),
     )
 
     assert (team.owes("helper"), team.owes("Agent")) == ({}, {})
@@ -188,9 +196,13 @@ async def test_a_reply_settles_what_was_owed_and_creates_no_debt(
 @pytest.mark.asyncio
 async def test_a_root_has_no_parent_to_send_to(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="You have no parent"):
-        _ = await AgentSend(team=_team(tmp_path)).call(
-            _context(tmp_path),
-            {"to": "parent", "content": "hi"},
+        _ = (
+            await AgentSend(team=_team(tmp_path))
+            .call(
+                _context(tmp_path),
+                {"to": "parent", "content": "hi"},
+            )
+            .result
         )
 
 
@@ -207,11 +219,15 @@ async def test_a_root_that_may_spawn_starts_its_watcher_to_reach_its_parent(
     )
     _ = team.join(root)
     async with team:
-        first = await send.call(
-            _context(tmp_path),
-            {"to": "parent", "content": "hold me to the goal"},
+        first = await settled(
+            send.call(
+                _context(tmp_path),
+                {"to": "parent", "content": "hold me to the goal"},
+            ),
         )
-        again = await send.call(_context(tmp_path), {"to": "parent", "content": "and"})
+        again = await settled(
+            send.call(_context(tmp_path), {"to": "parent", "content": "and"}),
+        )
 
         assert first.text() == (
             "Started your watcher, watcher, now your parent. Delivered to watcher."
@@ -219,9 +235,10 @@ async def test_a_root_that_may_spawn_starts_its_watcher_to_reach_its_parent(
         assert again.text() == "Delivered to watcher."
         assert team.resolve("parent", by="Agent") == ["watcher"]
         assert team.owes("watcher") == {"Agent": "and"}
+        watcher = team["watcher"]
         told = [
             m.content or ""
-            for m in _inbox(team, "watcher")
+            for m in (*watcher.session, *_inbox(team, "watcher"))
             if isinstance(m, AgentToAgentMessage)
         ]
         assert told[0].startswith("<skill name='watch' source='builtin'>")
@@ -242,7 +259,10 @@ async def test_a_root_kept_from_spawning_starts_no_watcher(tmp_path: Path) -> No
     _ = team.join(root)
 
     with pytest.raises(ValueError, match="You have no parent"):
-        _ = await send.call(_context(tmp_path), {"to": "parent", "content": "hi"})
+        _ = await send.call(
+            _context(tmp_path),
+            {"to": "parent", "content": "hi"},
+        ).result
     assert list(team) == ["Agent"]
 
 
@@ -260,14 +280,16 @@ async def test_user_is_told_on_the_screen_once_one_watches(tmp_path: Path) -> No
     team = _team(tmp_path)
     send = AgentSend(team=team)
     with pytest.raises(ValueError, match="No user is watching"):
-        _ = await send.call(_context(tmp_path), {"to": "user", "content": "hi"})
+        _ = await send.call(_context(tmp_path), {"to": "user", "content": "hi"}).result
     shown: list[tuple[str, str]] = []
     team.to_user = lambda sender, text: shown.append((sender, text))
     team.ask("Agent", "what broke?")
 
-    result = await send.call(
-        _context(tmp_path),
-        {"to": "user", "content": "the parser"},
+    result = await settled(
+        send.call(
+            _context(tmp_path),
+            {"to": "user", "content": "the parser"},
+        ),
     )
 
     assert result.text() == "Delivered to user."
@@ -279,13 +301,16 @@ async def test_user_is_told_on_the_screen_once_one_watches(tmp_path: Path) -> No
 async def test_a_message_reaches_the_inbox_signed_by_its_sender(tmp_path: Path) -> None:
     team = _team(tmp_path, "bob")
 
-    result = await AgentSend(team=team).call(
-        _context(tmp_path),
-        {"to": "bob", "content": "look at a.py"},
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "look at a.py"},
+        ),
     )
 
     assert result.text() == "Delivered to bob."
-    assert result.is_error is None
+    assert result.is_error is False
+    assert result.result == AgentSendResult(to="bob")
     assert _inbox(team, "bob") == [
         AgentToAgentMessage(sender="Agent", recipient="bob", content="look at a.py"),
     ]
@@ -295,9 +320,11 @@ async def test_a_message_reaches_the_inbox_signed_by_its_sender(tmp_path: Path) 
 async def test_a_message_to_oneself_without_a_delay_is_flagged(tmp_path: Path) -> None:
     team = _team(tmp_path)
 
-    result = await AgentSend(team=team).call(
-        _context(tmp_path),
-        {"to": "Agent", "content": "note to self"},
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "Agent", "content": "note to self"},
+        ),
     )
 
     assert result.text().startswith("Delivered to Agent. Note: you sent yourself")
@@ -310,9 +337,11 @@ async def test_an_unnamed_sender_signs_as_unknown_and_is_never_itself(
 ) -> None:
     team = _team(tmp_path, "unknown")
 
-    result = await AgentSend(team=team).call(
-        _context(tmp_path, label=""),
-        {"to": "unknown", "content": "hi"},
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path, label=""),
+            {"to": "unknown", "content": "hi"},
+        ),
     )
 
     assert result.text() == "Delivered to unknown."
@@ -343,7 +372,7 @@ async def test_a_send_that_cannot_be_delivered_is_refused(
     team = _team(tmp_path, "bob")
 
     with pytest.raises(ValueError, match=match):
-        _ = await AgentSend(team=team).call(_context(tmp_path), arguments)
+        _ = await AgentSend(team=team).call(_context(tmp_path), arguments).result
     assert _inbox(team, "bob") == []
 
 
@@ -362,9 +391,11 @@ async def test_a_delayed_message_reaches_whoever_holds_the_label_then(
     team = _team(tmp_path, "bob")
     old = team["bob"]
 
-    result = await AgentSend(team=team).call(
-        _context(tmp_path),
-        {"to": "bob", "content": "check back", "delay": 5},
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "check back", "delay": 5},
+        ),
     )
     assert _inbox(team, "bob") == []
     (delay, deliver, args) = scheduled[0]
@@ -405,9 +436,11 @@ async def test_a_delayed_reply_settles_the_debt_when_sent_not_when_it_lands(
     team.send("bob", "Agent", "status?")
     _ = _inbox(team, "Agent")
 
-    _ = await AgentSend(team=team).call(
-        _context(tmp_path),
-        {"to": "bob", "content": "done", "delay": 5},
+    _ = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "done", "delay": 5},
+        ),
     )
     assert team.owes("Agent") == {}
     ((deliver, args),) = scheduled
@@ -444,9 +477,13 @@ async def test_each_refusal_says_exactly_why(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-        _ = await AgentSend(team=_team(tmp_path)).call(
-            _context(tmp_path, label),
-            arguments,
+        _ = (
+            await AgentSend(team=_team(tmp_path))
+            .call(
+                _context(tmp_path, label),
+                arguments,
+            )
+            .result
         )
 
 
@@ -462,9 +499,11 @@ async def test_every_result_is_for_no_call_and_a_self_send_says_why_it_is_odd(
     team = _team(tmp_path, "bob")
     send = AgentSend(team=team)
     results = [
-        await send.call(_context(tmp_path), {"to": "Agent", "content": "x"}),
-        await send.call(_context(tmp_path), {"to": "bob", "content": "x"}),
-        await send.call(_context(tmp_path), {"to": "bob", "content": "x", "delay": 1}),
+        await settled(send.call(_context(tmp_path), {"to": "Agent", "content": "x"})),
+        await settled(send.call(_context(tmp_path), {"to": "bob", "content": "x"})),
+        await settled(
+            send.call(_context(tmp_path), {"to": "bob", "content": "x", "delay": 1}),
+        ),
     ]
     assert [r.call_id for r in results] == ["", "", ""]
     assert results[0].text() == (

@@ -90,7 +90,13 @@ from sagent.tools.mcp_auth import (
     session_auth,
     sign_ins,
 )
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 from sagent.types import AsyncResource
 
 
@@ -99,6 +105,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from mcp import Client, StdioServerParameters
+    from mcp.client import session_group
     from mcp.client._transport import TransportStreams
     from mcp.client.session_group import StreamableHttpParameters
     from mcp.client.stdio import stdio_client
@@ -106,6 +113,7 @@ if TYPE_CHECKING:
     from mcp.shared._httpx_utils import create_mcp_http_client
 
     import httpx2
+    import mcp
     import mcp.types as mcp_types
 
     from sagent.tools.types import Tool, ToolContext
@@ -114,11 +122,10 @@ else:
 
     # ``mcp`` takes ~450 ms to import; a session with no server never pays it.
     Client = lazy_import("mcp", "Client")
-    StdioServerParameters = lazy_import("mcp", "StdioServerParameters")
-    StreamableHttpParameters = lazy_import(
-        "mcp.client.session_group",
-        "StreamableHttpParameters",
-    )
+    # A dataclass field's type is spelled through its module, ``mcp.X``: ``@dataclass``
+    # probes an annotation's bare first name, and probing a proxy imports ``mcp``.
+    mcp = lazy_import("mcp")
+    session_group = lazy_import("mcp.client.session_group")
     stdio_client = lazy_import("mcp.client.stdio", "stdio_client")
     create_mcp_http_client = lazy_import(
         "mcp.shared._httpx_utils",
@@ -170,7 +177,7 @@ class McpServer:
     name: str
     """The configuration's key; the prefix of every tool name it gives."""
 
-    parameters: StdioServerParameters | StreamableHttpParameters
+    parameters: mcp.StdioServerParameters | session_group.StreamableHttpParameters
     """How to reach it: a command to run, or a URL."""
 
     description: str = ""
@@ -205,13 +212,17 @@ class McpServer:
     @property
     def transport(self) -> Literal["stdio", "http"]:
         """Return how it is reached: a process it runs, or a URL."""
-        return "stdio" if isinstance(self.parameters, StdioServerParameters) else "http"
+        return (
+            "stdio"
+            if isinstance(self.parameters, mcp.StdioServerParameters)
+            else "http"
+        )
 
     @property
     def target(self) -> str:
         """Return what it is reached at: its URL, or its command line."""
         p = self.parameters
-        if isinstance(p, StdioServerParameters):
+        if isinstance(p, mcp.StdioServerParameters):
             return " ".join([p.command, *p.args])
         return p.url
 
@@ -473,7 +484,7 @@ class McpConnection:
         arguments: Mapping[str, PlainTree],
         *,
         context: ToolContext,
-    ) -> McpResult:
+    ) -> ToolOutput[McpResult, Attachment | str, str]:
         """Run the server's ``tool``; return its result, cut to fit ``context``.
 
         Args:
@@ -482,7 +493,8 @@ class McpConnection:
           context: How much of the result fits.
 
         Returns:
-          result: Its text, or its JSON when it gives no text, and its media.
+          output: Its text, or its JSON when it gives no text, then its media;
+            its exit code is ``1`` when the server says the tool failed.
 
         """
         done = await self._open().call_tool(tool, dict(arguments))
@@ -491,16 +503,21 @@ class McpConnection:
         structured = cast("PlainTree | None", done.structured_content)
         if not done.content and structured is not None:
             texts.append(json_dumps(structured))
-        return _result(
+        return _output(
             texts,
             attachments,
             server=self.server.name,
             tool=tool,
             context=context,
-            is_error=done.is_error,
+            failed=done.is_error is True,
         )
 
-    async def read(self, uri: str, *, context: ToolContext) -> McpResult:
+    async def read(
+        self,
+        uri: str,
+        *,
+        context: ToolContext,
+    ) -> ToolOutput[McpResult, Attachment | str, str]:
         """Read the resource at ``uri``; return it, cut to fit ``context``.
 
         Args:
@@ -508,18 +525,17 @@ class McpConnection:
           context: How much of the result fits.
 
         Returns:
-          result: Its text and media, naming the server and no tool.
+          output: Its text, then its media.
 
         """
         done = await self._open().read_resource(uri)
         texts, attachments = _contents(done.contents)
-        return _result(
+        return _output(
             texts,
             attachments,
             server=self.server.name,
             tool="",
             context=context,
-            is_error=False,
         )
 
     def _open(self) -> Client:
@@ -586,13 +602,15 @@ class McpTool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> McpResult:
+    ) -> ToolStreamingResult[McpResult, Attachment | str, str]:
         """Run the tool with ``arguments``, which the server checks."""
-        return await self._connection.call(self._tool, arguments, context=context)
+        return whole_output(
+            self._connection.call(self._tool, arguments, context=context),
+        )
 
 
 class McpServerTool:
@@ -678,11 +696,11 @@ class McpServerTool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> McpResult:
+    ) -> ToolStreamingResult[McpResult, Attachment | str, str]:
         """List, describe, or run a tool, or read a resource, as ``arguments`` ask.
 
         Args:
@@ -691,12 +709,20 @@ class McpServerTool:
             with ``arguments`` runs it; nothing returns the description.
 
         Returns:
-          result: What the server returned, or the schema or listing asked for.
+          streaming_result: What the server returned, or the schema or
+            description asked for.
 
         Raises:
           ValueError: The arguments fit no schema, or ``tool`` is not offered.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[McpResult, Attachment | str, str]:
         connection = self._connection
         if not self._runs_tools:
             a = parse(arguments, McpServerTool.ResourceArguments)
@@ -705,13 +731,12 @@ class McpServerTool:
         if b.resource:
             return await connection.read(b.resource, context=context)
         if not b.tool:
-            return _result(
+            return _output(
                 [self.description],
                 [],
                 server=connection.server.name,
                 tool="",
                 context=context,
-                is_error=False,
             )
         tool = connection.offered.get(b.tool)
         if tool is None:
@@ -725,13 +750,12 @@ class McpServerTool:
                 "description": tool.description or "",
                 "input_schema": cast(PlainTree, tool.input_schema),
             }
-            return _result(
+            return _output(
                 [json_dumps(described)],
                 [],
                 server=connection.server.name,
                 tool=tool.name,
                 context=context,
-                is_error=False,
             )
         return await connection.call(tool.name, b.arguments, context=context)
 
@@ -865,7 +889,7 @@ async def login(
             f"MCP server {server.name!r} runs locally; it needs no sign-in.",
         )
     p = server.parameters
-    assert isinstance(p, StreamableHttpParameters)
+    assert isinstance(p, session_group.StreamableHttpParameters)
     try:
         async with (
             login_auth(
@@ -903,7 +927,7 @@ async def _transport(
 ) -> AsyncGenerator[TransportStreams]:
     """Yield the streams to ``server``: a process it runs, or an HTTP session."""
     p = server.parameters
-    if isinstance(p, StdioServerParameters):
+    if isinstance(p, mcp.StdioServerParameters):
         log = (
             state_dir()
             / "rekursiv-ai"
@@ -986,23 +1010,20 @@ def _contents(
     return texts, attachments
 
 
-def _result(
+def _output(
     texts: Sequence[str],
     attachments: Sequence[Attachment],
     *,
     server: str,
     tool: str,
     context: ToolContext,
-    is_error: bool | None,
-) -> McpResult:
+    failed: bool = False,
+) -> ToolOutput[McpResult, Attachment | str, str]:
+    """Return a server's text, cut to fit ``context``, then its media."""
     text, _ = context.fit(["\n".join(texts)])
-    return McpResult(
-        call_id="",
-        server=server,
-        tool=tool,
-        content=text,
-        attachments=tuple(attachments),
-        is_error=True if is_error is True else None,
+    return ToolOutput(
+        stdout=(text, *attachments),
+        result=McpResult(server=server, tool=tool, exit_code=int(failed)),
     )
 
 
@@ -1122,7 +1143,7 @@ def _server(name: str, raw: Mapping[str, PlainTree], *, source: str) -> McpServe
     try:
         if command is not None:
             parameters: StdioServerParameters | StreamableHttpParameters = (
-                StdioServerParameters(
+                mcp.StdioServerParameters(
                     command=_expand(command),
                     args=[_expand(a) for a in entry.get("args", [])],
                     env=_expand_all(entry["env"]) if "env" in entry else None,
@@ -1130,7 +1151,7 @@ def _server(name: str, raw: Mapping[str, PlainTree], *, source: str) -> McpServe
                 )
             )
         else:
-            parameters = StreamableHttpParameters(
+            parameters = session_group.StreamableHttpParameters(
                 url=_expand(url),
                 headers=_expand_all(entry["headers"]) if "headers" in entry else None,
             )

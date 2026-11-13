@@ -13,10 +13,12 @@ A tool (`sagent.tools.types.Tool`) exposes:
 - `schema`: JSON Schema of its arguments.
 - `display`: how its calls show in the terminal, a `ToolDisplay`.
 - `summary(arguments)`: short label for a call, such as `Edit foo.py`.
-- `serialize_key(context, arguments)`: which calls this one must not overlap; `None` runs beside anything, `"*"` runs alone.
-- `call(context, arguments)`: run, and return the session record of what it did.
+- `serialize_key(context, arguments)`: which calls this one must not overlap; `None` runs beside anything; `"*"` waits for every keyed call before it, and every later call waits for it.
+- `call(context, arguments)`: start the tool and return a `ToolStreamingResult` at once: the tool's output streams (`stdout`, `stderr`) and a future of its result (`result`), a dataclass with an `exit_code`, `0` for success.
 
-A tool holds no agent's state. Each call gets the calling agent's `ToolContext`: its working directory, the files it has seen, and its result size limit. Arguments that do not fit the schema raise `ValueError`; the runtime returns the message to the model as an error.
+Whoever ran the call reads the streams and saves the session record, a `ToolResult`; a tool never builds one. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call.
+
+A tool holds no agent's state. Each call gets the calling agent's `ToolContext`: its working directory, the files it has seen, and its result size limit. Arguments that do not fit the schema raise `ValueError`; the model reads the message as the call's error.
 
 Optional protocols add standing context: `Briefing` (a system prompt section, read once a window) and `Reminding` (a note each round).
 
@@ -44,7 +46,7 @@ A `str` return is cut to what one result holds. A parameter named `context` rece
 
 ## Class-based tools
 
-Use a class when the tool needs state, a custom summary, or a typed result. Declare the arguments once, as a dataclass whose fields are `Annotated[T, "description"]`; `json_schema` builds the schema from it and `parse` checks the model's arguments against it.
+Use a class when the tool needs state, a custom summary, or typed output. Declare the arguments once, as a dataclass whose fields are `Annotated[T, "description"]`; `json_schema` builds the schema from it and `parse` checks the model's arguments against it.
 
 ```python
 from collections.abc import Mapping
@@ -53,7 +55,15 @@ from typing import Annotated
 
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, ToolContext, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 from treekle import PlainTree
 
 
@@ -79,16 +89,27 @@ class Echo:
     ) -> str | None:
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
+        return whole_output(self._run(arguments))
+
+    async def _run(
+        self,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, str, str]:
         a = parse(arguments, Echo.Arguments)
-        return UncategorizedToolResult(call_id="", content=" ".join([a.text] * a.times))
+        return ToolOutput(
+            stdout=(" ".join([a.text] * a.times),),
+            result=UncategorizedToolResult(),
+        )
 ```
 
-The runtime fills in `call_id`.
+`whole_output` suits a tool with nothing to write until it is done: it starts the work and writes the output it returns. A tool that writes as it runs, as `Bash` does, returns its own `Stream`s. A tool names the item type of each stream: text for most, and records for some, as `Edit` writes each `Splice`.
+
+`result` is a class that carries the exit code as `exit_code`, `0` for success. A tool with more to report defines its own result class: `Read` returns a `ReadResult` (the resolved `path`, and a `status` when it showed no lines), so `Read` is a `Tool[ReadResult, Attachment | LineSpan | str, str]`. Every built-in has its own (`BashResult`, `GrepResult`, `EditResult`, and so on, all in `sagent.session.types`), so a reader tells which tool a result came from by the class of its `result`; a tool of yours with nothing more to report returns an `UncategorizedToolResult`. A bare `Tool` is a tool of any result class and item types.
 
 ## Built-ins
 

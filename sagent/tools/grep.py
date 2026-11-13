@@ -6,7 +6,7 @@ its first match, which is the part a search exists to show.
 
 Typical usage example:
 
-  result = await Grep().call(context, {"pattern": "def main", "-C": 2})
+  result = await settled(Grep().call(context, {"pattern": "def main", "-C": 2}))
 """
 
 from __future__ import annotations
@@ -31,7 +31,14 @@ from sagent.tools.command_analyzer import (
     resolve,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -308,11 +315,11 @@ class Grep:
             arguments["keep_last" if sink.exe == "tail" else "keep_first"] = count
         return arguments
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> GrepResult:
+    ) -> ToolStreamingResult[GrepResult, str, str]:
         """Search the files under ``path`` for ``pattern``.
 
         Args:
@@ -320,9 +327,16 @@ class Grep:
           arguments: What the model passed, as ``Grep.Arguments``.
 
         Returns:
-          result: One entry per line, with a note to resume when cut.
+          streaming_result: One entry per line, with a note to resume when cut.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[GrepResult, str, str]:
         a = parse(arguments, Grep.Arguments)
         around = max(a.around, a.context)
         named = (a.path,) if isinstance(a.path, str) else a.path
@@ -356,11 +370,9 @@ class Grep:
                 query,
             )
         except GrepError as e:
-            return GrepResult(
-                call_id="",
-                pattern=a.pattern,
-                shown=str(e),
-                is_error=True,
+            return ToolOutput(
+                stderr=(str(e),),
+                result=GrepResult(pattern=a.pattern, exit_code=1),
             )
         # ``keep_last`` starts the window at the tail; the resume note names it.
         start = max(0, len(rows) - a.keep_last) if a.keep_last else a.offset
@@ -369,7 +381,7 @@ class Grep:
         if not window:
             # Past the last entry, saying none matched would be false.
             content = "(no matches in this window)" if rows else "(no matches)"
-            return GrepResult(call_id="", pattern=a.pattern, content=content)
+            return ToolOutput(stdout=(content,), result=GrepResult(pattern=a.pattern))
         # Room for the longest note, one naming every entry and the last offset,
         # less the newline the body ends with, which the note stands in for.
         note = _more(len(window), offset=start + len(window))
@@ -381,7 +393,7 @@ class Grep:
         body = body.removesuffix("\n")
         if kept < len(window):
             body += _more(len(window) - kept, offset=start + kept)
-        return GrepResult(call_id="", pattern=a.pattern, content=body)
+        return ToolOutput(stdout=(body,), result=GrepResult(pattern=a.pattern))
 
     # The ``path:line:`` prefix is kept whole: it is how the row is found.
     def _clip(self, row: Row) -> str:

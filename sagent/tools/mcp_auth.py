@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
 
     from mcp.client.auth import OAuthClientProvider
+    from mcp.shared import auth as shared_auth
     from mcp.shared.auth import (
         AuthorizationCodeResult,
         OAuthClientInformationFull,
@@ -65,13 +66,10 @@ else:
     # ``mcp`` takes ~450 ms to import; a session with no server never pays it.
     AnyUrl = lazy_import("pydantic", "AnyUrl")
     OAuthClientProvider = lazy_import("mcp.client.auth", "OAuthClientProvider")
-    AuthorizationCodeResult = lazy_import("mcp.shared.auth", "AuthorizationCodeResult")
-    OAuthClientInformationFull = lazy_import(
-        "mcp.shared.auth",
-        "OAuthClientInformationFull",
-    )
-    OAuthClientMetadata = lazy_import("mcp.shared.auth", "OAuthClientMetadata")
-    OAuthToken = lazy_import("mcp.shared.auth", "OAuthToken")
+    # Its types are reached through the module: a dataclass field spelled
+    # ``shared_auth.X`` is never probed, while ``@dataclass`` probes a bare name's
+    # proxy, which imports ``mcp``.
+    shared_auth = lazy_import("mcp.shared.auth")
 
 
 __all__ = [
@@ -93,8 +91,8 @@ _HELD = ContextVar[frozenset[tuple[Path, asyncio.Task[object] | None]]](
 class _MemoryStorage:
     """A sign-in's tokens and client, held until the sign-in succeeds."""
 
-    tokens: OAuthToken | None = None
-    client: OAuthClientInformationFull | None = None
+    tokens: shared_auth.OAuthToken | None = None
+    client: shared_auth.OAuthClientInformationFull | None = None
     expires_at: float | None = None
 
     async def get_tokens(self) -> OAuthToken | None:
@@ -360,13 +358,13 @@ class _SignIn:
             # Over ssh the browser cannot reach us; its address bar holds the code.
             with suppress(TimeoutError):
                 code = await asyncio.wait_for(asyncio.shield(self.code), self.wait_sec)
-                return AuthorizationCodeResult(code=code, state=self.state)
+                return shared_auth.AuthorizationCodeResult(code=code, state=self.state)
         code = await read_pasted_code(
             state=self.state,
             show=self.show,
             browser_tried=not self.headless,
         )
-        return AuthorizationCodeResult(code=code, state=self.state)
+        return shared_auth.AuthorizationCodeResult(code=code, state=self.state)
 
 
 # The SDK reads the file once and renews with the refresh token it read then. A
@@ -470,7 +468,7 @@ class _SignInNeeded(httpx2.Auth):
 
 def _metadata(redirect: str) -> OAuthClientMetadata:
     """Return the client sagent registers as: public, with PKCE, redirected to us."""
-    return OAuthClientMetadata(
+    return shared_auth.OAuthClientMetadata(
         client_name="sagent",
         redirect_uris=[AnyUrl(redirect)],
         token_endpoint_auth_method="none",  # noqa: S106 -- Flagged for the keyword's name; the value is OAuth's public-client method.
@@ -494,9 +492,11 @@ def _expiry(tokens: OAuthToken) -> float | None:
 def _parse(kept: _Kept) -> _MemoryStorage:
     tokens, client = kept.get("tokens"), kept.get("client")
     return _MemoryStorage(
-        tokens=OAuthToken.model_validate(tokens) if tokens is not None else None,
+        tokens=shared_auth.OAuthToken.model_validate(tokens)
+        if tokens is not None
+        else None,
         client=(
-            OAuthClientInformationFull.model_validate(client)
+            shared_auth.OAuthClientInformationFull.model_validate(client)
             if client is not None
             else None
         ),

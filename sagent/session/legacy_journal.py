@@ -68,6 +68,7 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -241,7 +242,7 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
             if event is not None:
                 built = ReferrableTapeEvent(ref=ref, event=event)
                 n = _int(record.get("id"))
-                if isinstance(event, UncategorizedToolResult) and n is not None:
+                if isinstance(event, ToolResult) and n is not None:
                     ids[n] = len(tape)
         elif kind in ("clear", "context_clear"):
             built = _splice(ref=ref, mask=full_tape_mask(tape), strategy="clear")
@@ -356,15 +357,19 @@ def _patch(tape: list[TapeRecord], at: int | None, record: _Record) -> None:
     held = tape[at]
     assert isinstance(held, ReferrableTapeEvent)
     result = held.event
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ToolResult)
     content = _str(record.get("content"))
+    stub = _stub(None, content)
     tape[at] = replace(
         held,
-        event=replace(
-            result,
-            content=content,
-            is_error=_bool(record.get("is_error")),
-            stub=_stub(None, content),
+        event=ToolResult(
+            timestamp=result.timestamp,
+            call_id=result.call_id,
+            state=stub or "done",
+            stdout=(*((content,) if content else ()), *result.attachments),
+            result=None
+            if stub
+            else UncategorizedToolResult(exit_code=int(_bool(record.get("is_error")))),
         ),
     )
 
@@ -445,13 +450,15 @@ def _event(record: _Record) -> ModelContextEvent | None:
         return _turn(record, text=text, timestamp=timestamp)
     if kind == "tool_result":
         content = _str(record.get("content"))
-        return UncategorizedToolResult(
+        stub = _stub(record.get("result_kind"), content)
+        return ToolResult(
             timestamp=timestamp,
             call_id=_str(record.get("call_id")),
-            content=content,
-            is_error=_bool(record.get("is_error")),
-            stub=_stub(record.get("result_kind"), content),
-            attachments=attachments,
+            state=stub or "done",
+            stdout=(*((content,) if content else ()), *attachments),
+            result=None
+            if stub
+            else UncategorizedToolResult(exit_code=int(_bool(record.get("is_error")))),
         )
     return None
 

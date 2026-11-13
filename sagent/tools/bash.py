@@ -2,13 +2,17 @@
 
 A ``cd`` in the command moves the agent's ``cwd`` for later tools. A command
 that times out, or whose call is cancelled, is stopped with its process group.
+The first lines of output are streamed as the command prints them. A long
+output is truncated in the middle, so the rest is streamed when the command
+ends.
 
 Typical usage example:
 
-  result = await Bash().call(
+  streaming_result = Bash().call(
       context,
       {"command": "pytest -q", "description": "Run the tests", "timeout": 60_000},
   )
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
@@ -31,9 +35,21 @@ import time
 
 from sagent.lib.posix.child import Child, finish
 from sagent.session.types import BashResult
-from sagent.tools.command_analyzer import ReadOnly, Rewrite, ShellTool, rewrite
+from sagent.tools.command_analyzer import (
+    ReadOnly,
+    Rewrite,
+    ShellTool,
+    moves,
+    rewrite,
+)
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    Stream,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+)
 
 
 if TYPE_CHECKING:
@@ -93,7 +109,7 @@ class Bash:
     """How long an unwrapped command has, after TERM, to close its output."""
 
     read_only: ReadOnly = field(default_factory=ReadOnly.default)
-    """Which commands only read, and so may run beside other calls."""
+    """The commands that only read; ``rewrite`` may turn a line of them into ``peers``' calls."""
 
     peers: Sequence[ShellTool] = ()
     """Tools that ``rewrite`` may hand a command to, such as Read for ``cat``."""
@@ -117,21 +133,24 @@ class Bash:
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
     ) -> str | None:
-        """Return ``None`` for a command that only reads, else ``"*"`` to run alone.
+        """Return ``"*"`` for a command that may move the shell, else ``None``.
+
+        Commands run side by side, and beside every other call, as a shell's
+        jobs do; only Read, Write, and Edit keep an order, by file. Every call
+        made after a command that may move the shell waits for it, since those
+        calls start in the directory where it ends.
 
         Args:
           context: The calling agent's state; unused.
           arguments: What the model passed to Bash.
 
         Returns:
-          key: ``None`` or ``"*"``.
+          key: ``"*"`` or ``None``.
 
         """
         del context
         command = arguments.get("command")
-        return (
-            None if isinstance(command, str) and self.read_only.reads(command) else "*"
-        )
+        return "*" if not isinstance(command, str) or moves(command) else None
 
     def rewrite(
         self,
@@ -161,11 +180,11 @@ class Bash:
             reads=self.read_only.reads(command),
         )
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> BashResult:
+    ) -> ToolStreamingResult[BashResult, str, str]:
         """Run ``command`` in ``context.cwd``, and move it where the shell ends.
 
         Args:
@@ -173,13 +192,50 @@ class Bash:
           arguments: What the model passed, as ``Bash.Arguments``.
 
         Returns:
-          result: What the command printed, and how it exited.
+          streaming_result: The command's output as it is printed, and a
+            ``BashResult`` with its exit code; the exit code is ``None`` when
+            the shell did not stop.
 
         """
-        a = parse(arguments, Bash.Arguments)
+        stdout, stderr = Stream[str](), Stream[str]()
+        return ToolStreamingResult(
+            result=asyncio.ensure_future(self._run(context, arguments, stdout, stderr)),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
+        stderr: Stream[str],
+    ) -> BashResult:
+        """Run the command and return its result; close both streams on any exit."""
+        try:
+            a = parse(arguments, Bash.Arguments)
+            return BashResult(
+                command=("bash", "-c", a.command),
+                exit_code=await self._run_command(context, a, stdout, stderr),
+            )
+        finally:
+            stdout.close()
+            stderr.close()
+
+    async def _run_command(
+        self,
+        context: ToolContext,
+        a: Bash.Arguments,
+        stdout: Stream[str],
+        stderr: Stream[str],
+    ) -> int | None:
+        """Run ``a.command``, write its output to the streams, and return its exit code."""
+        cwd = context.cwd
         # A wrapped shell's directory may be invisible here; ``_guard`` falls back.
         if not self.exec_prefix:
-            context.cwd = await asyncio.to_thread(_existing, context.cwd)
+            cwd = await asyncio.to_thread(_existing, cwd)
+            if cwd != context.cwd:
+                context.cwd = cwd
         sentinel = f"__SAGENT_CWD_{secrets.token_hex()}__"
         script = _script(sentinel)
         held = _HeldPipe() if self.exec_prefix else None
@@ -193,9 +249,24 @@ class Bash:
                 _guard() + script,
                 "bash",
                 a.command,
-                str(context.cwd),
+                str(cwd),
             ]
         )
+        cap = min(self.max_result_chars, context.max_result_chars)
+        spill = (
+            context.spill_dir / f"bash-{secrets.token_hex(4)}.txt"
+            if context.spill_dir is not None
+            else None
+        )
+        note = f"; full output: {spill}" if spill is not None else ""
+        stdout_lines = _StdoutLines(
+            writer=_EarlyWriter(
+                stream=stdout,
+                early_chars=_early_chars(cap, note=note),
+            ),
+            report_prefix=f"{sentinel}=",
+        )
+        stderr_writer = _EarlyWriter(stream=stderr, early_chars=cap // 4)
         started = time.monotonic()
         reason: str | None = None
         try:
@@ -207,29 +278,37 @@ class Bash:
                 stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=context.cwd if held is None else "/",
+                cwd=cwd if held is None else "/",
                 env=_environment(self.env, columns=context.columns),
             )
             proc = child.process
+            assert isinstance(proc.stdout, asyncio.StreamReader)
+            assert isinstance(proc.stderr, asyncio.StreamReader)
             # Shielded, so a timeout cancels the wait, not the read of what was written.
-            communicate = asyncio.ensure_future(proc.communicate())
+            read_task = asyncio.ensure_future(
+                _read_output(
+                    child,
+                    (proc.stdout, stdout_lines.add_line),
+                    (proc.stderr, stderr_writer.add_line),
+                ),
+            )
             try:
-                out, err = await asyncio.wait_for(
-                    asyncio.shield(communicate),
+                await asyncio.wait_for(
+                    asyncio.shield(read_task),
                     timeout=timedelta(milliseconds=a.timeout).total_seconds(),
                 )
             except TimeoutError:
-                await finish(_stop(child, held=held, output=communicate))
-                drained = await _drain(proc, communicate, grace_sec=self.drain_sec)
-                out, err = drained or (b"", b"")
+                await finish(_stop(child, held=held, output=read_task))
                 reason = f"timeout after {time.monotonic() - started:.1f}s"
-                if drained is None:
-                    reason += "; the shell did not stop, and its output is lost"
+                if not await _drain(proc, read_task, grace_sec=self.drain_sec):
+                    reason += (
+                        "; the shell did not stop, and the rest of its output is lost"
+                    )
             except asyncio.CancelledError:
                 try:
-                    await finish(_stop(child, held=held, output=communicate))
+                    await finish(_stop(child, held=held, output=read_task))
                 finally:
-                    communicate.cancel()
+                    _ = read_task.cancel()
                 raise
             else:
                 if held is not None:
@@ -237,69 +316,180 @@ class Bash:
         finally:
             if held is not None:
                 held.close()
-        stdout: list[str] = []
-        lines = out.decode(errors="replace").split("\n")
-        for i, line in enumerate(lines):
-            following = lines[i + 1] if i + 1 < len(lines) else None
-            # The report's leading newline, and the stream's final one, end no
-            # line the command printed; kept, each is counted as one omitted.
-            if not line and (following is None or following.startswith(f"{sentinel}=")):
-                continue
-            if not line.startswith(f"{sentinel}="):
-                stdout.append(line + "\n")
-            elif (cwd := Path(line.removeprefix(f"{sentinel}="))).is_absolute() and (
-                held is not None or await asyncio.to_thread(cwd.is_dir)
+        stdout_lines.finish()
+        # The script reports the directory before the command, then after it. Commands
+        # run side by side, so one that stayed put must not undo another's ``cd``.
+        # A wrapped shell is compared with the directory asked for instead, since
+        # ``_guard`` starts it in ``/`` when that directory is gone.
+        reported_dirs = stdout_lines.reported_dirs
+        start_dir = (
+            str(cwd) if held is not None or not reported_dirs else reported_dirs[0]
+        )
+        for reported_dir in reported_dirs:
+            end_cwd = Path(reported_dir)
+            if (
+                reported_dir != start_dir
+                and end_cwd.is_absolute()
+                and (held is not None or await asyncio.to_thread(end_cwd.is_dir))
             ):
-                context.cwd = cwd
+                context.cwd = end_cwd
         # Stderr gets its own quarter, so floods of stdout cannot hide the error.
-        stderr = [
-            f"{line}\n" for line in err.decode(errors="replace").strip().split("\n")
-        ]
-        cap = min(self.max_result_chars, context.max_result_chars)
-        diagnostics, _ = context.fit(stderr, cap=cap // 4)
+        diagnostics, _ = context.fit(
+            [f"{line}\n" for line in "".join(stderr_writer.lines).strip().split("\n")],
+            cap=cap // 4,
+        )
         diagnostics = diagnostics.strip()
         if reason is not None:
             diagnostics += f"\n[{reason}]"
-        spill = (
-            context.spill_dir / f"bash-{secrets.token_hex(4)}.txt"
-            if context.spill_dir is not None
-            else None
+        lines = stdout_lines.writer.lines
+        final_text, truncated = _final_text(
+            context,
+            lines,
+            reserve=len(diagnostics),
+            cap=cap,
+            note=note,
         )
-        note = f"; full output: {spill}" if spill is not None else ""
-        body, kept = context.fit(stdout, reserve=len(diagnostics), cap=cap)
-        if kept < len(stdout):
-            if spill is not None:
-                await asyncio.to_thread(_spill, spill, stdout)
-            body = _ends(context, stdout, reserve=len(diagnostics), cap=cap, note=note)
-        shown = f"{body.strip()}\n" if body.strip() else ""
-        return BashResult(
-            call_id="",
-            command=("bash", "-c", a.command),
-            stdout=shown,
-            stderr=diagnostics.strip(),
-            exit_code=proc.returncode,
-        )
+        if truncated and spill is not None:
+            await asyncio.to_thread(_spill, spill, lines)
+        stdout_lines.writer.write_rest(final_text)
+        stderr_writer.write_rest(diagnostics.strip())
+        return proc.returncode
+
+
+@dataclass(slots=True, kw_only=True)
+class _EarlyWriter:
+    """Writes a stream's first lines as they arrive, and the rest at the end.
+
+    The final text is known only when the command ends: it is stripped, and a
+    long one is truncated in the middle. A line is written early only when the
+    final text is certain to contain it: a later non-blank line has arrived,
+    and the output so far is within ``early_chars``.
+    """
+
+    stream: Stream[str]
+    early_chars: int
+    """How many characters from the start the final text always keeps."""
+
+    lines: list[str] = field(default_factory=list[str])
+    """Every line added, each with its newline."""
+
+    _written: list[str] = field(default_factory=list[str])
+    _next_unwritten: int = 0
+    """Index in ``lines`` of the first line neither written nor skipped as a leading blank."""
+
+    _chars_added: int = 0
+
+    def add_line(self, line: str) -> None:
+        """Add the next line and write the earlier lines that are now certain.
+
+        Args:
+          line: The next line of output, without its newline.
+
+        """
+        self.lines.append(f"{line}\n")
+        self._chars_added += len(line) + 1
+        if not line.strip() or self._chars_added > self.early_chars:
+            return
+        newest = len(self.lines) - 1
+        for earlier in self.lines[self._next_unwritten : newest]:
+            # The final text is stripped, so a leading blank line is never written.
+            text = earlier if self._written else earlier.lstrip()
+            if text:
+                self._written.append(text)
+                self.stream.write(text)
+        self._next_unwritten = newest
+
+    def write_rest(self, final_text: str) -> None:
+        """Write the part of ``final_text`` that was not written early."""
+        rest = final_text.removeprefix("".join(self._written))
+        for line in rest.splitlines(keepends=True):
+            self.stream.write(line)
+
+
+@dataclass(slots=True, kw_only=True)
+class _StdoutLines:
+    """Separates the command's output lines from the script's directory reports."""
+
+    writer: _EarlyWriter
+    report_prefix: str
+    """What a report line starts with: the sentinel and ``=``."""
+
+    reported_dirs: list[str] = field(default_factory=list[str])
+    """Each directory the script reported; the last is where the shell ended."""
+
+    _pending_line: str | None = None
+
+    # A line is classified only once the next line is known, so it waits here.
+    def add_line(self, line: str) -> None:
+        """Add the next line of standard output, given without its newline."""
+        if self._pending_line is not None:
+            self._route(self._pending_line, next_line=line)
+        self._pending_line = line
+
+    def finish(self) -> None:
+        """Route the last line, which no line follows."""
+        if self._pending_line is not None:
+            self._route(self._pending_line, next_line=None)
+        self._pending_line = None
+
+    def _route(self, line: str, *, next_line: str | None) -> None:
+        # The report's leading newline and the stream's final newline each read
+        # as an empty line the command never printed.
+        if not line and (next_line is None or next_line.startswith(self.report_prefix)):
+            return
+        if line.startswith(self.report_prefix):
+            self.reported_dirs.append(line.removeprefix(self.report_prefix))
+        else:
+            self.writer.add_line(line)
+
+
+# By chunk, not ``readline``: a line longer than the reader's limit raises there.
+async def _read_lines(
+    reader: asyncio.StreamReader,
+    add_line: Callable[[str], None],
+) -> None:
+    """Call ``add_line`` with each line of ``reader``, without its newline."""
+    partial = b""
+    while chunk := await reader.read(1 << 16):
+        *complete, partial = (partial + chunk).split(b"\n")
+        for line in complete:
+            add_line(line.decode(errors="replace"))
+    add_line(partial.decode(errors="replace"))
+
+
+async def _read_output(
+    child: Child,
+    *readers: tuple[asyncio.StreamReader, Callable[[str], None]],
+) -> None:
+    """Read each stream to its end, line by line, then wait for the shell to exit."""
+    _ = await asyncio.gather(
+        *(_read_lines(reader, add_line) for reader, add_line in readers),
+    )
+    _ = await child.exited()
 
 
 # A child that ran ``setsid`` survives the group kill and can hold the pipes open.
-async def _drain(
+async def _drain[T](
     proc: asyncio.subprocess.Process,
-    communicate: asyncio.Future[tuple[bytes, bytes]],
+    read_task: asyncio.Future[T],
     *,
     grace_sec: float,
-) -> tuple[bytes, bytes] | None:
-    """Return what the stopped command wrote, or ``None`` if it would not end."""
+) -> bool:
+    """Return whether the stopped command's output was read to its end."""
     try:
-        return await asyncio.wait_for(asyncio.shield(communicate), timeout=grace_sec)
+        await asyncio.wait_for(asyncio.shield(read_task), timeout=grace_sec)
     except TimeoutError:
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
                 stream.feed_eof()
+    else:
+        return True
     try:
-        return await asyncio.wait_for(communicate, timeout=grace_sec)
+        await asyncio.wait_for(read_task, timeout=grace_sec)
     except TimeoutError:
         logging.getLogger(__name__).warning("Shell outlived its stop; output lost")
-        return None
+        return False
+    return True
 
 
 class _HeldPipe:
@@ -344,11 +534,37 @@ def _script(sentinel: str) -> str:
         '  eval "set -- $line"\n'
         '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         "}\n"
+        "__sagent_report\n"
         'eval "$1"\n'
         "__rc=$?\n"
         "__sagent_report\n"
         "exit $__rc"
     )
+
+
+# ``_ends`` gives the start at least two fifths of the room. The room is ``cap``
+# less the largest diagnostics (a quarter of ``cap`` plus one line of why the
+# command stopped) and less the line that counts the omitted lines.
+def _early_chars(cap: int, *, note: str) -> int:
+    """Return how many characters from the output's start the final text always keeps."""
+    room = cap - (cap // 4 + 160) - len(_omitted(10**18, note=note))
+    return max(0, room) * 2 // 5
+
+
+def _final_text(
+    context: ToolContext,
+    lines: Sequence[str],
+    *,
+    reserve: int,
+    cap: int,
+    note: str,
+) -> tuple[str, bool]:
+    """Return the text the model reads for ``lines``, and whether it was truncated."""
+    body, kept = context.fit(lines, reserve=reserve, cap=cap)
+    truncated = kept < len(lines)
+    if truncated:
+        body = _ends(context, lines, reserve=reserve, cap=cap, note=note)
+    return (f"{body.strip()}\n" if body.strip() else ""), truncated
 
 
 # A failure prints last, so the end is kept as well as the start: the end gets the
@@ -424,11 +640,11 @@ def _guard(*, kill_after_sec: float = 2.0) -> str:
 
 # The group, not the leader: a backgrounded child outlives the leader and would
 # hold the pipe open.
-async def _stop(
+async def _stop[T](
     child: Child,
     *,
     held: _HeldPipe | None,
-    output: asyncio.Future[tuple[bytes, bytes]],
+    output: asyncio.Future[T],
     wait_sec: float = 5.0,
 ) -> None:
     """End the shell's process group: TERM, a grace for ``output`` to end, then KILL."""

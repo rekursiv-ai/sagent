@@ -47,11 +47,13 @@ from sagent.session.types import (
     AssistantMessage,
     BashResult,
     EditResult,
+    LineSpan,
     ReadResult,
     ToolCall,
     ToolResult,
     UncategorizedToolResult,
     UserMessage,
+    WriteResult,
 )
 from sagent.tools.types import ToolContext
 
@@ -128,7 +130,14 @@ def _turns(*results: str, tail: str = "done", requests: int = 0) -> list[Session
     records: list[SessionRecord] = [UserMessage(content="go")]
     for i, content in enumerate(results):
         records.append(ToolCall(call_id=f"c{i}", name="Read"))
-        records.append(UncategorizedToolResult(call_id=f"c{i}", content=content))
+        records.append(
+            ToolResult(
+                call_id=f"c{i}",
+                state="done",
+                stdout=(content,),
+                result=UncategorizedToolResult(),
+            ),
+        )
     records.append(AssistantMessage(content=tail))
     for i in range(requests):
         records.append(UserMessage(content=f"q{i}"))
@@ -144,17 +153,32 @@ def _read(
     """Return a Read of ``ranges`` of ``path``, 1000 tokens long; all of it when none."""
     return [
         ToolCall(call_id=call_id, name="Read", arguments={"file_path": path}),
-        ReadResult(call_id=call_id, path=path, content="x" * 4000, ranges=ranges),
+        ToolResult(
+            call_id=call_id,
+            state="done",
+            stdout=("x" * 4000, *(LineSpan(start=s, count=n) for s, n in ranges)),
+            result=ReadResult(path=path),
+        ),
+    ]
+
+
+def _unnamed(call_id: str, tool: str) -> list[SessionRecord]:
+    """Return a ``tool`` call with no arguments and its result with no path or command."""
+    tool_result = ReadResult(exit_code=1) if tool == "Read" else BashResult(exit_code=1)
+    return [
+        ToolCall(call_id=call_id, name=tool),
+        ToolResult(call_id=call_id, state="done", stderr=("no",), result=tool_result),
     ]
 
 
 def _shell(call_id: str, command: str) -> list[SessionRecord]:
     return [
         ToolCall(call_id=call_id, name="Bash", arguments={"command": command}),
-        BashResult(
+        ToolResult(
             call_id=call_id,
-            command=("bash", "-c", command),
-            stdout="o" * 4000,
+            state="done",
+            stdout=("o" * 4000,),
+            result=BashResult(command=("bash", "-c", command)),
         ),
     ]
 
@@ -231,11 +255,21 @@ def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> Non
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="read", name="Read"),
-        UncategorizedToolResult(call_id="read", content="x" * 4000),
+        ToolResult(
+            call_id="read",
+            state="done",
+            stdout=("x" * 4000,),
+            result=UncategorizedToolResult(),
+        ),
         AssistantMessage(content="ok"),
         UserMessage(content="next"),
         ToolCall(call_id="unread", name="Read"),
-        UncategorizedToolResult(call_id="unread", content="y" * 4000),
+        ToolResult(
+            call_id="unread",
+            state="done",
+            stdout=("y" * 4000,),
+            result=UncategorizedToolResult(),
+        ),
         UserMessage(content="also"),
     )
 
@@ -282,6 +316,12 @@ _P = "/home/me/repo/agent/x.py"
         ([*_read("a", _P, (1, 20)), *_read("b", _P, (1, 10))], set[str]()),
         ([*_read("a", _P), *_read("b", "/repo/agent/y.py")], set[str]()),
         ([*_shell("a", "ls"), *_shell("b", "ls")], {"a"}),
+        # A read that failed names no file, and a shell call may name no command:
+        # neither is superseded, nor stands in the way of what is.
+        ([*_read("a", _P), *_unnamed("x", "Read"), *_read("b", _P)], {"a"}),
+        ([*_shell("a", "ls"), *_unnamed("x", "Bash"), *_shell("b", "ls")], {"a"}),
+        ([*_unnamed("x", "Read"), *_unnamed("y", "Read")], set[str]()),
+        ([*_unnamed("x", "Bash"), *_unnamed("y", "Bash")], set[str]()),
         ([*_shell("a", "ls"), *_shell("b", "ls -a")], set[str]()),
     ],
 )
@@ -289,16 +329,26 @@ def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
     records: list[SessionRecord],
     gone: set[str],
 ) -> None:
-    context = [record for record in records if isinstance(record, ToolResult)]
+    context: list[ModelContextEvent] = [
+        reply(calls=[r]) if isinstance(r, ToolCall) else r
+        for r in records
+        if isinstance(r, ToolCall | ToolResult)
+    ]
 
     assert _ids(context, superseded(context)) == gone
 
 
 def test_a_result_is_idle_since_its_file_was_last_named() -> None:
     context = [
-        ReadResult(call_id="a", path=_P),
+        reply(calls=[ToolCall(call_id="a", name="Read", arguments={"file_path": _P})]),
+        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        UncategorizedToolResult(call_id="g", content="hit"),
+        ToolResult(
+            call_id="g",
+            state="done",
+            stdout=("hit",),
+            result=UncategorizedToolResult(),
+        ),
         reply(
             calls=[
                 ToolCall(
@@ -308,7 +358,12 @@ def test_a_result_is_idle_since_its_file_was_last_named() -> None:
                 ),
             ],
         ),
-        UncategorizedToolResult(call_id="s", content="line"),
+        ToolResult(
+            call_id="s",
+            state="done",
+            stdout=("line",),
+            result=UncategorizedToolResult(),
+        ),
         reply(
             calls=[
                 ToolCall(
@@ -318,7 +373,11 @@ def test_a_result_is_idle_since_its_file_was_last_named() -> None:
                 ),
             ],
         ),
-        EditResult(call_id="e", path="/repo/y.py"),
+        ToolResult(
+            call_id="e",
+            state="done",
+            result=EditResult(path="/repo/y.py"),
+        ),
         reply("done"),
     ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
@@ -398,7 +457,12 @@ def _read_turn(
         *_turns(requests=before),
         UserMessage(content="look"),
         ToolCall(call_id="g", name="Grep", arguments={"pattern": "x", "path": named}),
-        UncategorizedToolResult(call_id="g", content="hit"),
+        ToolResult(
+            call_id="g",
+            state="done",
+            stdout=("hit",),
+            result=UncategorizedToolResult(),
+        ),
         AssistantMessage(content="ok"),
         *_turns(requests=after),
     ]
@@ -406,14 +470,20 @@ def _read_turn(
 
 def test_a_file_result_naming_no_file_is_idle_since_it_came() -> None:
     context = [
-        EditResult(call_id="e", path=None),
+        reply(calls=[ToolCall(call_id="e", name="Edit")]),
+        ToolResult(call_id="e", state="done", result=EditResult()),
         reply(
             calls=[ToolCall(call_id="g", name="Grep", arguments={"pattern": "None"})],
         ),
-        UncategorizedToolResult(call_id="g", content="hit"),
+        ToolResult(
+            call_id="g",
+            state="done",
+            stdout=("hit",),
+            result=UncategorizedToolResult(),
+        ),
         reply("done"),
     ]
-    (at,) = (i for i, e in enumerate(context) if isinstance(e, EditResult))
+    at = 1
 
     assert idle(context)[at] == reads(context)[at]
 
@@ -421,9 +491,17 @@ def test_a_file_result_naming_no_file_is_idle_since_it_came() -> None:
 def test_a_file_named_only_before_its_result_is_idle_since_it_came() -> None:
     context = [
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        UncategorizedToolResult(call_id="g", content="hit"),
-        reply("editing"),
-        EditResult(call_id="e", path=_P),
+        ToolResult(
+            call_id="g",
+            state="done",
+            stdout=("hit",),
+            result=UncategorizedToolResult(),
+        ),
+        reply(
+            "editing",
+            calls=[ToolCall(call_id="e", name="Edit", arguments={"file_path": _P})],
+        ),
+        ToolResult(call_id="e", state="done", result=EditResult(path=_P)),
         reply("done"),
     ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
@@ -433,10 +511,21 @@ def test_a_file_named_only_before_its_result_is_idle_since_it_came() -> None:
 
 def test_a_file_result_after_one_naming_no_file_is_still_followed() -> None:
     context = [
-        EditResult(call_id="e", path=None),
-        ReadResult(call_id="a", path=_P),
+        reply(
+            calls=[
+                ToolCall(call_id="e", name="Edit"),
+                ToolCall(call_id="a", name="Read", arguments={"file_path": _P}),
+            ],
+        ),
+        ToolResult(call_id="e", state="done", result=WriteResult()),
+        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        UncategorizedToolResult(call_id="g", content="hit"),
+        ToolResult(
+            call_id="g",
+            state="done",
+            stdout=("hit",),
+            result=UncategorizedToolResult(),
+        ),
         reply("done"),
     ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
@@ -446,7 +535,15 @@ def test_a_file_result_after_one_naming_no_file_is_still_followed() -> None:
 
 @pytest.mark.parametrize("server", [False, True])
 def test_with_no_policy_to_prune_by_nothing_is_planned(server: bool) -> None:
-    context = [ReadResult(call_id="a", content="x" * 64), reply("done")]
+    context = [
+        ToolResult(
+            call_id="a",
+            state="done",
+            stdout=("x" * 64,),
+            result=UncategorizedToolResult(),
+        ),
+        reply("done"),
+    ]
     splice = Mock()
     agent = Mock(
         spec=Agent,
@@ -473,8 +570,18 @@ def test_with_no_policy_to_prune_by_nothing_is_planned(server: bool) -> None:
 
 def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
     context = [
-        ReadResult(call_id="a", path=_P),
-        ReadResult(call_id="numeric", path="2"),
+        reply(
+            calls=[
+                ToolCall(call_id="a", name="Read", arguments={"file_path": _P}),
+                ToolCall(call_id="numeric", name="Read", arguments={"file_path": "2"}),
+            ],
+        ),
+        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
+        ToolResult(
+            call_id="numeric",
+            state="done",
+            result=ReadResult(path="2"),
+        ),
         reply("before"),
         reply(
             calls=[
@@ -488,7 +595,7 @@ def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
         reply("after"),
     ]
 
-    assert idle(context) == [1, 3, 2, 1, 0]
+    assert idle(context) == [3, 1, 3, 2, 1, 0]
 
 
 @pytest.mark.parametrize(("named", "kept"), [(_P, True), ("/repo/other.py", False)])
@@ -536,11 +643,21 @@ def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="early", name="Read"),
-        UncategorizedToolResult(call_id="early", content="e" * 40_000),
+        ToolResult(
+            call_id="early",
+            state="done",
+            stdout=("e" * 40_000,),
+            result=UncategorizedToolResult(),
+        ),
         AssistantMessage(content="a" * 40_000),
         UserMessage(content="more"),
         ToolCall(call_id="late", name="Read"),
-        UncategorizedToolResult(call_id="late", content="l" * 40_000),
+        ToolResult(
+            call_id="late",
+            state="done",
+            stdout=("l" * 40_000,),
+            result=UncategorizedToolResult(),
+        ),
         AssistantMessage(content="done"),
     )
 
@@ -662,7 +779,12 @@ async def test_the_policy_says_which_results_may_go(
             ],
         ),
         *(
-            UncategorizedToolResult(call_id=f"c{i}", content=str(i) * 2)
+            ToolResult(
+                call_id=f"c{i}",
+                state="done",
+                stdout=(str(i) * 2,),
+                result=UncategorizedToolResult(),
+            )
             for i in range(4)
         ),
         reply("done"),
@@ -697,20 +819,26 @@ async def test_the_policy_says_which_results_may_go(
 @pytest.mark.asyncio
 async def test_a_small_result_or_a_stub_is_never_dropped(tmp_path: Path) -> None:
     agent, pruner, _ = _agent(tmp_path, stub="[gone]")
-    pending = UncategorizedToolResult(
-        call_id="c1",
-        content=Markers().detached,
-        stub="pending",
-    )
+    pending = ToolResult(call_id="c1", state="pending", stdout=(Markers().detached,))
     async with agent:
         agent.session.append(
             UserMessage(content="go"),
             ToolCall(call_id="c0", name="Read"),
-            UncategorizedToolResult(call_id="c0", content="tiny"),
+            ToolResult(
+                call_id="c0",
+                state="done",
+                stdout=("tiny",),
+                result=UncategorizedToolResult(),
+            ),
             ToolCall(call_id="c1", name="Bash"),
             pending,
             ToolCall(call_id="c2", name="Read"),
-            UncategorizedToolResult(call_id="c2", content="x" * 400, is_error=True),
+            ToolResult(
+                call_id="c2",
+                state="done",
+                stdout=("x" * 400,),
+                result=UncategorizedToolResult(exit_code=1),
+            ),
             AssistantMessage(content="started"),
         )
 

@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from sagent.lib.files.grep import GrepError, Query, Row
+from sagent.session.types import GrepResult
 from sagent.tools import grep
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.grep import Grep
-from sagent.tools.types import ToolContext, parse
+from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -49,32 +50,34 @@ async def test_each_argument_reaches_the_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen = _capture(monkeypatch, rows=[Row(text="hit")])
-    result = await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {
-            "pattern": "p",
-            "path": "src",
-            "glob": "*.py",
-            "type": "py",
-            "exclude": "*_test.py",
-            "output_mode": "content",
-            "-B": 1,
-            "-A": 4,
-            "-i": True,
-            "-n": False,
-            "multiline": True,
-            "pcre": True,
-            "-v": True,
-            "-w": True,
-            "-x": True,
-            "-F": True,
-            "-o": True,
-            "-m": 3,
-            "-a": True,
-            "no_ignore": True,
-            "follow": True,
-            "max_depth": 2,
-        },
+    result = await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {
+                "pattern": "p",
+                "path": "src",
+                "glob": "*.py",
+                "type": "py",
+                "exclude": "*_test.py",
+                "output_mode": "content",
+                "-B": 1,
+                "-A": 4,
+                "-i": True,
+                "-n": False,
+                "multiline": True,
+                "pcre": True,
+                "-v": True,
+                "-w": True,
+                "-x": True,
+                "-F": True,
+                "-o": True,
+                "-m": 3,
+                "-a": True,
+                "no_ignore": True,
+                "follow": True,
+                "max_depth": 2,
+            },
+        ),
     )
     assert result.text() == "hit"
     assert seen == [
@@ -113,9 +116,11 @@ async def test_several_paths_are_searched_in_the_order_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen = _capture(monkeypatch, rows=[])
-    await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "p", "path": ["b", "/abs/a", ""]},
+    await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "p", "path": ["b", "/abs/a", ""]},
+        ),
     )
     assert [paths for paths, _ in seen] == [
         [tmp_path / "b", type(tmp_path)("/abs/a"), tmp_path],
@@ -126,14 +131,16 @@ async def test_several_paths_are_searched_in_the_order_given(
 async def test_a_real_inverted_search_lists_the_other_lines(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("alpha\nbeta\n")
     (tmp_path / "b.py").write_text("alpha\n")
-    result = await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {
-            "pattern": "alpha",
-            "path": ["a.py", "b.py"],
-            "output_mode": "content",
-            "-v": True,
-        },
+    result = await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {
+                "pattern": "alpha",
+                "path": ["a.py", "b.py"],
+                "output_mode": "content",
+                "-v": True,
+            },
+        ),
     )
     assert result.text() == f"{tmp_path / 'a.py'}:2:beta"
 
@@ -158,9 +165,11 @@ async def test_context_on_each_side_is_the_widest_asked_for(
     after: int,
 ) -> None:
     seen = _capture(monkeypatch, rows=[])
-    await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "p", "path": "", **arguments},
+    await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "p", "path": "", **arguments},
+        ),
     )
     ((root, query),) = seen
     assert root == [tmp_path]
@@ -176,23 +185,28 @@ async def test_a_real_search_finds_matching_files_and_lines(tmp_path: Path) -> N
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "c.txt").write_text("ALPHA\n")
     context = ToolContext(cwd=tmp_path)
-    files = await Grep().call(context, {"pattern": "alpha", "-i": True})
+    files = await settled(Grep().call(context, {"pattern": "alpha", "-i": True}))
     assert files.text() == f"{tmp_path / 'a.py'}\n{tmp_path / 'sub' / 'c.txt'}"
-    lines = await Grep().call(
-        context,
-        {"pattern": "alpha", "path": "a.py", "output_mode": "content"},
+    lines = await settled(
+        Grep().call(
+            context,
+            {"pattern": "alpha", "path": "a.py", "output_mode": "content"},
+        ),
     )
     assert lines.text() == f"{tmp_path / 'a.py'}:1:alpha"
-    assert lines.is_error is None
+    assert lines.is_error is False
     assert lines.call_id == ""
 
 
 @pytest.mark.asyncio
 async def test_nothing_found_says_so(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("alpha\n")
-    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "absent"})
+    result = await settled(
+        Grep().call(ToolContext(cwd=tmp_path), {"pattern": "absent"}),
+    )
     assert result.text() == "(no matches)"
-    assert result.is_error is None
+    assert result.is_error is False
+    assert result.result == GrepResult(pattern="absent")
 
 
 @pytest.mark.asyncio
@@ -200,9 +214,11 @@ async def test_a_search_that_cannot_run_is_an_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "x", "path": "missing"},
+    result = await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "x", "path": "missing"},
+        ),
     )
     assert result.is_error is True
     assert result.call_id == ""
@@ -213,7 +229,7 @@ async def test_a_search_that_cannot_run_is_an_error(
         raise GrepError("bad pattern")
 
     monkeypatch.setattr(grep, "grep_rows", refuse)
-    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "("})
+    result = await settled(Grep().call(ToolContext(cwd=tmp_path), {"pattern": "("}))
     assert (result.is_error, result.text()) == (True, "bad pattern")
 
 
@@ -237,7 +253,9 @@ async def test_a_window_pages_the_entries(
     rows: list[str],
 ) -> None:
     _capture(monkeypatch, rows=[Row(text=f"r{i}") for i in range(6)])
-    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", **window})
+    result = await settled(
+        Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", **window}),
+    )
     assert result.text() == "\n".join(rows)
 
 
@@ -247,7 +265,9 @@ async def test_a_window_past_the_last_entry_says_matches_lie_before_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _capture(monkeypatch, rows=[Row(text="r0")])
-    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", "offset": 5})
+    result = await settled(
+        Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", "offset": 5}),
+    )
     assert result.text() == "(no matches in this window)"
     assert result.call_id == ""
 
@@ -259,7 +279,7 @@ async def test_a_full_result_says_where_to_resume(
 ) -> None:
     _capture(monkeypatch, rows=[Row(text=f"row{i:02d}") for i in range(40)])
     context = ToolContext(cwd=tmp_path, max_result_chars=120)
-    result = await Grep().call(context, {"pattern": "r", "offset": 10})
+    result = await settled(Grep().call(context, {"pattern": "r", "offset": 10}))
     rows = result.text().splitlines()
     kept = len(rows) - 1
     assert rows[0] == "row10"
@@ -277,9 +297,11 @@ async def test_grep_s_own_cap_holds_below_the_context_s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _capture(monkeypatch, rows=[Row(text=f"row{i:02d}") for i in range(40)])
-    result = await Grep(max_result_chars=120).call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "r"},
+    result = await settled(
+        Grep(max_result_chars=120).call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "r"},
+        ),
     )
     assert result.text().endswith("to continue)")
     assert len(result.text()) <= 120
@@ -322,9 +344,11 @@ async def test_a_long_line_is_cut_around_its_first_match(
 ) -> None:
     """The ``path:line:`` prefix stays whole: it is how the row is found again."""
     _capture(monkeypatch, rows=[row])
-    result = await Grep(max_line_chars=12).call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "NEEDLE", "output_mode": "content"},
+    result = await settled(
+        Grep(max_line_chars=12).call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "NEEDLE", "output_mode": "content"},
+        ),
     )
     assert result.text() == shown
 
@@ -332,9 +356,11 @@ async def test_a_long_line_is_cut_around_its_first_match(
 @pytest.mark.asyncio
 async def test_a_real_wide_line_is_cut_around_its_match(tmp_path: Path) -> None:
     (tmp_path / "wide.txt").write_text("a" * 2_000 + "NEEDLE" + "b" * 2_000 + "\n")
-    result = await Grep().call(
-        ToolContext(cwd=tmp_path),
-        {"pattern": "NEEDLE", "path": "wide.txt", "output_mode": "content"},
+    result = await settled(
+        Grep().call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "NEEDLE", "path": "wide.txt", "output_mode": "content"},
+        ),
     )
     assert result.text().startswith(f"{tmp_path / 'wide.txt'}:1:[1,750 chars] ")
     assert "a" * 250 + "NEEDLE" + "b" * 244 + " [1,756 chars]" in result.text()
@@ -358,7 +384,7 @@ async def test_arguments_that_do_not_fit_are_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match=r"argument|must be"):
-        await Grep().call(ToolContext(cwd=tmp_path), arguments)
+        await Grep().call(ToolContext(cwd=tmp_path), arguments).result
 
 
 _REFUSAL = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
@@ -855,9 +881,11 @@ async def test_a_cut_result_never_passes_its_cap(
         for delta in (-1, 0, 1)
     }
     for cap in sorted(caps):
-        result = await Grep(max_result_chars=cap).call(
-            ToolContext(cwd=tmp_path),
-            {"pattern": "r", "offset": 9_999},
+        result = await settled(
+            Grep(max_result_chars=cap).call(
+                ToolContext(cwd=tmp_path),
+                {"pattern": "r", "offset": 9_999},
+            ),
         )
         text = result.text()
         kept = text.count("\n")

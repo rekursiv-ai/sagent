@@ -13,7 +13,8 @@ import pytest
 from sagent.host import testing
 from sagent.host.testing import Gate, LocalHost
 from sagent.host.wire import MAX_LINE_BYTES
-from sagent.tools.types import ToolContext
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -93,17 +94,17 @@ async def test_a_gate_runs_until_opened_or_cancelled(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, label="a")
     assert gate.summary({}) == "Gate"
     assert gate.serialize_key(context, {}) is None
-    waiting = asyncio.create_task(gate.call(context, {}))
+    waiting = asyncio.create_task(settled(gate.call(context, {})))
     try:
         _ = await asyncio.wait_for(gate.started.wait(), 5)
     finally:
         waiting.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await waiting
+        assert (await waiting).state == "cancelled"
     assert gate.stopped.is_set()
     gate.opened.set()
-    opened = await gate.call(context, {})
+    opened = await settled(gate.call(context, {}))
     assert opened.text() == "open for a"
+    assert (opened.state, opened.result) == ("done", UncategorizedToolResult())
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ from sagent.tui.theme import ThemeState
 
 
 if TYPE_CHECKING:
-    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit import key_binding
 
     from sagent.agent.team import Team
     from sagent.providers.types import ModelCatalog
@@ -50,7 +50,8 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    KeyBindings = lazy_import("prompt_toolkit.key_binding", "KeyBindings")  # 80 ms.
+    # Annotation-only, so not eager; a module, so ``@dataclass`` never probes it.
+    key_binding = lazy_import("prompt_toolkit.key_binding")
 
 
 __all__ = [
@@ -75,7 +76,7 @@ class View:
     deferred: Deferred
     status: Status
     scrollback: Scrollback
-    keys: KeyBindings
+    keys: key_binding.KeyBindings
     commands: Commands
     uncommit: Callable[[], None]
 

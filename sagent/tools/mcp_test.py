@@ -15,8 +15,10 @@ import contextlib
 import fcntl
 import json
 import logging
+import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 
@@ -34,7 +36,7 @@ from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.providers.testing import refuse_browsers
 from sagent.providers.tool_server import McpToolServer
 from sagent.session.projects import project_dir
-from sagent.session.types import Attachment
+from sagent.session.types import Attachment, McpResult
 from sagent.tools import mcp, mcp_auth
 from sagent.tools.display import ToolDisplay
 from sagent.tools.function import tool
@@ -52,7 +54,7 @@ from sagent.tools.mcp import (
 )
 from sagent.tools.mcp_auth import McpTokenStorage
 from sagent.tools.testing import SHOUT_SERVER
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -79,6 +81,26 @@ _PNG = b"\x89PNG\r\n\x1a\n"
 def _write(path: Path, servers_: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"mcpServers": servers_}))
+
+
+def test_starting_sagent_imports_no_mcp() -> None:
+    """A session with no server never loads the SDK; a fresh interpreter proves it."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, sagent.tui.main; "
+                "print(sorted(m for m in sys.modules if m.partition('.')[0] == 'mcp'))"
+            ),
+        ],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert probe.stdout == "[]\n"
 
 
 def test_a_command_entry_runs_a_local_server(tmp_path: Path) -> None:
@@ -866,10 +888,14 @@ async def test_a_call_returns_text_images_and_errors(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     async with _connected(_Backend()) as connection:
         tools = _by_name(connection.tools())
-        echo = await tools["mcp__srv__echo"].call(context, {"text": "hi"})
-        picture = await tools["mcp__srv__picture"].call(context, {})
-        fail = await tools["mcp__srv__fail"].call(context, {})
-    assert (echo.text(), echo.is_error, echo.call_id) == ("hi", None, "")
+        echo = await settled(tools["mcp__srv__echo"].call(context, {"text": "hi"}))
+        picture = await settled(tools["mcp__srv__picture"].call(context, {}))
+        fail = await settled(tools["mcp__srv__fail"].call(context, {}))
+    assert (echo.text(), echo.is_error, echo.call_id) == ("hi", False, "")
+    assert (echo.result, fail.result) == (
+        McpResult(server="srv", tool="echo"),
+        McpResult(server="srv", tool="fail", exit_code=1),
+    )
     assert picture.text() == "a picture"
     assert picture.attachments == (Attachment(mime_descriptor="image/png", data=_PNG),)
     assert (fail.text(), fail.is_error) == ("it broke", True)
@@ -880,7 +906,7 @@ async def test_long_text_is_cut_to_what_one_result_holds(tmp_path: Path) -> None
     context = ToolContext(cwd=tmp_path, max_result_chars=10)
     async with _connected(_Backend()) as connection:
         echo = _by_name(connection.tools())["mcp__srv__echo"]
-        result = await echo.call(context, {"text": "x" * 30})
+        result = await settled(echo.call(context, {"text": "x" * 30}))
     assert result.text().startswith("x" * 10)
     assert "chars omitted" in result.text()
 
@@ -933,9 +959,16 @@ async def test_an_on_demand_tool_is_described_then_run(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     async with _connected(_Backend(), loading="on_demand") as connection:
         (tool,) = connection.tools()
-        described = await tool.call(context, {"tool": "echo"})
-        ran = await tool.call(context, {"tool": "echo", "arguments": {"text": "hi"}})
-        listed = await tool.call(context, {})
+        described = await settled(tool.call(context, {"tool": "echo"}))
+        ran = await settled(
+            tool.call(context, {"tool": "echo", "arguments": {"text": "hi"}}),
+        )
+        listed = await settled(tool.call(context, {}))
+    assert (described.result, ran.result, listed.result) == (
+        McpResult(server="srv", tool="echo"),
+        McpResult(server="srv", tool="echo"),
+        McpResult(server="srv"),
+    )
     assert json.loads(described.text()) == {
         "name": "echo",
         "description": "Say the text back.",
@@ -958,7 +991,7 @@ async def test_an_on_demand_server_refuses_a_tool_it_does_not_offer(
     ) as connection:
         (tool,) = connection.tools()
         with pytest.raises(ValueError, match=r"No tool 'fail' on MCP server 'srv'"):
-            await tool.call(context, {"tool": "fail", "arguments": {}})
+            await tool.call(context, {"tool": "fail", "arguments": {}}).result
 
 
 @pytest.mark.asyncio
@@ -967,9 +1000,10 @@ async def test_resources_are_read_through_the_server_tool(tmp_path: Path) -> Non
     async with _connected(_Backend(resources=True)) as connection:
         tools = _by_name(connection.tools())
         server_tool = tools["mcp__srv"]
-        read = await server_tool.call(context, {"resource": "note://a"})
+        read = await settled(server_tool.call(context, {"resource": "note://a"}))
         with pytest.raises(ValueError, match="Unknown arguments: tool"):
-            await server_tool.call(context, {"tool": "echo"})
+            await server_tool.call(context, {"tool": "echo"}).result
+    assert read.result == McpResult(server="srv")
     assert "mcp__srv__echo" in tools
     assert _properties(server_tool) == {"resource"}
     assert "- note://a: a note" in server_tool.description
@@ -1073,10 +1107,11 @@ async def test_a_tool_without_a_description_is_described_as_empty(
     assert hush.description == ""
     async with _connected(_Backend(quiet=("hush",)), loading="on_demand") as connection:
         (tool,) = connection.tools()
-        described = await tool.call(context, {"tool": "hush"})
+        described = await settled(tool.call(context, {"tool": "hush"}))
     assert "\n- hush: \n" in f"{tool.description}\n"
     assert json.loads(described.text())["description"] == ""
-    assert described.is_error is None
+    assert described.is_error is False
+    assert described.result == McpResult(server="srv", tool="hush")
 
 
 def test_a_listing_shows_a_description_s_first_line_alone() -> None:
@@ -1089,15 +1124,19 @@ async def test_what_the_server_tool_says_of_itself_is_no_error(tmp_path: Path) -
     context = ToolContext(cwd=tmp_path)
     async with _connected(_Backend(resources=True), loading="on_demand") as connection:
         (tool,) = connection.tools()
-        listed = await tool.call(context, {})
-        described = await tool.call(context, {"tool": "echo"})
-        read = await tool.call(context, {"resource": "note://a"})
+        listed = await settled(tool.call(context, {}))
+        described = await settled(tool.call(context, {"tool": "echo"}))
+        read = await settled(tool.call(context, {"resource": "note://a"}))
         with pytest.raises(
             ValueError,
             match=r"it offers: echo, picture, fail, mixed, data\.$",
         ):
-            await tool.call(context, {"tool": "nope"})
-    assert (listed.is_error, described.is_error, read.is_error) == (None, None, None)
+            await tool.call(context, {"tool": "nope"}).result
+    assert (listed.is_error, described.is_error, read.is_error) == (
+        False,
+        False,
+        False,
+    )
     assert isinstance(tool, McpServerTool)
     assert tool.display == ToolDisplay()
     assert tool.summary({"resource": "note://a"}) == "mcp__srv note://a"
@@ -1113,7 +1152,7 @@ async def test_a_server_that_offers_nothing_says_so(tmp_path: Path) -> None:
     ) as connection:
         (tool,) = connection.tools()
         with pytest.raises(ValueError, match=r"it offers: none\.$"):
-            await tool.call(ToolContext(cwd=tmp_path), {"tool": "echo"})
+            await tool.call(ToolContext(cwd=tmp_path), {"tool": "echo"}).result
 
 
 @pytest.mark.asyncio
@@ -1129,8 +1168,8 @@ async def test_every_kind_of_content_reaches_the_model(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     async with _connected(_Backend()) as connection:
         tools = _by_name(connection.tools())
-        mixed = await tools["mcp__srv__mixed"].call(context, {})
-        data = await tools["mcp__srv__data"].call(context, {})
+        mixed = await settled(tools["mcp__srv__mixed"].call(context, {}))
+        data = await settled(tools["mcp__srv__data"].call(context, {}))
     assert mixed.text() == "embedded\nResource: file:///linked"
     assert mixed.attachments == (
         Attachment(mime_descriptor="audio/wav", data=b"RIFF"),
@@ -1150,7 +1189,7 @@ async def test_an_on_demand_server_reads_resources_and_says_what_it_is(
         description="Notes and echoes.",
     ) as connection:
         (tool,) = connection.tools()
-        read = await tool.call(context, {"resource": "note://a"})
+        read = await settled(tool.call(context, {"resource": "note://a"}))
     assert read.text() == "the note"
     assert tool.description.splitlines()[:2] == [
         "The tools and resources of the MCP server `srv`.",
@@ -1181,7 +1220,9 @@ async def test_a_session_connects_its_servers_and_skips_one_that_fails(
     with caplog.at_level(logging.WARNING):
         async with McpSession([good, missing, off]) as session:
             tools = _by_name(session.tools())
-            result = await tools["mcp__good__shout"].call(_context(), {"text": "hi"})
+            result = await settled(
+                tools["mcp__good__shout"].call(_context(), {"text": "hi"}),
+            )
     assert list(tools) == ["mcp__good__shout"]
     assert result.text() == "HI"
     status = session.status()

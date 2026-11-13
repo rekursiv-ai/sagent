@@ -36,7 +36,6 @@ from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -45,6 +44,7 @@ from sagent.settings.harvest import harvest
 from sagent.settings.types import Setting
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.mcp_settings import McpSettings
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tui import slash
 from sagent.tui.prompt import Panes, Staged
 from sagent.tui.recording import RecordingPrinter
@@ -90,13 +90,23 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context
-        return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
+        return ToolOutput(
+            stdout=(str(arguments.get("text")),),
+            result=UncategorizedToolResult(),
+        )
 
 
 class _Plain:
@@ -123,13 +133,20 @@ class _Plain:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="")
+        return ToolOutput(result=UncategorizedToolResult())
 
 
 def _windowed(

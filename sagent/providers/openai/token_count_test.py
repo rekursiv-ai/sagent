@@ -21,6 +21,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -70,7 +71,12 @@ def test_estimate_reads_every_text_the_request_sends(tokenizers: list[str]) -> N
             Thinking(summary="summary", content="raw"),
             Thinking(content="raw"),
             ToolCall(call_id="c", name="Read", arguments={"file_path": "a"}),
-            UncategorizedToolResult(call_id="c", content="result"),
+            ToolResult(
+                call_id="c",
+                state="done",
+                stdout=("result",),
+                result=UncategorizedToolResult(),
+            ),
             # Bookkeeping says nothing to the model.
             TokenUsage(),
         ),
@@ -115,7 +121,12 @@ def test_estimate_adds_each_image_shrunk_to_the_models_edge() -> None:
             UserMessage(attachments=(image, pdf)),
             # The model's own images are not sent back.
             AssistantMessage(attachments=(image,)),
-            UncategorizedToolResult(call_id="c", attachments=(image,)),
+            ToolResult(
+                call_id="c",
+                state="done",
+                stdout=(image,),
+                result=UncategorizedToolResult(),
+            ),
         ),
     )
     # Shrunk to 512 px, each is one 512 px tile: 85 + 170.

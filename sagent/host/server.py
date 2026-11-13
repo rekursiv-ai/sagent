@@ -87,7 +87,7 @@ from sagent.host.wire import (
 )
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.posix.child import Child, finish
-from sagent.session.types import ToolErrorResult
+from sagent.session.types import ToolResult
 from sagent.types import AsyncResource
 
 
@@ -1322,5 +1322,5 @@ def _valid_session_id(value: str) -> bool:
     )
 
 
-def _error(text: str) -> ToolErrorResult:
-    return ToolErrorResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> ToolResult:
+    return ToolResult(call_id="", state="failed", stderr=(text,))

@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  render_diff(console, splice_diff(result), row_indent="  ")
+  render_diff(console, splice_diff(edits), row_indent="  ")
   console.print(highlight_source("ls -la", "bash"))
 """
 
@@ -27,10 +27,12 @@ from sagent.tui.types import Sticky, hang
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pygments.lexer import Lexer
     from rich.console import Console
 
-    from sagent.session.types import EditResult, WriteResult
+    from sagent.session.types import Splice
     from sagent.tui.theme import Theme
 
 
@@ -164,11 +166,11 @@ def render_diff(
         index += 1
 
 
-def splice_diff(result: EditResult) -> str:
+def splice_diff(edits: Sequence[Splice]) -> str:
     """Return an edit's replacements as a unified diff.
 
     Args:
-      result: What Edit did.
+      edits: What Edit replaced, in the order it did.
 
     Returns:
       diff: One hunk per replacement, numbered for the file after the edit.
@@ -176,7 +178,7 @@ def splice_diff(result: EditResult) -> str:
     """
     hunks: list[str] = []
     shift = 0
-    for splice in result.edits:
+    for splice in edits:
         before = (splice.before or "").splitlines()
         after = (splice.after or "").splitlines()
         start = splice.start if splice.start is not None else 1
@@ -187,17 +189,17 @@ def splice_diff(result: EditResult) -> str:
     return "\n".join(hunks)
 
 
-def write_diff(result: WriteResult) -> str:
+def write_diff(content: str) -> str:
     """Return a write's content as a unified diff adding every line.
 
     Args:
-      result: What Write did.
+      content: What Write wrote.
 
     Returns:
       diff: One hunk adding the file's lines from line 1.
 
     """
-    lines = (result.content or "").splitlines()
+    lines = content.splitlines()
     return "\n".join([f"@@ -0,0 +1,{len(lines)} @@", *(f"+{ln}" for ln in lines)])
 
 

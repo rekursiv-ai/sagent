@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
+from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
     Final,
@@ -60,14 +61,19 @@ from sagent.host.wire import (
     received,
 )
 from sagent.session.types import (
+    AgentSpawnResult,
     Attachment,
-    BashResult,
     EditResult,
+    LineSpan,
     ReadResult,
     Splice,
+    ToolResult,
+    UncategorizedToolResult,
     UserMessage,
+    WebFetchResult,
     WebSearchHit,
     WebSearchResult,
+    WriteResult,
     record_classes,
     stored_plain,
 )
@@ -141,19 +147,65 @@ _TOKEN = secrets.token_urlsafe(16)
         Peers(labels=("a_0", "a_1")),
         Result(
             id="1",
-            record=BashResult(call_id="", stdout="hi\n", exit_code=0),
+            record=ToolResult(
+                call_id="",
+                state="done",
+                stdout=("hi\n",),
+                result=UncategorizedToolResult(),
+            ),
         ),
         Result(
             id="2",
-            record=ReadResult(
+            record=ToolResult(
                 call_id="",
-                path="/a.png",
-                attachments=(
+                state="done",
+                stdout=(
+                    "[image: /a.png]",
                     Attachment(mime_descriptor="image/png", data=b"\x00\xff"),
+                    LineSpan(start=3, count=2),
                 ),
+                result=UncategorizedToolResult(),
             ),
         ),
-        Result(id="3", record=ReadResult(call_id="", wire_id="3", path="/a")),
+        Result(
+            id="3",
+            record=ToolResult(
+                call_id="",
+                wire_id="3",
+                state="done",
+                result=UncategorizedToolResult(),
+            ),
+        ),
+        Result(
+            id="4",
+            record=ToolResult(
+                call_id="",
+                state="done",
+                stdout=("3\tx\n", LineSpan(start=3, count=1)),
+                result=ReadResult(path="/r/a.py", status="past_end", exit_code=1),
+            ),
+        ),
+        Result(
+            id="5",
+            record=ToolResult(
+                call_id="",
+                state="done",
+                stdout=("t\nu\ns", WebSearchHit(url="u", title="t", snippet="s")),
+                result=WebSearchResult(query="q", duration_sec=0.5),
+            ),
+        ),
+        *(
+            Result(
+                id="6",
+                record=ToolResult(call_id="", state="done", result=tool_result),
+            )
+            for tool_result in (
+                WriteResult(path="/r/a.py", content="x"),
+                EditResult(path="/r/a.py"),
+                WebFetchResult(url="http://a", code=200, duration_sec=0.5, size=4),
+                AgentSpawnResult(agent_id="kid", state="completed", tokens=3),
+            )
+        ),
         Ack(id="1"),
         Cancel(id="1"),
         Bye(),
@@ -177,7 +229,17 @@ async def test_each_message_reads_back_as_it_was_sent(message: Message) -> None:
 
 @pytest.mark.asyncio
 async def test_a_message_is_one_line() -> None:
-    line = encoded(Result(id="1", record=BashResult(call_id="", stdout="a\nb")))
+    line = encoded(
+        Result(
+            id="1",
+            record=ToolResult(
+                call_id="",
+                state="done",
+                stdout=("a\nb",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    )
     assert line.endswith(b"\n")
     assert line.count(b"\n") == 1
 
@@ -264,10 +326,11 @@ _CALL = Call(
 )
 _RESULT = Result(
     id="1",
-    record=ReadResult(
+    record=ToolResult(
         call_id="",
-        path="/a.png",
-        attachments=(Attachment(mime_descriptor="image/png", data=b"\x00"),),
+        state="done",
+        stdout=(Attachment(mime_descriptor="image/png", data=b"\x00"),),
+        result=UncategorizedToolResult(),
     ),
 )
 _NOTE = Note(id="n1", sender="a", recipient="b", content="hi", kind="tell")
@@ -277,6 +340,9 @@ _ADDED: Final = {"py/object": "AddedByANewerSagent", "deep": [1, "x"]}
 
 
 type _Plain = dict[str, object]
+
+_RECORD_PLAIN: Final = {"py/object": "ToolResult", "call_id": "", "state": "done"}
+"""A result as a line holds it, with nothing written."""
 
 
 def _top(plain: _Plain) -> _Plain:
@@ -315,17 +381,18 @@ def _with_added(message: Message, at: Callable[[_Plain], _Plain]) -> bytes:
         (_RESULT, _top),
         (Welcome(name="gpu1", resumed=True, calls=("1",), tools={}), _top),
         (_RESULT, _record),
-        (_RESULT, _first("attachments")),
-        (
-            Result(id="1", record=EditResult(call_id="", edits=(Splice(after="x"),))),
-            _first("edits"),
-        ),
+        (_RESULT, _first("stdout")),
         (
             Result(
                 id="1",
-                record=WebSearchResult(call_id="", content=(WebSearchHit(url="u"),)),
+                record=ToolResult(
+                    call_id="",
+                    state="done",
+                    stdout=(Splice(after="x"),),
+                    result=UncategorizedToolResult(),
+                ),
             ),
-            _first("content"),
+            _first("stdout"),
         ),
         (Described(id="d1", spec=_SPEC), _field("spec")),
         (GateCall(op="trip", policy=GatePolicy()), _field("policy")),
@@ -348,10 +415,12 @@ def test_what_a_message_is_written_as_is_unchanged() -> None:
         b'"tool": "Bash", "arguments": {"py/dict": {"command": "ls"}}, '
         b'"address_book": ["a"]}\n'
     )
+    # Version 2: ``Result.record`` is declared ``ToolResult``, so it carries no tag.
     assert encoded(_RESULT) == (
-        b'{"py/object": "Result", "id": "1", "record": {"py/object": "ReadResult", '
-        b'"path": "/a.png", "call_id": "", "attachments": [{"mime_descriptor": '
-        b'"image/png", "data": {"py/b64": "AA=="}}], "extra": {}}}\n'
+        b'{"py/object": "Result", "id": "1", "record": {'
+        b'"call_id": "", "state": "done", "stdout": [{"py/object": "Attachment", '
+        b'"mime_descriptor": "image/png", "data": {"py/b64": "AA=="}}], '
+        b'"result": {"py/object": "UncategorizedToolResult"}, "extra": {}}}\n'
     )
 
 
@@ -370,21 +439,22 @@ def test_a_field_of_plain_data_is_kept_whatever_it_holds() -> None:
         {"record": {"py/object": "ResultOfANewerSagent", "call_id": ""}},
         {
             "record": {
-                "py/object": "ReadResult",
+                "py/object": "ToolResult",
                 "call_id": "",
-                "attachments": [{"py/object": "AttachmentOfANewerSagent"}],
+                "state": "done",
+                "stdout": [{"py/object": "AttachmentOfANewerSagent"}],
             },
         },
-        {"record": {"py/object": "ReadResult", "call_id": "", "attachments": 5}},
-        {"record": {"py/object": "ReadResult", "call_id": "", "attachments": [5]}},
-        {"record": {"py/object": "ReadResult", "call_id": "", "attachments": {}}},
+        {"record": {**_RECORD_PLAIN, "stdout": 5}},
+        {"record": {**_RECORD_PLAIN, "stdout": [5]}},
+        {"record": {**_RECORD_PLAIN, "stdout": {}}},
     ],
 )
 def test_an_unknown_kind_or_class_or_a_misshapen_line_is_refused(
     change: dict[str, object],
 ) -> None:
     plain = cast("_Plain", json.loads(encoded(_RESULT)))
-    with pytest.raises(ValueError, match=r"cannot read|missing|expected"):
+    with pytest.raises(ValueError, match=r"cannot read|missing|expected|must be"):
         _ = decoded((json.dumps({**plain, **change}) + "\n").encode())
 
 
@@ -421,16 +491,80 @@ def test_a_field_holding_what_its_type_is_not_is_refused(
 def test_a_record_inside_a_message_is_checked_field_by_field() -> None:
     plain = cast("_Plain", json.loads(encoded(_RESULT)))
     record = cast("_Plain", plain["record"])
-    line = json.dumps({**plain, "record": {**record, "path": _RECORD}}) + "\n"
-    with pytest.raises(ValueError, match=r"^'Result\.record\.path' must be string"):
+    line = json.dumps({**plain, "record": {**record, "wire_id": _RECORD}}) + "\n"
+    with pytest.raises(ValueError, match=r"^'Result\.record\.wire_id' must be string"):
         _ = decoded(line.encode())
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        kind
+        for kind in record_classes().values()
+        if is_dataclass(kind)
+        and any(field.name == "exit_code" for field in fields(kind))
+    ],
+    ids=attrgetter("__name__"),
+)
+def test_a_result_line_reads_back_with_each_result_class(
+    kind: Callable[[], object],
+) -> None:
+    message = Result(
+        id="1",
+        record=ToolResult(call_id="", state="done", result=kind()),
+    )
+    assert decoded(encoded(message)) == message
+
+
+def test_a_result_line_from_a_host_running_older_code_reads_as_the_record_now() -> None:
+    """A daemon that restarts on new code keeps the hosts its old code started."""
+    line = json.dumps(
+        {
+            "py/object": "Result",
+            "id": "1",
+            "record": {
+                "py/object": "ReadResult",
+                "call_id": "c",
+                "content": "1\tx\n",
+                "path": "/a.py",
+            },
+        },
+    ).encode()
+
+    assert decoded(line) == Result(
+        id="1",
+        record=ToolResult(
+            call_id="c",
+            state="done",
+            stdout=("1\tx\n",),
+            result=ReadResult(path="/a.py"),
+        ),
+    )
+
+
+def test_a_record_s_result_is_checked_field_by_field() -> None:
+    message = Result(
+        id="1",
+        record=ToolResult(call_id="", state="done", result=ReadResult(path="/a")),
+    )
+    plain = cast("_Plain", json.loads(encoded(message)))
+    record = cast("_Plain", plain["record"])
+    result = cast("_Plain", record["result"])
+    for value, where in (
+        ({**result, "path": _RECORD}, r"Result\.record\.result\.path"),
+        ({"py/object": "Ping"}, r"Result\.record\.result"),
+        ("done", r"Result\.record\.result"),
+    ):
+        line = json.dumps({**plain, "record": {**record, "result": value}}) + "\n"
+        with pytest.raises(ValueError, match=rf"^'{where}' must"):
+            _ = decoded(line.encode())
 
 
 def test_a_line_nested_too_deep_in_its_records_is_refused() -> None:
     depth = 100_000
     line = encoded(_RESULT).replace(
-        b'"attachments": [',
-        b'"attachments": [' + b"[" * depth + b"]" * depth + b", ",
+        b'"stdout": [',
+        b'"stdout": [' + b"[" * depth + b"]" * depth + b", ",
     )
     with pytest.raises(ValueError, match=r"nested too deep|cannot read"):
         _ = decoded(line)
@@ -512,7 +646,7 @@ class _Unseen:
     by_name: Mapping[str, Attachment]
     maybe: tuple[Attachment, ...] | None
     seen: tuple[Attachment, ...]
-    either: ReadResult | BashResult
+    either: Attachment | Splice
     plain: str
 
 

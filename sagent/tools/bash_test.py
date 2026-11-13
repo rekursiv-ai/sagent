@@ -18,18 +18,33 @@ import subprocess
 import sys
 import time
 
+from hypothesis import (
+    given,
+    strategies as st,
+)
+
 import pytest
 
 from sagent.lib.posix.child import Child
 from sagent.lib.posix.pids import gone_within, running
-from sagent.session.types import BashResult
+from sagent.session.types import BashResult, ToolResult
 from sagent.tools import bash
-from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _spill, _stop
+from sagent.tools.bash import (
+    Bash,
+    _drain,
+    _early_chars,
+    _EarlyWriter,
+    _final_text,
+    _guard,
+    _HeldPipe,
+    _spill,
+    _stop,
+)
 from sagent.tools.command_analyzer import Rewrite
 from sagent.tools.grep import Grep
 from sagent.tools.list import List
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
+from sagent.tools.types import Stream, ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -58,16 +73,22 @@ import sys
 from pathlib import Path
 
 from sagent.tools.bash import Bash
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 directory, command, *prefix = sys.argv[1:]
 context = ToolContext(cwd=Path(directory))
-asyncio.run(
-    Bash(exec_prefix=tuple(prefix)).call(
-        context,
-        {"command": command, "description": "Sleep", "timeout": 120_000},
-    ),
-)
+
+
+async def main():
+    await settled(
+        Bash(exec_prefix=tuple(prefix)).call(
+            context,
+            {"command": command, "description": "Sleep", "timeout": 120_000},
+        ),
+    )
+
+
+asyncio.run(main())
 """
 
 
@@ -79,15 +100,21 @@ import subprocess
 from pathlib import Path
 
 from sagent.tools.bash import Bash
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 bystander = subprocess.Popen(["sleep", "60"])
-asyncio.run(
-    Bash(exec_prefix=("/usr/bin/env",)).call(
-        ToolContext(cwd=Path.cwd()),
-        {"command": "sleep 60", "description": "Sleep", "timeout": 100},
-    ),
-)
+
+
+async def main():
+    await settled(
+        Bash(exec_prefix=("/usr/bin/env",)).call(
+            ToolContext(cwd=Path.cwd()),
+            {"command": "sleep 60", "description": "Sleep", "timeout": 100},
+        ),
+    )
+
+
+asyncio.run(main())
 print("alive" if bystander.poll() is None else "killed", flush=True)
 bystander.kill()
 """
@@ -110,7 +137,7 @@ def test_the_guard_ends_only_the_shells_own_group(tmp_path: Path) -> None:
         check=False,
     )
 
-    assert (done.returncode, done.stdout) == (0, "alive\n")
+    assert (done.returncode, "".join(done.stdout)) == (0, "alive\n")
 
 
 @pytest.fixture
@@ -152,7 +179,6 @@ def test_schema_requires_a_command_and_its_description_and_bounds_the_timeout() 
     assert isinstance(timeout, Mapping)
     assert (timeout["minimum"], timeout["maximum"]) == (1, 600_000)
     assert "600000" in Bash.description
-    assert "30 s" in Bash.description
 
 
 def test_a_command_with_no_timeout_is_killed_at_the_longest_allowed() -> None:
@@ -180,42 +206,48 @@ async def test_arguments_that_do_not_fit_are_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match=r"argument|must be"):
-        await Bash().call(ToolContext(cwd=tmp_path), arguments)
+        await Bash().call(ToolContext(cwd=tmp_path), arguments).result
 
 
 @pytest.mark.parametrize(
     "command",
     [
         "cat foo.py",
-        "grep -n pat foo.py",
-        "ls -la",
-        "git status --short",
         "grep -rl pat d 2>/dev/null",
-        "ls d 2>&1",
+        "rm victim",
+        "echo hi > victim",
+        "sed -i 's/a/b/' foo.py",
+        "git checkout .",
+        "pytest -q",
     ],
 )
-def test_a_command_that_only_reads_runs_beside_others(
+def test_a_command_runs_beside_other_calls_whether_or_not_it_writes(
     tmp_path: Path,
     command: str,
 ) -> None:
+    """Only Read, Write, and Edit keep an order; a shell's jobs run side by side."""
     assert Bash().serialize_key(ToolContext(cwd=tmp_path), {"command": command}) is None
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "rm victim",
-        "echo hi > victim",
-        "ls d 2> err",
-        "sed -i 's/a/b/' foo.py",
-        "git checkout .",
         "cd /srv && head -20 f",
-        "cat <<'EOF'\nhi\nEOF",
+        "(cd /srv && head -20 f)",
+        "pushd d",
+        "source env.sh",
+        'eval "$line"',
+        "exec bash",
+        "echo 'unclosed",
         3,
         None,
     ],
 )
-def test_anything_else_runs_alone(tmp_path: Path, command: PlainTree) -> None:
+def test_a_command_that_may_move_the_shell_runs_alone(
+    tmp_path: Path,
+    command: PlainTree,
+) -> None:
+    """The calls after it start where it ends, so none may start beside it."""
     key = Bash().serialize_key(ToolContext(cwd=tmp_path), {"command": command})
     assert key == "*"
 
@@ -261,8 +293,12 @@ async def test_a_command_reports_what_it_printed_and_how_it_exited(
     tmp_path: Path,
 ) -> None:
     result = await _run(tmp_path, "echo out; echo err >&2; exit 3")
-    assert result.command == ("bash", "-c", "echo out; echo err >&2; exit 3")
-    assert (result.stdout, result.stderr, result.exit_code) == ("out\n", "err", 3)
+    # Each stream holds what the command wrote on it; its exit is read after both.
+    assert ("".join(result.stdout), "".join(result.stderr), _code(result)) == (
+        "out\n",
+        "err",
+        3,
+    )
     assert result.text() == "out\nerr\n[exit 3]"
 
 
@@ -283,8 +319,10 @@ async def test_a_command_sees_the_columns_its_output_is_shown_in(
     seen: str,
 ) -> None:
     context = ToolContext(cwd=tmp_path, columns=columns)
-    result = await Bash(env=env).call(context, _arguments('printf %s "$COLUMNS"'))
-    assert result.stdout == f"{seen}\n"
+    result = await settled(
+        Bash(env=env).call(context, _arguments('printf %s "$COLUMNS"')),
+    )
+    assert "".join(result.stdout) == f"{seen}\n"
 
 
 @pytest.mark.asyncio
@@ -294,20 +332,26 @@ async def test_columns_leave_the_rest_of_the_environment_inherited(
 ) -> None:
     monkeypatch.setenv("SAGENT_MARKER", "kept")
     context = ToolContext(cwd=tmp_path, columns=75)
-    result = await Bash().call(context, _arguments('printf %s "$SAGENT_MARKER"'))
-    assert result.stdout == "kept\n"
+    result = await settled(
+        Bash().call(context, _arguments('printf %s "$SAGENT_MARKER"')),
+    )
+    assert "".join(result.stdout) == "kept\n"
 
 
 @pytest.mark.asyncio
 async def test_a_silent_command_reports_nothing(tmp_path: Path) -> None:
     result = await _run(tmp_path, "true")
-    assert (result.stdout, result.stderr, result.exit_code) == ("", "", 0)
+    assert ("".join(result.stdout), "".join(result.stderr), _code(result)) == (
+        "",
+        "",
+        0,
+    )
 
 
 @pytest.mark.asyncio
 async def test_the_command_runs_in_the_context_directory(tmp_path: Path) -> None:
     result = await _run(tmp_path, "pwd")
-    assert result.stdout == f"{tmp_path}\n"
+    assert "".join(result.stdout) == f"{tmp_path}\n"
 
 
 @pytest.mark.asyncio
@@ -320,17 +364,41 @@ async def test_the_commands_own_exit_status_is_kept(
     command: str,
     code: int,
 ) -> None:
-    assert (await _run(tmp_path, command)).exit_code == code
+    assert _code(await _run(tmp_path, command)) == code
 
 
 @pytest.mark.asyncio
 async def test_a_cd_moves_the_directory_later_calls_start_in(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    await Bash().call(context, _arguments("cd sub"))
+    await settled(Bash().call(context, _arguments("cd sub")))
     assert context.cwd == tmp_path / "sub"
-    result = await Bash().call(context, _arguments("pwd"))
-    assert result.stdout == f"{tmp_path / 'sub'}\n"
+    result = await settled(Bash().call(context, _arguments("pwd")))
+    assert "".join(result.stdout) == f"{tmp_path / 'sub'}\n"
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_stays_put_keeps_a_cd_run_beside_it(
+    tmp_path: Path,
+) -> None:
+    """Commands run side by side; only one that moved the shell sets the directory."""
+    (tmp_path / "sub").mkdir()
+    context = ToolContext(cwd=tmp_path)
+    waiting = asyncio.ensure_future(
+        settled(
+            Bash().call(
+                context,
+                _arguments("echo yes > started; until [ -e go ]; do sleep 0.01; done"),
+            ),
+        ),
+    )
+    assert await _written_text(tmp_path / "started") == "yes"
+
+    await settled(Bash().call(context, _arguments("cd sub")))
+    (tmp_path / "go").touch()
+    _ = await waiting
+
+    assert context.cwd == tmp_path / "sub"
 
 
 @pytest.mark.asyncio
@@ -338,8 +406,8 @@ async def test_the_cwd_report_never_reaches_the_output(tmp_path: Path) -> None:
     """``printf`` adds no newline, so the report must not fuse with it."""
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(context, _arguments("cd sub; printf hello"))
-    assert result.stdout == "hello\n"
+    result = await settled(Bash().call(context, _arguments("cd sub; printf hello")))
+    assert "".join(result.stdout) == "hello\n"
     assert context.cwd == tmp_path / "sub"
 
 
@@ -365,8 +433,8 @@ async def test_the_cwd_is_tracked_whether_the_command_exits_or_owns_the_trap(
     """A trap the command sets still reports the directory, however it ends."""
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(context, _arguments(command))
-    assert "__SAGENT_CWD_" not in result.stdout
+    result = await settled(Bash().call(context, _arguments(command)))
+    assert "__SAGENT_CWD_" not in "".join(result.stdout)
     assert context.cwd == tmp_path / "sub"
 
 
@@ -375,19 +443,21 @@ async def test_a_trap_the_command_sets_still_runs_and_sees_its_status(
     tmp_path: Path,
 ) -> None:
     result = await _run(tmp_path, "trap 'echo \"bye rc=$?\"' EXIT; echo hi; exit 3")
-    assert (result.stdout, result.exit_code) == ("hi\nbye rc=3\n", 3)
+    assert ("".join(result.stdout), _code(result)) == ("hi\nbye rc=3\n", 3)
 
 
 @pytest.mark.asyncio
 async def test_a_trap_in_a_subshell_reports_no_directory(tmp_path: Path) -> None:
     """A subshell's ``cd`` never moved the shell, so its exit must not say it did."""
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(
-        context,
-        _arguments("(trap 'echo x' EXIT; cd /); echo y"),
+    result = await settled(
+        Bash().call(
+            context,
+            _arguments("(trap 'echo x' EXIT; cd /); echo y"),
+        ),
     )
-    assert result.stdout == "x\ny\n"
-    assert result.stderr == ""
+    assert "".join(result.stdout) == "x\ny\n"
+    assert "".join(result.stderr) == ""
     assert context.cwd == tmp_path
 
 
@@ -407,8 +477,8 @@ async def test_a_vanished_directory_falls_back_to_its_nearest_ancestor(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path / "gone" / "deeper")
-    result = await Bash().call(context, _arguments("pwd"))
-    assert result.stdout == f"{tmp_path}\n"
+    result = await settled(Bash().call(context, _arguments("pwd")))
+    assert "".join(result.stdout) == f"{tmp_path}\n"
     assert context.cwd == tmp_path
 
 
@@ -417,7 +487,9 @@ async def test_a_reported_directory_that_is_gone_is_not_adopted(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path)
-    await Bash().call(context, _arguments('mkdir sub && cd sub && rmdir "$PWD"'))
+    await settled(
+        Bash().call(context, _arguments('mkdir sub && cd sub && rmdir "$PWD"')),
+    )
     assert context.cwd == tmp_path
 
 
@@ -430,14 +502,14 @@ async def test_the_environment_given_replaces_the_inherited_one(
     command = 'printf "%s|%s" "${SAGENT_TEST_VARIABLE-unset}" "$KEPT"'
     inherited = await _run(tmp_path, command)
     replaced = await _run(tmp_path, command, tool=Bash(env={"KEPT": "yes"}))
-    assert inherited.stdout == "leaked|\n"
-    assert replaced.stdout == "unset|yes\n"
+    assert "".join(inherited.stdout) == "leaked|\n"
+    assert "".join(replaced.stdout) == "unset|yes\n"
 
 
 @pytest.mark.asyncio
 async def test_the_command_reads_no_input(tmp_path: Path) -> None:
     result = await _run(tmp_path, 'read -r line; echo "status=$?"')
-    assert result.stdout == "status=1\n"
+    assert "".join(result.stdout) == "status=1\n"
 
 
 @pytest.mark.asyncio
@@ -445,20 +517,23 @@ async def test_long_output_is_cut_on_a_line_and_says_how_much_was_omitted(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path, max_result_chars=200)
-    result = await Bash().call(
-        context,
-        _arguments(
-            "for i in $(seq 1 100); do echo line$i; done; echo boom >&2; exit 3",
+    result = await settled(
+        Bash().call(
+            context,
+            _arguments(
+                "for i in $(seq 1 100); do echo line$i; done; echo boom >&2; exit 3",
+            ),
         ),
     )
-    assert result.stdout.startswith("line1\nline2\n")
-    kept = sum(row.startswith("line") for row in result.stdout.splitlines())
+    assert "".join(result.stdout).startswith("line1\nline2\n")
+    kept = sum(row.startswith("line") for row in "".join(result.stdout).splitlines())
     assert 0 < kept < 100
-    assert f"\n... ({100 - kept} lines omitted)\n" in result.stdout
-    assert result.stdout.endswith("line100\n")
-    assert result.stderr == "boom"
+    assert f"\n... ({100 - kept} lines omitted)\n" in "".join(result.stdout)
+    assert "".join(result.stdout).endswith("line100\n")
+    assert "".join(result.stderr) == "boom"
     assert result.text().endswith("boom\n[exit 3]")
-    assert len(result.stdout) + len(result.stderr) <= context.max_result_chars
+    # The cap covers the command's output; ``[exit N]`` is appended after it.
+    assert len("".join(result.stdout)) + len("boom") <= context.max_result_chars
 
 
 @pytest.mark.asyncio
@@ -467,14 +542,16 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
 ) -> None:
     context = ToolContext(cwd=tmp_path, spill_dir=tmp_path / "session")
     tool = Bash(max_result_chars=200)
-    result = await tool.call(
-        context,
-        _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
+    result = await settled(
+        tool.call(
+            context,
+            _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
+        ),
     )
-    assert len(result.stdout) <= tool.max_result_chars
-    spilled = re.search(r"; full output: (\S+)\)", result.stdout)
+    assert len("".join(result.stdout)) <= tool.max_result_chars
+    spilled = re.search(r"; full output: (\S+)\)", "".join(result.stdout))
     assert spilled is not None
-    assert result.stdout.endswith("line-14-padding\n")
+    assert "".join(result.stdout).endswith("line-14-padding\n")
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
     assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 15)]
     # A short name, as the model reads it in every cut result.
@@ -494,13 +571,15 @@ def test_a_spill_makes_its_directories_and_shares_them_with_the_next(
 
 @pytest.mark.asyncio
 async def test_output_cut_with_nowhere_to_spill_names_no_file(tmp_path: Path) -> None:
-    result = await Bash(max_result_chars=200).call(
-        ToolContext(cwd=tmp_path),
-        _arguments("seq 1 1000"),
+    result = await settled(
+        Bash(max_result_chars=200).call(
+            ToolContext(cwd=tmp_path),
+            _arguments("seq 1 1000"),
+        ),
     )
-    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
-    assert result.stdout.endswith("1000\n")
-    assert len(result.stdout) <= 200
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", "".join(result.stdout))
+    assert "".join(result.stdout).endswith("1000\n")
+    assert len("".join(result.stdout)) <= 200
 
 
 @pytest.mark.asyncio
@@ -508,13 +587,15 @@ async def test_stderr_keeps_a_quarter_so_stdout_cannot_be_crowded_out(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path, max_result_chars=400)
-    result = await Bash().call(
-        context,
-        _arguments("for i in $(seq 1 200); do echo err$i >&2; done; echo out"),
+    result = await settled(
+        Bash().call(
+            context,
+            _arguments("for i in $(seq 1 200); do echo err$i >&2; done; echo out"),
+        ),
     )
-    assert result.stdout == "out\n"
-    assert result.stderr.startswith("err1\nerr2\n")
-    assert len(result.stderr) <= 100
+    assert "".join(result.stdout) == "out\n"
+    assert "".join(result.stderr).startswith("err1\nerr2\n")
+    assert len("".join(result.stderr)) <= 100
 
 
 @pytest.mark.asyncio
@@ -532,9 +613,13 @@ async def test_a_timeout_stops_the_command_and_keeps_what_it_printed(
         limit_ms=timeout_ms,
     )
     assert time.monotonic() - began < 5
-    assert result.stdout == "before\n"
-    assert re.fullmatch(r"\[timeout after 0\.\ds\]", result.stderr)
-    assert result.exit_code != 0
+    assert "".join(result.stdout) == "before\n"
+    assert re.fullmatch(r"\[timeout after 0\.\ds\]", "".join(result.stderr))
+    assert re.fullmatch(
+        r"before\n\[timeout after 0\.\ds\]\n\[exit -?\d+\]",
+        result.text(),
+    )
+    assert _code(result) not in (None, 0)
 
 
 @pytest.mark.asyncio
@@ -551,8 +636,8 @@ async def test_a_timeout_ends_a_job_that_outlives_the_shell(
     )
     (child,) = await _written_pids(tmp_path, "child.pid")
     started.append(child)
-    assert result.stdout == "started\n"
-    assert "[timeout after" in result.stderr
+    assert "".join(result.stdout) == "started\n"
+    assert "[timeout after" in "".join(result.stderr)
     assert await gone_within([child])
 
 
@@ -596,7 +681,7 @@ async def test_a_timeout_kills_jobs_that_ignore_terminate(
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
-    assert "[timeout after" in result.stderr
+    assert "[timeout after" in "".join(result.stderr)
     assert await gone_within(pids)
 
 
@@ -618,8 +703,8 @@ async def test_a_job_that_leaves_the_group_cannot_hang_the_call(
         timeout=5,
     )
     started.extend(await _written_pids(tmp_path, "child.pid"))
-    assert result.stdout == "started\n"
-    assert "[timeout after" in result.stderr
+    assert "".join(result.stdout) == "started\n"
+    assert "[timeout after" in "".join(result.stderr)
 
 
 @pytest.mark.asyncio
@@ -645,7 +730,7 @@ async def test_a_stopped_shell_reports_its_exit_status_without_waitid(
         timeout=5,
     )
     started.extend(await _written_pids(tmp_path, "child.pid"))
-    assert result.exit_code is not None
+    assert result.result is not None
 
 
 @pytest.mark.asyncio
@@ -657,8 +742,7 @@ async def test_a_cancelled_call_stops_the_shell_and_its_jobs(
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     call.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(call, timeout=5)
+    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
     assert await gone_within(pids)
 
 
@@ -703,8 +787,7 @@ async def test_a_call_cancelled_while_the_shell_starts_stops_it_and_its_jobs(
     started.extend(pids)
     call.cancel()
     handed.set()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(call, timeout=5)
+    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
     assert await gone_within(pids)
 
 
@@ -721,7 +804,7 @@ async def test_a_wrapper_goes_before_the_shell_and_the_command_stays_one_word(
     args = record.read_bytes().split(b"\0")[:-1]
     assert args[:4] == [b"/usr/bin/env", b"A=1", b"/bin/bash", b"-c"]
     assert args[5:] == [b"bash", b"echo hi", str(tmp_path).encode()]
-    assert result.stdout == "hi\n"
+    assert "".join(result.stdout) == "hi\n"
 
 
 @pytest.mark.asyncio
@@ -732,9 +815,9 @@ async def test_a_wrapped_shell_enters_the_directory_and_tracks_cd(
     (tmp_path / "sub").mkdir()
     tool = Bash(exec_prefix=wrapper, env={"KEPT": "yes"})
     context = ToolContext(cwd=tmp_path)
-    shown = await tool.call(context, _arguments('echo "$PWD $KEPT"'))
-    await tool.call(context, _arguments("cd sub"))
-    assert shown.stdout == f"{tmp_path} yes\n"
+    shown = await settled(tool.call(context, _arguments('echo "$PWD $KEPT"')))
+    await settled(tool.call(context, _arguments("cd sub")))
+    assert "".join(shown.stdout) == f"{tmp_path} yes\n"
     assert context.cwd == tmp_path / "sub"
     assert _read_text(Path(f"{record}.cwd")) == "/"
 
@@ -745,8 +828,8 @@ async def test_a_wrapped_shell_falls_back_to_the_root_when_its_directory_is_gone
 ) -> None:
     wrapper, _ = _recording_prefix(tmp_path)
     context = ToolContext(cwd=tmp_path / "gone")
-    result = await Bash(exec_prefix=wrapper).call(context, _arguments("pwd"))
-    assert result.stdout == "/\n"
+    result = await settled(Bash(exec_prefix=wrapper).call(context, _arguments("pwd")))
+    assert "".join(result.stdout) == "/\n"
     assert context.cwd == Path("/")
 
 
@@ -766,7 +849,7 @@ async def test_a_wrapped_call_never_looks_at_the_shells_directory(
 
     monkeypatch.setattr(Path, "is_dir", is_dir)
     context = ToolContext(cwd=tmp_path)
-    await Bash(exec_prefix=wrapper).call(context, _arguments("cd sub"))
+    await settled(Bash(exec_prefix=wrapper).call(context, _arguments("cd sub")))
     assert context.cwd == tmp_path / "sub"
 
 
@@ -782,7 +865,12 @@ async def test_a_wrapped_call_keeps_both_streams_and_the_status(
         ),
         timeout=10,
     )
-    assert (result.stdout, result.stderr, result.exit_code) == ("out\n", "err", 3)
+    assert ("".join(result.stdout), "".join(result.stderr), _code(result)) == (
+        "out\n",
+        "err",
+        3,
+    )
+    assert result.text() == "out\nerr\n[exit 3]"
 
 
 @pytest.mark.asyncio
@@ -797,7 +885,7 @@ async def test_a_wrapped_command_cannot_reach_the_held_pipe(tmp_path: Path) -> N
         limit_ms=3_000,
         tool=Bash(exec_prefix=_OTHER_GROUP),
     )
-    assert result.stdout == "stdin_status=1\nclosed\n"
+    assert "".join(result.stdout) == "stdin_status=1\nclosed\n"
 
 
 @pytest.mark.asyncio
@@ -812,7 +900,7 @@ async def test_a_bare_wait_does_not_wait_for_the_guard(tmp_path: Path) -> None:
         ),
         timeout=10,
     )
-    assert result.stdout == "done\n"
+    assert "".join(result.stdout) == "done\n"
 
 
 @pytest.mark.asyncio
@@ -836,12 +924,13 @@ async def test_a_wrapped_call_leaves_no_descriptor_open(
 
 
 @pytest.mark.asyncio
-async def test_a_wrapper_that_cannot_start_raises_and_leaks_no_descriptor(
+async def test_a_wrapper_that_cannot_start_fails_and_leaks_no_descriptor(
     tmp_path: Path,
 ) -> None:
     before = _open_descriptors()
+    tool = Bash(exec_prefix=(str(tmp_path / "none"),))
     with pytest.raises(FileNotFoundError):
-        await _run(tmp_path, "true", tool=Bash(exec_prefix=(str(tmp_path / "none"),)))
+        _ = await tool.call(ToolContext(cwd=tmp_path), _arguments("true")).result
     assert _open_descriptors() == before
 
 
@@ -863,7 +952,7 @@ async def test_a_wrapped_timeout_stops_a_shell_this_process_cannot_signal(
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
-    assert "[timeout after" in result.stderr
+    assert "[timeout after" in "".join(result.stderr)
     assert await gone_within(pids)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -886,8 +975,7 @@ async def test_a_wrapped_cancel_stops_the_shell_and_its_jobs(
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     call.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(call, timeout=5)
+    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
     assert await gone_within(pids)
 
 
@@ -909,7 +997,7 @@ async def test_a_background_job_outlives_a_normal_end(
     # A guard ends its group before it ends itself, so once the child is alone
     # there, no guard fired.
     assert await _alone_within(child)
-    assert result.stdout == ""
+    assert "".join(result.stdout) == ""
     assert running(child)
 
 
@@ -932,7 +1020,7 @@ async def test_a_shell_that_ignores_terminate_is_killed_after_the_grace(
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
-    assert "[timeout after" in result.stderr
+    assert "[timeout after" in "".join(result.stderr)
     assert await gone_within(pids)
 
 
@@ -953,7 +1041,7 @@ async def test_a_wrapper_that_outlives_the_stop_is_killed_and_said_so(
             ),
             timeout=5,
         )
-    assert "[timeout after" in result.stderr
+    assert "[timeout after" in "".join(result.stderr)
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warning.name == "sagent.tools.bash"
     assert re.fullmatch(r"Killing wrapper pid=\d+", warning.getMessage())
@@ -991,10 +1079,12 @@ async def test_a_wrapper_this_process_cannot_kill_is_left_behind_not_awaited(
         )
     (wrapper,) = await _written_pids(tmp_path, "wrapper.pid")
     started.append(wrapper)
-    assert result.stdout == ""
+    # What it printed before the stop may have been read by then.
+    assert "".join(result.stdout) in ("", "before\n")
     assert re.fullmatch(
-        r"\[timeout after \d\.\ds; the shell did not stop, and its output is lost\]",
-        result.stderr,
+        r"\[timeout after \d\.\ds; the shell did not stop,"
+        r" and the rest of its output is lost\]",
+        "".join(result.stderr),
     )
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert messages[-1] == "Shell outlived its stop; output lost"
@@ -1085,7 +1175,7 @@ async def test_a_drain_gives_up_on_a_process_that_does_not_end(
     finally:
         proc.kill()
         await proc.wait()
-    assert drained is None
+    assert drained is False
     assert communicate.cancelled()
 
 
@@ -1109,7 +1199,8 @@ async def test_a_drain_returns_what_a_process_wrote_once_its_pipes_are_cut(
         _drain(proc, communicate, grace_sec=0.05),
         timeout=2,
     )
-    assert drained == (b"out\n", b"")
+    assert drained is True
+    assert communicate.result() == (b"out\n", b"")
 
 
 @pytest.mark.asyncio
@@ -1142,23 +1233,24 @@ async def test_killing_the_calling_process_leaves_no_shell_behind(
 
 
 @pytest.mark.asyncio
-async def test_a_call_returns_the_command_and_what_the_shell_named_itself(
+async def test_a_call_is_recorded_whole_and_the_shell_names_itself_bash(
     tmp_path: Path,
 ) -> None:
-    command = 'echo "$0"'
-    assert await _run(tmp_path, command) == BashResult(
+    assert await _run(tmp_path, 'echo "$0"') == ToolResult(
         call_id="",
-        command=("bash", "-c", command),
-        stdout="bash\n",
-        stderr="",
-        exit_code=0,
+        state="done",
+        stdout=("bash\n",),
+        result=BashResult(command=("bash", "-c", 'echo "$0"'), exit_code=0),
     )
 
 
 @pytest.mark.asyncio
 async def test_bytes_that_are_not_utf8_are_replaced_not_raised(tmp_path: Path) -> None:
     result = await _run(tmp_path, r"printf 'a \377\n'; printf 'b \376\nc' >&2")
-    assert (result.stdout, result.stderr) == ("a \ufffd\n", "b \ufffd\nc")
+    assert ("".join(result.stdout), "".join(result.stderr)) == (
+        "a \ufffd\n",
+        "b \ufffd\nc",
+    )
 
 
 @pytest.mark.asyncio
@@ -1166,8 +1258,8 @@ async def test_a_line_that_looks_like_a_directory_report_is_the_commands_own(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(context, _arguments("echo None=/; echo x=/"))
-    assert result.stdout == "None=/\nx=/\n"
+    result = await settled(Bash().call(context, _arguments("echo None=/; echo x=/")))
+    assert "".join(result.stdout) == "None=/\nx=/\n"
     assert context.cwd == tmp_path
 
 
@@ -1181,7 +1273,7 @@ async def test_a_blank_line_inside_the_output_is_kept(
     tmp_path: Path,
     command: str,
 ) -> None:
-    assert (await _run(tmp_path, command)).stdout == "a\n\nb\n"
+    assert "".join((await _run(tmp_path, command)).stdout) == "a\n\nb\n"
 
 
 @pytest.mark.asyncio
@@ -1193,11 +1285,11 @@ async def test_stderr_keeps_a_quarter_of_bash_s_own_cap(tmp_path: Path) -> None:
         "for i in $(seq 1 200); do echo err$i >&2; done",
         tool=tool,
     )
-    assert flood.stderr.startswith("err1\nerr2\n")
-    assert len(flood.stderr) <= 402 // 4
+    assert "".join(flood.stderr).startswith("err1\nerr2\n")
+    assert len("".join(flood.stderr)) <= 402 // 4
     long = await _run(tmp_path, "printf '%0300d' 0 >&2", tool=tool)
     # The line is cut with its newline: 301 characters, 100 kept.
-    assert long.stderr == "0" * 100 + "\n... (201 chars omitted)"
+    assert "".join(long.stderr) == "0" * 100 + "\n... (201 chars omitted)"
 
 
 @pytest.mark.asyncio
@@ -1210,9 +1302,9 @@ async def test_a_cut_output_fills_the_cap_but_for_its_last_line_s_slack(
         "for i in $(seq 1 1000); do echo x; done; echo boom >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
-    assert result.stdout.endswith("x\n")
-    assert 200 - 4 <= len(result.stdout) + len(result.stderr) <= 200
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", "".join(result.stdout))
+    assert "".join(result.stdout).endswith("x\n")
+    assert 200 - 4 <= len("".join(result.stdout)) + len("".join(result.stderr)) <= 200
 
 
 @pytest.mark.asyncio
@@ -1226,7 +1318,11 @@ async def test_a_timeout_keeps_what_the_command_said_on_stderr(
         "echo oops >&2; echo yes > printed; sleep 30",
         limit_ms=60,
     )
-    assert re.fullmatch(r"oops\n\[timeout after 0\.\ds\]", result.stderr)
+    assert re.fullmatch(r"oops\n\[timeout after 0\.\ds\]", "".join(result.stderr))
+    assert re.fullmatch(
+        r"oops\n\[timeout after 0\.\ds\]\n\[exit -?\d+\]",
+        result.text(),
+    )
 
 
 @pytest.mark.asyncio
@@ -1247,9 +1343,159 @@ async def test_a_job_slower_than_the_grace_is_killed_mid_cleanup(
     assert not (tmp_path / "got.term").exists()
 
 
+@pytest.mark.asyncio
+async def test_what_a_command_prints_is_written_while_it_still_runs(
+    tmp_path: Path,
+) -> None:
+    """A line is written once a later one shows it is neither the last nor past the cut."""
+    waits = "until [ -e go ]; do sleep 0.01; done"
+    streaming_result = Bash().call(
+        ToolContext(cwd=tmp_path),
+        _arguments(f"echo one; echo two; echo three; {waits}; echo end"),
+    )
+
+    assert await asyncio.wait_for(anext(streaming_result.stdout), timeout=5) == "one\n"
+    assert not streaming_result.result.done()
+    (tmp_path / "go").touch()
+
+    assert [line async for line in streaming_result.stdout] == [
+        "two\n",
+        "three\n",
+        "end\n",
+    ]
+    assert [line async for line in streaming_result.stderr] == []
+    assert (await streaming_result.result).exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_a_line_longer_than_the_readers_buffer_is_read_whole(
+    tmp_path: Path,
+) -> None:
+    result = await _run(tmp_path, "head -c 200000 /dev/zero | tr '\\0' x; echo")
+    assert result.state == "done"
+    assert result.text().startswith("xxxx")
+    assert "chars omitted)" in result.text()
+
+
+@pytest.mark.asyncio
+async def test_arguments_that_do_not_fit_end_both_streams() -> None:
+    """A call that never starts its command still ends what a reader waits on."""
+    result = await settled(Bash().call(ToolContext(cwd=Path("/")), {}))
+    assert (result.state, result.stdout) == ("failed", ())
+    assert "Missing argument" in result.text()
+
+
+async def _read_closed(stream: Stream[str]) -> list[str]:
+    """Close ``stream`` and return its items."""
+    stream.close()
+    return [item async for item in stream]
+
+
+@pytest.mark.asyncio
+async def test_a_line_is_written_early_once_a_later_line_arrives() -> None:
+    """Leading blank lines are never written; the newest line and trailing blanks wait."""
+    stream = Stream[str]()
+    writer = _EarlyWriter(stream=stream, early_chars=100)
+    for line in ("", "  a", "", "b", "   "):
+        writer.add_line(line)
+
+    assert await _read_closed(stream) == ["a\n", "\n"]
+    assert writer.lines == ["\n", "  a\n", "\n", "b\n", "   \n"]
+
+
+@pytest.mark.asyncio
+async def test_the_rest_of_the_final_text_is_written_at_the_end() -> None:
+    stream = Stream[str]()
+    writer = _EarlyWriter(stream=stream, early_chars=100)
+    for line in ("a", "b", "c"):
+        writer.add_line(line)
+
+    writer.write_rest("a\nb\nc\n")
+
+    assert await _read_closed(stream) == ["a\n", "b\n", "c\n"]
+
+
+@pytest.mark.asyncio
+async def test_a_line_past_early_chars_is_written_only_at_the_end() -> None:
+    """Past ``early_chars`` a line may be truncated away, so it is not written early."""
+    stream = Stream[str]()
+    writer = _EarlyWriter(stream=stream, early_chars=6)
+    for line in ("ab", "cd", "ef", "gh"):
+        writer.add_line(line)
+    early = stream._queue.qsize()
+
+    writer.write_rest("ab\n... (2 lines omitted)\ngh\n")
+
+    assert early == 1
+    assert await _read_closed(stream) == ["ab\n", "... (2 lines omitted)\n", "gh\n"]
+
+
+def test_a_long_output_is_written_early_only_as_far_as_truncation_keeps() -> None:
+    """Truncation keeps at least two fifths of the room at the start."""
+    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
+    writer = _EarlyWriter(
+        stream=Stream[str](),
+        early_chars=_early_chars(2_000, note=""),
+    )
+    for _ in range(200):
+        writer.add_line("x" * 19)
+
+    final_text, truncated = _final_text(
+        context,
+        writer.lines,
+        reserve=0,
+        cap=2_000,
+        note="",
+    )
+
+    assert truncated
+    assert 400 < len("".join(writer._written)) <= 2_000 * 2 // 5
+    assert final_text.startswith("".join(writer._written))
+
+
+@given(
+    lines=st.lists(st.text(alphabet=" \tab", max_size=40), max_size=200),
+    cap=st.integers(min_value=600, max_value=3_000),
+    stderr_share=st.floats(min_value=0, max_value=1),
+    note=st.sampled_from(["", "; full output: /state/spill/bash-0123abcd.txt"]),
+)
+def test_the_final_text_always_starts_with_what_was_written_early(
+    lines: list[str],
+    cap: int,
+    stderr_share: float,
+    note: str,
+) -> None:
+    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
+    writer = _EarlyWriter(
+        stream=Stream[str](),
+        early_chars=_early_chars(cap, note=note),
+    )
+    for line in lines:
+        writer.add_line(line)
+    # The diagnostics take at most a quarter of the cap, and a line of why it stopped.
+    reserve = int(stderr_share * (cap // 4 + 160))
+
+    final_text, _ = _final_text(
+        context,
+        writer.lines,
+        reserve=reserve,
+        cap=cap,
+        note=note,
+    )
+
+    assert final_text.startswith("".join(writer._written))
+
+
 def _arguments(command: str) -> dict[str, PlainTree]:
     """Return what the model passes to run ``command``."""
     return {"command": command, "description": "Run it"}
+
+
+def _code(result: ToolResult[BashResult, str, str]) -> int | None:
+    """Return the exit code in ``result``."""
+    tool_result = result.result
+    assert tool_result is not None
+    return tool_result.exit_code
 
 
 async def _run(
@@ -1258,11 +1504,13 @@ async def _run(
     *,
     limit_ms: float = 10_000,
     tool: Bash | None = None,
-) -> BashResult:
+) -> ToolResult[BashResult, str, str]:
     """Run ``command`` with ``tool`` in a fresh context at ``cwd``."""
-    return await (tool or Bash()).call(
-        ToolContext(cwd=cwd),
-        {**_arguments(command), "timeout": limit_ms},
+    return await settled(
+        (tool or Bash()).call(
+            ToolContext(cwd=cwd),
+            {**_arguments(command), "timeout": limit_ms},
+        ),
     )
 
 
@@ -1406,14 +1654,18 @@ async def test_commands_defer_to_the_desktop_unless_told_not_to(
 ) -> None:
     want = min(19, os.nice(0) + added)
     # The priority is set as the shell starts: wait for it, and fail on time.
-    result = await tool.call(
-        ToolContext(cwd=tmp_path),
-        {
-            **_arguments(f'until [ "$(nice)" = {want} ]; do sleep 0.01; done; echo ok'),
-            "timeout": 2_000,
-        },
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path),
+            {
+                **_arguments(
+                    f'until [ "$(nice)" = {want} ]; do sleep 0.01; done; echo ok',
+                ),
+                "timeout": 2_000,
+            },
+        ),
     )
-    assert result.stdout == "ok\n"
+    assert "".join(result.stdout) == "ok\n"
 
 
 @pytest.mark.parametrize(("tool", "asked"), [(Bash(), [10]), (Bash(nice=None), [])])
@@ -1446,8 +1698,8 @@ async def test_output_that_fits_alone_is_cut_to_leave_room_for_stderr(
         "for i in $(seq 1 20); do echo line-$i--; done; echo errors-here >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert "lines omitted" in result.stdout
-    assert len(result.stdout) + len(result.stderr) <= 200
+    assert "lines omitted" in "".join(result.stdout)
+    assert len("".join(result.stdout)) + len("".join(result.stderr)) <= 200
 
 
 @pytest.mark.parametrize("last", ["y" * 20, "z" * 400])
@@ -1462,14 +1714,16 @@ async def test_a_cut_output_keeps_its_end_and_counts_every_line_left_out(
         f"for i in $(seq 1 100); do echo line-$i; done; echo {last}",
         tool=Bash(max_result_chars=200),
     )
-    kept = re.findall(r"^line-\d+$", result.stdout, flags=re.MULTILINE)
-    shown_last = last in result.stdout
-    assert result.stdout.count(" lines omitted)") == 1
-    omitted = result.stdout.partition(" lines omitted)")[0].rpartition("... (")[2]
-    assert result.stdout.startswith("line-1\n")
+    kept = re.findall(r"^line-\d+$", "".join(result.stdout), flags=re.MULTILINE)
+    shown_last = last in "".join(result.stdout)
+    assert "".join(result.stdout).count(" lines omitted)") == 1
+    omitted = (
+        "".join(result.stdout).partition(" lines omitted)")[0].rpartition("... (")[2]
+    )
+    assert "".join(result.stdout).startswith("line-1\n")
     assert int(omitted) == 101 - len(kept) - shown_last
     assert shown_last is (len(last) < 100)
-    assert len(result.stdout) <= 200
+    assert len("".join(result.stdout)) <= 200
 
 
 @pytest.mark.asyncio
@@ -1481,9 +1735,9 @@ async def test_first_and_last_lines_too_long_to_show_still_count_the_lines(
         f"echo {'x' * 400}; seq 1 50; echo {'z' * 400}",
         tool=Bash(max_result_chars=200),
     )
-    assert result.stdout.startswith("xxx")
-    assert re.search(r"\.\.\. \(5[12] lines omitted\)", result.stdout)
-    assert len(result.stdout) <= 200
+    assert "".join(result.stdout).startswith("xxx")
+    assert re.search(r"\.\.\. \(5[12] lines omitted\)", "".join(result.stdout))
+    assert len("".join(result.stdout)) <= 200
 
 
 if __name__ == "__main__":

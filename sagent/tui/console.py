@@ -25,6 +25,11 @@ import io
 import re
 import sys
 
+from rich.cells import cell_len
+from rich.console import Console
+from rich.style import Style
+from rich.text import Text
+
 from sagent.runtime import types
 from sagent.tools.display import Elided
 from sagent.tui.diff import highlight_source, render_diff
@@ -39,10 +44,6 @@ if TYPE_CHECKING:
 
     from prompt_toolkit.output.color_depth import ColorDepth
     from prompt_toolkit.output.defaults import create_output
-    from rich.cells import cell_len
-    from rich.console import Console
-    from rich.style import Style
-    from rich.text import Text
 
     from sagent.tools.display import DisplaySpec, ToolDisplay
     from sagent.tui.types import Header
@@ -51,10 +52,6 @@ else:
 
     ColorDepth = lazy_import("prompt_toolkit.output.color_depth", "ColorDepth")
     create_output = lazy_import("prompt_toolkit.output.defaults", "create_output")
-    Console = lazy_import("rich.console", "Console")
-    cell_len = lazy_import("rich.cells", "cell_len")
-    Style = lazy_import("rich.style", "Style")
-    Text = lazy_import("rich.text", "Text")
 
 
 __all__ = [
@@ -94,19 +91,27 @@ class ConsoleStyle:
     quiet: Style = field(default_factory=lambda: load_theme().style("muted"))
     """What the harness says: notes, calls, their input and output, reasoning."""
 
-    heading: Style = field(default_factory=lambda: load_theme().style("thinking"))
+    heading: Style = field(
+        default_factory=lambda: load_theme().style("thinking"),
+    )
     """The ``∴ Thinking`` over the reasoning."""
 
     user: Style = field(default_factory=lambda: load_theme().style("user"))
     """The bar of what the user said."""
 
-    to_agent: Style = field(default_factory=lambda: load_theme().style("to_agent"))
+    to_agent: Style = field(
+        default_factory=lambda: load_theme().style("to_agent"),
+    )
     """The bar of what another agent sent this one."""
 
-    to_user: Style = field(default_factory=lambda: load_theme().style("to_user"))
+    to_user: Style = field(
+        default_factory=lambda: load_theme().style("to_user"),
+    )
     """The bar of what an agent sent the user."""
 
-    failure: Style = field(default_factory=lambda: load_theme().style("failure"))
+    failure: Style = field(
+        default_factory=lambda: load_theme().style("failure"),
+    )
     """What failed."""
 
     rule: Style = field(default_factory=lambda: load_theme().style("error"))

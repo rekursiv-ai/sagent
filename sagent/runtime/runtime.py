@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 import asyncio
 import dataclasses
@@ -131,12 +131,10 @@ from sagent.runtime.types import (
 )
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolErrorResult,
     ToolResult,
     TurnContext,
     UserMessage,
@@ -150,7 +148,7 @@ from sagent.tools.background_task import (
 )
 from sagent.tools.bash import Bash
 from sagent.tools.command_analyzer import Rewrite, drop_cd, moves
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -169,6 +167,9 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# How long ``Quit`` waits for the tools it cancelled to stop.
+_QUIT_WAIT_SEC: Final = 10.0
 
 
 def widen_barrier_mask(
@@ -594,7 +595,7 @@ class Runtime:
         # Whether a call may ask to run in the background, or after a delay.
         self.allow_background = True
         # Callers waiting on a background call's result instead of its delivery.
-        self._foreground_waiters: dict[str, list[asyncio.Future[AnyToolResult]]] = {}
+        self._foreground_waiters: dict[str, list[asyncio.Future[ToolResult]]] = {}
         # How long a call the model waits on may run before it is answered by a stub
         # and left to finish, its result delivered later; ``None`` waits for each.
         self.detach_after_sec: float | None = None
@@ -758,7 +759,7 @@ class Runtime:
             for cid, c in self._calls.items()
         }
 
-    async def foreground(self, call_id: str) -> AnyToolResult | None:
+    async def foreground(self, call_id: str) -> ToolResult | None:
         """Wait for a detached call's result, and take it instead of its delivery.
 
         Args:
@@ -779,7 +780,7 @@ class Runtime:
                 return dataclasses.replace(entry, call_id=call_id)
         if call_id not in self.detached:
             return None
-        waiter = asyncio.Future[AnyToolResult]()
+        waiter = asyncio.Future[ToolResult]()
         waiters = self._foreground_waiters.setdefault(call_id, [])
         waiters.append(waiter)
         try:
@@ -789,23 +790,48 @@ class Runtime:
             if not waiters and self._foreground_waiters.get(call_id) is waiters:
                 del self._foreground_waiters[call_id]
 
-    def detach(self, task: asyncio.Task[None] | None) -> None:
+    def detach[T](self, task: asyncio.Future[T] | None) -> None:
         """Answer the waited-on call ``task`` runs with a stub, and let it run on.
 
         As when it outlives ``detach_after_sec``: its real result arrives later.
         Nothing happens when background runs are off, or no waited call runs there.
 
         Args:
-          task: The task running the call, as ``asyncio.current_task()`` in it;
-            ``None``, outside any task, runs none.
+          task: The task running the call's tool, as ``asyncio.current_task()``
+            in it; ``None``, outside any task, runs none.
 
         """
         if not self.allow_background:
             return
-        for cid, held in self.running_tools.items():
-            if held is task and cid in self.cohort:
+        for cid in self.running_tools:
+            if self._calls[cid].result_future is task and cid in self.cohort:
                 self.push(Detach(call_id=cid))
                 return
+
+    # Counting turns of the loop instead would not do: how many pass between a tool's
+    # end and its result reaching the inbox is the runtime's own business.
+    def push_after[T](
+        self,
+        task: asyncio.Future[T] | None,
+        event: RuntimeEvent,
+    ) -> None:
+        """Queue ``event`` right behind the result of the call ``task`` runs.
+
+        A tool that asks the runtime to act on its own agent, as to compact it,
+        asks so: taken ahead of the result, the event would detach the call.
+
+        Args:
+          task: The task running the call's tool, as ``asyncio.current_task()``
+            in it.
+          event: What to queue; at once, when ``task`` runs no call of this
+            runtime, as a call made by another agent.
+
+        """
+        for call in self._calls.values():
+            if task is not None and call.result_future is task:
+                call.events_after_result.append(event)
+                return
+        self.push(event)
 
     # A resumed context's detached calls ran in a process that has ended, so no
     # result will follow; and a clean quit's cancellations are never committed.
@@ -816,14 +842,20 @@ class Runtime:
         for entry in self.context().messages:
             if not isinstance(entry, ToolResult):
                 continue
-            if entry.stub == "pending":
+            if entry.state == "pending":
                 pending.append(entry.call_id)
             else:
                 answered.add(entry.call_id.removesuffix(self.markers.arrival))
         for cid in pending:
             if cid in answered or cid in self.detached or cid in self.running_tools:
                 continue
-            self._append_detached_arrival(self._cancelled(cid))
+            self._append_detached_arrival(
+                ToolResult(
+                    call_id=cid,
+                    state="cancelled",
+                    shown=self.markers.cancelled,
+                ),
+            )
 
     # A resumed window may end with something the last process never answered: a
     # message, a result, a job it left running. That is as stale as a halted turn's,
@@ -1119,12 +1151,12 @@ class Runtime:
 
     # A caller of :meth:`foreground` takes the result as its own answer, so delivering
     # it forward as well would tell the model twice.
-    def _deliver_detached(self, result: AnyToolResult) -> None:
+    def _deliver_detached(self, result: ToolResult) -> None:
         """Hand a detached call's result to whoever waits for it, else deliver it."""
         waiting = [
             w for w in self._foreground_waiters.get(result.call_id, ()) if not w.done()
         ]
-        if not waiting or result.stub == "pending":
+        if not waiting or result.state == "pending":
             self._defer_detached_forward(result)
             return
         for waiter in waiting:
@@ -1135,16 +1167,16 @@ class Runtime:
     # and marking its call delivered would drop the real result. A cancellation whose
     # call is already answered cancelled, as a cohort ``Kill`` answers it, is not
     # delivered again; a background job's, answered only by its stub, is.
-    def _defer_detached_forward(self, result: AnyToolResult) -> None:
+    def _defer_detached_forward(self, result: ToolResult) -> None:
         """Queue a completed detached tool's real result for forward delivery."""
-        if result.stub == "pending":
+        if result.state == "pending":
             logger.debug(
                 "runtime detached forward skipped (pending stub, not real result):"
                 " call_id=%s",
                 result.call_id,
             )
             return
-        if result.stub == "cancelled" and self._inslot_result_is_terminal(
+        if result.state == "cancelled" and self._inslot_result_is_terminal(
             result.call_id,
         ):
             logger.debug(
@@ -1177,13 +1209,13 @@ class Runtime:
         return any(
             isinstance(entry, ToolResult)
             and entry.call_id == call_id
-            and entry.stub != "pending"
+            and entry.state != "pending"
             for entry in entries
         )
 
     # A ``DetachedArrived`` call the model made itself is answered beside it on the
     # next real round, so it spends no round of its own.
-    def _defer_pairing(self, result: AnyToolResult) -> None:
+    def _defer_pairing(self, result: ToolResult) -> None:
         """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``."""
         self._pending_commits.append(_PendingCommit(kind="pairing", entry=result))
 
@@ -1206,7 +1238,7 @@ class Runtime:
 
     # Beside its call, not at the tail: a turn in between would leave the call
     # unanswered, and the gate would answer it ``[interrupted]``.
-    def _commit_pairing(self, result: AnyToolResult) -> None:
+    def _commit_pairing(self, result: ToolResult) -> None:
         """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use."""
         parent_ref = self._parent_assistant_refs.get(result.call_id)
         if parent_ref is None or parent_ref not in set(self.context().origins):
@@ -1223,7 +1255,7 @@ class Runtime:
 
     # After a model turn, a user turn naming the call comes first: two model turns
     # may not be adjacent.
-    def _append_detached_arrival(self, result: AnyToolResult) -> None:
+    def _append_detached_arrival(self, result: ToolResult) -> None:
         """Append the synthetic ``BackgroundTask`` foreground pair for ``result``."""
         messages = self.context().messages
         at = _last_turn(messages)
@@ -1292,6 +1324,11 @@ class Runtime:
                                 self.model_call.cancel()
                             if self.compact_task:
                                 self.compact_task.cancel()
+                            stopped = [
+                                *self.running_tools.values(),
+                                *self.detached.values(),
+                                *self._stopping,
+                            ]
                             for t in self.running_tools.values():
                                 t.cancel()
                             # Background work too, or it runs on after shutdown.
@@ -1306,6 +1343,20 @@ class Runtime:
                                     _ = later.done.cancel()
                             if self._retry_timer is not None:
                                 self._retry_timer.cancel()
+                            # A cancelled tool takes a moment to stop, as a shell
+                            # does. The loop ends when they have all stopped, or
+                            # after ``_QUIT_WAIT_SEC``: a tool that ignores its
+                            # cancel must not keep the process from exiting.
+                            if stopped:
+                                _, still_running = await asyncio.wait(
+                                    stopped,
+                                    timeout=_QUIT_WAIT_SEC,
+                                )
+                                if still_running:
+                                    logger.warning(
+                                        "runtime quit: %d tool(s) did not stop",
+                                        len(still_running),
+                                    )
                             return
 
                         case Halt():
@@ -1970,11 +2021,7 @@ class Runtime:
             if anchor is None:
                 continue
             payload = tuple(
-                ToolErrorResult(
-                    call_id=cid,
-                    content="[interrupted]",
-                    is_error=True,
-                )
+                ToolResult(call_id=cid, state="failed", stderr=("[interrupted]",))
                 for cid in missing_ids
             )
             # Their calls are in the recorded turn at ``anchor``.
@@ -2020,9 +2067,9 @@ class Runtime:
     ) -> None:
         """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
         stub = (
-            self._cancelled(cid)
+            ToolResult(call_id=cid, state="cancelled", shown=self.markers.cancelled)
             if mode == "kill"
-            else ToolResult(call_id=cid, stub="pending", shown=self.markers.detached)
+            else ToolResult(call_id=cid, state="pending", shown=self.markers.detached)
         )
         self.append_history(stub)
         self.publish(stub)
@@ -2312,7 +2359,7 @@ class Runtime:
         """Answer ``call``, which ``task`` runs apart, with a stub."""
         stub = ToolResult(
             call_id=call.call_id,
-            stub="pending",
+            state="pending",
             shown=f"{self.markers.running}{call.name} as job {call.call_id}]",
         )
         self.append_history(stub)
@@ -2351,7 +2398,7 @@ class Runtime:
             return
         self._stop(cid, task)
         self._deliver_detached(
-            self._cancelled(cid),
+            ToolResult(call_id=cid, state="cancelled", shown=self.markers.cancelled),
         )
 
     # A finished task removes itself; one cancelled before it ran a step does not.
@@ -2539,15 +2586,6 @@ class Runtime:
         self._calls[call.call_id].waiting = False
         await self._run_tool_and_post(call)
 
-    def _cancelled(self, call_id: str) -> ToolResult:
-        """Return the stand-in that answers a call killed before it finished."""
-        return ToolResult(
-            call_id=call_id,
-            is_error=True,
-            stub="cancelled",
-            shown=self.markers.cancelled,
-        )
-
     # A failure or a cancellation is still a result, so every call is answered; a call
     # detached meanwhile is delivered forward.
     async def _run_tool_and_post(
@@ -2561,11 +2599,15 @@ class Runtime:
             logger.debug("runtime detached-arrived mimic: call_id=%s", call.call_id)
             self.inbox.push_back(
                 LazyEvent(
-                    payload=ToolErrorResult(
+                    payload=ToolResult(
                         call_id=call.call_id,
-                        content=f"{self.markers.arrived} is not callable; detached "
-                        "results arrive automatically.",
-                        is_error=True,
+                        state="failed",
+                        stderr=(
+                            (
+                                f"{self.markers.arrived} is not callable; detached "
+                                "results arrive automatically."
+                            ),
+                        ),
                     ),
                 ),
             )
@@ -2580,16 +2622,18 @@ class Runtime:
                 refused is not None,
             )
             self.inbox.push_back(
-                ToolErrorResult(
+                ToolResult(
                     call_id=call.call_id,
-                    content=refused
-                    if refused is not None
-                    else f"Unknown tool: {call.name}",
-                    is_error=True,
+                    state="failed",
+                    stderr=(
+                        refused
+                        if refused is not None
+                        else f"Unknown tool: {call.name}",
+                    ),
                 ),
             )
             return
-        result: AnyToolResult
+        result: ToolResult
         try:
             logger.debug(
                 "runtime tool start: call_id=%s tool=%s",
@@ -2601,31 +2645,40 @@ class Runtime:
                 if backgroundable(tool)
                 else call.arguments
             )
-            outcome = (
-                tool.manage(self, arguments)
-                if isinstance(tool, BackgroundTask)
-                else tool.call(self.tool_context, arguments)
-            )
-            result = dataclasses.replace(await outcome, call_id=call.call_id)
+            if isinstance(tool, BackgroundTask):
+                result = dataclasses.replace(
+                    await tool.manage(self, arguments),
+                    call_id=call.call_id,
+                )
+            else:
+                streaming_result = tool.call(self.tool_context, arguments)
+                self._calls[call.call_id].result_future = streaming_result.result
+                # A cancel here stops the tool; ``settled`` still returns its output.
+                result = await settled(streaming_result, call_id=call.call_id)
         except asyncio.CancelledError:
+            result = ToolResult(call_id=call.call_id, state="cancelled")
+        except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
+            result = ToolResult(
+                call_id=call.call_id,
+                state="failed",
+                stderr=(describe(exc),),
+            )
+        if result.state == "failed":
+            # The last item of ``stderr`` is ``describe(error)``. Only its type
+            # is logged: the message may hold the tool's output.
+            logger.debug(
+                "runtime tool failed: call_id=%s tool=%s error=%s",
+                call.call_id,
+                call.name,
+                str(result.stderr[-1]).partition(":")[0],
+            )
+        if result.state == "cancelled":
             logger.debug(
                 "runtime tool cancelled: call_id=%s tool=%s",
                 call.call_id,
                 call.name,
             )
-            result = self._cancelled(call.call_id)
-        except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
-            logger.debug(
-                "runtime tool failed: call_id=%s tool=%s error=%s",
-                call.call_id,
-                call.name,
-                type(exc).__name__,
-            )
-            result = ToolErrorResult(
-                call_id=call.call_id,
-                content=describe(exc),
-                is_error=True,
-            )
+            result = dataclasses.replace(result, shown=self.markers.cancelled)
         if call.call_id in self.detached:
             logger.debug(
                 "runtime tool complete detached: call_id=%s tool=%s is_error=%s",
@@ -2643,6 +2696,8 @@ class Runtime:
                 result.is_error,
             )
             self.inbox.push_back(result)
+        for event in self._calls[call.call_id].events_after_result:
+            self.inbox.push_back(event)
 
     # A compaction cancelled by ``Halt`` or ``Clear`` has its failure published
     # already, so its late outcome is dropped.
@@ -2793,7 +2848,7 @@ class _PendingCommit:
     """
 
     kind: Literal["pairing", "forward"]
-    entry: AnyToolResult
+    entry: ToolResult
 
 
 @dataclass(slots=True, kw_only=True)
@@ -2809,6 +2864,15 @@ class _Call:
 
     waiting: bool = True
     """Whether it still waits for the calls before it, or for its delay."""
+
+    result_future: asyncio.Future[object] | None = None
+    """The future of the tool's result, set once the tool starts. For most tools it
+    is the task the tool runs in, so the tool sees it as ``asyncio.current_task()``."""
+
+    events_after_result: list[RuntimeEvent] = dataclasses.field(
+        default_factory=list[RuntimeEvent],
+    )
+    """Events to queue right after the call's result; see ``Runtime.push_after``."""
 
 
 # ``"*"`` is a call whose resources are unknown: it waits for every keyed call before

@@ -22,10 +22,11 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
+from sagent.session.types import AgentSelfResult
 from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -71,7 +72,11 @@ async def _patch(
     *,
     label: str = "Agent",
 ) -> str:
-    result = await tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
+    streaming_result = tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
+    result = await settled(streaming_result)
+    # ``settled`` records a raise instead of raising; a refusal test expects the raise.
+    _ = await streaming_result.result
+    assert result.result == AgentSelfResult()
     return result.text()
 
 
@@ -378,9 +383,11 @@ async def test_diagnostics_distinguishes_callable_tools_from_offered_schemas(
         callable_tools = (
             "AgentSend" if allowed is None or "AgentSend" in allowed else ""
         )
-    result = await tool.call(
-        root.runtime.tool_context,
-        {"agent": "restricted", "diagnostics": True},
+    result = await settled(
+        tool.call(
+            root.runtime.tool_context,
+            {"agent": "restricted", "diagnostics": True},
+        ),
     )
     lines = result.text().splitlines()
     assert "offered_tools: AgentSelf, AgentSend" in lines

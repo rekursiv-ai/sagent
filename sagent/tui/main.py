@@ -1410,8 +1410,12 @@ def _records(
                 "descriptor": "application/x-tool-result",
                 "call_id": result.call_id,
                 "content": result.text(),
-                "is_error": result.is_error,
-                **({} if result.stub is None else {"stub": result.stub}),
+                "is_error": result.is_error or None,
+                **(
+                    {"stub": result.state}
+                    if result.state in ("pending", "cancelled")
+                    else {}
+                ),
             },
         ]
     if isinstance(event, types.ModelResponseError):

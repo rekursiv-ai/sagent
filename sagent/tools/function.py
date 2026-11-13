@@ -3,8 +3,9 @@
 Each parameter's type gives its JSON schema, and its line in the docstring's
 ``Args:`` section its description; one without a default is required. A
 parameter named ``context`` gets the calling agent's ``ToolContext`` instead
-of an argument. A ``str`` return is cut to what one result holds; any session
-record returned is the result as it is.
+of an argument. The function returns ``str``, which is truncated to what one
+result holds and becomes the tool's standard output, or a ``ToolOutput``,
+which is the tool's output unchanged.
 
 Typical usage example:
 
@@ -28,7 +29,6 @@ from dataclasses import (
     field as dataclass_field,
     fields,
     make_dataclass,
-    replace,
 )
 from functools import lru_cache
 from typing import TYPE_CHECKING, cast, overload
@@ -38,9 +38,16 @@ import inspect
 
 from treekle import immutable, mutable
 
-from sagent.session.types import FunctionResult
+from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import ToolContext, json_schema, parse
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -48,8 +55,6 @@ if TYPE_CHECKING:
 
     from _typeshed import DataclassInstance
     from treekle import PlainTree
-
-    from sagent.session.types import AnyToolResult
 
     type _Shape = tuple[type[DataclassInstance], Mapping[str, PlainTree], bool]
     """A tool's arguments type, their schema, and whether it takes the context."""
@@ -116,24 +121,33 @@ class FunctionTool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
-        """Call the function with ``arguments``, checked, and return what it did.
+    ) -> ToolStreamingResult[object, object, object]:
+        """Call the function with ``arguments`` and return its output.
 
         Args:
           context: The calling agent's state.
           arguments: What the model passed.
 
         Returns:
-          result: The record the function returned, or its text as one.
+          streaming_result: The text the function returned, truncated to what one result
+            holds, or the ``ToolOutput`` it returned.
 
         Raises:
           ValueError: The arguments do not fit the signature.
+          TypeError: The function returned neither ``str`` nor ``ToolOutput``.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[object, object, object]:
         parsed = parse(arguments, self._arguments)
         kwargs: dict[str, object] = {
             f.name: getattr(parsed, f.name) for f in fields(parsed)
@@ -146,12 +160,13 @@ class FunctionTool:
             done = await asyncio.to_thread(self._fn, **kwargs)
         if isinstance(done, str):
             text, _ = context.fit([done])
-            return FunctionResult(call_id="", name=self.name, content=text)
-        record = cast("AnyToolResult", done)
-        # A function returning its result whole need not know the name it runs under.
-        if isinstance(record, FunctionResult) and not record.name:
-            return replace(record, name=self.name)
-        return record
+            return ToolOutput(stdout=(text,), result=UncategorizedToolResult())
+        if not isinstance(done, ToolOutput):
+            raise TypeError(
+                f"{self.name} returned {type(done).__name__}; a function tool returns"
+                " str or ToolOutput.",
+            )
+        return done
 
 
 @overload

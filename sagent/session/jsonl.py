@@ -30,7 +30,7 @@ from treekle import json_loads
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.posix.pids import lock_holder
 from sagent.session.types import (
-    RENAMED,
+    FORMER_RESULT_KINDS,
     ContextClear,
     IncompleteRecord,
     SessionRecord,
@@ -234,7 +234,11 @@ def rename_records(path: Path, *, dry_run: bool = False) -> int:
             record = _record(line)
             if isinstance(record, IncompleteRecord):
                 continue
-            lines[n] = record_line(record)
+            rewritten = record_line(record)
+            # A current result class may share a legacy record's name; its line is unchanged.
+            if rewritten == line:
+                continue
+            lines[n] = rewritten
             renamed += 1
         if renamed and not dry_run:
             path.with_name(f"{path.name}.renamed-from").write_bytes(before)
@@ -246,10 +250,10 @@ def rename_records(path: Path, *, dry_run: bool = False) -> int:
         os.close(fd)
 
 
-# A ``py/object`` tag naming a record type by a name it no longer has.
+# A ``py/object`` tag naming a class by a name a record's type once had.
 _FORMER: Final = re.compile(
     rb'"py/object":\s*"(?:'
-    + b"|".join(re.escape(name.encode()) for name in (*RENAMED, "WebSearchResults"))
+    + b"|".join(re.escape(name.encode()) for name in sorted(FORMER_RESULT_KINDS))
     + rb')"',
 )
 
@@ -288,12 +292,14 @@ def _line_starts(path: Path, *, offset: int = 0) -> tuple[list[int], int]:
 
 def _read(path: Path, begin: int, end: int) -> Iterator[SessionRecord]:
     """Yield the records of ``path``'s lines from byte ``begin`` to ``end``, when asked."""
+    # One line at a time: a worker thread's heap keeps its high-water mark, so the
+    # range read whole would hold the session's size there for good.
     with path.open("rb") as file:
-        _ = file.seek(begin)
-        data = file.read(end - begin)
-    for line in data.split(b"\n"):
-        if line.strip():
-            yield _record(line)
+        position = file.seek(begin)
+        while position < end and (line := file.readline()):
+            position += len(line)
+            if line.strip():
+                yield _record(line)
 
 
 def _last_window(path: Path) -> list[SessionRecord]:

@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  result = await List().call(context, {"path": "src", "sort": "mtime_desc"})
+  result = await settled(List().call(context, {"path": "src", "sort": "mtime_desc"}))
 """
 
 from __future__ import annotations
@@ -24,7 +24,14 @@ from sagent.tools.command_analyzer import (
     resolve,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -158,11 +165,11 @@ class List:
             arguments["keep_last" if sink.exe == "tail" else "max_results"] = count
         return arguments
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> ListResult:
+    ) -> ToolStreamingResult[ListResult, str, str]:
         """List a directory's entries, directories marked with ``/``.
 
         Args:
@@ -170,9 +177,16 @@ class List:
           arguments: What the model passed, as ``List.Arguments``.
 
         Returns:
-          result: One entry per line, or why there are none.
+          streaming_result: One entry per line, or why there are none.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[ListResult, str, str]:
         return await asyncio.to_thread(_list, context, parse(arguments, List.Arguments))
 
 
@@ -210,7 +224,7 @@ def ls_row(path: Path, *, name: str) -> str:
     return f"{_stat(path, 'size'):>10}  {when}  {name}"
 
 
-def _list(context: ToolContext, a: List.Arguments) -> ListResult:
+def _list(context: ToolContext, a: List.Arguments) -> ToolOutput[ListResult, str, str]:
     """List the directory ``a`` names."""
     directory = context.path(a.path or ".")
     if not directory.exists():
@@ -239,7 +253,7 @@ def _list(context: ToolContext, a: List.Arguments) -> ListResult:
     out = "\n".join(rows) or "(empty directory)"
     if total > len(entries):
         out += f"\n... ({total - len(entries):,} more)"
-    return ListResult(call_id="", path=str(directory), content=out)
+    return ToolOutput(stdout=(out,), result=ListResult(path=str(directory)))
 
 
 def _stat(path: Path, key: str) -> float:
@@ -251,5 +265,5 @@ def _stat(path: Path, key: str) -> float:
     return stat.st_mtime if key == "mtime" else stat.st_size
 
 
-def _error(message: str) -> ListResult:
-    return ListResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[ListResult, str, str]:
+    return ToolOutput(stderr=(message,), result=ListResult(exit_code=1))

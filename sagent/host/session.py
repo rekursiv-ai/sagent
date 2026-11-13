@@ -28,7 +28,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -65,17 +65,16 @@ from sagent.host.wire import (
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.runtime.exceptions import describe
 from sagent.runtime.types import Markers
-from sagent.session.types import ToolErrorResult, ToolResult
+from sagent.session.types import ToolResult
 from sagent.tools.builtin import builders
 from sagent.tools.remote import RemoteSession, saved, tls_link
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from sagent.agent.team import MessageKind
-    from sagent.session.types import AnyToolResult
     from sagent.tools.types import Tool
 
 
@@ -324,7 +323,12 @@ class _Calls:
     def _finished(self, call_id: str, task: asyncio.Task[None]) -> None:
         self._running.pop(call_id, None)
         if task.cancelled():
-            self._writer.write(encoded(Result(id=call_id, record=_cancelled())))
+            cancelled = ToolResult(
+                call_id="",
+                state="cancelled",
+                shown=Markers().cancelled,
+            )
+            self._writer.write(encoded(Result(id=call_id, record=cancelled)))
 
     def cancel(self, call_id: str) -> None:
         """Stop the call ``call_id``, if it runs; its result says it was cancelled."""
@@ -373,30 +377,22 @@ async def _result(
     context: ToolContext,
     *,
     call: Call,
-) -> AnyToolResult:
+) -> ToolResult:
     """Return what ``tool`` did, a failure or a cancel as the runtime records it."""
     if tool is None:
-        return ToolErrorResult(
+        return ToolResult(
             call_id="",
-            content=f"Unknown tool: {call.tool}",
-            is_error=True,
+            state="failed",
+            stderr=(f"Unknown tool: {call.tool}",),
         )
     try:
-        return await tool.call(context, call.arguments)
-    except asyncio.CancelledError:
-        return _cancelled()
+        streaming_result = tool.call(context, call.arguments)
     except Exception as exc:  # noqa: BLE001 -- A tool's failure is its call's result, as the runtime records it.
-        return ToolErrorResult(call_id="", content=describe(exc), is_error=True)
-
-
-def _cancelled() -> ToolResult:
-    """Return a cancelled call's result, as the runtime records one."""
-    return ToolResult(
-        call_id="",
-        is_error=True,
-        stub="cancelled",
-        shown=Markers().cancelled,
-    )
+        return ToolResult(call_id="", state="failed", stderr=(describe(exc),))
+    result = await settled(streaming_result)
+    if result.state == "cancelled":
+        return replace(result, shown=Markers().cancelled)
+    return result
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

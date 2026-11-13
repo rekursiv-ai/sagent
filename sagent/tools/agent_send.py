@@ -9,7 +9,7 @@ or ``user``, whose screen shows it. A root with no parent that may call
 Typical usage example:
 
   send = AgentSend(team=team)
-  result = await send.call(context, {"to": "reviewer", "content": "look at a.py"})
+  result = await settled(send.call(context, {"to": "reviewer", "content": "look at a.py"}))
 """
 
 from __future__ import annotations
@@ -24,7 +24,14 @@ import logging
 from sagent.agent.team import Team
 from sagent.session.types import AgentSendResult
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -126,11 +133,11 @@ class AgentSend:
         ]
         return " ".join(p for p in parts if p)
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AgentSendResult:
+    ) -> ToolStreamingResult[AgentSendResult, str, str]:
         """Deliver ``content`` to ``to``, from the caller, after ``delay`` seconds.
 
         Args:
@@ -138,13 +145,20 @@ class AgentSend:
           arguments: What the model passed, as ``AgentSend.Arguments``.
 
         Returns:
-          result: Delivered or scheduled, or why not.
+          streaming_result: Delivered or scheduled, or why not.
 
         Raises:
           ValueError: ``to`` or ``content`` is empty, or ``to`` is no agent:
             ``parent`` of a root that may not call ``AgentSpawn``.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[AgentSendResult, str, str]:
         a = parse(arguments, AgentSend.Arguments)
         if not a.to or not a.content:
             raise ValueError("'to' and 'content' are required.")
@@ -170,25 +184,25 @@ class AgentSend:
                 f"[delayed {a.delay}s] {a.content}",
                 kind,
             )
-            return AgentSendResult(
-                call_id="",
-                to=a.to,
-                delay_sec=a.delay,
-                content=f"{started}Scheduled for {a.to} in {a.delay}s.",
+            return ToolOutput(
+                stdout=(f"{started}Scheduled for {a.to} in {a.delay}s.",),
+                result=AgentSendResult(to=a.to, delay_sec=a.delay),
             )
         self.team.send(sender, recipient=a.to, content=a.content)
         # A reminder to oneself carries a delay; one without is likely a loop.
         if a.to == context.label:
-            return AgentSendResult(
-                call_id="",
-                to=a.to,
-                content=f"Delivered to {a.to}. Note: you sent yourself a message"
-                " without a delay; this is likely not intentional.",
+            return ToolOutput(
+                stdout=(
+                    (
+                        f"Delivered to {a.to}. Note: you sent yourself a message"
+                        " without a delay; this is likely not intentional."
+                    ),
+                ),
+                result=AgentSendResult(to=a.to),
             )
-        return AgentSendResult(
-            call_id="",
-            to=a.to,
-            content=f"{started}Delivered to {a.to}.",
+        return ToolOutput(
+            stdout=(f"{started}Delivered to {a.to}.",),
+            result=AgentSendResult(to=a.to),
         )
 
     # A root kept from spawning, such as a watcher gated off AgentSpawn, starts none:

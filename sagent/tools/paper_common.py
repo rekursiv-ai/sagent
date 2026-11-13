@@ -1,4 +1,4 @@
-"""What the Paper tools share: reading ``ids``, labels, and errors.
+"""What the Paper tools share: reading ``ids``, labels, and listings.
 
 Typical usage example:
 
@@ -17,8 +17,6 @@ from treekle import json_loads
 from wesearch.paper.ids import looks_like_paper_id
 from wesearch.paper.render import format_record
 
-from sagent.session.types import ToolResult
-
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -28,7 +26,6 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "error",
     "listed",
     "paper_ids",
     "summary_ids",
@@ -115,8 +112,3 @@ def listed(listing: Listing, abstract_chars: int | None, *, more: str) -> str:
     if not listing.complete:
         body += f"\n... (more matches {more}; raise 'limit' to see them)"
     return body
-
-
-def error[R: ToolResult](kind: type[R], message: str) -> R:
-    """Return ``message`` as a failed result of the tool's own ``kind``."""
-    return kind(call_id="", shown=message, is_error=True)

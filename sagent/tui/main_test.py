@@ -76,11 +76,11 @@ from sagent.session.projects import list_sessions, project_dir
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     BashResult,
     SessionRecord,
     Thinking,
+    ToolResult,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -106,7 +106,12 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.remote import Link, RemoteSession, RemoteTool, local_link
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main, slash
@@ -3290,13 +3295,34 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
     ((notice,),) = [main._records(spent, tools=tools)]
     assert notice["descriptor"] == "text/x-notice"
     assert str(notice["content"]).startswith("[no acli login has quota: work ")
-    result = BashResult(call_id="1", stdout="out", exit_code=2, is_error=True)
+    result = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("out",),
+        stderr=("bad",),
+        result=UncategorizedToolResult(exit_code=2),
+    )
     assert main._records(result, tools=tools) == [
         {
             "descriptor": "application/x-tool-result",
             "call_id": "1",
-            "content": "out\n[exit 2]",
+            "content": "outbad",
             "is_error": True,
+        },
+    ]
+    # A shell command's ``[exit N]`` follows its output, and is no error.
+    exited = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("out",),
+        result=BashResult(exit_code=2),
+    )
+    assert main._records(exited, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "out\n[exit 2]",
+            "is_error": None,
         },
     ]
     assert main._records(types.AgentIdle(), tools=tools) == []
@@ -3306,8 +3332,13 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
 def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
     """A reader can tell the stand-in from the result that replaces it."""
     tools = {"Read": Read()}
-    stub = UncategorizedToolResult(call_id="1", content="[detached]", stub="pending")
-    real = UncategorizedToolResult(call_id="1", content="done")
+    stub = ToolResult(call_id="1", state="pending", stdout=("[detached]",))
+    real = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("done",),
+        result=UncategorizedToolResult(),
+    )
     assert main._records(stub, tools=tools) == [
         {
             "descriptor": "application/x-tool-result",
@@ -4606,15 +4637,22 @@ class _Slow:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
         self.started.set()
         await self.release.wait()
-        return UncategorizedToolResult(call_id="", content="done")
+        return ToolOutput(stdout=("done",), result=UncategorizedToolResult())
 
 
 @pytest.mark.asyncio

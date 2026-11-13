@@ -19,7 +19,6 @@ from sagent.model.types import Response
 from sagent.runtime import types
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     ContextClear,
     EditResult,
@@ -28,11 +27,13 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
 from sagent.tui.replay import replay
@@ -65,13 +66,23 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context
-        return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
+        return ToolOutput(
+            stdout=(str(arguments.get("text")),),
+            result=UncategorizedToolResult(),
+        )
 
 
 def _replayed(
@@ -160,9 +171,24 @@ def test_a_call_redraws_by_its_tool_and_its_result_by_that_tool_s_display() -> N
             UserMessage(content="go"),
             call("Echo", "1", text="a"),
             call("Gone", "2"),
-            UncategorizedToolResult(call_id="1", content="said a"),
-            UncategorizedToolResult(call_id="2", content="from gone"),
-            UncategorizedToolResult(call_id="3", content="orphan"),
+            ToolResult(
+                call_id="1",
+                state="done",
+                stdout=("said a",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="2",
+                state="done",
+                stdout=("from gone",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="3",
+                state="done",
+                stdout=("orphan",),
+                result=UncategorizedToolResult(),
+            ),
             call("Echo", "4", text="held"),
         ),
     )
@@ -252,11 +278,16 @@ def test_a_taped_delivery_redraws_only_its_result_and_counts_once() -> None:
     said = _replayed(
         UserMessage(content="go"),
         call("Echo", "1", text="a"),
-        UncategorizedToolResult(call_id="1", content="[detached]", stub="pending"),
+        ToolResult(call_id="1", state="pending", stdout=("[detached]",)),
         AssistantMessage(content="later"),
         UserMessage(content="[detached tool 1 completed]"),
         ToolCall(call_id="1:detached", name="DetachedArrived"),
-        UncategorizedToolResult(call_id="1:detached", content="late"),
+        ToolResult(
+            call_id="1:detached",
+            state="done",
+            stdout=("late",),
+            result=UncategorizedToolResult(),
+        ),
     )
     assert said == [
         ("user", "go"),
@@ -309,16 +340,27 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
         call("Echo", "1", text="a"),
         call("Fix", "2"),
     )
-    echo = UncategorizedToolResult(call_id="1", content="a")
-    edit = EditResult(
+    echo = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("a",),
+        result=UncategorizedToolResult(),
+    )
+    edit = ToolResult(
         call_id="2",
-        path="a.py",
-        edits=(Splice(before="x = 1", after="x = 2", start=3),),
+        state="done",
+        stdout=("Edited a.py.", Splice(before="x = 1", after="x = 2", start=3)),
+        result=EditResult(path="a.py"),
     )
     background = call("Slow", "3", background=True)
-    pending = UncategorizedToolResult(call_id="3", content="[detached]", stub="pending")
+    pending = ToolResult(call_id="3", state="pending", stdout=("[detached]",))
     later = reply("The slow one runs in the background.")
-    arrived = UncategorizedToolResult(call_id="3", content="finally done")
+    arrived = ToolResult(
+        call_id="3",
+        state="done",
+        stdout=("finally done",),
+        result=UncategorizedToolResult(),
+    )
     done = reply("The slow one finished.")
     live, replayed = _live_and_replayed(
         [
@@ -348,7 +390,12 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
             *later.records,
             UserMessage(content="[detached tool 3 completed]"),
             ToolCall(call_id="3:detached", name="BackgroundTask"),
-            UncategorizedToolResult(call_id="3:detached", content="finally done"),
+            ToolResult(
+                call_id="3:detached",
+                state="done",
+                stdout=("finally done",),
+                result=UncategorizedToolResult(),
+            ),
             *done.records,
         ],
         tools={
@@ -381,7 +428,12 @@ def test_text_after_a_call_in_one_turn_replays_where_it_streamed() -> None:
         call("Echo", "1", text="a"),
         AssistantMessage(content="After."),
     )
-    result = UncategorizedToolResult(call_id="1", content="a")
+    result = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("a",),
+        result=UncategorizedToolResult(),
+    )
     done = reply("Done.")
     live, replayed = _live_and_replayed(
         [

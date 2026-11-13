@@ -5,7 +5,7 @@ extractor; a POST may have effects, so it is never replayed.
 
 Typical usage example:
 
-  result = await WebFetch().call(context, {"url": "https://peps.python.org/pep-0008/"})
+  result = await settled(WebFetch().call(context, {"url": "https://peps.python.org/pep-0008/"}))
 """
 
 from __future__ import annotations
@@ -32,7 +32,13 @@ import cachetools
 from sagent.session.types import WebFetchResult
 from sagent.tools.command_analyzer import Invocation, replaceable
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -151,11 +157,11 @@ class WebFetch:
             private = host == "localhost" or host.endswith((".local", ".internal"))
         return None if private else {"url": urls[0]}
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WebFetchResult:
+    ) -> ToolStreamingResult[WebFetchResult, str, str]:
         """Fetch ``url`` and extract its text.
 
         A POST carries ``json`` or ``form``, never both; a GET carries neither.
@@ -165,9 +171,16 @@ class WebFetch:
           arguments: What the model passed, as ``WebFetch.Arguments``.
 
         Returns:
-          result: The page's text, or why it could not be fetched.
+          streaming_result: The page's text, or why it could not be fetched.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[WebFetchResult, str, str]:
         # A model writes "get" as readily as "GET".
         method = arguments.get("method")
         if isinstance(method, str):
@@ -211,14 +224,15 @@ class WebFetch:
         body, kept = context.fit(lines, reserve=len(note))
         if kept < len(lines):
             body += f"\n... ({len(lines) - kept:,} more lines omitted)"
-        return WebFetchResult(
-            call_id="",
-            url=a.url,
-            content=body,
-            duration_sec=time.monotonic() - started,
-            size=len(text),
+        return ToolOutput(
+            stdout=(body,),
+            result=WebFetchResult(
+                url=a.url,
+                duration_sec=time.monotonic() - started,
+                size=len(text),
+            ),
         )
 
 
-def _error(message: str) -> WebFetchResult:
-    return WebFetchResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[WebFetchResult, str, str]:
+    return ToolOutput(stderr=(message,), result=WebFetchResult(exit_code=1))

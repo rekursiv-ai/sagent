@@ -9,8 +9,9 @@ import stat
 import pytest
 import yaml
 
+from sagent.session.types import MemoryResult
 from sagent.tools.memory import Memory
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.session.types import MemoryResult
+    from sagent.session.types import ToolResult
 
 
 def test_summary_names_the_action_and_the_memory(tmp_path: Path) -> None:
@@ -175,12 +176,15 @@ async def test_saving_and_forgetting_leave_a_memory_whose_name_ends_the_same(
     await _save(memory, "unit testing")
     await _save(memory, "testing")
     assert (tmp_path / "feedback_unit_testing.md").exists()
-    forgot = await memory.call(
-        ToolContext(cwd=tmp_path),
-        {"action": "forget", "name": "testing"},
+    forgot = await settled(
+        memory.call(
+            ToolContext(cwd=tmp_path),
+            {"action": "forget", "name": "testing"},
+        ),
     )
     assert forgot.text() == "Forgot feedback_testing.md."
-    assert forgot.is_error is None
+    assert forgot.is_error is False
+    assert forgot.result == MemoryResult(action="forget", name="testing")
     assert (tmp_path / "feedback_unit_testing.md").exists()
     assert (tmp_path / "MEMORY.md").read_text() == (
         "- [unit testing](feedback_unit_testing.md) -- unit testing\n"
@@ -197,9 +201,11 @@ async def test_forget_removes_every_type_of_a_name_and_keeps_other_lines(
     (tmp_path / "reference_role.md").write_text("---\nname: role\n---\n")
     with (tmp_path / "MEMORY.md").open("a") as index:
         index.write("\n  \nhand-written line\n")
-    result = await memory.call(
-        ToolContext(cwd=tmp_path),
-        {"action": "forget", "name": "role"},
+    result = await settled(
+        memory.call(
+            ToolContext(cwd=tmp_path),
+            {"action": "forget", "name": "role"},
+        ),
     )
     assert result.text() == "Forgot user_role.md, reference_role.md."
     assert _names(tmp_path) == [
@@ -219,9 +225,11 @@ async def test_a_name_that_files_like_another_is_refused_not_overwritten(
     memory = Memory(directory=tmp_path)
     await _save(memory, "Foo Bar")
     saved = await _save(memory, "foo-bar", content="y")
-    forgot = await memory.call(
-        ToolContext(cwd=tmp_path),
-        {"action": "forget", "name": "foo-bar"},
+    forgot = await settled(
+        memory.call(
+            ToolContext(cwd=tmp_path),
+            {"action": "forget", "name": "foo-bar"},
+        ),
     )
     assert saved.is_error is True
     assert saved.text() == (
@@ -251,10 +259,9 @@ async def test_a_memory_whose_frontmatter_will_not_parse_still_names_its_owner(
     )
     assert (tmp_path / "user_role_lead.md").read_bytes() == held
     own = await _save(memory, "Role: lead", kind="user")
-    assert own.is_error is None, own.text()
+    assert own.is_error is False, own.text()
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_a_name_line_with_an_unclosed_quote_names_its_owner_as_written(
     tmp_path: Path,
@@ -278,7 +285,7 @@ async def test_a_quoted_name_in_frontmatter_that_will_not_parse_is_unquoted(
     (tmp_path / "user_role_lead.md").write_bytes(held)
     memory = Memory(directory=tmp_path)
     own = await _save(memory, "Role: lead", kind="user")
-    assert own.is_error is None, own.text()
+    assert own.is_error is False, own.text()
 
 
 @pytest.mark.asyncio
@@ -299,7 +306,7 @@ async def test_a_file_that_names_no_memory_is_replaced_by_its_name(
 ) -> None:
     (tmp_path / "user_role.md").write_bytes(held)
     result = await _save(Memory(directory=tmp_path), "role", kind="user")
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
     assert "name: role\n" in (tmp_path / "user_role.md").read_text()
 
 
@@ -360,7 +367,9 @@ async def test_a_call_that_names_no_memory_or_lacks_one_is_an_error(
     arguments: dict[str, PlainTree],
     message: str,
 ) -> None:
-    result = await Memory(directory=tmp_path).call(ToolContext(cwd=tmp_path), arguments)
+    result = await settled(
+        Memory(directory=tmp_path).call(ToolContext(cwd=tmp_path), arguments),
+    )
     assert result.is_error is True
     assert result.call_id == ""
     assert result.text() == message
@@ -382,7 +391,9 @@ async def test_arguments_that_do_not_fit_are_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match=r"argument|must be"):
-        await Memory(directory=tmp_path).call(ToolContext(cwd=tmp_path), arguments)
+        await (
+            Memory(directory=tmp_path).call(ToolContext(cwd=tmp_path), arguments).result
+        )
 
 
 @pytest.mark.parametrize(
@@ -479,18 +490,20 @@ async def _save(
     source: str = "user",
     description: str = "",
     content: str = "x",
-) -> MemoryResult:
+) -> ToolResult:
     """Save ``name``; its description defaults to its name."""
-    return await memory.call(
-        ToolContext(cwd=memory.directory),
-        {
-            "action": "save",
-            "name": name,
-            "type": kind,
-            "source": source,
-            "description": description or name,
-            "content": content,
-        },
+    return await settled(
+        memory.call(
+            ToolContext(cwd=memory.directory),
+            {
+                "action": "save",
+                "name": name,
+                "type": kind,
+                "source": source,
+                "description": description or name,
+                "content": content,
+            },
+        ),
     )
 
 

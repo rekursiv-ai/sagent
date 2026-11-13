@@ -39,18 +39,19 @@ from sagent.providers.google import cli
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     Attachment,
     ContextClear,
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
 
 if TYPE_CHECKING:
@@ -359,7 +360,12 @@ async def test_stream_reuses_only_a_conversation_that_can_continue(
     answered: bool,
     restart: bool,
 ) -> None:
-    result = UncategorizedToolResult(call_id="c1", content="x")
+    result = ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("x",),
+        result=UncategorizedToolResult(),
+    )
     addition = (result,) if held else (UserMessage(content="and now?"),)
     unseen = Mock(return_value=addition if eligible else None)
     answered_call = AsyncMock(return_value=answered)
@@ -496,7 +502,12 @@ def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript() -> None:
         Thinking(content="hmm"),
         AssistantMessage(content="ok"),
         ToolCall(call_id="c0", name="Echo", arguments={"text": "x"}),
-        UncategorizedToolResult(call_id="c0", content="x"),
+        ToolResult(
+            call_id="c0",
+            state="done",
+            stdout=("x",),
+            result=UncategorizedToolResult(),
+        ),
         TurnContext(),
         TurnContext(cwd="/w"),
         UserMessage(content="go"),
@@ -574,27 +585,63 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
 @pytest.mark.parametrize(
     ("additions", "accepted"),
     [
-        ((UncategorizedToolResult(call_id="c1", content="x"),), True),
+        (
+            (
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("x",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            True,
+        ),
         (
             (
                 SystemMessage(content="note"),
-                UncategorizedToolResult(call_id="c1", content="x"),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("x",),
+                    result=UncategorizedToolResult(),
+                ),
                 TurnContext(cwd="/work"),
             ),
             True,
         ),
-        ((UncategorizedToolResult(call_id="wrong"),), False),
+        (
+            (
+                ToolResult(
+                    call_id="wrong",
+                    state="done",
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            False,
+        ),
         ((), False),
         (
             (
-                UncategorizedToolResult(call_id="c1"),
-                UncategorizedToolResult(call_id="c1"),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    result=UncategorizedToolResult(),
+                ),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    result=UncategorizedToolResult(),
+                ),
             ),
             False,
         ),
         (
             (
-                UncategorizedToolResult(call_id="c1"),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    result=UncategorizedToolResult(),
+                ),
                 UserMessage(content="and this"),
             ),
             False,
@@ -831,8 +878,18 @@ async def test_agy_quiet_too_long_is_a_disconnect(
 async def test_answer_forwards_only_results_in_record_order(late: bool) -> None:
     first = ToolCall(call_id="first", name="Echo")
     second = ToolCall(call_id="second", name="Echo")
-    first_result = UncategorizedToolResult(call_id="first", content="one")
-    second_result = UncategorizedToolResult(call_id="second", content="two")
+    first_result = ToolResult(
+        call_id="first",
+        state="done",
+        stdout=("one",),
+        result=UncategorizedToolResult(),
+    )
+    second_result = ToolResult(
+        call_id="second",
+        state="done",
+        stdout=("two",),
+        result=UncategorizedToolResult(),
+    )
     agy = cli._Agy(
         Mock(),
         home=Path("/nowhere"),
@@ -1251,13 +1308,20 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="")
+        return ToolOutput(result=UncategorizedToolResult())
 
 
 if __name__ == "__main__":

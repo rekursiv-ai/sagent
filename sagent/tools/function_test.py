@@ -12,15 +12,22 @@ from treekle import PlainTree, from_plain
 
 import pytest
 
-from sagent.session.types import FunctionResult, UncategorizedToolResult
+from sagent.session.types import (
+    Attachment,
+    ReadResult,
+    ToolResult,
+    UncategorizedToolResult,
+)
 from sagent.tools import types
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.function import tool
+from sagent.tools.types import ToolOutput, settled
 
 
 if TYPE_CHECKING:
     # Named for the checker only, as a module offering a tool would: the
     # ``context`` parameter's annotation must not need it at run time.
+
     from sagent.tools.types import Tool, ToolContext
 
 
@@ -76,12 +83,13 @@ def test_a_name_description_and_schema_may_be_given() -> None:
 async def test_a_call_passes_the_arguments_and_returns_the_text() -> None:
     made: Tool = tool(greet, name="Greet")
 
-    result = await made.call(_context(), {"name": "ann", "times": 2})
+    result = await settled(made.call(_context(), {"name": "ann", "times": 2}))
 
-    assert result == FunctionResult(
+    assert result == ToolResult(
         call_id="",
-        name="Greet",
-        content="hello ann hello ann",
+        state="done",
+        stdout=("hello ann hello ann",),
+        result=UncategorizedToolResult(),
     )
     assert made.summary({"name": "ann"}) == "Greet"
     assert made.serialize_key(_context(), {"name": "ann"}) is None
@@ -98,9 +106,14 @@ async def test_an_async_function_is_awaited() -> None:
         """
         return word.upper()
 
-    result = await tool(shout).call(_context(), {"word": "yo"})
+    result = await settled(tool(shout).call(_context(), {"word": "yo"}))
 
-    assert result == FunctionResult(call_id="", name="shout", content="YO")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("YO",),
+        result=UncategorizedToolResult(),
+    )
 
 
 @pytest.mark.asyncio
@@ -122,10 +135,11 @@ async def test_a_function_taking_the_context_gets_the_callers() -> None:
     context = _context()
 
     assert "context" not in from_plain(made.schema["properties"], dict[str, object])
-    assert await made.call(context, {"path": "a"}) == FunctionResult(
+    assert await settled(made.call(context, {"path": "a"})) == ToolResult(
         call_id="",
-        name="where",
-        content="/a",
+        state="done",
+        stdout=("/a",),
+        result=UncategorizedToolResult(),
     )
     assert seen == [context]
 
@@ -136,21 +150,55 @@ async def test_a_long_text_is_cut_to_what_one_result_holds() -> None:
         """Say a lot."""
         return "x" * 50
 
-    result = await tool(long).call(_context(max_result_chars=10), {})
+    result = await settled(tool(long).call(_context(max_result_chars=10), {}))
 
-    assert isinstance(result, FunctionResult)
-    assert result.content == "x" * 10 + "\n... (40 chars omitted)"
+    assert result.text() == "x" * 10 + "\n... (40 chars omitted)"
 
 
 @pytest.mark.asyncio
-async def test_a_record_returned_is_returned_as_it_is() -> None:
-    record = UncategorizedToolResult(call_id="", content="done", is_error=True)
-
-    def fail() -> UncategorizedToolResult:
+async def test_a_returned_output_is_the_tools_output_unchanged() -> None:
+    def fail() -> ToolOutput[UncategorizedToolResult, str, str]:
         """Fail."""
-        return record
+        return ToolOutput(
+            stdout=("done",),
+            stderr=("why",),
+            result=UncategorizedToolResult(exit_code=1),
+        )
 
-    assert await tool(fail).call(_context(), {}) is record
+    assert await settled(tool(fail).call(_context(), {})) == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("done",),
+        stderr=("why",),
+        result=UncategorizedToolResult(exit_code=1),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_function_that_returns_neither_text_nor_an_output_fails() -> None:
+    def count() -> int:
+        """Count."""
+        return 3
+
+    result = await settled(tool(count).call(_context(), {}))
+
+    assert (result.state, result.stderr) == (
+        "failed",
+        ("TypeError: count returned int; a function tool returns str or ToolOutput.",),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_returned_output_keeps_its_attachments_and_its_result_class() -> None:
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+
+    def look() -> ToolOutput[ReadResult, Attachment | str, str]:
+        """Look."""
+        return ToolOutput(stdout=("a picture", image), result=ReadResult(path="/a"))
+
+    done = await settled(tool(look).call(_context(), {}))
+
+    assert (done.stdout, done.result) == (("a picture", image), ReadResult(path="/a"))
 
 
 @pytest.mark.asyncio
@@ -168,7 +216,7 @@ async def test_arguments_not_fitting_the_signature_are_refused(
     error: str,
 ) -> None:
     with pytest.raises(ValueError, match=error):
-        await tool(greet).call(_context(), arguments)
+        await tool(greet).call(_context(), arguments).result
 
 
 def test_a_type_with_no_json_schema_is_refused_when_the_tool_is_made() -> None:
@@ -198,10 +246,11 @@ async def test_a_given_schema_spares_a_type_with_no_json_schema() -> None:
 
     made = tool(odd, schema={"type": "object", "properties": {}})
 
-    assert await made.call(_context(), {}) == FunctionResult(
+    assert await settled(made.call(_context(), {})) == ToolResult(
         call_id="",
-        name="odd",
-        content="/",
+        state="done",
+        stdout=("/",),
+        result=UncategorizedToolResult(),
     )
 
 
@@ -216,9 +265,14 @@ def test_tool_as_a_decorator_takes_the_same_settings() -> None:
 
 @pytest.mark.asyncio
 async def test_an_omitted_argument_takes_its_default() -> None:
-    result = await tool(greet).call(_context(), {"name": "ann"})
+    result = await settled(tool(greet).call(_context(), {"name": "ann"}))
 
-    assert result == FunctionResult(call_id="", name="greet", content="hello ann")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("hello ann",),
+        result=UncategorizedToolResult(),
+    )
 
 
 def test_an_annotated_description_and_bound_outrank_the_docstring() -> None:
@@ -299,11 +353,12 @@ async def test_a_partial_keeps_the_types_and_defaults_of_what_it_wraps() -> None
         ]
         == "integer"
     )
-    result = await made.call(_context(), {"name": "ann"})
-    assert result == FunctionResult(
+    result = await settled(made.call(_context(), {"name": "ann"}))
+    assert result == ToolResult(
         call_id="",
-        name="tool",
-        content="hello ann hello ann",
+        state="done",
+        stdout=("hello ann hello ann",),
+        result=UncategorizedToolResult(),
     )
 
 
@@ -347,15 +402,17 @@ async def test_tools_over_one_method_share_a_schema_but_call_their_own_object() 
     )
     # Each tool has a schema of its own, so changing one changes no other.
     assert hello.schema is not bye.schema
-    assert await hello.call(_context(), {"name": "ann"}) == FunctionResult(
+    assert await settled(hello.call(_context(), {"name": "ann"})) == ToolResult(
         call_id="",
-        name="greet",
-        content="hello ann",
+        state="done",
+        stdout=("hello ann",),
+        result=UncategorizedToolResult(),
     )
-    assert await bye.call(_context(), {"name": "ann"}) == FunctionResult(
+    assert await settled(bye.call(_context(), {"name": "ann"})) == ToolResult(
         call_id="",
-        name="greet",
-        content="bye ann",
+        state="done",
+        stdout=("bye ann",),
+        result=UncategorizedToolResult(),
     )
     # The function itself still takes the object it would be bound to.
     assert from_plain(tool(_Greeter.greet).schema["required"], list[str]) == [
@@ -372,16 +429,6 @@ def test_the_object_a_dropped_tool_was_bound_to_is_let_go() -> None:
     del greeter, made
 
     assert gone() is None
-
-
-@pytest.mark.asyncio
-async def test_a_function_returning_its_result_unnamed_is_named_as_its_tool() -> None:
-    def found(pattern: str) -> FunctionResult:
-        return FunctionResult(call_id="", content=pattern)
-
-    result = await tool(found, name="Find").call(_context(), {"pattern": "x"})
-
-    assert result == FunctionResult(call_id="", name="Find", content="x")
 
 
 if __name__ == "__main__":

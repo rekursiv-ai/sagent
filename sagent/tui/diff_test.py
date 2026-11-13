@@ -13,7 +13,7 @@ from rich.style import Style
 import pytest
 
 from sagent.lib.userdirs import config_dir
-from sagent.session.types import EditResult, Splice, WriteResult
+from sagent.session.types import Splice
 from sagent.tui.diff import (
     DiffStyle,
     highlight_source,
@@ -405,17 +405,13 @@ def test_highlight_source_is_plain_for_an_unknown_language_or_no_code() -> None:
 
 
 def test_splice_diff_numbers_each_hunk_for_the_file_after_the_edit() -> None:
-    result = EditResult(
-        call_id="1",
-        path="a.py",
-        edits=(
-            Splice(before="a\nb", after="c", start=3),
-            Splice(before="", after="x\ny", start=10),
-            Splice(after="z"),
-            Splice(before="w", start=20),
-        ),
+    edits = (
+        Splice(before="a\nb", after="c", start=3),
+        Splice(before="", after="x\ny", start=10),
+        Splice(after="z"),
+        Splice(before="w", start=20),
     )
-    assert splice_diff(result).split("\n") == [
+    assert splice_diff(edits).split("\n") == [
         "@@ -3,2 +3,1 @@",
         "-a",
         "-b",
@@ -431,13 +427,12 @@ def test_splice_diff_numbers_each_hunk_for_the_file_after_the_edit() -> None:
 
 
 def test_an_edit_with_no_splices_is_an_empty_diff() -> None:
-    assert splice_diff(EditResult(call_id="1", path="a.py")) == ""
+    assert splice_diff(()) == ""
 
 
 def test_a_write_is_a_diff_adding_every_line_from_one() -> None:
-    write = WriteResult(call_id="1", path="a.py", content="a\nb\n")
-    assert write_diff(write) == "@@ -0,0 +1,2 @@\n+a\n+b"
-    assert write_diff(WriteResult(call_id="2")) == "@@ -0,0 +1,0 @@"
+    assert write_diff("a\nb\n") == "@@ -0,0 +1,2 @@\n+a\n+b"
+    assert write_diff("") == "@@ -0,0 +1,0 @@"
 
 
 def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:

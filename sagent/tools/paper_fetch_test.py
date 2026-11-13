@@ -18,9 +18,10 @@ from wesearch.paper.errors import PaperError
 import pytest
 
 from sagent.lib.userdirs import base_dir_variables, cache_dir
+from sagent.session.types import PaperFetchResult
 from sagent.tools import paper_fetch
 from sagent.tools.paper_fetch import PaperFetch
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -85,13 +86,16 @@ async def test_one_paper_is_downloaded_and_kept(
     calls = _downloads(monkeypatch, {"2106.15928": (_PDF, "arXiv")})
     batches = _batches(monkeypatch)
     tool = _tool(tmp_path)
-    result = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": "arXiv:2106.15928"},
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": "arXiv:2106.15928"},
+        ),
     )
     path = tmp_path / "arxiv_2106.15928.pdf"
     assert result.text() == f"Downloaded via arXiv: {path}"
     assert result.is_error is False
+    assert result.result == PaperFetchResult()
     assert result.call_id == ""
     assert path.read_bytes() == _PDF
     assert batches == []
@@ -110,7 +114,9 @@ async def test_a_kept_pdf_is_returned_without_a_download(
 ) -> None:
     (tmp_path / "doi_10.1000_x.pdf").write_bytes(_PDF)
     calls = _downloads(monkeypatch)
-    result = await _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"})
+    result = await settled(
+        _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"}),
+    )
     assert result.text() == f"Cached: {tmp_path / 'doi_10.1000_x.pdf'}"
     assert calls == []
 
@@ -129,7 +135,9 @@ async def test_a_kept_file_that_is_no_pdf_is_downloaded_again(
     path = tmp_path / "doi_10.1000_x.pdf"
     path.write_bytes(kept)
     _downloads(monkeypatch, {"10.1000/x": (_PDF, "open access")})
-    result = await _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"})
+    result = await settled(
+        _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"}),
+    )
     assert result.text() == f"Downloaded via open access: {path}"
     assert path.read_bytes() == _PDF
 
@@ -149,9 +157,11 @@ async def test_many_papers_share_one_lookup_and_report_in_input_order(
         },
     )
     tool = _tool(tmp_path)
-    result = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": ["10.1000/a", "10.1000/b"]},
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": ["10.1000/a", "10.1000/b"]},
+        ),
     )
     assert result.text() == (
         f"Downloaded via open access: {tmp_path / 'doi_10.1000_a.pdf'}\n"
@@ -178,9 +188,11 @@ async def test_a_failed_lookup_leaves_each_download_to_find_its_own(
         monkeypatch,
         {"2106.15928": (_PDF, "arXiv"), "2106.15929": (_PDF, "arXiv")},
     )
-    result = await _tool(tmp_path).call(
-        ToolContext(cwd=tmp_path),
-        {"ids": "2106.15928, 2106.15929"},
+    result = await settled(
+        _tool(tmp_path).call(
+            ToolContext(cwd=tmp_path),
+            {"ids": "2106.15928, 2106.15929"},
+        ),
     )
     assert result.is_error is False
     assert [(c.kwargs["oa_url"], c.kwargs["oa_looked_up"]) for c in calls] == [
@@ -199,9 +211,11 @@ async def test_every_paper_failing_is_one_error(
         monkeypatch,
         {"10.1000/a": PaperError("no a"), "10.1000/b": PaperError("no b")},
     )
-    result = await _tool(tmp_path).call(
-        ToolContext(cwd=tmp_path),
-        {"ids": ["10.1000/a", "10.1000/b"]},
+    result = await settled(
+        _tool(tmp_path).call(
+            ToolContext(cwd=tmp_path),
+            {"ids": ["10.1000/a", "10.1000/b"]},
+        ),
     )
     assert (result.is_error, result.text()) == (True, "no a\nno b")
     assert _names(tmp_path) == []
@@ -228,7 +242,7 @@ async def test_ids_that_name_no_paper_are_refused_before_any_download(
     calls = _downloads(monkeypatch)
     batches = _batches(monkeypatch)
     with pytest.raises(ValueError, match=message):
-        await _tool(tmp_path).call(ToolContext(cwd=tmp_path), arguments)
+        await _tool(tmp_path).call(ToolContext(cwd=tmp_path), arguments).result
     assert (calls, batches) == ([], [])
 
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+
+import itertools
 
 from wesearch.fetch import FetchSession, PolicyParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
@@ -13,10 +16,10 @@ from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.session.types import WebFetchResult
+from sagent.session.types import ToolResult, WebFetchResult
 from sagent.tools import web_fetch
 from sagent.tools.command_analyzer import invocations
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 from sagent.tools.web_fetch import WebFetch
 
 
@@ -64,14 +67,22 @@ class Fetches:
 def fetches(monkeypatch: pytest.MonkeyPatch) -> Fetches:
     fake = Fetches()
     monkeypatch.setattr(web_fetch, "fetch_web", fake)
+    # Each fetch takes 2.5 seconds on this clock.
+    clock = SimpleNamespace(monotonic=itertools.count(10.0, 2.5).__next__)
+    monkeypatch.setattr(web_fetch, "time", clock)
     return fake
 
 
 _CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
-def _error(text: str) -> WebFetchResult:
-    return WebFetchResult(call_id="", shown=text, is_error=True)
+def _error(text: str) -> ToolResult:
+    return ToolResult(
+        call_id="",
+        state="done",
+        stderr=(text,),
+        result=WebFetchResult(exit_code=1),
+    )
 
 
 @pytest.mark.parametrize(
@@ -153,15 +164,13 @@ def test_anything_else_stays_a_shell_command(command: str) -> None:
 @pytest.mark.asyncio
 async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
     tool = WebFetch()
-    result = await tool.call(_CONTEXT, {"url": "https://example.com"})
-    assert (result.url, result.content, result.size) == (
-        "https://example.com",
-        "page text\n",
-        10,
+    result = await settled(tool.call(_CONTEXT, {"url": "https://example.com"}))
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("page text\n",),
+        result=WebFetchResult(url="https://example.com", duration_sec=2.5, size=10),
     )
-    assert result.call_id == ""
-    assert result.duration_sec is not None
-    assert 0 <= result.duration_sec < 1
     assert fetches.seen == [
         {
             "url": "https://example.com",
@@ -177,9 +186,11 @@ async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
 
 @pytest.mark.asyncio
 async def test_a_lowercase_method_is_accepted(fetches: Fetches) -> None:
-    await WebFetch().call(
-        _CONTEXT,
-        {"url": "https://e.com", "method": "post"},
+    await settled(
+        WebFetch().call(
+            _CONTEXT,
+            {"url": "https://e.com", "method": "post"},
+        ),
     )
     assert fetches.seen[0]["method"] == "POST"
 
@@ -187,9 +198,13 @@ async def test_a_lowercase_method_is_accepted(fetches: Fetches) -> None:
 @pytest.mark.asyncio
 async def test_an_unknown_method_is_an_argument_error(fetches: Fetches) -> None:
     with pytest.raises(ValueError, match="'method' must be one of"):
-        _ = await WebFetch().call(
-            _CONTEXT,
-            {"url": "https://e.com", "method": "PUT"},
+        _ = (
+            await WebFetch()
+            .call(
+                _CONTEXT,
+                {"url": "https://e.com", "method": "PUT"},
+            )
+            .result
         )
     assert fetches.seen == []
 
@@ -211,9 +226,11 @@ async def test_a_body_must_fit_the_method(
     arguments: dict[str, PlainTree],
     error: str,
 ) -> None:
-    result = await WebFetch().call(
-        _CONTEXT,
-        {"url": "https://e.com", **arguments},
+    result = await settled(
+        WebFetch().call(
+            _CONTEXT,
+            {"url": "https://e.com", **arguments},
+        ),
     )
     assert result == _error(error)
     assert fetches.seen == []
@@ -222,17 +239,23 @@ async def test_a_body_must_fit_the_method(
 @pytest.mark.asyncio
 async def test_a_post_sends_its_body(fetches: Fetches) -> None:
     tool = WebFetch()
-    _ = await tool.call(
-        _CONTEXT,
-        {"url": "https://e.com", "method": "POST", "json": None},
+    _ = await settled(
+        tool.call(
+            _CONTEXT,
+            {"url": "https://e.com", "method": "POST", "json": None},
+        ),
     )
-    _ = await tool.call(
-        _CONTEXT,
-        {"url": "https://e.com", "method": "POST", "json": [1]},
+    _ = await settled(
+        tool.call(
+            _CONTEXT,
+            {"url": "https://e.com", "method": "POST", "json": [1]},
+        ),
     )
-    _ = await tool.call(
-        _CONTEXT,
-        {"url": "https://e.com", "method": "POST", "form": {"q": "x"}},
+    _ = await settled(
+        tool.call(
+            _CONTEXT,
+            {"url": "https://e.com", "method": "POST", "form": {"q": "x"}},
+        ),
     )
     assert [(s["json_body"], s["form_body"]) for s in fetches.seen] == [
         (NO_BODY, None),
@@ -244,10 +267,12 @@ async def test_a_post_sends_its_body(fetches: Fetches) -> None:
 @pytest.mark.asyncio
 async def test_a_call_may_choose_transport_and_extractor(fetches: Fetches) -> None:
     tool = WebFetch(policy=PolicyParams(transport="curl", extractor="raw"))
-    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
-    _ = await tool.call(
-        _CONTEXT,
-        {"url": "https://e.com", "transport": "stdlib", "extractor": "trafilatura"},
+    _ = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
+    _ = await settled(
+        tool.call(
+            _CONTEXT,
+            {"url": "https://e.com", "transport": "stdlib", "extractor": "trafilatura"},
+        ),
     )
     assert [(s["transport"], s["extractor"]) for s in fetches.seen] == [
         ("curl", "raw"),
@@ -265,8 +290,8 @@ async def test_a_get_is_cached_by_url_transport_and_extractor(fetches: Fetches) 
         {"url": "https://e.com", "extractor": "raw"},
         {"url": "https://e.com/other"},
     ):
-        result = await tool.call(_CONTEXT, arguments)
-        assert result.content == "page text\n"
+        result = await settled(tool.call(_CONTEXT, arguments))
+        assert result.text() == "page text\n"
     assert len(fetches.seen) == 4
 
 
@@ -274,10 +299,10 @@ async def test_a_get_is_cached_by_url_transport_and_extractor(fetches: Fetches) 
 async def test_a_post_is_never_replayed(fetches: Fetches) -> None:
     tool = WebFetch()
     post: dict[str, PlainTree] = {"url": "https://e.com", "method": "POST"}
-    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
-    _ = await tool.call(_CONTEXT, post)
-    _ = await tool.call(_CONTEXT, post)
-    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    _ = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
+    _ = await settled(tool.call(_CONTEXT, post))
+    _ = await settled(tool.call(_CONTEXT, post))
+    _ = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
     assert [s["method"] for s in fetches.seen] == ["GET", "POST", "POST"]
 
 
@@ -285,25 +310,28 @@ async def test_a_post_is_never_replayed(fetches: Fetches) -> None:
 async def test_a_long_page_is_cut_with_a_note(fetches: Fetches) -> None:
     fetches.text = "".join(f"line {i:03}\n" for i in range(100))
     context = ToolContext(cwd=Path("/"), max_result_chars=200)
-    result = await WebFetch().call(
-        context,
-        {"url": "https://e.com"},
+    result = await settled(
+        WebFetch().call(
+            context,
+            {"url": "https://e.com"},
+        ),
     )
-    assert result.content is not None
-    body, note = result.content.rsplit("\n... ", 1)
+    assert result.text() is not None
+    body, note = result.text().rsplit("\n... ", 1)
     kept = body.splitlines()
     assert kept == [f"line {i:03}" for i in range(len(kept))]
     assert note == f"({100 - len(kept):,} more lines omitted)"
-    assert len(result.content) <= 200
-    assert result.size == len(fetches.text)
+    assert len(result.text()) <= 200
 
 
 @pytest.mark.asyncio
 async def test_a_bot_block_says_how_to_clear_it(fetches: Fetches) -> None:
     fetches.error = CloudflareChallengeError(url="https://e.com")
-    result = await WebFetch().call(
-        _CONTEXT,
-        {"url": "https://e.com"},
+    result = await settled(
+        WebFetch().call(
+            _CONTEXT,
+            {"url": "https://e.com"},
+        ),
     )
     assert result == _error(CloudflareChallengeError.explain("https://e.com"))
 
@@ -320,10 +348,10 @@ async def test_a_bot_block_says_how_to_clear_it(fetches: Fetches) -> None:
 async def test_a_failed_fetch_says_why(fetches: Fetches, error: Exception) -> None:
     fetches.error = error
     tool = WebFetch()
-    result = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    result = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
     assert result == _error(f"Fetch failed: {error}")
     fetches.error = None
-    await tool.call(_CONTEXT, {"url": "https://e.com"})
+    await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
     assert len(fetches.seen) == 2
 
 

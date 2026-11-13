@@ -27,11 +27,13 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tools.watch import Feed, lines
 
 
@@ -74,13 +76,20 @@ class _Bash:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="ok")
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 def test_the_feed_shows_what_the_user_sees_and_stubs_the_rest() -> None:
@@ -92,7 +101,12 @@ def test_the_feed_shows_what_the_user_sees_and_stubs_the_rest() -> None:
             AssistantMessage(content="Reading first."),
             AssistantMessage(content=""),
             ToolCall(call_id="c1", name="Bash", arguments={"command": "pytest"}),
-            UncategorizedToolResult(call_id="c1", content="hidden too"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("hidden too",),
+                result=UncategorizedToolResult(),
+            ),
             ToolCall(call_id="c2", name="Gone"),
             AgentToAgentMessage(sender="kid", recipient="Agent", content="done"),
             SystemMessage(content=long, subtype="nudge"),

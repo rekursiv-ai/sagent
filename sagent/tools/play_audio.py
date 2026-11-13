@@ -6,7 +6,7 @@ effort: a host with no audio, such as one over SSH, still succeeds.
 
 Typical usage example:
 
-  result = await PlayAudio().call(context, {"path": "done.wav"})
+  result = await settled(PlayAudio().call(context, {"path": "done.wav"}))
 """
 
 from __future__ import annotations
@@ -24,7 +24,13 @@ import subprocess
 
 from sagent.session.types import PlayAudioResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -77,11 +83,11 @@ class PlayAudio:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> PlayAudioResult:
+    ) -> ToolStreamingResult[PlayAudioResult, str, str]:
         """Play the file at ``path``.
 
         Args:
@@ -89,10 +95,17 @@ class PlayAudio:
           arguments: ``path``, relative to ``context.cwd``.
 
         Returns:
-          result: What played, or why the file could not; a host with no audio
+          streaming_result: What played, or why the file could not; a host with no audio
             still succeeds, saying so.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PlayAudioResult, str, str]:
         path = context.path(parse(arguments, PlayAudio.Arguments).path)
         if not path.is_file():
             return _error(f"Not a file: {path}")
@@ -103,15 +116,13 @@ class PlayAudio:
         failure = await asyncio.to_thread(self._play, path)
         if failure:
             logger.warning("PlayAudio: %s", failure)
-            return PlayAudioResult(
-                call_id="",
-                path=str(path),
-                content=f"Played {path.name} (best effort): {failure}",
+            return ToolOutput(
+                stdout=(f"Played {path.name} (best effort): {failure}",),
+                result=PlayAudioResult(path=str(path)),
             )
-        return PlayAudioResult(
-            call_id="",
-            path=str(path),
-            content=f"Played {path.name}.",
+        return ToolOutput(
+            stdout=(f"Played {path.name}.",),
+            result=PlayAudioResult(path=str(path)),
         )
 
     def _play(self, path: Path) -> str:
@@ -157,5 +168,5 @@ class PlayAudio:
         return "no audio backend worked: " + "; ".join(tried)
 
 
-def _error(message: str) -> PlayAudioResult:
-    return PlayAudioResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[PlayAudioResult, str, str]:
+    return ToolOutput(stderr=(message,), result=PlayAudioResult(exit_code=1))

@@ -28,9 +28,15 @@ from sagent.host.session import serve
 from sagent.host.wire import MAX_LINE_BYTES
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import FunctionResult
+from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Tool, ToolContext
+from sagent.tools.types import (
+    Tool,
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -74,32 +80,38 @@ class Gate:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> FunctionResult:
-        """Wait for the gate; return who called.
+    ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
+        """Wait until the gate opens, then return the caller's label.
 
         Args:
-          context: The calling agent's state; its label is the answer.
+          context: The calling agent's state.
           arguments: Ignored.
 
         Returns:
-          result: ``open for LABEL``.
+          streaming_result: ``open for LABEL`` on standard output.
 
         """
         del arguments
+        return whole_output(self._wait(context))
+
+    async def _wait(
+        self,
+        context: ToolContext,
+    ) -> ToolOutput[UncategorizedToolResult, str, str]:
+        """Wait until the gate opens, then return ``open for LABEL`` as the output."""
         self.started.set()
         try:
             _ = await self.opened.wait()
         except asyncio.CancelledError:
             self.stopped.set()
             raise
-        return FunctionResult(
-            call_id="",
-            name="Gate",
-            content=f"open for {context.label}",
+        return ToolOutput(
+            stdout=(f"open for {context.label}",),
+            result=UncategorizedToolResult(),
         )
 
 

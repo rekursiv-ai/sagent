@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  result = await Write().call(context, {"file_path": "notes.md", "content": "hi"})
+  result = await settled(Write().call(context, {"file_path": "notes.md", "content": "hi"}))
 """
 
 from __future__ import annotations
@@ -20,7 +20,13 @@ from sagent.lib.userdirs import state_dir
 from sagent.providers.login import file_lock
 from sagent.session.types import WriteResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -70,11 +76,11 @@ class Write:
         """Return the file, so calls on one file run in order."""
         return str(context.path(str(arguments.get("file_path", ""))).resolve())
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WriteResult:
+    ) -> ToolStreamingResult[WriteResult, str, str]:
         """Write ``content`` to ``file_path``, keeping an existing file's mode.
 
         An existing file must have been read first, and not changed since, so
@@ -86,9 +92,16 @@ class Write:
             ``content``.
 
         Returns:
-          result: What was written, or why not.
+          streaming_result: What was written, or why not.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[WriteResult, str, str]:
         a = parse(arguments, Write.Arguments)
         path = context.path(a.file_path)
         async with file_lock(file_lock_path(path)):
@@ -153,7 +166,7 @@ def _write(
     context: ToolContext,
     path: Path,
     content: str,
-) -> WriteResult:
+) -> ToolOutput[WriteResult, str, str]:
     """Write ``content`` to ``path`` if the model has seen what it replaces."""
     if path.is_dir():
         return _error(f"{path} is a directory, not a file.")
@@ -166,8 +179,11 @@ def _write(
         )
     write_file(path, content.encode())
     context.files.saw(path)
-    return WriteResult(call_id="", path=str(path), content=content)
+    return ToolOutput(
+        stdout=(f"Wrote {path}.",),
+        result=WriteResult(path=str(path), content=content),
+    )
 
 
-def _error(message: str) -> WriteResult:
-    return WriteResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[WriteResult, str, str]:
+    return ToolOutput(stderr=(message,), result=WriteResult(exit_code=1))

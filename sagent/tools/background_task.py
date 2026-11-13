@@ -10,7 +10,7 @@ Typical usage example:
 
   tool = offered(Read())                     # what the model is shown
   delay = background_delay(call.arguments)   # None: run it now
-  result = await tool.call(context, without_controls(call.arguments))
+  streaming_result = tool.call(context, without_controls(call.arguments))
 """
 
 from __future__ import annotations
@@ -25,14 +25,20 @@ import time
 
 from treekle import PlainTree
 
-from sagent.session.types import BackgroundTaskResult
+from sagent.session.types import BackgroundTaskResult, ToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Tool, json_schema, parse
+from sagent.tools.types import (
+    Tool,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
     from sagent.runtime.types import Job
-    from sagent.session.types import AnyToolResult
     from sagent.tools.types import ToolContext
 
 
@@ -55,7 +61,7 @@ class JobTable(Protocol):
         """Return the calls still running, by call id."""
         ...
 
-    async def foreground(self, call_id: str) -> AnyToolResult | None:
+    async def foreground(self, call_id: str) -> ToolResult | None:
         """Wait for the background call ``call_id``; ``None`` if there is none."""
         ...
 
@@ -98,20 +104,20 @@ class BackgroundTask:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> BackgroundTaskResult:
+    ) -> ToolStreamingResult[BackgroundTaskResult, str, str]:
         """Refuse: the jobs are the runtime's, which calls :meth:`manage` instead."""
         del context, arguments
-        return _error("BackgroundTask runs only inside an agent's runtime.")
+        return whole_output(_refused())
 
     async def manage(
         self,
         table: JobTable,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolResult:
         """Do ``operation`` on ``table``'s background jobs.
 
         Args:
@@ -140,11 +146,11 @@ class BackgroundTask:
             if job is None:
                 return unknown
             job.cancel()
-            return BackgroundTaskResult(
+            return ToolResult(
                 call_id="",
-                operation="cancel",
-                job_id=a.id,
-                content=f"Cancelling {job.call.name} ({a.id}).",
+                state="done",
+                stdout=(f"Cancelling {job.call.name} ({a.id}).",),
+                result=BackgroundTaskResult(operation="cancel", job_id=a.id),
             )
         # A job already done may still be asked for: its result is given again.
         result = await table.foreground(a.id)
@@ -185,13 +191,13 @@ class Offered:
         """Return the tool's key for a call, without the control keys."""
         return self.tool.serialize_key(context, without_controls(arguments))
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[object, object, object]:
         """Run the tool, without the control keys."""
-        return await self.tool.call(context, without_controls(arguments))
+        return self.tool.call(context, without_controls(arguments))
 
 
 def backgroundable(tool: Tool) -> bool:
@@ -272,25 +278,23 @@ def without_controls(arguments: Mapping[str, PlainTree]) -> dict[str, PlainTree]
     return {k: v for k, v in arguments.items() if k not in ("background", "delay")}
 
 
-def _listing(jobs: Mapping[str, Job]) -> BackgroundTaskResult:
+def _listing(jobs: Mapping[str, Job]) -> ToolResult[BackgroundTaskResult]:
     """Return one row per job: id, tool, phase, and seconds since it was asked for."""
-    if not jobs:
-        return BackgroundTaskResult(
-            call_id="",
-            operation="list",
-            content="No background jobs.",
-        )
-    width = max(len(cid) for cid in jobs)
-    now = time.time()
-    rows = [
-        f"{cid:<{width}}  {job.call.name:<20}  {_phase(job):<8}  {now - job.started:.0f}s"
-        for cid, job in jobs.items()
-    ]
-    header = f"{'ID':<{width}}  {'TOOL':<20}  {'PHASE':<8}  ELAPSED"
-    return BackgroundTaskResult(
+    listing = "No background jobs."
+    if jobs:
+        width = max(len(cid) for cid in jobs)
+        now = time.time()
+        rows = [
+            f"{cid:<{width}}  {job.call.name:<20}  {_phase(job):<8}  {now - job.started:.0f}s"
+            for cid, job in jobs.items()
+        ]
+        header = f"{'ID':<{width}}  {'TOOL':<20}  {'PHASE':<8}  ELAPSED"
+        listing = "\n".join((header, *rows))
+    return ToolResult(
         call_id="",
-        operation="list",
-        content="\n".join((header, *rows)),
+        state="done",
+        stdout=(listing,),
+        result=BackgroundTaskResult(operation="list"),
     )
 
 
@@ -299,5 +303,19 @@ def _phase(job: Job) -> str:
     return "sleeping" if job.state == "sleeping" else "running"
 
 
-def _error(text: str) -> BackgroundTaskResult:
-    return BackgroundTaskResult(call_id="", shown=text, is_error=True)
+def _error(text: str) -> ToolResult[BackgroundTaskResult]:
+    """Return a done record with exit code 1 and ``text`` on standard error."""
+    return ToolResult(
+        call_id="",
+        state="done",
+        stderr=(text,),
+        result=BackgroundTaskResult(exit_code=1),
+    )
+
+
+async def _refused() -> ToolOutput[BackgroundTaskResult, str, str]:
+    """Return the output of a call made outside a runtime: an error saying so."""
+    return ToolOutput(
+        stderr=("BackgroundTask runs only inside an agent's runtime.",),
+        result=BackgroundTaskResult(exit_code=1),
+    )

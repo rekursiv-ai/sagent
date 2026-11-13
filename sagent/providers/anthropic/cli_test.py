@@ -37,7 +37,6 @@ from sagent.providers.testing import refuse_browsers
 from sagent.providers.types import HasLogin
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     Attachment,
     ContextClear,
@@ -45,12 +44,18 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Tool
+from sagent.tools.types import (
+    Tool,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 from sagent.types import AsyncResource
 
 
@@ -325,7 +330,12 @@ async def test_a_tool_call_is_held_until_its_result_is_answered(
     # The model calls our tool under the MCP server's name.
     assert response.records == (call,)
     assert response.stop_reason == "tool_use"
-    result = UncategorizedToolResult(call_id="toolu_1", content="x")
+    result = ToolResult(
+        call_id="toolu_1",
+        state="done",
+        stdout=("x",),
+        result=UncategorizedToolResult(),
+    )
     second = Request(records=(*first.records, call, result), tools=(_Echo(),))
     events = await _stream(model, second)
     assert _response(events).records == (AssistantMessage(content="Done"),)
@@ -354,7 +364,12 @@ async def test_notes_that_came_with_tool_results_reach_the_next_line_once(
     records += _response(await _stream(model, Request(records=records))).records
     for call_id, note in (("toolu_1", "One changed."), ("toolu_2", "Two changed.")):
         records += (
-            UncategorizedToolResult(call_id=call_id, content="ok"),
+            ToolResult(
+                call_id=call_id,
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
             SystemMessage(content=note),
         )
         records += _response(await _stream(model, Request(records=records))).records
@@ -383,7 +398,15 @@ async def test_a_tool_results_images_are_shrunk_before_answering(
     (call,) = _response(await _stream(model, first)).records
     wide = Attachment(mime_descriptor="image/png", data=_png(2_600, 1))
     pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF-1.4")
-    result = UncategorizedToolResult(call_id="toolu_1", attachments=(wide, pdf))
+    result = ToolResult(
+        call_id="toolu_1",
+        state="done",
+        stdout=(
+            wide,
+            pdf,
+        ),
+        result=UncategorizedToolResult(),
+    )
     await _stream(model, Request(records=(*first.records, call, result)))
     ((_, answered),) = shared.server.mounted.answered
     shrunk, kept = answered.attachments
@@ -475,7 +498,12 @@ async def test_results_for_only_some_held_calls_start_a_fresh_claude(
         "toolu_1",
         "toolu_2",
     ]
-    result = UncategorizedToolResult(call_id="toolu_1", content="one")
+    result = ToolResult(
+        call_id="toolu_1",
+        state="done",
+        stdout=("one",),
+        result=UncategorizedToolResult(),
+    )
     await _stream(model, Request(records=(*first.records, *calls, result)))
     assert shared.server.mounted.answered == []
     assert len(claude.processes()) == 2
@@ -504,7 +532,12 @@ async def test_a_call_that_never_reached_the_mount_starts_a_fresh_claude(
     model = _model(shared)
     first = Request(records=(UserMessage(content="echo x"),))
     (call,) = _response(await _stream(model, first)).records
-    result = UncategorizedToolResult(call_id="toolu_1", content="x")
+    result = ToolResult(
+        call_id="toolu_1",
+        state="done",
+        stdout=("x",),
+        result=UncategorizedToolResult(),
+    )
     events = await _stream(model, Request(records=(*first.records, call, result)))
     assert _response(events).records == (AssistantMessage(content="Recovered"),)
     started = claude.processes()
@@ -1095,9 +1128,11 @@ class _Mount:
     """Where the stub's tool calls would wait; it answers them all at once."""
 
     url: str = "http://127.0.0.1:9/mount-token"
-    offered: list[tuple[Tool, ...]] = field(default_factory=list[tuple["Tool", ...]])
-    answered: list[tuple[ToolCall, AnyToolResult]] = field(
-        default_factory=list[tuple[ToolCall, "AnyToolResult"]],
+    offered: list[tuple[Tool, ...]] = field(
+        default_factory=list[tuple["Tool", ...]],
+    )
+    answered: list[tuple[ToolCall, ToolResult]] = field(
+        default_factory=list[tuple[ToolCall, ToolResult]],
     )
     unanswerable: bool = False
     """Whether every call is one the CLI never made, as for a tool it lacks."""
@@ -1110,7 +1145,7 @@ class _Mount:
     async def called(self) -> ToolCall:
         raise AssertionError("The claude transport reads its calls from its output.")
 
-    async def answer(self, call: ToolCall, result: AnyToolResult) -> None:
+    async def answer(self, call: ToolCall, result: ToolResult) -> None:
         if self.unanswerable:
             raise TimeoutError
         self.answered.append((call, result))
@@ -1217,13 +1252,23 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context
-        return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
+        return ToolOutput(
+            stdout=(str(arguments.get("text")),),
+            result=UncategorizedToolResult(),
+        )
 
 
 def _streamed(*events: Mapping[str, object]) -> list[dict[str, object]]:

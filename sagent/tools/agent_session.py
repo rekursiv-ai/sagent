@@ -12,7 +12,7 @@ them: the whole session, what was pruned or compacted away included.
 Typical usage example:
 
   session = AgentSession(team=team)
-  result = await session.call(context, {"action": "estimate", "ids": [3, 7]})
+  result = await settled(session.call(context, {"action": "estimate", "ids": [3, 7]}))
 """
 
 from __future__ import annotations
@@ -51,7 +51,13 @@ from sagent.session.types import (
 )
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -138,11 +144,11 @@ class AgentSession:
         del context
         return "*" if arguments.get("action") in ("prune", "compact", "clear") else None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> SessionResult:
+    ) -> ToolStreamingResult[SessionResult, str, str]:
         """Act on the selected session; say what it found or will change.
 
         Args:
@@ -150,13 +156,20 @@ class AgentSession:
           arguments: What the model passed, as ``AgentSession.Arguments``.
 
         Returns:
-          result: What the action found, or what it queued.
+          streaming_result: What the action found, or what it queued.
 
         Raises:
           ValueError: The caller is in no team; an id names no entry, or no
             result where one is needed; an action lacks what it needs.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[SessionResult, str, str]:
         a = parse(arguments, AgentSession.Arguments)
         agent = target_agent(
             self.team,
@@ -173,17 +186,14 @@ class AgentSession:
         # thread, and a read by record from the first record asked.
         if a.action == "read" and a.records:
             start = max(0, min(a.records))
-            records = await asyncio.to_thread(_listed, agent.session.history(start))
-            return _said(
-                context,
-                a.action,
-                _records(
-                    records,
-                    a.records,
-                    start=start,
-                    total=len(agent.session.journal),
-                ),
+            shown = await asyncio.to_thread(
+                _records,
+                agent.session.history(start),
+                a.records,
+                start=start,
+                total=len(agent.session.journal),
             )
+            return _said(context, a.action, shown)
         if a.action == "read":
             picked = _picked(entries, a.ids)
             return _said(
@@ -199,23 +209,25 @@ class AgentSession:
             return _said(context, a.action, found)
         if a.action in ("estimate", "prune"):
             return self._prune(agent, entries, a)
-        loop = asyncio.get_running_loop()
+        # Each is queued behind this call's result: taken ahead of it, a clear or a
+        # compaction would detach the call.
+        calling = asyncio.current_task()
         if a.action == "clear":
-            loop.call_soon(agent.runtime.push, types.Clear())
-            return SessionResult(call_id="", action=a.action, content="Clear queued.")
+            agent.runtime.push_after(calling, types.Clear())
+            return ToolOutput(
+                stdout=("Clear queued.",),
+                result=SessionResult(action=a.action),
+            )
         compactor = agent.session.compactor
         summarizes = isinstance(compactor, SummaryCompactor)
         if not summarizes:
             raise ValueError("This agent has no compactor.")
         if a.style is not None:
             compactor.style = a.style
-        # Pushed now, the compaction would reach the runtime ahead of this call's
-        # result, and detach the call.
-        loop.call_soon(agent.runtime.push, types.Compact(args=a.prompt))
-        return SessionResult(
-            call_id="",
-            action=a.action,
-            content=f"Compaction queued ({compactor.style}).",
+        agent.runtime.push_after(calling, types.Compact(args=a.prompt))
+        return ToolOutput(
+            stdout=(f"Compaction queued ({compactor.style}).",),
+            result=SessionResult(action=a.action),
         )
 
     def _prune(
@@ -223,14 +235,14 @@ class AgentSession:
         agent: Agent,
         entries: Sequence[ModelContextEvent],
         a: AgentSession.Arguments,
-    ) -> SessionResult:
+    ) -> ToolOutput[SessionResult, str, str]:
         """Weigh dropping the results ``a.ids``; for ``prune``, queue the drop."""
         picked = _picked(entries, a.ids)
         kept = [
             i
             for i in picked
             if not isinstance(result := entries[i], ToolResult)
-            or result.stub is not None
+            or result.state in ("pending", "cancelled")
         ]
         if kept:
             raise ValueError(f"#{kept[0]} is no tool result that can be pruned.")
@@ -259,7 +271,10 @@ class AgentSession:
                 f" about ${dollars:.4f} over the requests left before compaction.",
             )
         if a.action == "estimate":
-            return SessionResult(call_id="", action=a.action, content="\n".join(lines))
+            return ToolOutput(
+                stdout=("\n".join(lines),),
+                result=SessionResult(action=a.action),
+            )
         # By call id, since positions may move before the drop runs.
         ids = {r.call_id for i in picked if isinstance(r := entries[i], ToolResult)}
         runtime = agent.runtime
@@ -276,15 +291,13 @@ class AgentSession:
                 stub=self.stub,
             )
 
-        loop = asyncio.get_running_loop()
-        loop.call_soon(
-            runtime.push,
-            types.Scheduled(work=work, done=loop.create_future()),
+        runtime.push_after(
+            asyncio.current_task(),
+            types.Scheduled(work=work, done=asyncio.get_running_loop().create_future()),
         )
-        return SessionResult(
-            call_id="",
-            action=a.action,
-            content="\n".join([f"Prune queued: {a.reason.strip()}", *lines]),
+        return ToolOutput(
+            stdout=("\n".join([f"Prune queued: {a.reason.strip()}", *lines]),),
+            result=SessionResult(action=a.action),
         )
 
 
@@ -320,7 +333,8 @@ def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str
             if isinstance(r, ToolCall)
         }
         kind = f"result of {named.get(entry.call_id, '?')}"
-        return f"{entry.stub} {kind}" if entry.stub is not None else kind
+        stand_in = entry.state in ("pending", "cancelled")
+        return f"{entry.state} {kind}" if stand_in else kind
     if isinstance(entry, Response):
         called = [r.name for r in entry.records if isinstance(r, ToolCall)]
         return f"your turn, calling {', '.join(called)}" if called else "your turn"
@@ -333,33 +347,33 @@ def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str
     return "user message"
 
 
-def _listed(records: Iterable[SessionRecord]) -> list[SessionRecord]:
-    """Return ``records`` read into a list, as a worker thread reads a long journal."""
-    return list(records)
-
-
-# ``records`` are the session's from record ``start``, of ``total``.
+# ``records`` are the session's from record ``start``, of ``total``, read once as
+# they come: a worker thread that holds a long session decoded keeps its heap.
 def _records(
-    records: Sequence[SessionRecord],
+    records: Iterable[SessionRecord],
     wanted: Sequence[int],
     *,
     start: int,
     total: int,
 ) -> str:
     """Return each record numbered in ``wanted``, whole; a call with its result."""
-    out: list[str] = []
+    shown: dict[int, list[str]] = {}
     for n in sorted(set(wanted)):
         if n < 0 or n >= total:
             raise ValueError(f"No record {n}; the session has {total}.")
-        record = records[n - start]
-        out.append(f"record {n}, {type(record).__name__}:\n{_record_text(record)}")
-        if isinstance(record, ToolCall):
-            out.extend(
-                f"its result, record {m}:\n{_record_text(r)}"
-                for m, r in enumerate(records[n - start + 1 :], n + 1)
-                if isinstance(r, ToolResult) and r.call_id == record.call_id
+        shown[n] = []
+    calls: dict[str, list[int]] = {}
+    for m, record in enumerate(records, start):
+        if isinstance(record, ToolResult):
+            for n in calls.get(record.call_id, ()):
+                shown[n].append(f"its result, record {m}:\n{_record_text(record)}")
+        if m in shown:
+            shown[m].append(
+                f"record {m}, {type(record).__name__}:\n{_record_text(record)}",
             )
-    return "\n\n".join(out)
+            if isinstance(record, ToolCall):
+                calls.setdefault(record.call_id, []).append(m)
+    return "\n\n".join(part for parts in shown.values() for part in parts)
 
 
 def _search(records: Iterable[SessionRecord], wanted: str) -> str:
@@ -394,7 +408,11 @@ def _record_text(record: SessionRecord) -> str:
     return ""
 
 
-def _said(context: ToolContext, action: str, body: str) -> SessionResult:
+def _said(
+    context: ToolContext,
+    action: str,
+    body: str,
+) -> ToolOutput[SessionResult, str, str]:
     """Return ``body`` as the result, cut at a line to what one result may hold."""
     fitted, _ = context.fit(body.splitlines(keepends=True))
-    return SessionResult(call_id="", action=action, content=fitted)
+    return ToolOutput(stdout=(fitted,), result=SessionResult(action=action))

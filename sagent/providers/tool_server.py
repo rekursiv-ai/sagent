@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import uvicorn
 
     from sagent.providers.types import ToolMount
-    from sagent.session.types import AnyToolResult
+    from sagent.session.types import ToolResult
     from sagent.tools.types import Tool
 else:
     from wrapt import lazy_import
@@ -111,7 +111,7 @@ class McpMount:
             held = self._unreported.pop(0)
         return ToolCall(call_id=held.call_id, name=held.name, arguments=held.arguments)
 
-    async def answer(self, call: ToolCall, result: AnyToolResult) -> None:
+    async def answer(self, call: ToolCall, result: ToolResult) -> None:
         """Complete the waiting call that ``call`` describes with ``result``.
 
         A CLI's call carries no id, so it is matched by name and arguments.
@@ -347,7 +347,7 @@ class _Held:
     reply: asyncio.Future[mcp_types.CallToolResult]
 
 
-def _reply(result: AnyToolResult) -> mcp_types.CallToolResult:
+def _reply(result: ToolResult) -> mcp_types.CallToolResult:
     """Return ``result`` as an MCP ``tools/call`` reply, with its images."""
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(text=result.text()),
@@ -360,7 +360,7 @@ def _reply(result: AnyToolResult) -> mcp_types.CallToolResult:
         for attachment in result.attachments
         if attachment.mime_descriptor.startswith("image/")
     )
-    return mcp_types.CallToolResult(content=blocks, is_error=result.is_error is True)
+    return mcp_types.CallToolResult(content=blocks, is_error=result.is_error)
 
 
 class _Listener(Protocol):

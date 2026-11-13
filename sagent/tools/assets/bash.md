@@ -18,7 +18,7 @@ The Avoid column is not a style preference. `Read` returns numbered lines you ca
 | Display text | respond directly | `echo`, `printf` |
 
 - Absolute paths keep the session cwd consistent; `cd` only when asked. Quote paths with spaces.
-- `timeout` in ms kills the command; cap and default 600000 ms. A command still running after 30 s is answered with a note that it runs on, and its result arrives in a later message.
+- `timeout` in ms kills the command; cap and default 600000 ms.
 - Independent commands -> parallel Bash calls. Dependent -> chain with `&&`.
 - NEVER chain to inspect files. `cat`/`sed`/`grep`/`head` with a filename -- alone, behind `cd X &&`, inside `for f in ...; do`, or piped to `head` -- is Bash impersonating Read and Grep, and the chain form is the one that slips past review. Ten files means ten Read calls in ONE block, not one `for` loop. Same round-trip, and you get line numbers to cite.
 - Confirm parents with `Glob`/`List` before creating.

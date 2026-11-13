@@ -30,6 +30,7 @@ from sagent.tools.command_analyzer import (
     sed_mutates,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
 
 if TYPE_CHECKING:
@@ -60,13 +61,20 @@ class _Peer:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="")
+        return ToolOutput(result=UncategorizedToolResult())
 
     def from_shell(
         self,

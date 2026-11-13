@@ -30,7 +30,7 @@ async def test_endpoint_auth_and_native_request() -> None:
             records=(
                 UserMessage(content="hi"),
                 ToolCall(call_id="c", name="Read"),
-                ToolResult(call_id="c", shown="result"),
+                ToolResult(call_id="c", state="done", shown="result"),
             ),
         ),
         model=model,

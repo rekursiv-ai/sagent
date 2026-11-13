@@ -47,13 +47,19 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -137,13 +143,23 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context
-        return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
+        return ToolOutput(
+            stdout=(str(arguments.get("text")),),
+            result=UncategorizedToolResult(),
+        )
 
 
 def test_encode_names_the_vendor_id_and_streams() -> None:
@@ -265,8 +281,18 @@ def test_records_of_one_role_share_one_message() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="a", name="Echo", arguments={"text": "1"}),
             ToolCall(call_id="b", name="Echo", arguments={"text": "2"}),
-            UncategorizedToolResult(call_id="a", content="1"),
-            UncategorizedToolResult(call_id="b", content="2"),
+            ToolResult(
+                call_id="a",
+                state="done",
+                stdout=("1",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="b",
+                state="done",
+                stdout=("2",),
+                result=UncategorizedToolResult(),
+            ),
             UserMessage(content="next"),
         ],
     )
@@ -285,8 +311,18 @@ def test_tool_ids_are_renamed_consistently_within_a_request() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="fc_1", name="Echo", arguments={"text": "x"}),
             ToolCall(call_id="fc_2", name="Echo"),
-            UncategorizedToolResult(call_id="fc_2", content="b"),
-            UncategorizedToolResult(call_id="fc_1", content="a"),
+            ToolResult(
+                call_id="fc_2",
+                state="done",
+                stdout=("b",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="fc_1",
+                state="done",
+                stdout=("a",),
+                result=UncategorizedToolResult(),
+            ),
         ],
     )
     calls, results = _blocks(messages[1]), _blocks(messages[2])
@@ -303,8 +339,13 @@ def test_a_tool_result_carries_its_error_flag_and_its_text() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="a", name="Echo"),
             ToolCall(call_id="b", name="Echo"),
-            UncategorizedToolResult(call_id="a", content="boom", is_error=True),
-            UncategorizedToolResult(call_id="b"),
+            ToolResult(
+                call_id="a",
+                state="done",
+                stdout=("boom",),
+                result=UncategorizedToolResult(exit_code=1),
+            ),
+            ToolResult(call_id="b", state="done", result=UncategorizedToolResult()),
         ],
     )
     failed, empty = _blocks(messages[2])
@@ -456,7 +497,12 @@ def test_a_context_clear_sends_its_summary_then_its_history() -> None:
                 history=(
                     UserMessage(content="a"),
                     ToolCall(call_id="fc_9", name="Echo"),
-                    UncategorizedToolResult(call_id="fc_9", content="b"),
+                    ToolResult(
+                        call_id="fc_9",
+                        state="done",
+                        stdout=("b",),
+                        result=UncategorizedToolResult(),
+                    ),
                 ),
             ),
             ToolCall(call_id="fc_9", name="Echo"),
@@ -805,7 +851,12 @@ def test_attachments_ride_user_messages_and_tool_results() -> None:
         [
             UserMessage(content="see", attachments=(image,)),
             ToolCall(call_id="a", name="Echo"),
-            UncategorizedToolResult(call_id="a", attachments=(image,)),
+            ToolResult(
+                call_id="a",
+                state="done",
+                stdout=(image,),
+                result=UncategorizedToolResult(),
+            ),
         ],
     )
     assert [b["type"] for b in _blocks(messages[0])] == ["text", "image"]

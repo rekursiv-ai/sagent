@@ -1134,7 +1134,7 @@ def _skills_loaded(history: Sequence[ModelContextEvent]) -> list[str]:
                 and isinstance(name := r.arguments.get("skill"), str)
             )
         elif isinstance(entry, ToolResult) and entry.call_id in loads:
-            if entry.is_error is not True and entry.stub is None:
+            if entry.state == "done" and not entry.is_error:
                 seen.append(loads[entry.call_id])
         elif isinstance(entry, (UserMessage, AgentToAgentMessage)):
             # Restored blocks are written newest first. The names ride with the

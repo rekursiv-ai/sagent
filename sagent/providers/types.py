@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.login import Logins
-    from sagent.session.types import AnyToolResult, Attachment, ToolCall
+    from sagent.session.types import Attachment, ToolCall, ToolResult
     from sagent.tools.types import Tool
 
 
@@ -94,7 +94,7 @@ class ToolMount(Protocol):
         """Wait for the next call a CLI makes here, and return it as the model made it."""
         ...
 
-    async def answer(self, call: ToolCall, result: AnyToolResult) -> None:
+    async def answer(self, call: ToolCall, result: ToolResult) -> None:
         """Complete the waiting call that ``call`` describes with ``result``."""
         ...
 

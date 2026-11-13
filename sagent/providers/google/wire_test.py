@@ -33,17 +33,18 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     Attachment,
-    BashResult,
     ContextClear,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
         ThinkingEffort,
         ThinkingOutput,
     )
-    from sagent.session.types import AnyToolResult, SessionRecord
+    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 
@@ -163,12 +164,21 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
             extra={"thoughtSignature": "sig-a"},
         ),
         ToolCall(call_id="c2", name="Bash", arguments={"cmd": "pwd"}),
-        UncategorizedToolResult(
+        ToolResult(
             call_id="c1",
-            content="a.py",
-            attachments=(Attachment(mime_descriptor="image/png", data=png),),
+            state="done",
+            stdout=(
+                "a.py",
+                Attachment(mime_descriptor="image/png", data=png),
+            ),
+            result=UncategorizedToolResult(),
         ),
-        BashResult(call_id="c2", stdout="denied", is_error=True),
+        ToolResult(
+            call_id="c2",
+            state="done",
+            stdout=("denied",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
         TokenUsage(),
         UserMessage(content="and?"),
     )
@@ -205,12 +215,25 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
 
 
 def test_a_result_whose_call_is_gone_is_named_by_its_id() -> None:
-    contents = _contents(UncategorizedToolResult(call_id="lost", content="x"))
+    contents = _contents(
+        ToolResult(
+            call_id="lost",
+            state="done",
+            stdout=("x",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert _first_part(contents)["functionResponse"]["name"] == "lost"
 
 
 def test_an_empty_error_result_gets_no_error_mark() -> None:
-    contents = _contents(UncategorizedToolResult(call_id="c", is_error=True))
+    contents = _contents(
+        ToolResult(
+            call_id="c",
+            state="done",
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+    )
     assert _first_part(contents)["functionResponse"]["response"] == {"content": ""}
 
 
@@ -286,7 +309,12 @@ def test_a_context_clear_sends_its_summary_then_its_history() -> None:
             summary="We fixed it.",
             history=(
                 ToolCall(call_id="c", name="Read", arguments={}),
-                UncategorizedToolResult(call_id="c", content="text"),
+                ToolResult(
+                    call_id="c",
+                    state="done",
+                    stdout=("text",),
+                    result=UncategorizedToolResult(),
+                ),
             ),
         ),
         ContextClear(history=(UserMessage(content="next"),)),
@@ -1279,13 +1307,20 @@ class _Tool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="")
+        return ToolOutput(result=UncategorizedToolResult())
 
 
 if __name__ == "__main__":

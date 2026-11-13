@@ -1,14 +1,17 @@
-"""Tests for the tool argument schema, argument parsing, and per-agent state."""
+"""Tests for what a tool is, its argument schema and parsing, and per-agent state."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Generic, Literal, cast
+from typing_extensions import TypeVar
 from unittest.mock import Mock
 
+import asyncio
 import os
+import re
 
 from treekle import PlainTree
 from wesearch.fetch import FetchSession
@@ -16,13 +19,26 @@ from wesearch.fetch.session import default_session
 
 import pytest
 
+from sagent.session.types import (
+    Attachment,
+    Splice,
+    ToolResult,
+    UncategorizedToolResult,
+)
+from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
     FileTracker,
+    Stream,
+    Tool,
     ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
     checked,
     json_schema,
     parse,
+    settled,
+    whole_output,
 )
 
 
@@ -43,6 +59,336 @@ class _Arguments:
     headers: Annotated[Mapping[str, str] | None, "Headers."] = None
     body: Annotated[PlainTree, "Anything."] = None
     before: Annotated[int, "Lines before.", Arg(key="-B")] = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Whole[O, E]:
+    """A tool that does not stream: it returns ``output``, or raises ``error``."""
+
+    output: ToolOutput[UncategorizedToolResult, O, E]
+    error: Exception | None = None
+
+    name = "Whole"
+    description = "Say what it was built with."
+    schema = json_schema(_Arguments)
+    display: ToolDisplay = field(default=ToolDisplay())
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return "Whole"
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, O, E]:
+        del context, arguments
+        return whole_output(self._run())
+
+    async def _run(self) -> ToolOutput[UncategorizedToolResult, O, E]:
+        if self.error is not None:
+            raise self.error
+        return self.output
+
+
+_CONTEXT: Final = ToolContext(cwd=Path("/"))
+
+
+@pytest.mark.asyncio
+async def test_a_text_tool_writes_text_and_returns_its_exit_code() -> None:
+    """A bare ``Tool`` writes text on both streams and returns an exit code."""
+    bash: Tool = _Whole[str, str](
+        output=ToolOutput(
+            stdout=("out\n",),
+            stderr=("warn\n",),
+            result=UncategorizedToolResult(exit_code=2),
+        ),
+    )
+
+    streaming_result = bash.call(_CONTEXT, {})
+
+    assert [line async for line in streaming_result.stdout] == ["out\n"]
+    assert [line async for line in streaming_result.stderr] == ["warn\n"]
+    assert await streaming_result.result == UncategorizedToolResult(exit_code=2)
+
+
+@pytest.mark.asyncio
+async def test_a_structured_tool_writes_typed_items_beside_its_text() -> None:
+    """As Edit does: a ``Splice`` on stdout after the line the model reads."""
+    edit = Splice(before="a", after="b", start=3, count=1)
+    tool: Tool[UncategorizedToolResult, Splice | str, str] = _Whole[Splice | str, str](
+        output=ToolOutput(
+            stdout=("Edited a.py.", edit),
+            result=UncategorizedToolResult(),
+        ),
+    )
+
+    result = await settled(tool.call(_CONTEXT, {}), call_id="c1")
+
+    assert result == ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("Edited a.py.", edit),
+        result=UncategorizedToolResult(),
+    )
+    assert result.text() == "Edited a.py."
+
+
+@pytest.mark.asyncio
+async def test_tools_with_different_item_types_fit_one_any_tool_list() -> None:
+    """A runtime keeps its tools in one list and settles each the same way."""
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    tools: list[Tool] = [
+        _Whole[str, str](
+            output=ToolOutput(stdout=("text",), result=UncategorizedToolResult()),
+        ),
+        _Whole[Splice | str, str](
+            output=ToolOutput(
+                stdout=(Splice(after="x"),),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+        _Whole[Attachment | str, str](
+            output=ToolOutput(
+                stdout=("[image]", image),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    ]
+
+    done = [await settled(tool.call(_CONTEXT, {})) for tool in tools]
+
+    assert [result.text() for result in done] == ["text", "", "[image]"]
+    assert [result.attachments for result in done] == [(), (), (image,)]
+
+
+@pytest.mark.asyncio
+async def test_a_call_starts_at_once_and_its_streams_need_no_reader() -> None:
+    """The tool finishes with both streams unread; awaiting the result is enough."""
+    ran: list[str] = []
+
+    async def tool_output() -> ToolOutput[UncategorizedToolResult, str, str]:
+        ran.append("ran")
+        return ToolOutput(stdout=("out",), result=UncategorizedToolResult(exit_code=3))
+
+    streaming_result = whole_output(tool_output())
+    await asyncio.sleep(0)
+
+    assert ran == ["ran"]
+    assert await streaming_result.result == UncategorizedToolResult(exit_code=3)
+
+
+def test_an_output_requires_a_result_and_defaults_to_no_output() -> None:
+    with pytest.raises(TypeError, match="result"):
+        _ = cast("Callable[..., object]", ToolOutput)(stdout=("out",))
+    assert ToolOutput(result=UncategorizedToolResult()) == ToolOutput(
+        stdout=(),
+        stderr=(),
+        result=UncategorizedToolResult(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_raised_writes_nothing_and_its_result_raises() -> None:
+    tool = _Whole[str, str](
+        output=ToolOutput(stdout=("never",), result=UncategorizedToolResult()),
+        error=ValueError("no"),
+    )
+
+    streaming_result = tool.call(_CONTEXT, {})
+
+    assert [line async for line in streaming_result.stdout] == []
+    assert [line async for line in streaming_result.stderr] == []
+    with pytest.raises(ValueError, match="no"):
+        _ = await streaming_result.result
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_s_record_ends_stderr_with_the_error() -> None:
+    tool = _Whole[str, str](
+        output=ToolOutput(result=UncategorizedToolResult()),
+        error=ValueError("no"),
+    )
+
+    result = await settled(tool.call(_CONTEXT, {}), call_id="c1")
+
+    assert result == ToolResult(
+        call_id="c1",
+        state="failed",
+        stderr=("ValueError: no",),
+    )
+    assert result.is_error
+    assert result.text() == "ValueError: no"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_gives_what_was_written_in_order_until_closed() -> None:
+    stream = Stream[str]()
+    stream.write("a")
+    stream.write("b")
+    stream.close()
+
+    assert [item async for item in stream] == ["a", "b"]
+    assert [item async for item in stream] == []
+
+
+@pytest.mark.asyncio
+async def test_a_stream_gives_an_item_written_while_it_is_read() -> None:
+    stream = Stream[int]()
+    reading = asyncio.ensure_future(anext(stream))
+    await asyncio.sleep(0)
+    assert not reading.done()
+
+    stream.write(7)
+
+    assert await reading == 7
+
+
+async def _lines(
+    out: Stream[str],
+    err: Stream[str],
+    stop: asyncio.Event,
+) -> UncategorizedToolResult:
+    """Write a line on each stream, then run until ``stop`` or a cancel."""
+    out.write("out\n")
+    err.write("err\n")
+    try:
+        _ = await stop.wait()
+    finally:
+        out.close()
+        err.close()
+    return UncategorizedToolResult()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_call_stops_its_tool_and_keeps_its_output() -> None:
+    """A cancelled ``settled`` returns the record; it does not raise."""
+    out, err, stop = Stream[str](), Stream[str](), asyncio.Event()
+    result_future = asyncio.ensure_future(_lines(out, err, stop))
+    waiting = asyncio.ensure_future(
+        settled(
+            ToolStreamingResult(result=result_future, stdout=out, stderr=err),
+            call_id="c1",
+        ),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    _ = waiting.cancel()
+    result = await waiting
+
+    assert result_future.cancelled()
+    assert result == ToolResult(
+        call_id="c1",
+        state="cancelled",
+        stdout=("out\n",),
+        stderr=("err\n",),
+    )
+
+
+async def _broken() -> AsyncIterator[str]:
+    """Yield a line, then raise as reading a lost pipe does."""
+    yield "out\n"
+    raise OSError("pipe lost")
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_breaks_fails_the_call_once_its_tool_has_stopped() -> None:
+    err, stop = Stream[str](), asyncio.Event()
+    result_future = asyncio.ensure_future(stop.wait())
+
+    result = await settled(
+        ToolStreamingResult(result=result_future, stdout=_broken(), stderr=err),
+        call_id="c1",
+    )
+
+    assert result == ToolResult(
+        call_id="c1",
+        state="failed",
+        stdout=("out\n",),
+        stderr=("OSError: pipe lost",),
+    )
+    assert result_future.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_twice_still_waits_for_its_tool_to_stop() -> None:
+    """A second cancel must not return while the tool is still stopping."""
+    out, err, stopped = Stream[str](), Stream[str](), asyncio.Event()
+
+    async def slow_to_stop() -> int:
+        try:
+            _ = await asyncio.Event().wait()
+        finally:
+            _ = await stopped.wait()
+        return 0
+
+    result_future = asyncio.ensure_future(slow_to_stop())
+    waiting = asyncio.ensure_future(
+        settled(ToolStreamingResult(result=result_future, stdout=out, stderr=err)),
+    )
+    await asyncio.sleep(0)
+    _ = waiting.cancel()
+    await asyncio.sleep(0)
+    _ = waiting.cancel()
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    stopped.set()
+
+    assert (await waiting).state == "cancelled"
+    assert result_future.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_relays_a_record_has_it_returned_for_this_call() -> None:
+    """As RemoteTool: the call ran elsewhere, and the tool's result is its record."""
+    far = ToolResult(call_id="far", state="failed", stderr=("no such file",))
+    out, err = Stream[object](), Stream[object]()
+    out.close()
+    err.close()
+    relayed = asyncio.Future[ToolResult]()
+    relayed.set_result(far)
+
+    result = await settled(
+        ToolStreamingResult(result=relayed, stdout=out, stderr=err),
+        call_id="here",
+    )
+
+    assert result == ToolResult(
+        call_id="here",
+        state="failed",
+        stderr=("no such file",),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_live_call_is_recorded_once_its_streams_end() -> None:
+    out, err, stop = Stream[str](), Stream[str](), asyncio.Event()
+    result_future = asyncio.ensure_future(_lines(out, err, stop))
+    waiting = asyncio.ensure_future(
+        settled(ToolStreamingResult(result=result_future, stdout=out, stderr=err)),
+    )
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    stop.set()
+
+    assert await waiting == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("out\n",),
+        stderr=("err\n",),
+        result=UncategorizedToolResult(),
+    )
 
 
 def test_schema_names_each_field_and_requires_those_without_defaults() -> None:
@@ -272,6 +618,78 @@ def _holding[R](record: R, **fields: object) -> R:
     for name, value in fields.items():
         object.__setattr__(record, name, value)
     return record
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Boxed[T]:
+    """A generic record, as ``ToolResult`` is."""
+
+    item: T
+    items: tuple[T, ...] = ()
+    name: str = ""
+
+
+_Item_co = TypeVar("_Item_co", covariant=True, default=str)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Defaulted(Generic[_Item_co]):
+    """A record whose type parameter has a default, as ``ToolOutput``'s have."""
+
+    item: _Item_co
+
+
+@pytest.mark.parametrize(
+    ("hint", "value"),
+    [
+        (object, _Other(name="a")),
+        (_Boxed[int], _Boxed(item=1, items=(2, 3))),
+        (_Boxed, _Boxed(item=_Other(name="a"), items=("b", 1))),
+        (_Defaulted, _Defaulted(item="a")),
+        (
+            ToolResult[UncategorizedToolResult, Splice | str, str],
+            ToolResult(call_id="1", state="done", stdout=("a", Splice(after="b"))),
+        ),
+    ],
+    ids=["object", "parameterized", "bare", "defaulted", "tool-result"],
+)
+def test_checked_takes_a_generic_record_whose_items_are_of_its_parameters(
+    hint: object,
+    value: object,
+) -> None:
+    assert checked(value, hint, key="x") is value
+
+
+def test_checked_takes_anything_for_a_type_parameter_with_no_default() -> None:
+    """On 3.12 a plain type parameter has no ``__default__``; this stands in for one."""
+    parameter = Mock(spec=type(_Item_co))
+    del parameter.__default__
+
+    assert checked(3, parameter, key="x") == 3
+
+
+@pytest.mark.parametrize(
+    ("hint", "value", "where"),
+    [
+        (_Boxed[int], _Boxed(item="a"), "x.item"),
+        (_Boxed[int], _Boxed(item=1, items=("a",)), "x.items"),
+        (_Boxed[int], _holding(_Boxed(item=1), name=2), "x.name"),
+        (_Defaulted, _Defaulted(item=1), "x.item"),
+        (
+            ToolResult[UncategorizedToolResult, Splice | str, str],
+            ToolResult(call_id="1", state="done", stderr=(Splice(after="b"),)),
+            "x.stderr",
+        ),
+    ],
+    ids=["item", "items", "plain", "default", "structured"],
+)
+def test_checked_refuses_a_generic_record_holding_what_its_parameters_are_not(
+    hint: object,
+    value: object,
+    where: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"^'{re.escape(where)}"):
+        _ = checked(value, hint, key="x")
 
 
 _INNER: Final = _Inner(name="a")

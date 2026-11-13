@@ -2,7 +2,8 @@
 
 Typical usage example:
 
-  result = await WebSearch().call(context, {"query": "python 3.14 release notes"})
+  streaming_result = WebSearch().call(context, {"query": "python 3.14 release notes"})
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
@@ -22,12 +23,15 @@ from wesearch.search.search import search
 from wesearch.search.types import SearchBackends, SearxngCategory
 from wesearch.types.errors import BotDetectionError
 
-from sagent.session.types import (
-    WebSearchHit,
-    WebSearchResult,
-)
+from sagent.session.types import WebSearchHit, WebSearchResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -97,11 +101,11 @@ class WebSearch:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WebSearchResult:
+    ) -> ToolStreamingResult[WebSearchResult, WebSearchHit | str, str]:
         """Search for ``query``, scoped to the domains given.
 
         Args:
@@ -109,9 +113,16 @@ class WebSearch:
           arguments: What the model passed, as ``WebSearch.Arguments``.
 
         Returns:
-          result: The hits that fit in one result, or why there are none.
+          streaming_result: The hits that fit in one result, or why there are none.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[WebSearchResult, WebSearchHit | str, str]:
         a = parse(arguments, WebSearch.Arguments)
         # Only a bare hostname is spliced in, so a filter cannot carry query
         # syntax that widens the scope (``x.com -site:trusted.com``).
@@ -144,25 +155,33 @@ class WebSearch:
         except (RuntimeError, ValueError) as e:
             return _error(str(e))
         if not hits:
-            return WebSearchResult(call_id="", query=a.query, shown="(no results)")
+            return ToolOutput(
+                stdout=("(no results)",),
+                result=WebSearchResult(query=a.query),
+            )
+        # Title, URL, then the snippet plus the fields its category adds: a
+        # paper's DOI, a video's duration, a package's version.
         results = tuple(
             WebSearchHit(
                 url=hit.url,
                 title=hit.title,
-                # The snippet plus the fields its category adds: a paper's
-                # DOI, a video's duration, a package's version.
                 snippet=format_result(hit).partition("\n")[2],
             )
             for hit in hits
         )
         _, kept = context.fit(f"{r.title}\n{r.url}\n{r.snippet}\n\n" for r in results)
-        return WebSearchResult(
-            call_id="",
-            query=a.query,
-            duration_sec=time.monotonic() - started,
-            content=results[:kept],
+        shown = results[:kept]
+        return ToolOutput(
+            stdout=(
+                "\n\n".join(f"{r.title}\n{r.url}\n{r.snippet}" for r in shown),
+                *shown,
+            ),
+            result=WebSearchResult(
+                query=a.query,
+                duration_sec=time.monotonic() - started,
+            ),
         )
 
 
-def _error(message: str) -> WebSearchResult:
-    return WebSearchResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[WebSearchResult, str, str]:
+    return ToolOutput(stderr=(message,), result=WebSearchResult(exit_code=1))

@@ -5,7 +5,7 @@ and returns absolute paths of files only.
 
 Typical usage example:
 
-  result = await Glob().call(context, {"pattern": "**/*.py", "sort": "mtime_desc"})
+  result = await settled(Glob().call(context, {"pattern": "**/*.py", "sort": "mtime_desc"}))
 """
 
 from __future__ import annotations
@@ -27,7 +27,14 @@ from sagent.tools.command_analyzer import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.list import Sort, ls_row, sort_paths
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -149,11 +156,11 @@ class Glob:
             arguments["max_results"] = count
         return arguments
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> GlobResult:
+    ) -> ToolStreamingResult[GlobResult, str, str]:
         """Find files under ``path`` matching ``pattern``.
 
         An absolute ``pattern`` ignores ``path``.
@@ -163,30 +170,32 @@ class Glob:
           arguments: What the model passed, as ``Glob.Arguments``.
 
         Returns:
-          result: One absolute path per line, with a note to resume when cut.
+          streaming_result: One absolute path per line, with a note to resume when cut.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[GlobResult, str, str]:
         return await asyncio.to_thread(_glob, context, parse(arguments, Glob.Arguments))
 
 
-def _glob(context: ToolContext, a: Glob.Arguments) -> GlobResult:
+def _glob(context: ToolContext, a: Glob.Arguments) -> ToolOutput[GlobResult, str, str]:
     """Find the files ``a`` asks for."""
     try:
         matches = glob(context.path(a.path or "."), a.pattern)
     except GlobError as e:
-        return GlobResult(
-            call_id="",
-            pattern=a.pattern,
-            path=a.path,
-            shown=str(e),
-            is_error=True,
+        return ToolOutput(
+            stderr=(str(e),),
+            result=GlobResult(pattern=a.pattern, path=a.path, exit_code=1),
         )
     if not matches:
-        return GlobResult(
-            call_id="",
-            pattern=a.pattern,
-            path=a.path,
-            content="(no matches)",
+        return ToolOutput(
+            stdout=("(no matches)",),
+            result=GlobResult(pattern=a.pattern, path=a.path),
         )
     sort_paths(matches, a.sort)
     end = a.offset + a.max_results if a.max_results else None
@@ -203,4 +212,4 @@ def _glob(context: ToolContext, a: Glob.Arguments) -> GlobResult:
             f"\n... ({len(matches) - a.offset - kept:,} more;"
             f" pass offset={a.offset + kept} to continue)"
         )
-    return GlobResult(call_id="", pattern=a.pattern, path=a.path, content=body)
+    return ToolOutput(stdout=(body,), result=GlobResult(pattern=a.pattern, path=a.path))

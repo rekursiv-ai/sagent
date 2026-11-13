@@ -6,7 +6,7 @@ identifier, so asking again returns the same path without a download.
 
 Typical usage example:
 
-  result = await PaperFetch().call(context, {"ids": ["2106.15928"]})
+  result = await settled(PaperFetch().call(context, {"ids": ["2106.15928"]}))
 """
 
 from __future__ import annotations
@@ -26,7 +26,13 @@ from sagent.lib.userdirs import cache_dir
 from sagent.session.types import PaperFetchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 from sagent.tools.write import write_file
 
 
@@ -91,11 +97,11 @@ class PaperFetch:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> PaperFetchResult:
+    ) -> ToolStreamingResult[PaperFetchResult, str, str]:
         """Download each paper ``ids`` names, or find it in the cache.
 
         Args:
@@ -103,12 +109,19 @@ class PaperFetch:
           arguments: What the model passed, as ``PaperFetch.Arguments``.
 
         Returns:
-          result: One line per id: where its PDF is, or why it is not.
+          streaming_result: One line per id: where its PDF is, or why it is not.
 
         Raises:
           ValueError: ``ids`` is empty, or names something that is no paper id.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PaperFetchResult, str, str]:
         session = context.fetch_session
         ids = paper_ids(parse(arguments, PaperFetch.Arguments).ids)
         if not ids:
@@ -144,10 +157,11 @@ class PaperFetch:
                 )
             ),
         )
-        return PaperFetchResult(
-            call_id="",
-            content="\n".join(text for text, _ in lines),
-            is_error=any(failed for _, failed in lines),
+        return ToolOutput(
+            stdout=("\n".join(text for text, _ in lines),),
+            result=PaperFetchResult(
+                exit_code=int(any(failed for _, failed in lines)),
+            ),
         )
 
     async def _fetch(

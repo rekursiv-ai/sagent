@@ -40,6 +40,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -551,9 +552,23 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
             AssistantMessage(content=" both."),
             ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a"}),
             ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b"}),
-            UncategorizedToolResult(call_id="toolu_a", content="x = 1"),
-            UncategorizedToolResult(call_id="toolu_b", content="gone", is_error=True),
-            UncategorizedToolResult(call_id="toolu_c", is_error=True),
+            ToolResult(
+                call_id="toolu_a",
+                state="done",
+                stdout=("x = 1",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="toolu_b",
+                state="done",
+                stdout=("gone",),
+                result=UncategorizedToolResult(exit_code=1),
+            ),
+            ToolResult(
+                call_id="toolu_c",
+                state="done",
+                result=UncategorizedToolResult(exit_code=1),
+            ),
             AssistantMessage(content="Done."),
         ),
     )
@@ -590,7 +605,12 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
             UserMessage(content="b"),
             AssistantMessage(content="c"),
             ToolCall(call_id="x", name="Read"),
-            UncategorizedToolResult(call_id="x", content="r"),
+            ToolResult(
+                call_id="x",
+                state="done",
+                stdout=("r",),
+                result=UncategorizedToolResult(),
+            ),
             AssistantMessage(content="d"),
         ),
     )

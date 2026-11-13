@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,10 +16,10 @@ from PIL import Image
 import pypdfium2 as pdfium
 import pytest
 
-from sagent.session.types import ReadResult, UncategorizedToolResult
+from sagent.session.types import LineSpan, ReadResult, ToolResult
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext, parse
+from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -85,11 +86,10 @@ async def test_text_and_notebooks_are_utf8_whatever_the_locale(
 async def test_text_comes_back_numbered(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("alpha\nbeta\n")
     context = ToolContext(cwd=tmp_path)
-    result = await Read().call(context, {"file_path": "f.txt"})
-    assert result.content == "1\talpha\n2\tbeta\n"
-    assert result.path == str(tmp_path / "f.txt")
-    assert result.ranges == ()
-    assert result.is_error is None
+    result = await settled(Read().call(context, {"file_path": "f.txt"}))
+    assert result.text() == "1\talpha\n2\tbeta\n"
+    assert [item for item in result.stdout if isinstance(item, LineSpan)] == []
+    assert result.is_error is False
     assert tmp_path / "f.txt" in context.files
 
 
@@ -97,11 +97,10 @@ async def test_text_comes_back_numbered(tmp_path: Path) -> None:
 async def test_a_window_reads_from_offset_for_limit_lines(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 11)))
     result = await _read(tmp_path, file_path="f.txt", offset=3, limit=2)
-    assert isinstance(result, ReadResult)
-    assert result.content == (
+    assert result.text() == (
         "3\tline3\n4\tline4\n\n... (6 more lines. Use offset=5 to continue.)"
     )
-    assert result.ranges == ((3, 2),)
+    assert result.stdout[1:] == (LineSpan(start=3, count=2),)
 
 
 @pytest.mark.asyncio
@@ -111,29 +110,27 @@ async def test_last_lines_reads_the_tail_and_composes_with_limit(
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 11)))
     tail = await _read(tmp_path, file_path="f.txt", last_lines=2, offset=1)
     assert tail.text() == "9\tline9\n10\tline10\n"
-    assert isinstance(tail, ReadResult)
-    assert tail.ranges == ((9, 2),)
+    assert tail.stdout[1:] == (LineSpan(start=9, count=2),)
     head_of_tail = await _read(tmp_path, file_path="f.txt", last_lines=4, limit=1)
     assert head_of_tail.text() == (
         "7\tline7\n\n... (3 more lines. Use offset=8 to continue.)"
     )
     whole = await _read(tmp_path, file_path="f.txt", last_lines=99)
     assert whole.text().startswith("1\tline1\n")
-    assert isinstance(whole, ReadResult)
-    assert whole.ranges == ()
+    assert [item for item in whole.stdout if isinstance(item, LineSpan)] == []
 
 
 @pytest.mark.asyncio
 async def test_a_full_result_says_where_to_resume(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 101)))
     context = ToolContext(cwd=tmp_path, max_result_chars=100)
-    result = await Read().call(context, {"file_path": "f.txt"})
+    result = await settled(Read().call(context, {"file_path": "f.txt"}))
     kept = result.text().count("\tline")
     assert 0 < kept < 100
     assert result.text().endswith(
         f"\n... ({100 - kept} more lines. Use offset={kept + 1} to continue.)",
     )
-    assert result.ranges == ((1, kept),)
+    assert result.stdout[1:] == (LineSpan(start=1, count=kept),)
     assert len(result.text()) <= context.max_result_chars
 
 
@@ -166,10 +163,8 @@ async def test_a_file_with_nothing_to_number_says_why(
 ) -> None:
     (tmp_path / name).write_bytes(content)
     result = await _read(tmp_path, file_path=name, **arguments)
-    assert isinstance(result, ReadResult)
-    assert result.status is not None
     assert result.text() == message.format(tmp_path / name)
-    assert result.is_error is None
+    assert result.is_error is False
 
 
 @pytest.mark.asyncio
@@ -216,16 +211,16 @@ async def test_the_same_window_of_an_unchanged_file_is_not_sent_twice(
     f = tmp_path / "f.txt"
     f.write_text("hi\n")
     context = ToolContext(cwd=tmp_path)
-    first = await Read().call(context, {"file_path": "f.txt"})
-    again = await Read().call(context, {"file_path": "f.txt"})
-    other = await Read().call(context, {"file_path": "f.txt", "limit": 5})
+    first = await settled(Read().call(context, {"file_path": "f.txt"}))
+    again = await settled(Read().call(context, {"file_path": "f.txt"}))
+    other = await settled(Read().call(context, {"file_path": "f.txt", "limit": 5}))
     assert first.text() == "1\thi\n"
     assert again.text() == f"[File unchanged since last read: {f}]"
     assert other.text() == "1\thi\n"
     f.write_text("bye\n")
     later = f.stat().st_mtime + 100
     os.utime(f, (later, later))
-    edited = await Read().call(context, {"file_path": "f.txt", "limit": 5})
+    edited = await settled(Read().call(context, {"file_path": "f.txt", "limit": 5}))
     assert edited.text() == "1\tbye\n"
 
 
@@ -248,9 +243,9 @@ async def test_a_write_during_the_read_is_not_taken_for_what_was_seen(
 
     context = ToolContext(cwd=tmp_path)
     monkeypatch.setattr(Path, "read_bytes", racing_read)
-    first = await Read().call(context, {"file_path": "f.txt"})
+    first = await settled(Read().call(context, {"file_path": "f.txt"}))
     monkeypatch.setattr(Path, "read_bytes", original)
-    second = await Read().call(context, {"file_path": "f.txt"})
+    second = await settled(Read().call(context, {"file_path": "f.txt"}))
     assert "new" in first.text() + second.text()
 
 
@@ -274,10 +269,9 @@ async def test_an_image_comes_back_as_itself(
     image = _png(kind)
     (tmp_path / name).write_bytes(image)
     context = ToolContext(cwd=tmp_path)
-    result = await Read().call(context, {"file_path": name})
+    result = await settled(Read().call(context, {"file_path": name}))
     assert result.call_id == ""
-    assert result.content == f"[image: {tmp_path / name}]"
-    assert result.path == str(tmp_path / name)
+    assert result.text() == f"[image: {tmp_path / name}]"
     (attachment,) = result.attachments
     assert (attachment.mime_descriptor, attachment.data) == (mime, image)
     assert tmp_path / name in context.files
@@ -295,9 +289,11 @@ async def test_an_svg_is_read_as_text(tmp_path: Path) -> None:
 async def test_an_image_over_the_cap_is_refused(tmp_path: Path) -> None:
     (tmp_path / "pic.png").write_bytes(_png())
     size = (tmp_path / "pic.png").stat().st_size
-    result = await Read(max_image_bytes=size - 1).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "pic.png"},
+    result = await settled(
+        Read(max_image_bytes=size - 1).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "pic.png"},
+        ),
     )
     assert result.is_error is True
     assert not result.attachments
@@ -305,9 +301,11 @@ async def test_an_image_over_the_cap_is_refused(tmp_path: Path) -> None:
         f"{tmp_path / 'pic.png'} is {size:,} bytes, over the {size - 1:,} a read"
         " takes. Shrink it with Bash first."
     )
-    exact = await Read(max_image_bytes=size).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "pic.png"},
+    exact = await settled(
+        Read(max_image_bytes=size).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "pic.png"},
+        ),
     )
     assert exact.attachments
 
@@ -337,9 +335,8 @@ async def test_a_notebook_reads_as_cells_and_their_outputs(tmp_path: Path) -> No
     }
     (tmp_path / "n.ipynb").write_text(json.dumps(notebook))
     context = ToolContext(cwd=tmp_path)
-    result = await Read().call(context, {"file_path": "n.ipynb"})
-    assert result.path == str(tmp_path / "n.ipynb")
-    assert result.content == (
+    result = await settled(Read().call(context, {"file_path": "n.ipynb"}))
+    assert result.text() == (
         "--- Cell 1 (code) ---\nprint('hi')\n1 / 0\n"
         "[output] hi\n\n"
         "[output] 42\n"
@@ -358,7 +355,7 @@ async def test_an_empty_notebook_says_so(tmp_path: Path) -> None:
         (tmp_path / "n.ipynb").write_text(json.dumps(notebook))
         result = await _read(tmp_path, file_path="n.ipynb")
         assert result.text() == "(empty notebook)"
-        assert result.is_error is None
+        assert result.is_error is False
 
 
 @pytest.mark.asyncio
@@ -366,7 +363,7 @@ async def test_a_long_notebook_says_how_much_was_left_out(tmp_path: Path) -> Non
     cells = [{"cell_type": "code", "source": f"x = {i}"} for i in range(50)]
     (tmp_path / "n.ipynb").write_text(json.dumps({"cells": cells}))
     context = ToolContext(cwd=tmp_path, max_result_chars=200)
-    result = await Read().call(context, {"file_path": "n.ipynb"})
+    result = await settled(Read().call(context, {"file_path": "n.ipynb"}))
     kept = result.text().count("--- Cell")
     assert 0 < kept < 50
     shown = result.text().count("x = ")
@@ -404,10 +401,9 @@ async def test_an_unreadable_notebook_is_an_error(
 async def test_a_pdf_comes_back_as_a_jpeg_per_page(tmp_path: Path) -> None:
     _pdf(tmp_path / "doc.pdf", pages=3)
     context = ToolContext(cwd=tmp_path)
-    result = await Read().call(context, {"file_path": "doc.pdf"})
+    result = await settled(Read().call(context, {"file_path": "doc.pdf"}))
     assert result.call_id == ""
-    assert result.content == "[PDF: doc.pdf, pages 1-3 of 3]"
-    assert result.path == str(tmp_path / "doc.pdf")
+    assert result.text() == "[PDF: doc.pdf, pages 1-3 of 3]"
     assert [a.mime_descriptor for a in result.attachments] == ["image/jpeg"] * 3
     assert all(a.data.startswith(b"\xff\xd8") for a in result.attachments)
     assert tmp_path / "doc.pdf" in context.files
@@ -462,19 +458,25 @@ async def test_a_page_range_the_pdf_cannot_meet_is_an_error(
 async def test_a_long_pdf_needs_a_range(tmp_path: Path) -> None:
     _pdf(tmp_path / "doc.pdf", pages=3)
     tool = Read(max_pdf_pages=2)
-    refused = await tool.call(ToolContext(cwd=tmp_path), {"file_path": "doc.pdf"})
+    refused = await settled(
+        tool.call(ToolContext(cwd=tmp_path), {"file_path": "doc.pdf"}),
+    )
     assert refused.is_error is True
     assert refused.text().endswith(
         'has 3 pages, over 2. Pass pages="1-N" to read some.',
     )
-    ranged = await tool.call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf", "pages": "1-3"},
+    ranged = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf", "pages": "1-3"},
+        ),
     )
     assert len(ranged.attachments) == 3
-    at_cap = await Read(max_pdf_pages=3).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf"},
+    at_cap = await settled(
+        Read(max_pdf_pages=3).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf"},
+        ),
     )
     assert len(at_cap.attachments) == 3
 
@@ -494,9 +496,11 @@ async def test_the_byte_budget_stops_at_the_first_page_that_does_not_fit(
         for n in (1, 2, 3)
     ]
     assert sizes[1] > sizes[2]
-    result = await Read(max_rendered_bytes=sizes[0] + sizes[2]).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf", "pages": "1-3"},
+    result = await settled(
+        Read(max_rendered_bytes=sizes[0] + sizes[2]).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf", "pages": "1-3"},
+        ),
     )
     assert len(result.attachments) == 1
     assert result.text() == (
@@ -512,17 +516,21 @@ async def test_pages_past_the_byte_budget_are_left_for_another_read(
     one = await _read(tmp_path, file_path="doc.pdf", pages="1")
     per_page = len(one.attachments[0].data)
     tool = Read(max_rendered_bytes=per_page * 2)
-    result = await tool.call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf", "pages": "1-"},
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf", "pages": "1-"},
+        ),
     )
     assert len(result.attachments) == 2
     assert result.text() == (
         '[PDF: doc.pdf, pages 1-2 of 4] Pass pages="3-4" for the rest.'
     )
-    alone = await Read(max_rendered_bytes=per_page - 1).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf", "pages": "2"},
+    alone = await settled(
+        Read(max_rendered_bytes=per_page - 1).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf", "pages": "2"},
+        ),
     )
     assert alone.is_error is True
     assert (
@@ -543,17 +551,21 @@ async def test_a_pdf_that_is_not_one_or_too_big_is_an_error(tmp_path: Path) -> N
     assert f"{tmp_path / 'broken.pdf'} is not a readable PDF: " in broken.text()
     _pdf(tmp_path / "doc.pdf", pages=1)
     size = (tmp_path / "doc.pdf").stat().st_size
-    big = await Read(max_pdf_bytes=size - 1).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf"},
+    big = await settled(
+        Read(max_pdf_bytes=size - 1).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf"},
+        ),
     )
     assert big.is_error is True
     assert big.text().endswith(
         f"is {size:,} bytes, over the {size - 1:,} a read opens.",
     )
-    at_cap = await Read(max_pdf_bytes=size).call(
-        ToolContext(cwd=tmp_path),
-        {"file_path": "doc.pdf"},
+    at_cap = await settled(
+        Read(max_pdf_bytes=size).call(
+            ToolContext(cwd=tmp_path),
+            {"file_path": "doc.pdf"},
+        ),
     )
     assert len(at_cap.attachments) == 1
 
@@ -763,8 +775,8 @@ async def test_a_read_unchanged_since_the_last_is_said_so_for_no_call(
 ) -> None:
     (tmp_path / "f").write_text("a\n")
     context = ToolContext(cwd=tmp_path)
-    _ = await Read().call(context, {"file_path": "f"})
-    again = await Read().call(context, {"file_path": "f"})
+    _ = await settled(Read().call(context, {"file_path": "f"}))
+    again = await settled(Read().call(context, {"file_path": "f"}))
     assert again.text().startswith("[File unchanged")
     assert again.call_id == ""
 
@@ -785,7 +797,9 @@ async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
     caps = {threshold + delta for threshold in thresholds for delta in (-1, 0, 1)}
     for cap in sorted(c for c in caps if c >= len(cut(1))):
         context = ToolContext(cwd=tmp_path, max_result_chars=cap)
-        text = (await Read().call(context, {"file_path": "f", "offset": 9_990})).text()
+        text = (
+            await settled(Read().call(context, {"file_path": "f", "offset": 9_990}))
+        ).text()
         assert len(text) <= cap, cap
         kept = text.count("\t")
         if kept < 11:
@@ -794,7 +808,7 @@ async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
         else:
             assert text == whole, cap
     context = ToolContext(cwd=tmp_path, max_result_chars=len(cut(1)) - 1)
-    result = await Read().call(context, {"file_path": "f", "offset": 9_990})
+    result = await settled(Read().call(context, {"file_path": "f", "offset": 9_990}))
     assert result.text() == cut(1)
 
 
@@ -802,7 +816,7 @@ async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
 async def test_a_whole_read_that_fits_its_cap_keeps_every_line(tmp_path: Path) -> None:
     (tmp_path / "f").write_text("a\nb\n")
     context = ToolContext(cwd=tmp_path, max_result_chars=len("1\ta\n2\tb\n"))
-    result = await Read().call(context, {"file_path": "f"})
+    result = await settled(Read().call(context, {"file_path": "f"}))
     assert result.text() == "1\ta\n2\tb\n"
 
 
@@ -854,10 +868,10 @@ async def test_a_memory_older_than_a_day_says_how_old_it_is(
     then = time.time() - days * 86_400 - 1
     os.utime(memory, (then, then))
     context = ToolContext(cwd=tmp_path)
-    result = await Read().call(context, {"file_path": "user_role_lead.md"})
-    again = await Read().call(context, {"file_path": "user_role_lead.md"})
+    result = await settled(Read().call(context, {"file_path": "user_role_lead.md"}))
+    again = await settled(Read().call(context, {"file_path": "user_role_lead.md"}))
     assert result.text() == f"{note}1\tLeads the team.\n"
-    assert again.status == "unchanged"
+    assert again.text().startswith("[File unchanged since last read: ")
 
 
 @pytest.mark.asyncio
@@ -880,9 +894,12 @@ async def test_a_file_that_is_no_memory_carries_no_age(
 async def _read(
     cwd: Path,
     **arguments: PlainTree,
-) -> ReadResult | UncategorizedToolResult:
+) -> ToolResult:
     """Read with ``arguments`` in a fresh context at ``cwd``; the runtime names the call."""
-    result = await Read().call(ToolContext(cwd=cwd), arguments)
+    streaming_result = Read().call(ToolContext(cwd=cwd), arguments)
+    result = await settled(streaming_result)
+    # ``settled`` records a raise instead of raising; a refusal test expects the raise.
+    _ = await streaming_result.result
     assert result.call_id == ""
     return result
 
@@ -912,6 +929,44 @@ def _pdf(path: Path, *, pages: int, large: frozenset[int] = frozenset()) -> None
         doc.save(str(path))
     finally:
         doc.close()
+
+
+@pytest.mark.asyncio
+async def test_a_read_says_which_file_and_why_it_showed_no_lines(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("one\ntwo\n")
+    (tmp_path / "empty.txt").write_text("")
+    (tmp_path / "bin").write_bytes(b"\x00\x01")
+    (tmp_path / "latin").write_bytes(b"\xe9t\xe9")
+    (tmp_path / "p.png").write_bytes(_png())
+    (tmp_path / "n.ipynb").write_text(json.dumps({"cells": []}))
+    _pdf(tmp_path / "d.pdf", pages=1)
+    context = ToolContext(cwd=tmp_path)
+
+    async def read(name: str, **arguments: PlainTree) -> tuple[object, bool]:
+        done = await settled(Read().call(context, {"file_path": name, **arguments}))
+        return done.result, done.is_error
+
+    text = ReadResult(path=str(tmp_path / "a.txt"))
+    assert await read("a.txt") == (text, False)
+    assert await read("a.txt") == (replace(text, status="unchanged"), False)
+    assert await read("a.txt", offset=9) == (replace(text, status="past_end"), False)
+    assert await read("empty.txt") == (
+        ReadResult(path=str(tmp_path / "empty.txt"), status="empty"),
+        False,
+    )
+    assert await read("bin") == (
+        ReadResult(path=str(tmp_path / "bin"), status="binary"),
+        False,
+    )
+    assert await read("latin") == (
+        ReadResult(path=str(tmp_path / "latin"), status="undecodable"),
+        False,
+    )
+    for name in ("p.png", "n.ipynb", "d.pdf"):
+        assert await read(name) == (ReadResult(path=str(tmp_path / name)), False)
+    assert await read("missing") == (ReadResult(exit_code=1), True)
 
 
 if __name__ == "__main__":

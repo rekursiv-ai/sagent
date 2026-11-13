@@ -1,5 +1,5 @@
-# Which commands only read, so a Bash call of only these runs beside others;
-# see `ReadOnly` in command_analyzer.py. Anything else runs alone.
+# Which commands only read, so a Bash line of only these may be split into
+# other tools' calls; see `ReadOnly` in command_analyzer.py.
 #
 # Quoted where YAML would read a name as something else: `true`, `yes`, `:`.
 
