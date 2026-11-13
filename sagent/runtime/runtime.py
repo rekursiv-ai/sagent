@@ -575,7 +575,7 @@ class Runtime:
         self._retries = 0
         # Whether a failed call ended the turn, so it waits; a new model, or a
         # ``Retry``, may get past the failure, and so calls again.
-        self._failed = False
+        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
         self.recheck_quota = False
         # The model the call in flight asked; a failure of one switched away from
         # says nothing of the model now in use.
@@ -1241,11 +1241,10 @@ class Runtime:
     def _commit_pairing(self, result: ToolResult) -> None:
         """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use."""
         parent_ref = self._parent_assistant_refs.get(result.call_id)
-        if parent_ref is None or parent_ref not in set(self.context().origins):
+        if parent_ref is None:
             # The call is gone with its turn, so its answer goes too.
             return
         self.append_splice(
-            mask=(),
             insert_after=parent_ref,
             payload=(result,),
             strategy="lazy_pairing",
@@ -1294,7 +1293,7 @@ class Runtime:
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
-        awaiting_user = False
+        awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
         queued: list[UserQueuedMessage | AgentSendQueuedMessage] = []
         deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
 
@@ -1303,7 +1302,7 @@ class Runtime:
             if self._fully_drained():
                 self.publish(AgentIdle())
             items = await self.inbox.drain()
-            failed_reply = False
+            failed_reply = False  # pragma: no mutate -- None is as false.
 
             for item_idx, item in enumerate(items):
                 # One event that fails to dispatch is logged; the rest of
@@ -1376,12 +1375,9 @@ class Runtime:
                             # The user took the turn over: what a failure waited
                             # for no longer calls the model.
                             self._end_suspension()
-                            self._failed = False
+                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
                             # Tools keep running. What the user typed during the
-                            # stream is what the runtime would wait for; held for
-                            # the reply's calls, it detaches them, as a message does.
-                            if self._mid_stream_queue:
-                                self._stop_all_tools(mode="detach")
+                            # stream is what the runtime would wait for.
                             if not self._drain_mid_stream_queue():
                                 self.inbox.push_front(
                                     Await.user(),
@@ -1405,7 +1401,7 @@ class Runtime:
                             # A new conversation does not inherit the old
                             # one's failure, or its wait for a rate limit.
                             self._end_suspension()
-                            self._failed = False
+                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
                             self.append_clear()
                             self.inbox.push_front(
                                 Await.user(),
@@ -1527,8 +1523,8 @@ class Runtime:
                         case Retry():
                             self.recheck_quota = True
                             self._end_suspension()
-                            self._failed = False
-                            awaiting_user = False
+                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case Kill(call_id=cid):
                             if cid is None:
@@ -1585,7 +1581,7 @@ class Runtime:
                                 )
                                 self.cohort.discard(mid)
                             if not self.cohort:
-                                self._cohort_seen = False
+                                self._cohort_seen = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case Compact(args=args, trigger=trigger):
                             if self.compact_task and not self.compact_task.done():
@@ -1649,7 +1645,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            awaiting_user = False
+                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case AgentToAgentMessage():
                             if self.model_call is not None:
@@ -1658,7 +1654,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            awaiting_user = False
+                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         # A nudge to a busy agent is moot: it is nudged again
                         # at its next idle if it still owes.
@@ -1667,7 +1663,7 @@ class Runtime:
                                 self.append_history(
                                     SystemMessage(content=content, subtype="nudge"),
                                 )
-                            awaiting_user = False
+                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         # Input that ends the wait for the user is the user
                         # resuming; held for idle, the halted turn would be
@@ -1679,7 +1675,7 @@ class Runtime:
                             | AgentSendDeferredMessage()
                         ) if awaiting_user:
                             self._commit_user(_message_from_queued(item))
-                            awaiting_user = False
+                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case UserQueuedMessage() | AgentSendQueuedMessage():
                             queued.append(item)
@@ -1741,7 +1737,7 @@ class Runtime:
                         case ToolResult() if item.call_id in self.cohort:
                             cid = item.call_id
                             self.cohort.discard(cid)
-                            self.running_tools.pop(cid, None)
+                            del self.running_tools[cid]
                             self.append_history(item)
                             self.publish(item)
 
@@ -1767,7 +1763,7 @@ class Runtime:
                         case Scheduled():
                             self._scheduled.append(item)
 
-                        case _:
+                        case _:  # pragma: no mutate -- basedpyright asks for the default; without it nothing else matches either.
                             pass
                 except Exception as exc:  # noqa: BLE001 -- One event's failure must not drop the events after it.
                     log_exception_or_warning(
@@ -1803,7 +1799,7 @@ class Runtime:
                         len(self.detached),
                     )
                     self.publish(CohortComplete())
-                    self._cohort_seen = False
+                    self._cohort_seen = False  # pragma: no mutate -- None is as false.
 
                 # What the user sent as the reply streamed, if no ending of the reply
                 # took it in already.
@@ -1861,7 +1857,10 @@ class Runtime:
                 elif (
                     self._ready_to_advance
                     and self._should_call_model()
-                    and time.time() >= (self.service_suspended_until or 0.0)
+                    and (
+                        self.service_suspended_until is None
+                        or time.time() >= self.service_suspended_until
+                    )
                 ):
                     if self.context_updates is not None:
                         for note in self.context_updates():
@@ -1888,7 +1887,7 @@ class Runtime:
                     else:
                         # Whatever released a failure's wait, or ended a
                         # suspension's, the turn goes on, on the model asked now.
-                        self._failed = False
+                        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
                         self.service_suspended_until = None
                         await self._before_call(turn_start=self._steps == 0)
                         self._called_model = self.model
@@ -1992,7 +1991,7 @@ class Runtime:
         unmatched_per_am: list[tuple[TapeRef | None, list[str]]] = []
         # An ordered set.
         pending: dict[str, None] = {}
-        am_repair_anchor: TapeRef | None = None
+        am_repair_anchor: TapeRef | None = None  # pragma: no mutate -- unread till set.
         hr_orphan_refs: list[TapeRef] = []
 
         for idx, entry in enumerate(messages):
@@ -2014,7 +2013,6 @@ class Runtime:
                 del pending[entry.call_id]
             else:
                 _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
-                am_repair_anchor = None
         _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
 
         for anchor, missing_ids in unmatched_per_am:
@@ -2026,7 +2024,6 @@ class Runtime:
             )
             # Their calls are in the recorded turn at ``anchor``.
             self.append_splice(
-                mask=(),
                 insert_after=anchor,
                 payload=payload,
                 strategy="orphan_tool_use_repair",
@@ -2041,8 +2038,6 @@ class Runtime:
                         hi=orphan.ordinal,
                     ),
                 ),
-                insert_after=None,
-                payload=(),
                 strategy="orphan_tool_result_repair",
             )
 
@@ -2066,11 +2061,12 @@ class Runtime:
         mode: Literal["detach", "kill"],
     ) -> None:
         """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
-        stub = (
-            ToolResult(call_id=cid, state="cancelled", shown=self.markers.cancelled)
-            if mode == "kill"
-            else ToolResult(call_id=cid, state="pending", shown=self.markers.detached)
-        )
+        match mode:
+            case "kill":
+                state, shown = "cancelled", self.markers.cancelled
+            case "detach":
+                state, shown = "pending", self.markers.detached
+        stub = ToolResult(call_id=cid, state=state, shown=shown)
         self.append_history(stub)
         self.publish(stub)
         self.detached[cid] = task

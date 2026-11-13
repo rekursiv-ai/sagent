@@ -9,6 +9,7 @@ from typing import IO, TYPE_CHECKING, Final
 import asyncio
 import contextlib
 import functools
+import gc
 import logging
 import os
 import re
@@ -37,6 +38,8 @@ from sagent.tools.bash import (
     _final_text,
     _guard,
     _HeldPipe,
+    _OutputPipe,
+    _read_output,
     _spill,
     _stop,
 )
@@ -378,15 +381,18 @@ async def test_a_cd_moves_the_directory_later_calls_start_in(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [(), _OTHER_GROUP], ids=["bare", "wrapped"])
 async def test_a_command_that_stays_put_keeps_a_cd_run_beside_it(
     tmp_path: Path,
+    prefix: tuple[str, ...],
 ) -> None:
     """Commands run side by side; only one that moved the shell sets the directory."""
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
+    tool = Bash(exec_prefix=prefix)
     waiting = asyncio.ensure_future(
         settled(
-            Bash().call(
+            tool.call(
                 context,
                 _arguments("echo yes > started; until [ -e go ]; do sleep 0.01; done"),
             ),
@@ -394,11 +400,26 @@ async def test_a_command_that_stays_put_keeps_a_cd_run_beside_it(
     )
     assert await _written_text(tmp_path / "started") == "yes"
 
-    await settled(Bash().call(context, _arguments("cd sub")))
+    await settled(tool.call(context, _arguments("cd sub")))
     (tmp_path / "go").touch()
     _ = await waiting
 
     assert context.cwd == tmp_path / "sub"
+
+
+@pytest.mark.asyncio
+async def test_a_command_run_through_a_link_stays_in_the_directory_as_named(
+    tmp_path: Path,
+) -> None:
+    """The shell reports the directory the link names; staying there moves nothing."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+    context = ToolContext(cwd=tmp_path / "link")
+
+    result = await settled(Bash().call(context, _arguments("pwd -P")))
+
+    assert "".join(result.stdout) == f"{(tmp_path / 'real').resolve()}\n"
+    assert context.cwd == tmp_path / "link"
 
 
 @pytest.mark.asyncio
@@ -693,18 +714,26 @@ async def test_a_job_that_leaves_the_group_cannot_hang_the_call(
 ) -> None:
     """A job in its own group escapes the kill; the drain gives up on its pipes."""
     _stop_when(monkeypatch, exited=True)
-    result = await asyncio.wait_for(
-        _run(
-            tmp_path,
-            "set -m; sleep 60 & set +m; echo $! > child.pid; echo started",
-            limit_ms=1,
-            tool=Bash(drain_sec=0.05, grace_sec=0.01),
-        ),
-        timeout=5,
-    )
-    started.extend(await _written_pids(tmp_path, "child.pid"))
-    assert "".join(result.stdout) == "started\n"
-    assert "[timeout after" in "".join(result.stderr)
+    # A collection would close a pipe the call left open, and hide that it had.
+    gc.disable()
+    try:
+        before = _open_descriptors()
+        result = await asyncio.wait_for(
+            _run(
+                tmp_path,
+                "set -m; sleep 60 & set +m; echo $! > child.pid; echo started",
+                limit_ms=1,
+                tool=Bash(drain_sec=0.05, grace_sec=0.01),
+            ),
+            timeout=5,
+        )
+        started.extend(await _written_pids(tmp_path, "child.pid"))
+        assert "".join(result.stdout) == "started\n"
+        assert "[timeout after" in "".join(result.stderr)
+        # The job still holds the pipes' other ends; this process holds none.
+        assert await _open_descriptors_once_closed(before) == before
+    finally:
+        gc.enable()
 
 
 @pytest.mark.asyncio
@@ -739,6 +768,26 @@ async def test_a_cancelled_call_stops_the_shell_and_its_jobs(
     started: list[int],
 ) -> None:
     call = asyncio.create_task(_run(tmp_path, _SLEEPER, limit_ms=60_000))
+    pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
+    started.extend(pids)
+    call.cancel()
+    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
+    assert await gone_within(pids)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_call_kills_jobs_that_ignore_terminate(
+    tmp_path: Path,
+    started: list[int],
+) -> None:
+    call = asyncio.create_task(
+        _run(
+            tmp_path,
+            f"trap '' TERM; {_SLEEPER}",
+            limit_ms=60_000,
+            tool=Bash(grace_sec=0.02),
+        ),
+    )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     call.cancel()
@@ -914,13 +963,7 @@ async def test_a_wrapped_call_leaves_no_descriptor_open(
     wrapper, _ = _recording_prefix(tmp_path)
     before = _open_descriptors()
     await _run(tmp_path, command, limit_ms=limit_ms, tool=Bash(exec_prefix=wrapper))
-    # The loop closes the transport's own descriptors a moment after the call.
-    for _ in range(5000):
-        if _open_descriptors() == before:
-            break
-        # The loop closes the descriptors on its own schedule; nothing signals it.
-        await asyncio.sleep(0.001)  # house-ignore[sleep] -- See above.
-    assert _open_descriptors() == before
+    assert await _open_descriptors_once_closed(before) == before
 
 
 @pytest.mark.asyncio
@@ -969,14 +1012,53 @@ async def test_a_wrapped_cancel_stops_the_shell_and_its_jobs(
             limit_ms=60_000,
             # A stop that signalled only the wrapper would wait out this grace for
             # a shell it never reached.
-            tool=Bash(exec_prefix=_OTHER_GROUP, grace_sec=30),
+            tool=Bash(exec_prefix=_OTHER_GROUP, grace_sec=10),
         ),
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
+    began = time.monotonic()
     call.cancel()
-    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
+    # Timed here: a cancelled call still waits for its stop, however long.
+    assert (await call).state == "cancelled"
+    assert time.monotonic() - began < 5
     assert await gone_within(pids)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_call_stops_reading_a_wrapper_it_cannot_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[int],
+) -> None:
+    """The wrapper never exits, so a read left waiting for it would never end."""
+
+    def refuse(self: asyncio.subprocess.Process) -> None:
+        del self
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "kill", refuse)
+    monkeypatch.setattr(bash, "_stop", functools.partial(_stop, wait_sec=0.01))
+    pidfile = tmp_path / "wrapper.pid"
+    script = f"echo $$ > {shlex.quote(str(pidfile))}; exec sleep 60"
+    call = asyncio.create_task(
+        _run(
+            tmp_path,
+            "sleep 30",
+            limit_ms=60_000,
+            tool=Bash(exec_prefix=("/bin/sh", "-c", script, "wrapper")),
+        ),
+    )
+    (wrapper,) = await _written_pids(tmp_path, "wrapper.pid")
+    started.append(wrapper)
+
+    call.cancel()
+
+    assert (await asyncio.wait_for(call, timeout=5)).state == "cancelled"
+    assert [t for t in asyncio.all_tasks() if t is not asyncio.current_task()] == []
+    # Ended and collected while the loop watching the child still runs.
+    os.kill(wrapper, signal.SIGKILL)
+    assert await _collected_within(wrapper)
 
 
 @pytest.mark.asyncio
@@ -1151,32 +1233,50 @@ def test_releasing_a_held_pipe_sends_one_line_and_then_end_of_file() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "stderr",
-    [asyncio.subprocess.PIPE, None],
-    ids=["both", "stdout"],
-)
+async def test_a_pipe_gives_its_reader_what_its_writer_is_sent() -> None:
+    pipe = await _OutputPipe.open()
+    try:
+        assert pipe.writer.write(b"out\n") == 4
+        pipe.writer.close()
+        assert await pipe.reader.read() == b"out\n"
+    finally:
+        pipe.close()
+
+
+@pytest.mark.asyncio
 async def test_a_drain_gives_up_on_a_process_that_does_not_end(
-    stderr: int | None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Only the streams it has are cut, and the process alone is left to wait for."""
-    proc = await asyncio.create_subprocess_exec(
+    """Its pipes are closed here, and the process alone is left to wait for."""
+    pipes = [await _OutputPipe.open(), await _OutputPipe.open()]
+    printed: list[str] = []
+    async with await Child.start(
         "sleep",
         "60",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=stderr,
-    )
-    communicate = asyncio.ensure_future(proc.communicate())
-    try:
+        stdout=pipes[0].writer,
+        stderr=pipes[1].writer,
+    ) as child:
+        read_task = asyncio.ensure_future(
+            _read_output(
+                child,
+                (pipes[0].reader, printed.append),
+                (pipes[1].reader, printed.append),
+            ),
+        )
         drained = await asyncio.wait_for(
-            _drain(proc, communicate, grace_sec=0.01),
+            _drain(pipes, read_task, grace_sec=0.01),
             timeout=2,
         )
-    finally:
-        proc.kill()
-        await proc.wait()
     assert drained is False
-    assert communicate.cancelled()
+    assert read_task.cancelled()
+    assert printed == ["", ""]
+    assert caplog.record_tuples == [
+        (
+            "sagent.tools.bash",
+            logging.WARNING,
+            "Shell outlived its stop; output lost",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1185,22 +1285,52 @@ async def test_a_drain_returns_what_a_process_wrote_once_its_pipes_are_cut(
     started: list[int],
 ) -> None:
     """A job holding the pipe after the process ended costs only the grace."""
-    proc = await asyncio.create_subprocess_exec(
+    pipes = [await _OutputPipe.open(), await _OutputPipe.open()]
+    out: list[str] = []
+    err: list[str] = []
+    before = _open_descriptors()
+    async with await Child.start(
         "/bin/sh",
         "-c",
         "echo out; sleep 60 & echo $! > job.pid",
         cwd=tmp_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    started.extend(await _written_pids(tmp_path, "job.pid"))
-    communicate = asyncio.ensure_future(proc.communicate())
-    drained = await asyncio.wait_for(
-        _drain(proc, communicate, grace_sec=0.05),
-        timeout=2,
-    )
+        stdout=pipes[0].writer,
+        stderr=pipes[1].writer,
+    ) as child:
+        started.extend(await _written_pids(tmp_path, "job.pid"))
+        read_task = asyncio.ensure_future(
+            _read_output(
+                child,
+                (pipes[0].reader, out.append),
+                (pipes[1].reader, err.append),
+            ),
+        )
+        drained = await asyncio.wait_for(
+            _drain(pipes, read_task, grace_sec=0.05),
+            timeout=2,
+        )
     assert drained is True
-    assert communicate.result() == (b"out\n", b"")
+    assert (out, err) == (["out", ""], [""])
+    # Both ends of both pipes: the job still holds its own copies.
+    assert await _open_descriptors_once_closed(before - 4) == before - 4
+
+
+@pytest.mark.asyncio
+async def test_a_pipe_the_loop_cannot_read_is_closed_at_both_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def refuse(*_: object) -> None:
+        raise OSError("no pipe transport")
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "connect_read_pipe", refuse)
+    before = _open_descriptors()
+
+    # Held, so its traceback keeps the pipe's two files from being collected.
+    with pytest.raises(OSError, match="no pipe transport") as raised:
+        _ = await _OutputPipe.open()
+
+    assert _open_descriptors() == before
+    assert raised.type is OSError
 
 
 @pytest.mark.asyncio
@@ -1368,6 +1498,28 @@ async def test_what_a_command_prints_is_written_while_it_still_runs(
 
 
 @pytest.mark.asyncio
+async def test_a_line_is_written_early_up_to_the_last_character_a_cut_keeps(
+    tmp_path: Path,
+) -> None:
+    """With nowhere to spill, the line that counts a cut's lines names no file."""
+    cap = 1_000
+    kept = _early_chars(cap, note="")
+    waits = "until [ -e go ]; do sleep 0.01; done"
+    # ``one`` and the zeros, each with its newline, fill ``kept`` exactly.
+    streaming_result = Bash(max_result_chars=cap).call(
+        ToolContext(cwd=tmp_path),
+        _arguments(f"echo one; printf '%0{kept - 5}d\\n' 0; echo end; {waits}"),
+    )
+    try:
+        first = await asyncio.wait_for(anext(streaming_result.stdout), timeout=2)
+    finally:
+        (tmp_path / "go").touch()
+        _ = await streaming_result.result
+
+    assert first == "one\n"
+
+
+@pytest.mark.asyncio
 async def test_a_line_longer_than_the_readers_buffer_is_read_whole(
     tmp_path: Path,
 ) -> None:
@@ -1529,6 +1681,17 @@ def _recording_prefix(directory: Path) -> tuple[tuple[str, ...], Path]:
 
 def _open_descriptors() -> int:
     return len(list(Path("/dev/fd").iterdir()))
+
+
+# The loop closes a transport's descriptors a moment after the call.
+async def _open_descriptors_once_closed(expected: int) -> int:
+    """Return how many descriptors are open once ``expected`` are, or after 5 s."""
+    for _ in range(5000):
+        if _open_descriptors() == expected:
+            break
+        # The loop closes the descriptors on its own schedule; nothing signals it.
+        await asyncio.sleep(0.001)  # house-ignore[sleep] -- See above.
+    return _open_descriptors()
 
 
 def _read_text(path: Path) -> str:

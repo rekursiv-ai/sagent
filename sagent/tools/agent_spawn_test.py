@@ -382,16 +382,17 @@ async def test_a_child_spends_from_its_parents_budget_which_halts_past_it(
         _session(setup.parent).resume()
         setup.parent.max_spend_usd = 1.0
 
-        result = await _spawn(setup, tmp_path, {"prompt": "spend"})
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "spend"})
 
-        assert (result.is_error, result.text()) == (
-            True,
-            "BudgetExhaustedError: Budget exhausted: $1.20 >= $1.00",
-        )
-        assert setup.parent.spend_usd == pytest.approx(1.2)
-        assert spent(journal) == pytest.approx(1.2)
-        with pytest.raises(BudgetExhaustedError):
-            _ = await setup.parent.send("more")
+            assert (result.is_error, result.text()) == (
+                True,
+                "BudgetExhaustedError: Budget exhausted: $1.20 >= $1.00",
+            )
+            assert setup.parent.spend_usd == pytest.approx(1.2)
+            assert spent(journal) == pytest.approx(1.2)
+            with pytest.raises(BudgetExhaustedError):
+                _ = await setup.parent.send("more")
 
 
 @pytest.mark.asyncio
@@ -1102,7 +1103,8 @@ async def test_a_child_of_a_journaled_parent_keeps_its_own_journal(
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
         setup = _setup(tmp_path, reply("done"), journal=journal)
 
-        result = await _spawn(setup, tmp_path, {"prompt": "go"})
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "go"})
 
     (spec,) = setup.team.standing("Agent")
     path = Path(spec.journal)
@@ -1169,7 +1171,8 @@ async def test_a_plain_label_names_the_child_and_never_its_folder(
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
         setup = _setup(tmp_path, reply("done"), journal=journal)
 
-        result = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
 
     assert _spawn_result(result).agent_id == label
     (spec,) = setup.team.standing("Agent")
@@ -1681,10 +1684,11 @@ async def test_parallel_spawns_each_get_a_label_of_their_own(tmp_path: Path) -> 
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
         setup = _setup(tmp_path, reply("one"), reply("two"), journal=journal)
 
-        results = await asyncio.gather(
-            _spawn(setup, tmp_path, {"prompt": "a"}),
-            _spawn(setup, tmp_path, {"prompt": "b"}),
-        )
+        async with setup.team:
+            results = await asyncio.gather(
+                _spawn(setup, tmp_path, {"prompt": "a"}),
+                _spawn(setup, tmp_path, {"prompt": "b"}),
+            )
 
     assert sorted(_spawn_result(r).agent_id or "" for r in results) == [
         "Agent_0",
