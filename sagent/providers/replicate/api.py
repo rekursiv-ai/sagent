@@ -22,12 +22,7 @@ from sagent.model.exceptions import DisconnectedError
 from sagent.providers import replicate
 from sagent.providers.openai import wire
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
-from sagent.session.types import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
+from sagent.session.types import AssistantMessage, ToolCall, ToolResult
 
 
 if TYPE_CHECKING:
@@ -59,13 +54,18 @@ class Replicate(OpenAICompatible):
             raise ValueError("Replicate text wrappers do not support tools.")
         parts: list[str] = []
         for record in wire.flatten(request.records):
-            if isinstance(record, (UserMessage, AssistantMessage)):
-                if record.attachments:
-                    raise ValueError(
-                        "Replicate text wrappers do not support attachments.",
-                    )
-                role = "User" if isinstance(record, UserMessage) else "Assistant"
-                parts.append(f"{role}: {record.content or ''}")
+            # The user's side is what every OpenAI wire says it is: a person's
+            # line, another agent's, a harness note.
+            if isinstance(record, AssistantMessage):
+                role, said = "Assistant", (record.content or "", record.attachments)
+            elif (said := wire.user_content(record)) is not None:
+                role = "User"
+            else:
+                continue
+            text, attachments = said
+            if attachments:
+                raise ValueError("Replicate text wrappers do not support attachments.")
+            parts.append(f"{role}: {text}")
         return {
             "version": model.capability.wire_model_id or model.capability.model_id,
             "input": {

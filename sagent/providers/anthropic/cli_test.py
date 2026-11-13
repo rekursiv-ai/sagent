@@ -566,7 +566,13 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
         # Messages that say nothing add no line.
         AssistantMessage(content=""),
         AgentToAgentMessage(sender="lead", content=""),
-        AgentToAgentMessage(sender="lead", content="status?"),
+        AgentToAgentMessage(
+            sender="lead",
+            content="status?",
+            attachments=(
+                Attachment(mime_descriptor="application/pdf", data=b"%PDF-1.4"),
+            ),
+        ),
         AgentToAgentMessage(content="unsigned"),
         SystemMessage(content="Saved."),
         SystemMessage(content=None),
@@ -578,7 +584,8 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
     await _stream(_model(shared), Request(records=records))
     ((_, said),) = claude.processes()
     (content,) = said
-    assert [block["type"] for block in content] == ["text", "image"]
+    # What each line attaches follows the words, in the lines' order.
+    assert [block["type"] for block in content] == ["text", "document", "image"]
     assert content[0]["text"] == "\n\n".join(
         [
             "Summary of the conversation so far:\nWe fixed the bug.",
@@ -777,20 +784,26 @@ async def test_claude_quiet_for_ten_minutes_has_dropped_the_turn(
     assert set(waits) == {600.0}
 
 
+@pytest.mark.parametrize(
+    "line",
+    [UserMessage, AgentToAgentMessage],
+    ids=["a person's", "another agent's"],
+)
 @pytest.mark.asyncio
-async def test_a_new_lines_images_reach_the_running_claude(
+async def test_a_new_lines_images_and_pdfs_reach_the_running_claude(
     claude: _Stub,
     shared: _Resources,
+    line: type[UserMessage | AgentToAgentMessage],
 ) -> None:
     claude.script(_said("Hello"), _said("A dot"))
     model = _model(shared)
     first = Request(records=(UserMessage(content="hi"),))
     reply = _response(await _stream(model, first)).records
-    picture = _png_attachment()
-    seen = UserMessage(content="see", attachments=(picture,))
+    pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF-1.4")
+    seen = line(content="see", attachments=(_png_attachment(), pdf))
     await _stream(model, Request(records=(*first.records, *reply, seen)))
     ((_, said),) = claude.processes()
-    assert [block["type"] for block in said[1]] == ["text", "image"]
+    assert [block["type"] for block in said[1]] == ["text", "image", "document"]
 
 
 def test_a_model_that_takes_no_effort_is_told_none(shared: _Resources) -> None:

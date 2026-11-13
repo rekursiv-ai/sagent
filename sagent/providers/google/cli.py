@@ -791,9 +791,10 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
             case AgentToAgentMessage(content=str() as text, sender=str() as sender) if (
                 text
             ):
-                lines.append(f"Agent {sender}: {text}")
+                said = _with_attachments(text, record.attachments)
+                lines.append(f"Agent {sender}: {said}")
             case AgentToAgentMessage(content=str() as text) if text:
-                lines.append(f"Agent: {text}")
+                lines.append(f"Agent: {_with_attachments(text, record.attachments)}")
             case SystemMessage() | TurnContext():
                 if note := _said(record):
                     lines.append(note)
@@ -816,7 +817,7 @@ def _said(record: SessionRecord) -> str:
     if isinstance(record, UserMessage):
         return _with_attachments(record.content or "", record.attachments)
     if isinstance(record, AgentToAgentMessage):
-        body = record.content or ""
+        body = _with_attachments(record.content or "", record.attachments)
         return f"[from {record.sender}]: {body}" if record.sender is not None else body
     if isinstance(record, SystemMessage) and record.content is not None:
         return f"<system-reminder>\n{record.content}\n</system-reminder>"

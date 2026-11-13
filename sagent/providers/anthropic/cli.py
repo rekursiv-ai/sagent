@@ -667,11 +667,11 @@ def _content(
     lines: Sequence[str],
     limits: ModelLimits,
 ) -> list[dict[str, object]]:
-    """Return one user line: ``lines`` as text, then the images ``records`` attach."""
+    """Return one user line: ``lines`` as text, then what each of ``records``' lines attaches."""
     attachments = [
         attachment
         for record in records
-        if isinstance(record, UserMessage)
+        if isinstance(record, (UserMessage, AgentToAgentMessage))
         for attachment in record.attachments
     ]
     return wire.content("\n\n".join(lines), attachments, limits=limits)
