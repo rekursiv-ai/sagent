@@ -618,6 +618,7 @@ repos:
         name: biome-check
         stages: [pre-commit]
         files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
+        args: [--reporter=concise]
 
   # rustfmt rewrites in place, then clippy denies every warning, each once per
   # crate a change touches: the nearest `Cargo.toml` above each file.
