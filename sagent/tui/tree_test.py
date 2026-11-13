@@ -199,7 +199,7 @@ def test_with_no_rows_only_the_keys_are_drawn() -> None:
 
 
 @dataclass(slots=True, kw_only=True)
-class _Said:
+class _FakeControls:
     team: _Team | None = None
     stopped: list[str] = field(default_factory=list[str])
     cancelled: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
@@ -242,23 +242,23 @@ def test_the_cursor_starts_on_the_shown_agent_and_enter_picks(
     keys: tuple[str, ...],
     picked: str | None,
 ) -> None:
-    said = _Said()
+    controls = _FakeControls()
     screen = tree._Screen(
         team=_team(),
         focused="kid",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, *keys).assert_called_once_with(result=picked)
 
 
 def test_a_shown_agent_not_in_the_tree_starts_the_cursor_on_the_first_row() -> None:
-    said = _Said()
+    controls = _FakeControls()
     screen = tree._Screen(
         team=_team(),
         focused="gone",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "c-m").assert_called_once_with(result="Agent")
 
@@ -266,7 +266,7 @@ def test_a_shown_agent_not_in_the_tree_starts_the_cursor_on_the_first_row() -> N
 @pytest.mark.asyncio
 async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
     team = _team()
-    said = _Said()
+    controls = _FakeControls()
     before = asyncio.all_tasks()
     invalidate = MagicMock()
     made = SimpleNamespace(
@@ -279,7 +279,8 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
         patch.object(tree, "repaint_on_change", repaint),
     ):
         assert (
-            await pick(team, focused="kid", stop=said.stop, cancel=said.cancel) == "kid"
+            await pick(team, focused="kid", stop=controls.stop, cancel=controls.cancel)
+            == "kid"
         )
     options = application.call_args.kwargs
     assert options["full_screen"] is True
@@ -301,7 +302,7 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
     )
     (delete,) = keys.get_bindings_for_keys(("delete",))
     delete.handler(MagicMock(spec=KeyPressEvent))
-    assert said.stopped == ["grand"]
+    assert controls.stopped == ["grand"]
     team["grand"].runtime.jobs = {
         "w1": SimpleNamespace(
             call=ToolCall(call_id="w1", name="Wait", arguments={}),
@@ -311,7 +312,7 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
     }
     down.handler(MagicMock(spec=KeyPressEvent))
     delete.handler(MagicMock(spec=KeyPressEvent))
-    assert said.cancelled == [("grand", "w1")]
+    assert controls.cancelled == [("grand", "w1")]
     repaint.assert_called_once_with(invalidate, control.text)
     assert options["style"] is load_theme().prompt_style()
     (redraw,) = asyncio.all_tasks() - before
@@ -322,7 +323,7 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
 
 @pytest.mark.asyncio
 async def test_custom_theme_colors_reach_the_picker() -> None:
-    said = _Said()
+    controls = _FakeControls()
     theme = load_theme("terminal")
     before = asyncio.all_tasks()
     made = SimpleNamespace(
@@ -336,8 +337,8 @@ async def test_custom_theme_colors_reach_the_picker() -> None:
         await pick(
             _team(),
             focused="kid",
-            stop=said.stop,
-            cancel=said.cancel,
+            stop=controls.stop,
+            cancel=controls.cancel,
             theme=theme,
         )
     assert application.call_args.kwargs["style"] is theme.prompt_style()
@@ -349,8 +350,13 @@ async def test_custom_theme_colors_reach_the_picker() -> None:
 
 def test_a_tree_that_changes_while_shown_is_redrawn() -> None:
     team = _team()
-    said = _Said()
-    screen = tree._Screen(team=team, focused="kid", stop=said.stop, cancel=said.cancel)
+    controls = _FakeControls()
+    screen = tree._Screen(
+        team=team,
+        focused="kid",
+        stop=controls.stop,
+        cancel=controls.cancel,
+    )
     before = screen.text()
     team["other"].spend_usd = 0.5
     after = screen.text()
@@ -361,12 +367,12 @@ def test_a_tree_that_changes_while_shown_is_redrawn() -> None:
 
 def test_what_delete_did_is_said_and_the_cursor_falls_back_a_row() -> None:
     team = _team()
-    said = _Said(team=team)
+    controls = _FakeControls(team=team)
     screen = tree._Screen(
         team=team,
         focused="other",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "delete")
     drawn = screen.text()
@@ -378,27 +384,27 @@ def test_what_delete_did_is_said_and_the_cursor_falls_back_a_row() -> None:
 def test_a_lone_root_is_drawn_under_the_cursor() -> None:
     team = _team()
     team.agents = {"Agent": team["Agent"]}
-    said = _Said()
+    controls = _FakeControls()
     screen = tree._Screen(
         team=team,
         focused="Agent",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     first, *_ = screen.text()
     assert first == ("class:tree.selected", f" {'● Agent':<32}  idle         $0.00 ")
 
 
 def test_delete_stops_the_agent_of_its_row() -> None:
-    said = _Said()
+    controls = _FakeControls()
     screen = tree._Screen(
         team=_team(),
         focused="kid",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "down", "delete", "right").assert_called_once_with(result=None)
-    assert (said.stopped, said.cancelled) == (["grand"], [])
+    assert (controls.stopped, controls.cancelled) == (["grand"], [])
 
 
 def test_delete_on_a_job_cancels_it() -> None:
@@ -410,44 +416,44 @@ def test_delete_on_a_job_cancels_it() -> None:
             state="running",
         ),
     }
-    said = _Said()
+    controls = _FakeControls()
     screen = tree._Screen(
         team=team,
         focused="Agent",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "down", "delete", "right").assert_called_once_with(result=None)
-    assert (said.stopped, said.cancelled) == ([], [("Agent", "w1")])
+    assert (controls.stopped, controls.cancelled) == ([], [("Agent", "w1")])
 
 
 def test_when_the_last_row_leaves_the_cursor_falls_back_a_row() -> None:
     team = _team()
-    said = _Said(team=team)
+    controls = _FakeControls(team=team)
     screen = tree._Screen(
         team=team,
         focused="other",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "delete", "c-m").assert_called_once_with(result="grand")
-    assert said.stopped == ["other"]
+    assert controls.stopped == ["other"]
 
 
 def test_with_every_agent_gone_enter_and_delete_do_nothing() -> None:
     team = _team()
     team.agents = {"Agent": team["Agent"]}
-    said = _Said(team=team)
+    controls = _FakeControls(team=team)
     screen = tree._Screen(
         team=team,
         focused="Agent",
-        stop=said.stop,
-        cancel=said.cancel,
+        stop=controls.stop,
+        cancel=controls.cancel,
     )
     _press(screen, "delete", "delete", "c-m").assert_not_called()
     assert screen.text() == render([], cursor=0, note="stopping Agent")
     _press(screen, "right").assert_called_once_with(result=None)
-    assert said.stopped == ["Agent"]
+    assert controls.stopped == ["Agent"]
 
 
 if __name__ == "__main__":
