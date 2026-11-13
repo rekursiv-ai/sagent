@@ -611,11 +611,19 @@ repos:
   #   noComponentHookFactories tests and router/lazy.ts build components on purpose.
   # useExhaustiveDependencies keeps a listed dependency it finds unneeded: such
   # a dependency re-runs the effect when it changes, by design.
-  - repo: https://github.com/biomejs/pre-commit
-    rev: v2.6.7
+  # Installed from npm's registry, not as upstream's hook repo: pre-commit
+  # installs a hook repo as `git+file://` its clone, and npm 11.12 refuses that
+  # (EALLOWGIT), so the hook could not install and every commit failed, on any
+  # file. The version lives in `additional_dependencies`; bump it there.
+  - repo: local
     hooks:
       - id: biome-check
         name: biome-check
+        language: node
+        additional_dependencies: ["@biomejs/biome@2.6.7"]
+        entry: biome check --write --files-ignore-unknown=true --no-errors-on-unmatched
+        types: [text]
+        require_serial: true
         stages: [pre-commit]
         files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
         args: [--reporter=concise]
