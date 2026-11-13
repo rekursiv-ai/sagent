@@ -18,7 +18,7 @@ import pytest
 
 from sagent.session.types import LineSpan, ReadResult, ToolResult
 from sagent.tools.command_analyzer import invocations
-from sagent.tools.read import Read
+from sagent.tools.read import Read, _count
 from sagent.tools.types import ToolContext, parse, settled
 
 
@@ -602,6 +602,7 @@ async def test_a_pdf_that_is_not_one_or_too_big_is_an_error(tmp_path: Path) -> N
         ("sed -n '7,7p' foo.txt", {"file_path": "foo.txt", "offset": 7, "limit": 1}),
         ("cat /etc/hosts", {"file_path": "/etc/hosts"}),
         ("cat ~/notes.md", {"file_path": "~/notes.md"}),
+        ("cat X.txt", {"file_path": "X.txt"}),
     ],
 )
 def test_a_plain_shell_read_becomes_the_read_that_shows_the_same_lines(
@@ -635,6 +636,8 @@ def test_a_plain_shell_read_becomes_the_read_that_shows_the_same_lines(
         "head -",
         "tail -n 3 -",
         "sed -n '1p' -",
+        # After ``--`` a word is a file, and here that file is named ``-n``.
+        "cat -- -n",
     ],
 )
 def test_a_read_no_call_matches_is_refused_with_advice(command: str) -> None:
@@ -678,6 +681,9 @@ def test_a_read_after_a_known_cd_names_the_file_from_there() -> None:
         "sed -n -e '2,3p' foo.txt",
         "sed '1p' notes.txt",
         "sed --line-length=9 '1p' foo.txt",
+        # The word after each flag is its value, so neither command names a file.
+        "sed -n --expression '1p'",
+        "sed -n --file 1p",
         "head -n 5",
         "head --lines 5",
         "tail -n 3",
@@ -733,6 +739,24 @@ def test_each_spelling_of_a_count_and_its_sign_is_read(
         " and lines numbered to cite."
     )
     assert _from_shell(command) == (refused if arguments == "refused" else arguments)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("foo.txt",), (["foo.txt"], 10, "")),
+        (("-5", "foo.txt"), (["foo.txt"], 5, "")),
+        (("-n", "5", "foo.txt"), (["foo.txt"], 5, "")),
+        (("-n", "+5", "foo.txt"), (["foo.txt"], 5, "+")),
+        (("-n", "-5", "foo.txt"), (["foo.txt"], 5, "-")),
+    ],
+    ids=["no-count", "bare-number", "unsigned", "plus", "minus"],
+)
+def test_a_count_is_returned_with_the_operands_and_its_sign(
+    args: tuple[str, ...],
+    expected: tuple[list[str], int, str],
+) -> None:
+    assert _count(args) == expected
 
 
 @pytest.mark.parametrize("command", ["head -n", "tail -n"])

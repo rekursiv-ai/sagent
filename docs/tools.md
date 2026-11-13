@@ -107,7 +107,7 @@ class Echo:
         )
 ```
 
-`whole_output` suits a tool with nothing to write until it is done: it starts the work and writes the output it returns. A tool that writes as it runs, as `Bash` does, returns its own `Stream`s. A tool names the item type of each stream: text for most, and records for some, as `Edit` writes each `Splice`.
+`whole_output` suits a tool with nothing to write until it is done: it starts the work and writes the output it returns. A tool whose answer is at hand, such as a refusal, passes the `ToolOutput` itself. A tool that writes as it runs, as `Bash` does, returns its own `Stream`s and closes each when it has written its last item; one left open ends when the tool's `result` is done. A tool names the item type of each stream: text for most, and records for some, as `Edit` writes each `Splice`.
 
 `result` is a class that carries the exit code as `exit_code`, `0` for success. A tool with more to report defines its own result class: `Read` returns a `ReadResult` (the resolved `path`, and a `status` when it showed no lines), so `Read` is a `Tool[ReadResult, Attachment | LineSpan | str, str]`. Every built-in has its own (`BashResult`, `GrepResult`, `EditResult`, and so on, all in `sagent.session.types`), so a reader tells which tool a result came from by the class of its `result`; a tool of yours with nothing more to report returns an `UncategorizedToolResult`. A bare `Tool` is a tool of any result class and item types.
 

@@ -435,7 +435,6 @@ class _StdoutLines:
         """Route the last line, which no line follows."""
         if self._pending_line is not None:
             self._route(self._pending_line, next_line=None)
-        self._pending_line = None
 
     def _route(self, line: str, *, next_line: str | None) -> None:
         # The report's leading newline and the stream's final newline each read
@@ -595,7 +594,7 @@ def _script(sentinel: str) -> str:
 def _early_chars(cap: int, *, note: str) -> int:
     """Return how many characters from the output's start the final text always keeps."""
     room = cap - (cap // 4 + 160) - len(_omitted(10**18, note=note))
-    return max(0, room) * 2 // 5
+    return max(0, room * 2 // 5)
 
 
 def _final_text(

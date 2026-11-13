@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from typing import TYPE_CHECKING, NoReturn
 
 import contextlib
 import itertools
@@ -16,6 +15,7 @@ import subprocess
 
 import pytest
 
+from sagent.lib.files import grep as files_grep
 from sagent.lib.files.grep import (
     ARGV_CHARS,
     GrepError,
@@ -31,7 +31,7 @@ from sagent.lib.files.grep import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
 
@@ -49,13 +49,16 @@ _RG_VCS = ["--glob", "!.git", "--glob", "!.svn", "--glob", "!.hg"]
 
 
 @pytest.fixture(autouse=True)
-def backend(rg: bool) -> Iterator[None]:
+def backend(rg: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide ``rg`` unless the test runs against it."""
     found = shutil.which("rg")
     if rg and found is None:
         pytest.skip("ripgrep is not installed")
-    with patch("shutil.which", return_value=found if rg else None):
-        yield
+
+    def which(*_args: object, **_kwargs: object) -> object:
+        return found if rg else None
+
+    monkeypatch.setattr(shutil, "which", which)
 
 
 @pytest.fixture
@@ -514,44 +517,67 @@ def test_a_missing_named_file_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Thousands of named files must not overflow one command line."""
     names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("hit\n")
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    argvs: list[list[str]] = []
+    timeouts: list[float] = []
+    real = subprocess.run
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        argvs.append(argv)
+        timeouts.append(timeout)
+        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", run)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    batches = [
-        [arg for arg in cast(list[str], call.args[0]) if arg.startswith(str(tmp_path))]
-        for call in run.call_args_list
-    ]
+    batches = [[arg for arg in argv if arg.startswith(str(tmp_path))] for argv in argvs]
     assert [name for batch in batches for name in batch] == list(map(str, names))
     assert len(batches) > 1
     # Every batch, not just the first, is bounded by the caller's timeout.
-    assert [call.kwargs["timeout"] for call in run.call_args_list] == [30] * len(
-        batches,
-    )
+    assert timeouts == [30] * len(batches)
     for batch, after in itertools.pairwise(batches):
         assert len(" ".join(batch)) <= ARGV_CHARS
         assert len(" ".join([*batch, after[0]])) > ARGV_CHARS
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
+def test_each_rg_run_gets_the_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     f = tmp_path / "f.txt"
     f.write_text("ab\n")
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    argvs: list[list[str]] = []
+    options: list[tuple[bool, float, bool]] = []
+    real = subprocess.run
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        argvs.append(argv)
+        options.append((capture_output, timeout, check))
+        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", run)
         assert grep(f, Query(pattern="(?<=a)b"), timeout_sec=7) == [str(f)]
-    assert [call.kwargs for call in run.call_args_list] == [
-        {"capture_output": True, "timeout": 7, "check": False},
-    ] * 2
-    assert "-P" in cast(list[str], run.call_args_list[1].args[0])
+    assert options == [(True, 7, False)] * 2
+    assert "-P" in argvs[1]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -563,7 +589,11 @@ def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
     ],
     ids=["literal", "backtracking-multiline"],
 )
-def test_rg_answers_every_search_when_installed(tmp_path: Path, query: Query) -> None:
+def test_rg_answers_every_search_when_installed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query: Query,
+) -> None:
     r"""Python ``re`` backtracks without bound, and holds the GIL while it does.
 
     ``async def test_.*\\n(.*\\n){0,25}.*main\\._main\\(`` with ``multiline`` ran
@@ -573,16 +603,28 @@ def test_rg_answers_every_search_when_installed(tmp_path: Path, query: Query) ->
     """
     f = tmp_path / "f.py"
     f.write_text("value = 1\n")
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    argvs: list[list[str]] = []
+    real = subprocess.run
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        argvs.append(argv)
+        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", run)
         grep(f, query)
-    assert run.called
+    assert argvs
 
 
 def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A race must not truncate the file list the walk hands to the search.
 
@@ -603,7 +645,8 @@ def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
             raise OSError
         return real(self)
 
-    with patch("pathlib.Path.lstat", flaky):
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "lstat", flaky)
         found = grep(tmp_path, Query(pattern="hit"))
     every = {str(tmp_path / name) for name in ("a.py", "b.py", "c.py")}
     assert set(found) < every
@@ -614,51 +657,90 @@ def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
 @pytest.mark.parametrize("search", [grep, grep_rows])
 def test_the_default_rg_timeout_is_thirty_seconds(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     search: Callable[[Path, Query], list[str] | list[Row]],
 ) -> None:
     f = tmp_path / "f.txt"
     f.write_text("x\n")
-    with (
-        patch("sagent.lib.files.grep.shutil.which", return_value="/rg") as which,
-        patch(
-            "sagent.lib.files.grep.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 1, b"", b""),
-        ) as run,
-    ):
+    looked_up: list[str] = []
+    runs: list[tuple[list[str], float]] = []
+
+    def which(name: str) -> str:
+        looked_up.append(name)
+        return "/rg"
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        del capture_output, check
+        runs.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, 1, b"", b"")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "which", which)
+        patch.setattr(subprocess, "run", run)
         assert search(f, Query(pattern="x")) == []
-    which.assert_called_once_with("rg")
-    assert cast(list[str], run.call_args.args[0])[0] == "/rg"
-    assert run.call_args.kwargs["timeout"] == 30
+    assert looked_up == ["rg"]
+    ((argv, timeout),) = runs
+    assert argv[0] == "/rg"
+    assert timeout == 30
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_rg_failure_names_its_exit_and_stderr(tmp_path: Path) -> None:
+def test_a_rg_failure_names_its_exit_and_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     f = tmp_path / "f.txt"
     f.write_text("x\n")
-    with (
-        patch("sagent.lib.files.grep.shutil.which", return_value="/rg"),
-        patch(
-            "sagent.lib.files.grep.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 2, b"", b"bad\xff\n"),
-        ),
-        pytest.raises(GrepError) as raised,
-    ):
-        grep(f, Query(pattern="x"))
+    with monkeypatch.context() as patch:
+
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+
+        def run(*_args: object, **_kwargs: object) -> object:
+            return subprocess.CompletedProcess([], 2, b"", b"bad\xff\n")
+
+        patch.setattr(
+            subprocess,
+            "run",
+            run,
+        )
+        with pytest.raises(GrepError) as raised:
+            grep(f, Query(pattern="x"))
     assert str(raised.value) == "ripgrep error (exit 2): bad\ufffd"
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_rg_exit_without_a_message_keeps_what_it_found(tmp_path: Path) -> None:
+def test_a_rg_exit_without_a_message_keeps_what_it_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``--no-messages`` silences per-file failures; their exit 2 is no error."""
     f = tmp_path / "f.txt"
     f.write_text("x\n")
-    with (
-        patch("sagent.lib.files.grep.shutil.which", return_value="/rg"),
-        patch(
-            "sagent.lib.files.grep.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 2, f"{f}\n".encode(), b" \n"),
-        ),
-    ):
+    out = f"{f}\n".encode()
+    with monkeypatch.context() as patch:
+
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+
+        def run(*_args: object, **_kwargs: object) -> object:
+            return subprocess.CompletedProcess([], 2, out, b" \n")
+
+        patch.setattr(
+            subprocess,
+            "run",
+            run,
+        )
         assert grep(f, Query(pattern="x")) == [str(f)]
 
 
@@ -827,7 +909,10 @@ def test_multiline_count_of_two_matches_on_one_line(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
+def test_a_batch_may_fill_the_argv_limit_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Names joined by spaces may total ``ARGV_CHARS`` and still share a run."""
     names = _batch_paths(tmp_path)
     widths = [len(str(path)) + 1 for path in names]
@@ -841,16 +926,23 @@ def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
     for path in names:
         path.write_text("hit\n")
     assert len(" ".join(map(str, names[:fit]))) == ARGV_CHARS
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    argvs: list[list[str]] = []
+    real = subprocess.run
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        argvs.append(argv)
+        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", run)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    first = [
-        arg
-        for arg in cast(list[str], run.call_args_list[0].args[0])
-        if arg.startswith(str(tmp_path))
-    ]
+    first = [arg for arg in argvs[0] if arg.startswith(str(tmp_path))]
     assert len(first) == fit
 
 
@@ -887,16 +979,22 @@ def test_pcre_without_rg_is_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_rg_timeout_is_a_grep_error(tmp_path: Path) -> None:
-    def timeout(*_args: object, **_kwargs: object) -> object:
+def test_a_rg_timeout_is_a_grep_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(*_args: object, **_kwargs: object) -> NoReturn:
         raise subprocess.TimeoutExpired(cmd="rg", timeout=1)
 
-    with (
-        patch("shutil.which", return_value="/rg"),
-        patch("subprocess.run", timeout),
-        pytest.raises(GrepError, match=r"^ripgrep timed out after 1s"),
-    ):
-        grep(tmp_path, Query(pattern="x"), timeout_sec=1)
+    with monkeypatch.context() as patch:
+
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+        patch.setattr(subprocess, "run", timeout)
+        with pytest.raises(GrepError, match=r"^ripgrep timed out after 1s"):
+            grep(tmp_path, Query(pattern="x"), timeout_sec=1)
 
 
 def test_rg_command_with_every_knob_off(tmp_path: Path) -> None:
@@ -1040,7 +1138,10 @@ def test_a_raw_newline_in_the_pattern_needs_multiline(tmp_path: Path) -> None:
         grep(file, Query(pattern="a\nb"))
 
 
-def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
+def test_an_unreadable_file_is_skipped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for name in ("a.txt", "b.txt"):
         (tmp_path / name).write_text("hit\n")
     real = pathlib.Path.read_bytes
@@ -1050,7 +1151,8 @@ def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
             raise PermissionError(self)
         return real(self)
 
-    with patch("pathlib.Path.read_bytes", unreadable):
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "read_bytes", unreadable)
         assert grep(tmp_path, Query(pattern="hit")) == [str(tmp_path / "b.txt")]
 
 
@@ -1510,22 +1612,25 @@ def test_each_batch_holds_what_fits_its_space_joined_names(
 @pytest.mark.parametrize(("cpus", "workers"), [(8, 2), (None, 1)])
 def test_batches_run_on_one_thread_each_up_to_the_cpus(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     cpus: int | None,
     workers: int,
 ) -> None:
     names = [tmp_path / name for name in ("a", "b")]
     for path in names:
         path.write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.ARGV_CHARS", 1),
-        patch("sagent.lib.files.grep.os.cpu_count", return_value=cpus),
-        patch(
-            "sagent.lib.files.grep.ThreadPoolExecutor",
-            wraps=ThreadPoolExecutor,
-        ) as pool,
-    ):
+    sizes: list[int] = []
+
+    def pool(*, max_workers: int) -> ThreadPoolExecutor:
+        sizes.append(max_workers)
+        return ThreadPoolExecutor(max_workers=max_workers)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(files_grep, "ARGV_CHARS", 1)
+        patch.setattr(os, "cpu_count", lambda: cpus)
+        patch.setattr(files_grep, "ThreadPoolExecutor", pool)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    pool.assert_called_once_with(max_workers=workers)
+    assert sizes == [workers]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -1562,15 +1667,24 @@ def test_a_one_letter_name_keeps_its_row_whole(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_counts_ripgrep_prints_out_of_order_sort_by_file(tmp_path: Path) -> None:
+def test_counts_ripgrep_prints_out_of_order_sort_by_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ripgrep searches files in parallel, so its rows arrive in any order."""
     for name in ("a", "b"):
         (tmp_path / name).write_text("hit\n")
     out = f"{tmp_path}/b:1\n{tmp_path}/a:1\n".encode()
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        return_value=subprocess.CompletedProcess([], 0, out, b""),
-    ):
+    with monkeypatch.context() as patch:
+
+        def run(*_args: object, **_kwargs: object) -> object:
+            return subprocess.CompletedProcess([], 0, out, b"")
+
+        patch.setattr(
+            subprocess,
+            "run",
+            run,
+        )
         found = grep(tmp_path, Query(pattern="hit", output_mode="count"))
     assert found == [f"{tmp_path}/a:1", f"{tmp_path}/b:1"]
 

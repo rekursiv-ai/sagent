@@ -164,11 +164,13 @@ class Read:
                 *("-e", "-E", "-t", "-T", "--show-all", "--show-nonprinting"),
             },
         )
-        counts = frozenset({"-n", "-c", "--lines", "--bytes"})
+        # Only the flags ``deny`` lets through: a count of bytes, ``-e`` and ``-f``
+        # are refused before their values are looked for.
+        counts = frozenset({"-n", "--lines"})
         takes_value = {
             "head": counts,
             "tail": counts,
-            "sed": frozenset({"-e", "-f", "--expression", "--file"}),
+            "sed": frozenset({"--expression", "--file"}),
         }.get(invocation.exe, frozenset[str]())
         if not replaceable(
             invocation,
@@ -377,18 +379,21 @@ def _window(invocation: Invocation) -> tuple[str, Mapping[str, PlainTree]] | Non
         if any(a.startswith("-") and a != "-n" for a in args):
             return None
         paths = [a for a in args if a != "-n"]
-        source: tuple[str, int, str] = ("cat", 0, "")
+        # A ``cat`` shows the whole file, unless a ``head`` or ``tail`` cuts it.
+        cut: tuple[str, int, str] | None = None
     else:
         paths, count, sign = _count(args)
-        source = (invocation.exe, count, sign)
+        cut = (invocation.exe, count, sign)
     sinks = [s for s in invocation.downstream() if s.exe in {"head", "tail"}]
     # ``-`` names the input, which a Bash call leaves empty, not a file.
-    if paths[:1] == ["-"] or len(paths) != 1 or len(sinks) + (source[0] != "cat") > 1:
+    if paths == ["-"] or len(paths) != 1 or len(sinks) + (cut is not None) > 1:
         return None
     sink = bounding_sink(invocation)
-    exe, count, sign = (sink.exe, *_count(sink.args)[1:]) if sink else source
-    if exe == "cat":
+    if sink is not None:
+        cut = (sink.exe, *_count(sink.args)[1:])
+    if cut is None:
         return paths[0], dict[str, PlainTree]()
+    exe, count, sign = cut
     # No Read takes a zero count; ``head -n 0`` and ``head -n abc`` show nothing.
     if count < 1:
         return None
@@ -407,7 +412,7 @@ def _count(args: tuple[str, ...]) -> tuple[list[str], int, str]:
     count, sign = 10, ""
     i = 0
     while i < len(args):
-        arg, raw = args[i], ""
+        arg = args[i]
         if arg in {"-n", "--lines"} and i + 1 < len(args):
             raw, i = args[i + 1], i + 2
         elif arg.startswith("--lines="):
@@ -603,11 +608,17 @@ def _render(
         page = doc[i]
         try:
             # Twice 72 DPI: legible to a vision model, small enough to send.
-            image = page.render(scale=2).to_pil().convert("RGB")
+            # Rendered as RGB, which a JPEG takes: no alpha was asked for.
+            image = page.render(scale=2).to_pil()
         finally:
             page.close()
         buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=85, optimize=True)
+        image.save(
+            buf,
+            format="JPEG",  # pragma: no mutate -- PIL reads a format's name in either case.
+            quality=85,
+            optimize=True,
+        )
         if used + buf.tell() > max_bytes:
             break
         used += buf.tell()
