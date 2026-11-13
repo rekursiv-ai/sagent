@@ -68,7 +68,11 @@ from sagent.lib.posix.sockets import socket_address
 from sagent.lib.userdirs import config_dir, state_dir
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AgentToAgentMessage, stored_record
+from sagent.session.types import (
+    AgentToAgentMessage,
+    UncategorizedToolResult,
+    stored_record,
+)
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteSession, SavedRemote, local_link, tls_link
 
@@ -80,8 +84,7 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.host.server import _Session
-    from sagent.session.types import FunctionResult
-    from sagent.tools.types import ToolContext
+    from sagent.tools.types import ToolContext, ToolStreamingResult
 
 
 class _ExecError(BaseException):
@@ -103,13 +106,13 @@ class _CountedGate(Gate):
     calls: list[str] = field(default_factory=list[str])
 
     @override
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> FunctionResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
         self.calls.append(context.label)
-        return await super(_CountedGate, self).call(context, arguments)
+        return super(_CountedGate, self).call(context, arguments)
 
 
 @pytest_asyncio.fixture
@@ -598,7 +601,7 @@ async def test_upgrade_preserves_accepted_remote_work_without_replaying_it(
             _ = await ensure(dirs, version="new")
             gate.opened.set()
             result = await asyncio.wait_for(running, timeout=10)
-            assert result.is_error is not True
+            assert result.is_error is False
             assert gate.calls == ["Agent@fixture"]
             assert not gate.stopped.is_set()
             result = await endpoint.call(
@@ -607,7 +610,7 @@ async def test_upgrade_preserves_accepted_remote_work_without_replaying_it(
                 tool="Gate",
                 arguments={},
             )
-            assert result.is_error is not True
+            assert result.is_error is False
             assert gate.calls == ["Agent@fixture", "Agent@fixture"]
             peer = f"b#{local_b.session_id}"
             local = next(iter(local_a.endpoints().values()))
@@ -700,7 +703,7 @@ async def test_failed_replacement_keeps_accepted_work_and_the_old_daemon(
             _ = await control(dirs, DaemonControl(source_version="new"))
             await asyncio.wait_for(attempted.wait(), 5)
             gate.opened.set()
-            assert (await asyncio.wait_for(running, 5)).is_error is not True
+            assert (await asyncio.wait_for(running, 5)).is_error is False
             assert gate.calls == ["Agent@fixture"]
             assert not gate.stopped.is_set()
             assert (await _ready(dirs)).source_version == "old"

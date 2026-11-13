@@ -2,10 +2,9 @@
 
 Typical usage example:
 
-  result = await PaperAuthor().call(context, {"query": "Yoshua Bengio"})
-  result = await PaperAuthor().call(
-      context, {"ids": "1741101", "operation": "papers", "year_from": 2022},
-  )
+  result = await settled(PaperAuthor().call(context, {"query": "Yoshua Bengio"}))
+  streaming_result = PaperAuthor().call(context, {"ids": "1741101", "operation": "papers", "year_from": 2022})
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
@@ -29,8 +28,15 @@ import cachetools
 
 from sagent.session.types import PaperAuthorResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.paper_common import error, paper_ids, summary_ids
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.paper_common import paper_ids, summary_ids
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -141,11 +147,11 @@ class PaperAuthor:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> PaperAuthorResult:
+    ) -> ToolStreamingResult[PaperAuthorResult, str, str]:
         """Search authors, look up ``ids``, or list one author's papers.
 
         Args:
@@ -153,13 +159,20 @@ class PaperAuthor:
           arguments: What the model passed, as ``PaperAuthor.Arguments``.
 
         Returns:
-          result: One line per candidate, a block per author, or one line per
+          streaming_result: One line per candidate, a block per author, or one line per
             paper.
 
         Raises:
           ValueError: The arguments contradict each other.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PaperAuthorResult, str, str]:
         a = parse(arguments, PaperAuthor.Arguments)
         session = context.fetch_session
         query = a.query.strip()
@@ -193,7 +206,10 @@ class PaperAuthor:
         )
         cached = self.cache.get(key)
         if cached is not None:
-            return PaperAuthorResult(call_id="", operation=a.operation, content=cached)
+            return ToolOutput(
+                stdout=(cached,),
+                result=PaperAuthorResult(operation=a.operation),
+            )
         try:
             if query:
                 text = await self._search(query, limit=a.limit, session=session)
@@ -210,15 +226,17 @@ class PaperAuthor:
                     for label, r in zip(ids, records, strict=True)
                 )
                 if any(r is None for r in records):
-                    return PaperAuthorResult(
-                        call_id="",
-                        operation=a.operation,
-                        content=text,
+                    return ToolOutput(
+                        stdout=(text,),
+                        result=PaperAuthorResult(operation=a.operation),
                     )
         except PaperError as e:
-            return error(PaperAuthorResult, str(e))
+            return ToolOutput(stderr=(str(e),), result=PaperAuthorResult(exit_code=1))
         self.cache[key] = text
-        return PaperAuthorResult(call_id="", operation=a.operation, content=text)
+        return ToolOutput(
+            stdout=(text,),
+            result=PaperAuthorResult(operation=a.operation),
+        )
 
     async def _search(
         self,

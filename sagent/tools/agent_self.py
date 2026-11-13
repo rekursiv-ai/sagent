@@ -6,7 +6,7 @@ What the agent's session holds is the AgentSession tool's to change.
 Typical usage example:
 
   me = AgentSelf(team=team)
-  result = await me.call(context, {"status": "Fixing the parser", "effort": "high"})
+  result = await settled(me.call(context, {"status": "Fixing the parser", "effort": "high"}))
 """
 
 from __future__ import annotations
@@ -25,7 +25,13 @@ from sagent.runtime import types
 from sagent.session.types import AgentSelfResult
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -113,11 +119,11 @@ class AgentSelf:
         del context, arguments
         return "*"
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AgentSelfResult:
+    ) -> ToolStreamingResult[AgentSelfResult, str, str]:
         """Plan the patch, apply it whole, and say what changed.
 
         Args:
@@ -125,13 +131,20 @@ class AgentSelf:
           arguments: What the model passed, as ``AgentSelf.Arguments``.
 
         Returns:
-          result: One line per change, then any report asked for.
+          streaming_result: One line per change, then any report asked for.
 
         Raises:
           ValueError: The caller is in no team, or a setting or model is not
             offered; nothing was changed.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[AgentSelfResult, str, str]:
         a = parse(arguments, AgentSelf.Arguments)
         agent = target_agent(
             self.team,
@@ -189,9 +202,9 @@ class AgentSelf:
             lines.append(
                 f"{provider} models: " + ", ".join(self.team.catalog[provider]),
             )
-        return AgentSelfResult(
-            call_id="",
-            content="\n".join(lines) or "No change.",
+        return ToolOutput(
+            stdout=("\n".join(lines) or "No change.",),
+            result=AgentSelfResult(),
         )
 
     async def _model(self, agent: Agent, a: AgentSelf.Arguments) -> Model | None:

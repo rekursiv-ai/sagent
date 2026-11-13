@@ -15,9 +15,9 @@ from treekle import PlainTree, from_plain
 import pytest
 
 from sagent.session.types import (
-    AnyToolResult,
     BackgroundTaskResult,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
 )
 from sagent.tools.background_task import (
@@ -29,7 +29,13 @@ from sagent.tools.background_task import (
     without_controls,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    settled,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -64,14 +70,21 @@ class Echo:
     ) -> str | None:
         return f"{context.cwd}:" + ",".join(sorted(arguments))
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
-        return UncategorizedToolResult(
-            call_id="",
-            content=f"{context.cwd}: {sorted(arguments)}",
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
+        return ToolOutput(
+            stdout=(f"{context.cwd}: {sorted(arguments)}",),
+            result=UncategorizedToolResult(),
         )
 
 
@@ -93,14 +106,14 @@ class FakeTable:
     """The runtime's jobs, and the result a foreground call would get."""
 
     listed: dict[str, FakeJob] = field(default_factory=dict)
-    results: dict[str, AnyToolResult] = field(default_factory=dict)
+    results: dict[str, ToolResult] = field(default_factory=dict)
     waited: list[str] = field(default_factory=list)
 
     @property
     def jobs(self) -> Mapping[str, Job]:
         return self.listed
 
-    async def foreground(self, call_id: str) -> AnyToolResult | None:
+    async def foreground(self, call_id: str) -> ToolResult | None:
         self.waited.append(call_id)
         return self.results.get(call_id)
 
@@ -177,7 +190,7 @@ async def test_offered_forwards_everything_without_the_control_keys() -> None:
     )
     assert shown.summary(arguments) == "Echo ['text']"
     assert shown.serialize_key(_CONTEXT, arguments) == "/:text"
-    result = await shown.call(_CONTEXT, arguments)
+    result = await settled(shown.call(_CONTEXT, arguments))
     assert result.text() == "/: ['text']"
 
 
@@ -248,7 +261,7 @@ def test_background_task_describes_itself() -> None:
 
 @pytest.mark.asyncio
 async def test_background_task_alone_has_no_jobs_to_manage() -> None:
-    result = await BackgroundTask().call(_CONTEXT, {"operation": "list"})
+    result = await settled(BackgroundTask().call(_CONTEXT, {"operation": "list"}))
     assert result == _error("BackgroundTask runs only inside an agent's runtime.")
 
 
@@ -256,10 +269,11 @@ async def test_background_task_alone_has_no_jobs_to_manage() -> None:
 async def test_list_without_jobs() -> None:
     table = FakeTable(listed={"c1": _job("Bash", "running", 0)})
     result = await BackgroundTask().manage(table, {"operation": "list"})
-    assert result == BackgroundTaskResult(
+    assert result == ToolResult(
         call_id="",
-        operation="list",
-        content="No background jobs.",
+        state="done",
+        stdout=("No background jobs.",),
+        result=BackgroundTaskResult(operation="list"),
     )
 
 
@@ -289,11 +303,11 @@ async def test_cancel_cancels_the_job() -> None:
     job = _job("Bash", "detached", 0)
     table = FakeTable(listed={"c1": job})
     result = await BackgroundTask().manage(table, {"operation": "cancel", "id": "c1"})
-    assert result == BackgroundTaskResult(
+    assert result == ToolResult(
         call_id="",
-        operation="cancel",
-        job_id="c1",
-        content="Cancelling Bash (c1).",
+        state="done",
+        stdout=("Cancelling Bash (c1).",),
+        result=BackgroundTaskResult(operation="cancel", job_id="c1"),
     )
     assert job.cancelled == [True]
 
@@ -301,7 +315,12 @@ async def test_cancel_cancels_the_job() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed", [False, True], ids=["completed", "live"])
 async def test_foreground_returns_the_jobs_result(listed: bool) -> None:
-    real = UncategorizedToolResult(call_id="c1", content="done", is_error=True)
+    real = ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("done",),
+        result=UncategorizedToolResult(exit_code=1),
+    )
     table = FakeTable(
         listed={"c1": _job("Bash", "sleeping", 0)} if listed else {},
         results={"c1": real},
@@ -349,8 +368,13 @@ async def test_an_unknown_operation_is_an_argument_error() -> None:
         _ = await BackgroundTask().manage(FakeTable(), {"operation": "fg"})
 
 
-def _error(text: str) -> BackgroundTaskResult:
-    return BackgroundTaskResult(call_id="", shown=text, is_error=True)
+def _error(text: str) -> ToolResult:
+    return ToolResult(
+        call_id="",
+        state="done",
+        stderr=(text,),
+        result=BackgroundTaskResult(exit_code=1),
+    )
 
 
 def _properties(tool: Tool) -> Mapping[str, PlainTree]:

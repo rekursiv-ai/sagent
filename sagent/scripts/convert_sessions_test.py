@@ -159,7 +159,7 @@ def test_a_journal_storing_a_former_name_is_renamed_unless_open(
     assert out[1] == f"skipped: open: {held}"
     assert out[3] == f"renamed: {closed} (1 records)"
     assert out[-1] == "1 renamed, 2 skipped: not old, 1 skipped: open"
-    assert '"py/object": "ReadResult"' in closed.read_text()
+    assert '"py/object": "ToolResult"' in closed.read_text()
     assert "FileReadResult" in held.read_text()
 
 

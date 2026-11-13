@@ -15,7 +15,14 @@ from wesearch.types.errors import FetchError
 
 from sagent.session.types import Attachment, WebBrowserResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -86,11 +93,11 @@ class WebBrowser:
         tab_id = arguments.get("tab_id")
         return f"browser:{tab_id}" if isinstance(tab_id, str) and tab_id else None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WebBrowserResult:
+    ) -> ToolStreamingResult[WebBrowserResult, Attachment | str, str]:
         """Forward one action through the calling agent's fetch session.
 
         Args:
@@ -98,9 +105,16 @@ class WebBrowser:
           arguments: What the model passed, as WebBrowser.Arguments.
 
         Returns:
-          result: Structured inspection text with any PNG as an attachment.
+          streaming_result: Structured inspection text with any PNG as an attachment.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[WebBrowserResult, Attachment | str, str]:
         a = parse(arguments, WebBrowser.Arguments)
         try:
             result = await asyncio.to_thread(
@@ -118,19 +132,18 @@ class WebBrowser:
                 session=context.fetch_session,
             )
         except (BrowserError, FetchError, ValueError, OSError) as error:
-            return WebBrowserResult(
-                call_id="",
-                action=a.action,
-                shown=f"WebBrowser failed: {error}",
-                is_error=True,
+            return ToolOutput(
+                stderr=(f"WebBrowser failed: {error}",),
+                result=WebBrowserResult(action=a.action, exit_code=1),
             )
-        return WebBrowserResult(
-            call_id="",
-            action=a.action,
-            content=json_dumps(browser_data(result)),
-            attachments=(
-                Attachment(mime_descriptor="image/png", data=result.screenshot),
-            )
-            if result.screenshot
-            else (),
+        return ToolOutput(
+            stdout=(
+                json_dumps(browser_data(result)),
+                *(
+                    (Attachment(mime_descriptor="image/png", data=result.screenshot),)
+                    if result.screenshot
+                    else ()
+                ),
+            ),
+            result=WebBrowserResult(action=a.action),
         )

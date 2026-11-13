@@ -35,6 +35,7 @@ from sagent.runtime.tape import full_tape_mask, unpaired_call_ids
 from sagent.session.types import (
     BashResult,
     EditResult,
+    LineSpan,
     ReadResult,
     ToolCall,
     ToolResult,
@@ -193,8 +194,8 @@ class Pruner:
             and seen[i] > 0
             and isinstance(result := context[i], ToolResult)
             and names.get(result.call_id) not in policy.keep_tools
-            # A stub stands for a call still running or killed, and is already small.
-            and result.stub is None
+            # A pending or cancelled call's record holds only a short note.
+            and result.state not in ("pending", "cancelled")
             and len(result.text()) > stub
         ]
 
@@ -264,16 +265,23 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     commands: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         entry = context[i]
-        if isinstance(entry, ReadResult) and entry.path is not None:
-            shown = later.setdefault(entry.path, [])
-            spans = _spans(entry.ranges)
+        if not isinstance(entry, ToolResult):
+            continue
+        tool_result = entry.result
+        if isinstance(tool_result, ReadResult):
+            if tool_result.path is None:
+                continue
+            shown = later.setdefault(tool_result.path, [])
+            spans = _spans(
+                [(s.start, s.count) for s in entry.stdout if isinstance(s, LineSpan)],
+            )
             if all(_covered(span, shown) for span in spans):
                 gone.add(i)
             shown.extend(spans)
-        elif isinstance(entry, BashResult) and entry.command is not None:
-            if entry.command in commands:
+        elif isinstance(tool_result, BashResult) and tool_result.command is not None:
+            if tool_result.command in commands:
                 gone.add(i)
-            commands.add(entry.command)
+            commands.add(tool_result.command)
     return gone
 
 
@@ -304,11 +312,13 @@ def idle(context: Sequence[ModelContextEvent]) -> list[int]:
         for _, reply in replies
     ]
     for i, entry in enumerate(context):
-        if not isinstance(entry, (ReadResult, EditResult, WriteResult)):
+        result = entry.result if isinstance(entry, ToolResult) else None
+        if not isinstance(result, (ReadResult, EditResult, WriteResult)):
             continue
-        if entry.path is None:
+        path = result.path
+        if path is None:
             continue
-        names = (entry.path, str(PurePosixPath(*PurePosixPath(entry.path).parts[-2:])))
+        names = (path, str(PurePosixPath(*PurePosixPath(path).parts[-2:])))
         # The replies after ``i``, latest first.
         for r in reversed(range(bisect(at, i), len(at))):
             if any(name in s for name in names for s in said[r]):

@@ -1,7 +1,7 @@
 """What a client, a tool server and a tool host say to each other: one JSON line each.
 
 A message is a dataclass, written as a session record is (``stored_plain``), so
-a tool's result crosses whole and typed: a ``BashResult`` arrives as
+a tool's result crosses whole and typed: a ``ToolResult`` arrives as
 one, its attachments' bytes included.
 
 ::
@@ -57,7 +57,9 @@ from wesearch.fetch.gate import Admission, GatePolicy
 
 from sagent.agent.team import MessageKind
 from sagent.session.types import (
-    AnyToolResult,
+    KnownToolResult,
+    ToolResult,
+    current_plain,
     record_classes,
     stored_plain,
     stored_record,
@@ -108,8 +110,9 @@ __all__ = [
 ]
 
 
-VERSION: Final = 1
-"""The protocol; a client and server of different versions refuse each other."""
+VERSION: Final = 2
+"""The protocol; a client and server of different versions refuse each other.
+Version 2 sends a tool call's ``Result.record`` as a ``ToolResult``."""
 
 MAX_LINE_BYTES: Final = 256 << 20
 """The longest line read: a result carrying a PDF's pages is many megabytes."""
@@ -243,7 +246,7 @@ class Result:
     """What a call did."""
 
     id: str
-    record: AnyToolResult
+    record: ToolResult
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -482,7 +485,9 @@ def decoded(line: bytes) -> Message:
     """
     classes = _classes()
     try:
-        plain = _known(json_loads(line), None, classes=classes)
+        # Converted first: a record in a former shape has fields its class lacks
+        # now, which ``_known`` would drop before ``stored_record`` could read them.
+        plain = _known(current_plain(json_loads(line)), None, classes=classes)
         message = stored_record(plain, Message, classes=classes)
     except RecursionError as error:
         raise ValueError("The line is nested too deep.") from error
@@ -490,30 +495,36 @@ def decoded(line: bytes) -> Message:
     # Below the root a tag decides what treekle builds, whatever the field declares,
     # so a peer's ``Call`` may hold a record where it declares text.
     _ = checked(message, type(message), key=type(message).__name__)
+    # ``Result.record`` is declared to hold any types; a peer's record may hold
+    # only the result classes and stream item types this package defines.
+    if isinstance(message, Result):
+        _ = checked(message.record, KnownToolResult, key="Result.record")
     return message
 
 
 def _known(
-    plain: PlainTree,
+    plain: object,
     implied: type | None,
     *,
     classes: Mapping[str, type],
-) -> PlainTree:
+) -> object:
     """Return ``plain`` without the fields its classes lack, however deep."""
     if isinstance(plain, list):
-        return [_known(item, implied, classes=classes) for item in plain]
+        items = cast("list[object]", plain)
+        return [_known(item, implied, classes=classes) for item in items]
     if not isinstance(plain, Mapping):
         return plain
-    tag = plain.get("py/object")
+    fields = cast("Mapping[str, object]", plain)
+    tag = fields.get("py/object")
     kind = classes.get(tag) if isinstance(tag, str) else None
-    if kind is None and not any(key.startswith("py/") for key in plain):
+    if kind is None and not any(key.startswith("py/") for key in fields):
         kind = implied
     if kind is None:
-        return plain
+        return fields
     hints = _hints(kind)
     return {
         key: _known(value, _implied(hints.get(key)), classes=classes)
-        for key, value in plain.items()
+        for key, value in fields.items()
         if key in hints or key == "py/object"
     }
 

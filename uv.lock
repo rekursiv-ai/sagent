@@ -600,7 +600,7 @@ wheels = [
 [[package]]
 name = "codedoctor"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#35354cdcd1e7963c6d8d18055e05bfb13ced3bcc" }
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#d1fd2b79548005bf1fd793d5fb600dad013a0557" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rignore" },
@@ -3298,7 +3298,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.18"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#7fdc051da2407b315b5d255a953fc36223690451" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#a8f8b306bfd62f32a2cbf0b786d2da8439335b67" }
 
 [[package]]
 name = "requests"
@@ -3610,6 +3610,7 @@ dependencies = [
     { name = "starlette" },
     { name = "tiktoken" },
     { name = "treekle" },
+    { name = "typing-extensions" },
     { name = "uvicorn" },
     { name = "wesearch" },
     { name = "wrapt" },
@@ -3777,6 +3778,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'selfhosted'", specifier = ">=0.26.0" },
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.22.1" },
     { name = "treekle", specifier = ">=0.4.1" },
+    { name = "typing-extensions", specifier = ">=4.16.0" },
     { name = "uvicorn", specifier = ">=0.54.0" },
     { name = "wesearch", git = "https://github.com/rekursiv-ai/wesearch?branch=main" },
     { name = "wrapt", specifier = ">=2.5.2" },
@@ -4639,7 +4641,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.18"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#b1bad432cacbc790d6497541959db86faa4fbdf5" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#a46ab9f9e162330f9e2a9e32f986c5bc1ec9ffdb" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

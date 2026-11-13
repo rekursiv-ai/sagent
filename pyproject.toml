@@ -44,6 +44,8 @@ dependencies = [
     # containers
     "cachetools>=7.2.7",
     "wrapt>=2.5.2",
+    # typing: TypeVar defaults
+    "typing_extensions>=4.16.0",
     # json
     # 0.4.1 leaves dataclass fields at their defaults out of trees.
     "treekle>=0.4.1",
@@ -581,8 +583,9 @@ extend-safe-fixes = [
 #   - configgle Fig/Makes/Maker: resolves Config fields and owner __init__ hints.
 #   - dataclasses.dataclass: codec.from_plain, cli_override, and
 #     tool_spec.coerce_kwargs call get_type_hints on any dataclass. This pins
-#     every dataclass field type eager; a heavy one (torch.Tensor) that the
-#     house `annotation-import` rule then flags takes an inline house-ignore.
+#     every bare name in a dataclass field type eager. A heavy type stays lazy
+#     spelled through a lazy module, `torch.Tensor` with `torch = lazy_import(...)`;
+#     the house `lazy-dataclass-field` rule rejects a bare-name proxy there.
 #   - MCPServer.tool, APIRouter.*: build schemas from handler signatures.
 #
 # With these set, TC004 flags an import that IS needed at runtime but sits

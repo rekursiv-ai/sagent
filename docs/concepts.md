@@ -10,7 +10,7 @@ Parent agents spawn child agents for review, delegation, or map-reduce work. The
 
 ## Session records
 
-A session is a sequence of typed, frozen records: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, typed tool results such as `BashResult` and `EditResult`, `SystemMessage`, and more. The session keeps what each tool did, not a description of it.
+A session is a sequence of typed, frozen records: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, `ToolResult`, `SystemMessage`, and more. A `ToolResult` keeps the tool's output and its typed result, such as each replacement an edit made and the file it changed, not a description of them.
 
 ## Tool
 

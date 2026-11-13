@@ -24,7 +24,7 @@ import pytest
 
 from sagent.tools import paper_author
 from sagent.tools.paper_author import PaperAuthor
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -74,13 +74,17 @@ async def test_a_name_finds_authors_and_is_kept(
         AuthorSearchResult(records=[_ADA, _BOB], total=9),
     )
     tool = PaperAuthor()
-    first = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"query": " Ada ", "limit": 2},
+    first = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"query": " Ada ", "limit": 2},
+        ),
     )
-    again = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"query": "Ada", "limit": 2},
+    again = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"query": "Ada", "limit": 2},
+        ),
     )
     assert (
         first.text()
@@ -100,7 +104,9 @@ async def test_a_name_that_finds_no_one_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fake(monkeypatch, "search_authors", AuthorSearchResult(records=[], total=0))
-    result = await PaperAuthor().call(ToolContext(cwd=tmp_path), {"query": "Nobody"})
+    result = await settled(
+        PaperAuthor().call(ToolContext(cwd=tmp_path), {"query": "Nobody"}),
+    )
     assert result.text() == "(no results)"
 
 
@@ -112,13 +118,17 @@ async def test_ids_are_looked_up_in_one_batch_and_kept_when_all_are_found(
     session = FetchSession()
     calls = _fake(monkeypatch, "author_metadata", [_ADA, _BOB])
     tool = PaperAuthor()
-    first = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": "1741101, 2262347"},
+    first = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": "1741101, 2262347"},
+        ),
     )
-    again = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": ["1741101", "2262347"]},
+    again = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": ["1741101", "2262347"]},
+        ),
     )
     assert (
         first.text()
@@ -138,7 +148,9 @@ async def test_an_id_not_found_says_so_and_is_asked_again(
     calls = _fake(monkeypatch, "author_metadata", [_ADA, None], [_ADA, None])
     tool = PaperAuthor()
     for _ in range(2):
-        result = await tool.call(ToolContext(cwd=tmp_path), {"ids": ["1741101", "9"]})
+        result = await settled(
+            tool.call(ToolContext(cwd=tmp_path), {"ids": ["1741101", "9"]}),
+        )
         assert result.text() == f"{format_author_block(_ADA)}\n\n9: not found"
         assert result.call_id == ""
     assert len(calls) == 2
@@ -165,11 +177,17 @@ async def test_an_authors_papers_come_with_every_filter_and_are_kept(
         "year_to": 2020,
         "abstract_chars": 3,
     }
-    first = await tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments)
-    again = await tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments)
-    none = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": "2262347", "operation": "papers"},
+    first = await settled(
+        tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments),
+    )
+    again = await settled(
+        tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments),
+    )
+    none = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": "2262347", "operation": "papers"},
+        ),
     )
     assert (
         first.text()
@@ -198,9 +216,11 @@ async def test_a_complete_listing_has_no_notice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fake(monkeypatch, "author_papers", Listing(records=[_PAPER], complete=True))
-    result = await PaperAuthor().call(
-        ToolContext(cwd=tmp_path),
-        {"ids": "1741101", "operation": "papers"},
+    result = await settled(
+        PaperAuthor().call(
+            ToolContext(cwd=tmp_path),
+            {"ids": "1741101", "operation": "papers"},
+        ),
     )
     assert result.text() == format_record(_PAPER)
 
@@ -222,8 +242,8 @@ async def test_a_failed_lookup_is_an_error_and_is_not_kept(
 ) -> None:
     calls = _fake(monkeypatch, name, PaperError("S2 is down"), PaperError("still down"))
     tool = PaperAuthor()
-    first = await tool.call(ToolContext(cwd=tmp_path), arguments)
-    again = await tool.call(ToolContext(cwd=tmp_path), arguments)
+    first = await settled(tool.call(ToolContext(cwd=tmp_path), arguments))
+    again = await settled(tool.call(ToolContext(cwd=tmp_path), arguments))
     assert (first.is_error, first.text()) == (True, "S2 is down")
     assert again.text() == "still down"
     assert len(calls) == 2
@@ -273,7 +293,7 @@ async def test_arguments_that_contradict_are_refused_before_any_lookup(
         for name in ("search_authors", "author_metadata", "author_papers")
     ]
     with pytest.raises(ValueError, match=message):
-        await PaperAuthor().call(ToolContext(cwd=tmp_path), arguments)
+        await PaperAuthor().call(ToolContext(cwd=tmp_path), arguments).result
     assert calls == [[], [], []]
 
 
@@ -295,10 +315,12 @@ async def test_each_lookup_is_kept_apart_from_the_others(
     )
     tool = PaperAuthor()
     context = ToolContext(cwd=tmp_path)
-    found = await tool.call(context, {"query": "1741101"})
-    ada = await tool.call(context, {"ids": "1741101"})
-    listed = await tool.call(context, {"ids": "1741101", "operation": "papers"})
-    kept = await tool.call(context, {"ids": "1741101", "operation": "papers"})
+    found = await settled(tool.call(context, {"query": "1741101"}))
+    ada = await settled(tool.call(context, {"ids": "1741101"}))
+    listed = await settled(
+        tool.call(context, {"ids": "1741101", "operation": "papers"}),
+    )
+    kept = await settled(tool.call(context, {"ids": "1741101", "operation": "papers"}))
     assert found.text() == format_author_line(_ADA)
     assert ada.text() == format_author_block(_ADA)
     assert (
@@ -324,12 +346,14 @@ async def test_another_id_or_abstract_cut_is_another_lookup(
     )
     tool = PaperAuthor()
     context = ToolContext(cwd=tmp_path)
-    ada = await tool.call(context, {"ids": "1741101"})
-    bob = await tool.call(context, {"ids": "2262347"})
-    full = await tool.call(context, {"ids": "1", "operation": "papers"})
-    cut = await tool.call(
-        context,
-        {"ids": "1", "operation": "papers", "abstract_chars": 3},
+    ada = await settled(tool.call(context, {"ids": "1741101"}))
+    bob = await settled(tool.call(context, {"ids": "2262347"}))
+    full = await settled(tool.call(context, {"ids": "1", "operation": "papers"}))
+    cut = await settled(
+        tool.call(
+            context,
+            {"ids": "1", "operation": "papers", "abstract_chars": 3},
+        ),
     )
     assert (ada.text(), bob.text()) == (
         format_author_block(_ADA),
@@ -348,9 +372,11 @@ async def test_equal_years_bound_one_year(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake(monkeypatch, "author_papers", Listing(records=[], complete=True))
-    await PaperAuthor().call(
-        ToolContext(cwd=tmp_path),
-        {"ids": "1", "operation": "papers", "year_from": 2020, "year_to": 2020},
+    await settled(
+        PaperAuthor().call(
+            ToolContext(cwd=tmp_path),
+            {"ids": "1", "operation": "papers", "year_from": 2020, "year_to": 2020},
+        ),
     )
     assert [(c.kwargs["year_from"], c.kwargs["year_to"]) for c in calls] == [
         (2020, 2020),

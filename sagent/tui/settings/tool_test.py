@@ -15,6 +15,7 @@ import pytest
 from sagent.session.types import UncategorizedToolResult
 from sagent.settings.harvest import harvest
 from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tui.settings.tool import ToolDisplaySettings
 
 
@@ -46,13 +47,20 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="ok")
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 class _Calls:
@@ -78,13 +86,20 @@ class _Calls:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="ok")
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 class _Fixed(_Calls):

@@ -533,7 +533,7 @@ def _parts(
             return [("model", _signed(call, extra=record.extra))]
         case ToolResult():
             text = record.text()
-            if record.is_error is True and text:
+            if record.is_error and text:
                 text = f"[Error] {text}"
             response: dict[str, object] = {
                 "functionResponse": {

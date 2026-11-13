@@ -13,7 +13,7 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
 from sagent.tools.agent_self import AgentSelf
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 from sagent.tui.main import _configure, _Screen
 from sagent.tui.prompt import Panes
 from sagent.tui.slash import Commands
@@ -55,9 +55,11 @@ async def test_flag_slash_and_conversation_share_the_inherited_choice(
     _ = await commands("/peer-messaging on")
     assert team.peer_messaging("Agent")
     assert team.peer_messaging("child")
-    _ = await AgentSelf(team=team).call(
-        child.runtime.tool_context,
-        {"peer_messaging": False},
+    _ = await settled(
+        AgentSelf(team=team).call(
+            child.runtime.tool_context,
+            {"peer_messaging": False},
+        ),
     )
     _ = await commands("/peer-messaging off")
     _ = await commands("/peer-messaging on")

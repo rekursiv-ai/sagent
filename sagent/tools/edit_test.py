@@ -13,11 +13,15 @@ import threading
 
 import pytest
 
-from sagent.session.types import EditResult, Splice, UncategorizedToolResult
+from sagent.session.types import (
+    EditResult,
+    Splice,
+    ToolResult,
+)
 from sagent.tools import edit
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.edit import Edit
-from sagent.tools.types import ToolContext, parse
+from sagent.tools.types import ToolContext, parse, settled
 from sagent.tools.write import file_lock_path, write_file
 
 
@@ -49,11 +53,17 @@ async def test_a_unique_string_is_replaced_and_the_splice_says_where(
     (tmp_path / "a.py").write_text("one\nx = 1\nthree\n")
     context = ToolContext(cwd=tmp_path)
     result = await _edit(context, "a.py", "x = 1", "x = 2")
-    assert result == EditResult(
+    assert result == ToolResult(
         call_id="",
-        path=str(tmp_path / "a.py"),
-        edits=(Splice(before="x = 1", after="x = 2", start=2, count=1),),
+        state="done",
+        stdout=(
+            f"Edited {tmp_path / 'a.py'}.",
+            Splice(before="x = 1", after="x = 2", start=2, count=1),
+        ),
+        result=EditResult(path=str(tmp_path / "a.py")),
     )
+    refused = await _edit(context, "a.py", "", "y")
+    assert (refused.result, refused.is_error) == (EditResult(exit_code=1), True)
     assert result.text() == f"Edited {tmp_path / 'a.py'}."
     assert (tmp_path / "a.py").read_text() == "one\nx = 2\nthree\n"
 
@@ -68,8 +78,8 @@ async def test_replace_all_replaces_each_and_records_each_line(tmp_path: Path) -
         "baz",
         replace_all=True,
     )
-    assert isinstance(result, EditResult)
-    assert [(s.start, s.count) for s in result.edits] == [
+    splices = [item for item in result.stdout if isinstance(item, Splice)]
+    assert [(s.start, s.count) for s in splices] == [
         (1, 1),
         (3, 1),
         (3, 1),
@@ -82,8 +92,7 @@ async def test_replace_all_replaces_each_and_records_each_line(tmp_path: Path) -
 async def test_a_leading_blank_line_is_counted(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("\nx\n")
     result = await _edit(ToolContext(cwd=tmp_path), "a.py", "x", "y")
-    assert isinstance(result, EditResult)
-    assert [s.start for s in result.edits] == [2]
+    assert [s.start for s in result.stdout if isinstance(s, Splice)] == [2]
 
 
 @pytest.mark.asyncio
@@ -96,8 +105,8 @@ async def test_a_string_across_lines_counts_each_line_it_spans(tmp_path: Path) -
         "",
         replace_all=True,
     )
-    assert isinstance(result, EditResult)
-    assert [(s.start, s.count) for s in result.edits] == [(2, 3), (5, 3)]
+    splices = [item for item in result.stdout if isinstance(item, Splice)]
+    assert [(s.start, s.count) for s in splices] == [(2, 3), (5, 3)]
     assert (tmp_path / "a.py").read_text() == "a\nd\n"
 
 
@@ -107,7 +116,7 @@ async def test_a_file_need_not_be_read_first(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n")
     context = ToolContext(cwd=tmp_path)
     result = await _edit(context, "a.py", "1", "2")
-    assert result.is_error is None
+    assert result.is_error is False
     assert tmp_path / "a.py" in context.files
 
 
@@ -117,7 +126,7 @@ async def test_edits_in_a_row_each_see_the_last(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     for old, new in (("1", "2"), ("2", "3"), ("3", "4")):
         result = await _edit(context, "a.py", old, new)
-        assert result.is_error is None, result.text()
+        assert result.is_error is False, result.text()
     assert (tmp_path / "a.py").read_text() == "a = 4\n"
 
 
@@ -209,7 +218,7 @@ async def test_an_edit_keeps_the_files_line_endings(
     r"""Read shows ``\\n``; the file keeps what it had, and the rest is untouched."""
     (tmp_path / "f").write_bytes(before)
     result = await _edit(ToolContext(cwd=tmp_path), "f", old, new)
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
     assert (tmp_path / "f").read_bytes() == after
 
 
@@ -221,7 +230,7 @@ async def test_an_edit_reads_and_writes_utf8_whatever_the_locale(
     (tmp_path / "f").write_bytes("café\nb\n".encode())
     _latin1_locale(monkeypatch)
     result = await _edit(ToolContext(cwd=tmp_path), "f", "b", "c")
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
     assert (tmp_path / "f").read_bytes() == "café\nc\n".encode()
 
 
@@ -237,9 +246,18 @@ async def test_an_edited_file_keeps_its_mode(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_arguments_of_the_wrong_type_are_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="'replace_all' must be boolean"):
-        await Edit().call(
-            ToolContext(cwd=tmp_path),
-            {"file_path": "f", "old_string": "a", "new_string": "b", "replace_all": 1},
+        await (
+            Edit()
+            .call(
+                ToolContext(cwd=tmp_path),
+                {
+                    "file_path": "f",
+                    "old_string": "a",
+                    "new_string": "b",
+                    "replace_all": 1,
+                },
+            )
+            .result
         )
 
 
@@ -371,16 +389,18 @@ async def _edit(
     new: str,
     *,
     replace_all: bool = False,
-) -> EditResult | UncategorizedToolResult:
+) -> ToolResult:
     """Replace ``old`` with ``new`` in ``file_path``; the runtime names the call."""
-    result = await Edit().call(
-        context,
-        {
-            "file_path": file_path,
-            "old_string": old,
-            "new_string": new,
-            "replace_all": replace_all,
-        },
+    result = await settled(
+        Edit().call(
+            context,
+            {
+                "file_path": file_path,
+                "old_string": old,
+                "new_string": new,
+                "replace_all": replace_all,
+            },
+        ),
     )
     assert result.call_id == ""
     return result
@@ -425,13 +445,13 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
     monkeypatch.setattr(edit, "file_lock", lock)
     monkeypatch.setattr(edit, "write_file", held)
 
-    async def run(context: ToolContext, old: str, new: str) -> EditResult:
+    async def run(context: ToolContext, old: str, new: str) -> ToolResult:
         arguments: dict[str, PlainTree] = {
             "file_path": "a.py",
             "old_string": old,
             "new_string": new,
         }
-        return _typed(await Edit().call(context, arguments))
+        return await settled(Edit().call(context, arguments))
 
     async with asyncio.TaskGroup() as tasks:
         one = tasks.create_task(run(first, "a", "A"))
@@ -447,15 +467,10 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
     done, theirs = one.result(), two.result()
 
     assert calls == [file_lock_path(path)] * 2
-    assert done.is_error is not True
+    assert done.is_error is False
     assert theirs.is_error is True
     assert "changed since it was read" in theirs.text()
     assert path.read_text() == "A = 1\nb = 1\n"
-
-
-def _typed(result: object) -> EditResult:
-    assert isinstance(result, EditResult)
-    return result
 
 
 def _latin1_locale(monkeypatch: pytest.MonkeyPatch) -> None:

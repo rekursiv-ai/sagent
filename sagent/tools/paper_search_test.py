@@ -18,9 +18,10 @@ from wesearch.types.errors import PuzzleChallengeError
 
 import pytest
 
+from sagent.session.types import PaperSearchResult
 from sagent.tools import paper_search
 from sagent.tools.paper_search import PaperSearch, _named
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -57,16 +58,18 @@ async def test_the_search_gets_every_filter_and_the_shared_session(
     session = FetchSession()
     calls = _searches(monkeypatch, SearchResult(records=[_ONE], total=1, complete=True))
     tool = _tool()
-    await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {
-            "query": " attention ",
-            "source": "s2",
-            "limit": 5,
-            "year_from": 2015,
-            "year_to": 2020,
-            "open_access_only": True,
-        },
+    await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {
+                "query": " attention ",
+                "source": "s2",
+                "limit": 5,
+                "year_from": 2015,
+                "year_to": 2020,
+                "open_access_only": True,
+            },
+        ),
     )
     assert calls == [
         _Call(
@@ -87,12 +90,13 @@ async def test_hits_come_back_one_record_each_with_what_was_held_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _searches(monkeypatch, SearchResult(records=[_ONE, _TWO], total=40, complete=True))
-    result = await _tool().call(ToolContext(cwd=tmp_path), {"query": "x"})
+    result = await settled(_tool().call(ToolContext(cwd=tmp_path), {"query": "x"}))
     assert result.text() == (
         f"{format_record(_ONE)}\n{format_record(_TWO)}"
         "\n... (showing 2 of 40; tighten filters for more)"
     )
-    assert result.is_error is None
+    assert result.is_error is False
+    assert result.result == PaperSearchResult(query="x")
     assert result.call_id == ""
 
 
@@ -102,9 +106,11 @@ async def test_a_limit_and_an_abstract_cap_shape_the_rendering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _searches(monkeypatch, SearchResult(records=[_ONE, _TWO], total=2, complete=True))
-    result = await _tool().call(
-        ToolContext(cwd=tmp_path),
-        {"query": "x", "limit": 1, "abstract_chars": 5},
+    result = await settled(
+        _tool().call(
+            ToolContext(cwd=tmp_path),
+            {"query": "x", "limit": 1, "abstract_chars": 5},
+        ),
     )
     assert result.text() == (
         format_record(_ONE, abstract_chars=5)
@@ -134,7 +140,7 @@ async def test_nothing_found_says_why_a_search_may_miss(
     hint: str,
 ) -> None:
     _searches(monkeypatch, SearchResult(records=[], total=0, complete=True))
-    result = await _tool().call(ToolContext(cwd=tmp_path), {"query": query})
+    result = await settled(_tool().call(ToolContext(cwd=tmp_path), {"query": query}))
     assert result.text() == (
         "(no results)"
         + hint
@@ -157,10 +163,10 @@ async def test_a_complete_result_is_kept_and_a_partial_one_is_not(
         SearchResult(records=[_TWO], total=1, complete=True),
         SearchResult(records=[_ONE], total=1, complete=True),
     )
-    partial = await tool.call(context, {"query": "x"})
-    complete = await tool.call(context, {"query": "x"})
-    again = await tool.call(context, {"query": " x "})
-    other = await tool.call(context, {"query": "x", "limit": 1})
+    partial = await settled(tool.call(context, {"query": "x"}))
+    complete = await settled(tool.call(context, {"query": "x"}))
+    again = await settled(tool.call(context, {"query": " x "}))
+    other = await settled(tool.call(context, {"query": "x", "limit": 1}))
     assert partial.text() == format_record(_ONE)
     assert complete.text() == again.text() == format_record(_TWO)
     assert len(calls) == 3
@@ -193,10 +199,10 @@ async def test_a_failed_search_is_an_error_and_is_not_kept(
         failure,
         SearchResult(records=[_ONE], total=1, complete=True),
     )
-    failed = await tool.call(ToolContext(cwd=tmp_path), {"query": "x"})
+    failed = await settled(tool.call(ToolContext(cwd=tmp_path), {"query": "x"}))
     assert failed.is_error is True
     assert failed.text() == message
-    retried = await tool.call(ToolContext(cwd=tmp_path), {"query": "x"})
+    retried = await settled(tool.call(ToolContext(cwd=tmp_path), {"query": "x"}))
     assert retried.text() == format_record(_ONE)
     assert len(calls) == 2
 
@@ -218,9 +224,11 @@ async def test_a_captcha_names_the_source_as_a_user_knows_it(
     named: str,
 ) -> None:
     _searches(monkeypatch, PuzzleChallengeError("blocked"))
-    failed = await _tool().call(
-        ToolContext(cwd=tmp_path),
-        {"query": "x", "source": source},
+    failed = await settled(
+        _tool().call(
+            ToolContext(cwd=tmp_path),
+            {"query": "x", "source": source},
+        ),
     )
     assert failed.text().startswith(f"{named} returned a CAPTCHA: blocked.")
 
@@ -252,7 +260,7 @@ async def test_arguments_that_do_not_fit_are_refused_before_any_search(
 ) -> None:
     calls = _searches(monkeypatch)
     with pytest.raises(ValueError, match=message):
-        await _tool().call(ToolContext(cwd=tmp_path), arguments)
+        await _tool().call(ToolContext(cwd=tmp_path), arguments).result
     assert calls == []
 
 
@@ -262,9 +270,11 @@ async def test_equal_years_bound_one_year(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _searches(monkeypatch, SearchResult(records=[], total=0, complete=True))
-    await _tool().call(
-        ToolContext(cwd=tmp_path),
-        {"query": "x", "year_from": 2020, "year_to": 2020},
+    await settled(
+        _tool().call(
+            ToolContext(cwd=tmp_path),
+            {"query": "x", "year_from": 2020, "year_to": 2020},
+        ),
     )
     assert [(c.year_from, c.year_to) for c in calls] == [(2020, 2020)]
 

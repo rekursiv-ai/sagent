@@ -1,7 +1,7 @@
 """Command analyzer: what a Bash command does, read before it runs.
 
 ``invocations`` splits a command into the simple commands it runs.
-``ReadOnly`` says whether they only read, so the call may run beside others.
+``ReadOnly`` says whether they only read, so ``rewrite`` may split the line into calls.
 ``rewrite`` says whether they are another tool's job, as ``cat`` is Read's;
 a tool takes on such commands by defining ``from_shell``.
 
@@ -103,7 +103,7 @@ class Invocation:
             stage = stage.piped_into
 
 
-class ShellTool(Tool, Protocol):
+class ShellTool(Tool[object, object, object], Protocol):
     """A tool that can stand in for a shell command."""
 
     def from_shell(
@@ -212,11 +212,12 @@ def invocations(command: str) -> tuple[Invocation, ...] | None:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReadOnly:
-    """Which commands only read, so a call running only them may run beside others.
+    """Which commands only read, so ``rewrite`` may split a line of them into separate calls.
 
     An unknown command, a loop, an unparsed line, or any redirect but one that
     drops output (``2>/dev/null``) or merges it (``2>&1``) counts as writing:
-    a wrong ``False`` only serializes, a wrong ``True`` races writers.
+    a wrong ``False`` only keeps the line one call; a wrong ``True`` runs
+    writers apart and at once.
     """
 
     utilities: frozenset[str]

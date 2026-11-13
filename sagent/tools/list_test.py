@@ -9,9 +9,10 @@ import time
 
 import pytest
 
+from sagent.session.types import ListResult
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.list import List, ls_row, sort_paths
-from sagent.tools.types import ToolContext, parse
+from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ async def test_a_path_that_lists_nothing_is_an_error(
     elif setup == "locked":
         target.mkdir(mode=0)
     try:
-        result = await List().call(ToolContext(cwd=tmp_path), {"path": "t"})
+        result = await settled(List().call(ToolContext(cwd=tmp_path), {"path": "t"}))
     finally:
         if setup == "locked":
             target.chmod(0o700)
@@ -171,7 +172,7 @@ async def test_arguments_that_do_not_fit_are_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match=r"argument|must be"):
-        await List().call(ToolContext(cwd=tmp_path), arguments)
+        await List().call(ToolContext(cwd=tmp_path), arguments).result
 
 
 @pytest.mark.parametrize(
@@ -243,9 +244,13 @@ def test_a_command_that_is_no_plain_ls_is_not_lists_job(command: str) -> None:
 
 async def _list(cwd: Path, **arguments: PlainTree) -> str:
     """Return what List shows for ``arguments`` in a fresh context at ``cwd``."""
-    result = await List().call(ToolContext(cwd=cwd), arguments)
+    result = await settled(List().call(ToolContext(cwd=cwd), arguments))
     assert result.call_id == ""
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
+    tool_result = result.result
+    assert isinstance(tool_result, ListResult)
+    assert tool_result == ListResult(path=tool_result.path)
+    assert tool_result.path.startswith("/")
     return result.text()
 
 

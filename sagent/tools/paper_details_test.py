@@ -19,11 +19,12 @@ from wesearch.paper.types import PaperRecord
 
 import pytest
 
+from sagent.session.types import PaperDetailsResult
 from sagent.tools import (
     paper_details,
 )
 from sagent.tools.paper_details import PaperDetails
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -61,11 +62,14 @@ async def test_one_id_is_looked_up_alone_with_the_shared_session(
     session = FetchSession()
     calls = _fake(monkeypatch, "metadata", _ONE)
     tool = _tool()
-    result = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": "arXiv:2106.15928"},
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {"ids": "arXiv:2106.15928"},
+        ),
     )
     assert result.text() == format_block(_ONE)
+    assert result.result == PaperDetailsResult()
     assert result.call_id == ""
     assert calls == [
         _Call(args=("arxiv", "2106.15928"), kwargs={"session": session}),
@@ -80,9 +84,14 @@ async def test_many_ids_are_looked_up_in_one_batch_in_input_order(
     session = FetchSession()
     calls = _fake(monkeypatch, "metadata_batch", [_ONE, None, _TWO])
     tool = _tool()
-    result = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        {"ids": ["2106.15928", "10.1000/gone", "doi:10.1000/b"], "abstract_chars": 4},
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            {
+                "ids": ["2106.15928", "10.1000/gone", "doi:10.1000/b"],
+                "abstract_chars": 4,
+            },
+        ),
     )
     assert result.text() == (
         f"{format_block(_ONE, abstract_chars=4)}\n\n10.1000/gone: not found\n\n"
@@ -105,11 +114,13 @@ async def test_metadata_is_kept_by_canonical_id_only_when_every_paper_is_found(
     context = ToolContext(cwd=tmp_path)
     batch = _fake(monkeypatch, "metadata_batch", [_ONE, None], [_ONE, _TWO])
     single = _fake(monkeypatch, "metadata", _ONE)
-    await tool.call(context, {"ids": ["2106.15928", "10.1000/x"]})
-    await tool.call(context, {"ids": ["2106.15928", "10.1000/x"]})
-    kept = await tool.call(context, {"ids": ["arXiv:2106.15928", "doi:10.1000/x"]})
-    await tool.call(context, {"ids": "2106.15928"})
-    await tool.call(context, {"ids": "arxiv:2106.15928"})
+    await settled(tool.call(context, {"ids": ["2106.15928", "10.1000/x"]}))
+    await settled(tool.call(context, {"ids": ["2106.15928", "10.1000/x"]}))
+    kept = await settled(
+        tool.call(context, {"ids": ["arXiv:2106.15928", "doi:10.1000/x"]}),
+    )
+    await settled(tool.call(context, {"ids": "2106.15928"}))
+    await settled(tool.call(context, {"ids": "arxiv:2106.15928"}))
     assert kept.text() == f"{format_block(_ONE)}\n\n{format_block(_TWO)}"
     assert (len(batch), len(single)) == (2, 1)
 
@@ -166,9 +177,11 @@ async def test_the_graph_is_walked_from_one_paper_with_every_filter(
     session = FetchSession()
     calls = _fake(monkeypatch, name, Listing(records=[_ONE, _TWO], complete=True))
     tool = _tool()
-    result = await tool.call(
-        ToolContext(cwd=tmp_path, fetch_session=session),
-        arguments,
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, fetch_session=session),
+            arguments,
+        ),
     )
     assert result.text() == f"{format_record(_ONE)}\n{format_record(_TWO)}"
     assert result.call_id == ""
@@ -189,11 +202,15 @@ async def test_a_listing_says_when_more_exist_and_when_there_are_none(
         Listing(records=[], complete=True),
     )
     context = ToolContext(cwd=tmp_path)
-    more = await _tool().call(
-        context,
-        {"ids": "10.1000/x", "operation": "references", "abstract_chars": 3},
+    more = await settled(
+        _tool().call(
+            context,
+            {"ids": "10.1000/x", "operation": "references", "abstract_chars": 3},
+        ),
     )
-    none = await _tool().call(context, {"ids": "10.1000/y", "operation": "references"})
+    none = await settled(
+        _tool().call(context, {"ids": "10.1000/y", "operation": "references"}),
+    )
     assert more.text() == (
         format_record(_ONE, abstract_chars=3)
         + "\n... (more matches exist; raise 'limit' to see them)"
@@ -215,13 +232,21 @@ async def test_a_walk_is_kept_by_paper_and_filters(
         Listing(records=[_TWO], complete=True),
         Listing(records=[_TWO], complete=True),
     )
-    first = await tool.call(context, {"ids": "10.1000/x", "operation": "citations"})
-    again = await tool.call(context, {"ids": "doi:10.1000/x", "operation": "citations"})
-    other = await tool.call(
-        context,
-        {"ids": "10.1000/x", "operation": "citations", "year_from": 2000},
+    first = await settled(
+        tool.call(context, {"ids": "10.1000/x", "operation": "citations"}),
     )
-    paper = await tool.call(context, {"ids": "10.1000/y", "operation": "citations"})
+    again = await settled(
+        tool.call(context, {"ids": "doi:10.1000/x", "operation": "citations"}),
+    )
+    other = await settled(
+        tool.call(
+            context,
+            {"ids": "10.1000/x", "operation": "citations", "year_from": 2000},
+        ),
+    )
+    paper = await settled(
+        tool.call(context, {"ids": "10.1000/y", "operation": "citations"}),
+    )
     assert first.text() == again.text() == format_record(_ONE)
     assert again.call_id == ""
     assert other.text() == paper.text() == format_record(_TWO)
@@ -244,13 +269,15 @@ async def test_a_failed_lookup_is_an_error(
     arguments: dict[str, PlainTree],
 ) -> None:
     _fake(monkeypatch, name, PaperError("S2 is down"))
-    result = await _tool().call(ToolContext(cwd=tmp_path), arguments)
+    result = await settled(_tool().call(ToolContext(cwd=tmp_path), arguments))
     assert (result.is_error, result.text()) == (True, "S2 is down")
 
 
 @pytest.mark.asyncio
 async def test_an_id_of_no_known_shape_is_an_error(tmp_path: Path) -> None:
-    result = await _tool().call(ToolContext(cwd=tmp_path), {"ids": "not-an-id"})
+    result = await settled(
+        _tool().call(ToolContext(cwd=tmp_path), {"ids": "not-an-id"}),
+    )
     assert result.is_error is True
     assert "not-an-id" in result.text()
 
@@ -302,7 +329,7 @@ async def test_arguments_that_contradict_are_refused_before_any_lookup(
         )
     ]
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-        await _tool().call(ToolContext(cwd=tmp_path), arguments)
+        await _tool().call(ToolContext(cwd=tmp_path), arguments).result
     assert not any(calls)
 
 
@@ -320,9 +347,13 @@ async def test_a_source_not_offered_is_refused_naming_those_that_are(
         ValueError,
         match=f"^{re.escape(f"'source' must be one of {offered}, got 'bing'.")}$",
     ):
-        await _tool().call(
-            ToolContext(cwd=tmp_path),
-            {"ids": "10.1000/x", "source": "bing"},
+        await (
+            _tool()
+            .call(
+                ToolContext(cwd=tmp_path),
+                {"ids": "10.1000/x", "source": "bing"},
+            )
+            .result
         )
 
 

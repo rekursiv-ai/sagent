@@ -31,7 +31,6 @@ from sagent.session.types import (
     Thinking,
     ToolCall,
     ToolResult,
-    UncategorizedToolResult,
     UserMessage,
 )
 
@@ -187,8 +186,8 @@ def test_a_tape_converts_to_what_its_model_last_saw(tmp_path: Path) -> None:
     assert isinstance(clear, ContextClear)
     assert clear.extra == {"spend_usd": 0.75, "converted_from": str(path)}
     assert _texts(path) == ["go", "reading", "call c1", "the file", "done"]
-    (result,) = [r for r in history if isinstance(r, UncategorizedToolResult)]
-    assert result.stub is None
+    (result,) = [r for r in history if isinstance(r, ToolResult)]
+    assert result.state == "done"
 
 
 def test_a_meta_record_without_its_kind_is_still_read(tmp_path: Path) -> None:
@@ -355,12 +354,13 @@ def test_an_update_rewrites_the_result_it_names(tmp_path: Path) -> None:
     path = _log(
         tmp_path,
         _call(0, "c1"),
-        _result(1, "c1", _DETACHED, id=7),
+        _result(1, "c1", _DETACHED, id=7, timestamp=1_790_000_000),
         {"kind": "update", "id": 7, "content": "real", "is_error": True},
         {"kind": "update", "id": 99, "content": "nowhere"},
     )
-    (result,) = [r for r in _history(path) if isinstance(r, UncategorizedToolResult)]
-    assert (result.content, result.is_error, result.stub) == ("real", True, None)
+    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
+    assert (result.text(), result.is_error, result.state) == ("real", True, "done")
+    assert result.timestamp == "2026-09-21T14:13:20+00:00"
 
 
 def test_records_without_refs_take_the_next_ordinal(tmp_path: Path) -> None:
@@ -591,7 +591,7 @@ def test_a_v3_result_without_an_error_part_is_no_error(tmp_path: Path) -> None:
         },
     )
     result = _history(path)[-1]
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ToolResult)
     assert (result.text(), result.is_error) == ("ok", False)
 
 
@@ -619,8 +619,8 @@ def test_a_stand_in_result_keeps_what_it_stood_for(
     stub: str | None,
 ) -> None:
     path = _log(tmp_path, _call(0, "c1"), _result(1, "c1", content, **extra))
-    (result,) = [r for r in _history(path) if isinstance(r, UncategorizedToolResult)]
-    assert result.stub == stub
+    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
+    assert result.state == (stub or "done")
 
 
 @pytest.mark.parametrize(
@@ -773,7 +773,7 @@ def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
     )
     (called,) = [r for r in history if isinstance(r, ToolCall)]
     assert (called.name, called.arguments) == ("read", {"file_path": "a"})
-    (result,) = [r for r in history if isinstance(r, UncategorizedToolResult)]
+    (result,) = [r for r in history if isinstance(r, ToolResult)]
     assert result.is_error is True
 
 
@@ -800,7 +800,7 @@ def test_every_kind_keeps_its_time_and_attachments(tmp_path: Path) -> None:
     assert said == AssistantMessage(timestamp=at, content="said")
     assert isinstance(call, ToolCall)
     assert call.timestamp == at
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ToolResult)
     assert (result.timestamp, result.attachments) == (at, png)
     assert note == SystemMessage(timestamp=at, content="n")
     assert peer == AgentToAgentMessage(timestamp=at, content="p", attachments=png)
@@ -839,7 +839,7 @@ def test_a_value_of_the_wrong_type_reads_as_none_given(tmp_path: Path) -> None:
     user, said, _, result = _history(path)
     assert user == UserMessage(content="")
     assert said == AssistantMessage(content="x")
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ToolResult)
     assert result.is_error is False
 
 
@@ -866,8 +866,8 @@ def test_an_update_to_a_stand_in_marks_what_it_stood_for(tmp_path: Path) -> None
         {"kind": "update", "id": 4, "content": _DETACHED},
     )
     result = _history(path)[-1]
-    assert isinstance(result, UncategorizedToolResult)
-    assert result.stub == "pending"
+    assert isinstance(result, ToolResult)
+    assert result.state == "pending"
 
 
 def test_a_ref_less_record_takes_the_sessions_id_from_ordinal_zero(
@@ -1006,7 +1006,7 @@ def test_a_v3_log_keeps_times_ids_lines_and_result_attachments(tmp_path: Path) -
     assert said == AssistantMessage(content="go")
     assert isinstance(call, ToolCall)
     assert call.name == "ls"
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ToolResult)
     assert (result.text(), result.is_error) == ("new", False)
     assert result.attachments == (
         Attachment(mime_descriptor="image/png", data=b"\x89PNG"),

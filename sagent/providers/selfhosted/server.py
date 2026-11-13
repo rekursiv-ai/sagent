@@ -574,9 +574,7 @@ def _messages(request: Request) -> list[dict[str, object]]:
                 {
                     "role": "tool",
                     "tool_call_id": ids.setdefault(record.call_id, f"call_{len(ids)}"),
-                    "content": f"[Error] {text}"
-                    if record.is_error is True and text
-                    else text,
+                    "content": f"[Error] {text}" if record.is_error and text else text,
                 },
             )
     return messages

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, call
 
 import errno
 import os
+import tracemalloc
 
 from treekle import MutablePlainTree, json_loads
 
@@ -26,7 +27,9 @@ from sagent.session.types import (
     BashResult,
     ContextClear,
     IncompleteRecord,
+    ReadResult,
     ToolCall,
+    ToolResult,
     UserMessage,
 )
 
@@ -236,6 +239,23 @@ async def test_the_history_is_read_as_it_is_iterated_up_to_where_it_was_asked(
             ContextClear(),
             UserMessage(content="b"),
         ]
+
+
+@pytest.mark.asyncio
+async def test_the_history_holds_one_line_at_a_time(tmp_path: Path) -> None:
+    """A walk of a long session on a worker thread grew that thread's heap for good."""
+    line = "x" * (1 << 16)
+    async with JsonlJournal(tmp_path / "s.jsonl") as journal:
+        journal.append(*(UserMessage(content=line) for _ in range(16)), ContextClear())
+        tracemalloc.start()
+        try:
+            for _ in journal.history():
+                pass
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+    assert peak < 8 * len(line)
 
 
 @pytest.mark.asyncio
@@ -498,20 +518,33 @@ def test_a_journal_s_former_record_names_are_renamed_and_the_rest_kept_byte_for_
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "session.jsonl"
-    kept = record_line(UserMessage(content="hi"))
+    # ``ReadResult`` is a result class now and was a record's name before: a line
+    # that holds the result class is current and must be kept.
+    current = ToolResult(call_id="r", state="done", result=ReadResult(path="/a.py"))
+    kept = record_line(UserMessage(content="hi")) + record_line(current)
     old = b'{"py/object": "ShellCommandResult", "call_id": "c", "stdout": "x"}\n'
-    path.write_bytes(kept + old + b'{"py/object": "FileReadResult", "cut\n' + b"torn")
-
-    assert jsonl.rename_records(path, dry_run=True) == 1
-    assert b"ShellCommandResult" in path.read_bytes()
-    assert jsonl.rename_records(path) == 1
-
+    older = b'{"py/object": "FileReadResult", "call_id": "d", "path": "/a.py"}\n'
+    # A line that does not read is passed over, and the ones after it still renamed.
     unread = b'{"py/object": "FileReadResult", "cut\n'
+    path.write_bytes(kept + unread + old + older + b"torn")
+
+    assert jsonl.rename_records(path, dry_run=True) == 2
+    assert b"ShellCommandResult" in path.read_bytes()
+    assert jsonl.rename_records(path) == 2
+
     assert path.read_bytes() == (
-        kept + record_line(BashResult(call_id="c", stdout="x")) + unread + b"torn\n"
+        kept
+        + unread
+        + record_line(
+            ToolResult(call_id="c", state="done", stdout=("x",), result=BashResult()),
+        )
+        + record_line(
+            ToolResult(call_id="d", state="done", result=ReadResult(path="/a.py")),
+        )
+        + b"torn\n"
     )
     assert path.with_name("session.jsonl.renamed-from").read_bytes() == (
-        kept + old + unread + b"torn\n"
+        kept + unread + old + older + b"torn\n"
     )
     assert jsonl.rename_records(path) == 0
 

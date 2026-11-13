@@ -563,7 +563,7 @@ def _blocks(
             result: dict[str, object] = {
                 "type": "tool_result",
                 "tool_use_id": _wire_id(record.call_id, ids=ids),
-                "is_error": record.is_error is True,
+                "is_error": record.is_error,
             }
             blocks = content(record.text(), record.attachments, limits=limits)
             if blocks:

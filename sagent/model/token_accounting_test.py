@@ -21,13 +21,14 @@ from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
-    ReadResult,
     SessionRecord,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     TurnContext,
+    UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.read import Read
@@ -241,7 +242,15 @@ async def test_runtime_persists_measurements_and_resumes_across_windows(
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
-        (ReadResult(call_id="a", content="x" * 40), 10),
+        (
+            ToolResult(
+                call_id="a",
+                state="done",
+                stdout=("x" * 40,),
+                result=UncategorizedToolResult(),
+            ),
+            10,
+        ),
         (TurnContext(model="abc"), 2),
         (ToolCall(name="tool", call_id="a", arguments={"x": 1}), 2),
         (Thinking(content="x" * 40), 10),

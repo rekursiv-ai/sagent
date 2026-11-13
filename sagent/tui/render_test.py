@@ -33,13 +33,14 @@ from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     AssistantMessage,
     BashResult,
     EditResult,
+    McpResult,
     Splice,
     Thinking,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
     WriteResult,
@@ -49,6 +50,7 @@ from sagent.tools.edit import Edit
 from sagent.tools.glob_tool import Glob
 from sagent.tools.grep import Grep
 from sagent.tools.read import Read
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tools.write import Write
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import (
@@ -89,13 +91,23 @@ class _Echo:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context
-        return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
+        return ToolOutput(
+            stdout=(str(arguments.get("text")),),
+            result=UncategorizedToolResult(),
+        )
 
 
 def _tools() -> dict[str, Tool]:
@@ -119,14 +131,21 @@ def _result(
     call_id: str,
     text: str = "out",
     *,
-    is_error: bool | None = None,
+    is_error: bool = False,
     stub: Literal["pending", "cancelled"] | None = None,
-) -> UncategorizedToolResult:
-    return UncategorizedToolResult(
+) -> ToolResult:
+    if is_error:
+        return ToolResult(
+            call_id=call_id,
+            state="done",
+            stderr=(text,),
+            result=UncategorizedToolResult(exit_code=1),
+        )
+    return ToolResult(
         call_id=call_id,
-        content=text,
-        is_error=is_error,
-        stub=stub,
+        state=stub or "done",
+        stdout=(text,),
+        result=None if stub else UncategorizedToolResult(),
     )
 
 
@@ -400,7 +419,7 @@ class _Stranger:
     [
         cast("Shown", _Stranger()),
         # A record arrives by a known event, and fails where records are drawn.
-        types.DetachedResult(result=cast("AnyToolResult", _Stranger())),
+        types.DetachedResult(result=cast("ToolResult", _Stranger())),
     ],
     ids=["event", "record"],
 )
@@ -820,12 +839,26 @@ def test_a_user_message_that_merely_mentions_a_delivery_still_shows() -> None:
 def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    write = WriteResult(call_id="1", path="a.py", content="x\ny\n")
+    write = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("Wrote a.py.",),
+        result=WriteResult(path="a.py", content="x\ny\n"),
+    )
     cut = ToolDisplay(output=DisplaySpec(lines=(1, 1)))
     show_result(printer, write, header=replace(_ECHO, display=cut))
     show_result(printer, write, header=_ECHO)
     show_result(printer, write, header=replace(_ECHO, display=ToolDisplay()))
-    show_result(printer, WriteResult(call_id="2", path="b.py"), header=_ECHO)
+    show_result(
+        printer,
+        ToolResult(
+            call_id="2",
+            state="done",
+            stdout=("Wrote b.py.",),
+            result=UncategorizedToolResult(),
+        ),
+        header=_ECHO,
+    )
     assert printer.said == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
@@ -1192,6 +1225,32 @@ def test_a_call_of_an_unknown_tool_is_stamped_with_nothing() -> None:
     assert stamped(gone, tools=_tools()) is gone
 
 
+def test_a_tool_that_printed_and_failed_shows_as_a_failure_and_a_command_as_output() -> (
+    None
+):
+    """A shell that ran a failing command did its job: what it printed is output."""
+    printer = RecordingPrinter()
+    printer.call(_ECHO)
+    failed = ToolResult(
+        call_id="1",
+        state="done",
+        stdout=("no such page",),
+        result=McpResult(server="srv", tool="get", exit_code=1),
+    )
+    exited = ToolResult(
+        call_id="2",
+        state="done",
+        result=BashResult(command=("bash", "-c", "false"), exit_code=1),
+    )
+    show_result(printer, failed, header=_ECHO)
+    show_result(printer, exited, header=_ECHO)
+    assert printer.said == [
+        ("call", "Echo"),
+        ("failed", "no such page"),
+        ("output", "[exit 1]"),
+    ]
+
+
 def test_show_result_shows_a_failure_whatever_the_display() -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
@@ -1202,20 +1261,31 @@ def test_show_result_shows_a_failure_whatever_the_display() -> None:
 
 def test_show_result_shows_an_edit_as_a_diff() -> None:
     printer = RecordingPrinter()
-    edit = EditResult(
+    edit = ToolResult(
         call_id="1",
-        path="a.py",
-        edits=(Splice(before="x", after="y", start=2),),
+        state="done",
+        stdout=("Edited a.py.", Splice(before="x", after="y", start=2)),
+        result=EditResult(path="a.py"),
     )
     printer.call(_ECHO)
     show_result(printer, edit, header=_ECHO)
-    show_result(printer, EditResult(call_id="2", path="b.py"), header=_ECHO)
+    show_result(
+        printer,
+        ToolResult(
+            call_id="2",
+            state="done",
+            stdout=("Edited b.py.",),
+            result=EditResult(path="b.py"),
+        ),
+        header=_ECHO,
+    )
     assert printer.said == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -2,1 +2,1 @@\n-x\n+y"),
         ("output", "Edited b.py."),
     ]
-    show_result(printer, EditResult(call_id="3", edits=edit.edits), header=_ECHO)
+    pathless = replace(edit, call_id="3", result=EditResult())
+    show_result(printer, pathless, header=_ECHO)
     assert printer.said[-1] == ("diff", "\n@@ -2,1 +2,1 @@\n-x\n+y")
 
 
@@ -1224,7 +1294,7 @@ def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
     printer.call(_ECHO)
     show_result(printer, _result("1", "[detached]", stub="pending"), header=_ECHO)
     show_result(printer, _result("1", "[cancelled]", stub="cancelled"), header=_ECHO)
-    assert printer.said == [("call", "Echo"), ("output", "[cancelled]")]
+    assert printer.said == [("call", "Echo"), ("failed", "[cancelled]")]
 
 
 @pytest.mark.parametrize(
@@ -1246,7 +1316,16 @@ def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
 def test_show_result_drops_reminders_meant_for_the_model(text: str, shown: str) -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    show_result(printer, BashResult(call_id="1", stdout=text), header=_ECHO)
+    show_result(
+        printer,
+        ToolResult(
+            call_id="1",
+            state="done",
+            stdout=(text,),
+            result=UncategorizedToolResult(),
+        ),
+        header=_ECHO,
+    )
     assert printer.said == [("call", "Echo"), ("output", shown)]
 
 
@@ -1289,10 +1368,24 @@ def test_an_empty_write_says_it_wrote_and_a_pathless_one_still_diffs() -> None:
     printer.call(_ECHO)
     show_result(
         printer,
-        WriteResult(call_id="1", path="c.py", content=""),
+        ToolResult(
+            call_id="1",
+            state="done",
+            stdout=("Wrote c.py.",),
+            result=WriteResult(path="c.py", content=""),
+        ),
         header=_ECHO,
     )
-    show_result(printer, WriteResult(call_id="2", content="x\n"), header=_ECHO)
+    show_result(
+        printer,
+        ToolResult(
+            call_id="2",
+            state="done",
+            stdout=("Wrote the file.",),
+            result=WriteResult(content="x\n"),
+        ),
+        header=_ECHO,
+    )
     assert printer.said == [
         ("call", "Echo"),
         ("output", "Wrote c.py."),

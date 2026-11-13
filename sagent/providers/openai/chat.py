@@ -33,7 +33,12 @@ from sagent.model.cost import TokenCount
 from sagent.model.exceptions import DisconnectedError
 from sagent.model.types import Response, TextChunk
 from sagent.providers.openai import wire
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
+from sagent.session.types import (
+    AssistantMessage,
+    Thinking,
+    ToolCall,
+    ToolResult,
+)
 
 
 if TYPE_CHECKING:
@@ -519,7 +524,7 @@ def _result(result: ToolResult, *, ids: dict[str, str]) -> dict[str, object]:
     return {
         "role": "tool",
         "tool_call_id": ids.setdefault(result.call_id, f"call_{len(ids)}"),
-        "content": f"[Error] {text}" if result.is_error is True and text else text,
+        "content": f"[Error] {text}" if result.is_error and text else text,
     }
 
 

@@ -62,7 +62,7 @@ from sagent.host.wire import (
     received,
 )
 from sagent.lib.posix.child import Child
-from sagent.session.types import FunctionResult, ReadResult, ToolErrorResult
+from sagent.session.types import ReadResult, ToolResult, UncategorizedToolResult
 from sagent.tools.read import Read
 from sagent.tools.remote import Link, RemoteSession
 
@@ -210,7 +210,15 @@ async def test_a_pause_stops_output_only_during_handoff(
 ) -> None:
     server, session, host, sent = await _server_unit(tmp_path)
     server._suspending = suspending
-    result = Result(id="1", record=ReadResult(call_id="", content="hello\n"))
+    result = Result(
+        id="1",
+        record=ToolResult(
+            call_id="",
+            state="done",
+            stdout=("hello\n",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     session.running.add("1")
     host.reader.feed_data(encoded(Paused()) + encoded(result))
     host.reader.feed_eof()
@@ -521,10 +529,10 @@ async def test_a_client_gets_only_the_tools_granted_and_asked_for(
         encoded(
             Result(
                 id="1",
-                record=ToolErrorResult(
+                record=ToolResult(
                     call_id="",
-                    content="gpu1 does not offer Gate.",
-                    is_error=True,
+                    state="failed",
+                    stderr=("gpu1 does not offer Gate.",),
                 ),
             ),
         ),
@@ -569,7 +577,12 @@ async def test_a_reconnect_gets_what_finished_while_it_was_gone(
     session.running.add("1")
     result = Result(
         id="1",
-        record=FunctionResult(call_id="", name="Gate", content="done"),
+        record=ToolResult(
+            call_id="",
+            state="done",
+            stdout=("done",),
+            result=UncategorizedToolResult(),
+        ),
     )
     server._deliver(session, result)
     assert sent == []
@@ -702,7 +715,10 @@ async def test_a_host_that_pauses_while_the_server_suspends_ends_its_pump(
 ) -> None:
     server, session, host, sent = await _server_unit(tmp_path)
     server._suspending = True
-    later = Result(id="r1", record=FunctionResult(call_id="", name="Gate"))
+    later = Result(
+        id="r1",
+        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+    )
     host.reader.feed_data(encoded(Paused()) + encoded(later))
 
     async with asyncio.timeout(5):
@@ -1087,10 +1103,10 @@ async def test_ending_a_session_waits_for_its_pump_to_answer_calls(
         encoded(
             Result(
                 id="1",
-                record=ToolErrorResult(
+                record=ToolResult(
                     call_id="",
-                    content="The host of this session stopped.",
-                    is_error=True,
+                    state="failed",
+                    stderr=("The host of this session stopped.",),
                 ),
             ),
         ),
@@ -1150,10 +1166,10 @@ async def test_a_host_whose_stream_fails_ends_the_session(
         encoded(
             Result(
                 id="1",
-                record=ToolErrorResult(
+                record=ToolResult(
                     call_id="",
-                    content="The host of this session stopped.",
-                    is_error=True,
+                    state="failed",
+                    stderr=("The host of this session stopped.",),
                 ),
             ),
         ),
@@ -1180,10 +1196,10 @@ async def test_a_session_that_is_ending_takes_no_more_calls(tmp_path: Path) -> N
         encoded(
             Result(
                 id="1",
-                record=ToolErrorResult(
+                record=ToolResult(
                     call_id="",
-                    content="This session is ending: revoked.",
-                    is_error=True,
+                    state="failed",
+                    stderr=("This session is ending: revoked.",),
                 ),
             ),
         ),
@@ -1213,10 +1229,10 @@ async def test_a_session_that_is_ending_takes_no_more_calls(tmp_path: Path) -> N
     assert sent[-1] == encoded(
         Result(
             id="held",
-            record=ToolErrorResult(
+            record=ToolResult(
                 call_id="",
-                content="The host of this session stopped.",
-                is_error=True,
+                state="failed",
+                stderr=("The host of this session stopped.",),
             ),
         ),
     )
@@ -1343,7 +1359,10 @@ async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
         content="hi",
         kind="reply",
     )
-    result = Result(id="r1", record=FunctionResult(call_id="", name="Gate"))
+    result = Result(
+        id="r1",
+        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+    )
     said = (
         Peers(labels=("Agent_0",)),
         Peers(labels=("Agent_0", "Agent_1")),
@@ -2080,7 +2099,16 @@ async def test_inherited_worker_socket_restores_calls_and_local_registrations(
     server._suspending = False
     session.requested = ("Gate",)
     session.running.add("1")
-    held = encoded(Result(id="2", record=FunctionResult(call_id="", name="Gate")))
+    held = encoded(
+        Result(
+            id="2",
+            record=ToolResult(
+                call_id="",
+                state="done",
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    )
     session.unacked["2"] = held
     session.labels = ("caller",)
     session.public_peers = ("kid",)
@@ -2641,8 +2669,8 @@ async def test_a_real_endpoint_through_adopt(tmp_path: Path) -> None:
                     tool="Read",
                     arguments={"file_path": str(tmp_path / "a.txt")},
                 )
-        assert isinstance(result, ReadResult)
-        assert "hello" in (result.content or "")
+        assert isinstance(result.result, ReadResult)
+        assert "hello" in result.text()
 
 
 @pytest.mark.asyncio
@@ -2963,7 +2991,7 @@ async def test_a_relay_link_resumes_a_dropped_call_and_removal_ends_the_session(
                 await endpoint.until(lambda e: len(clients) == 2 and e.up)
                 served.gate.opened.set()
                 result = await calling
-            assert result.is_error is not True
+            assert result.is_error is False
             sessions = strings.listing(served.dirs).sessions
             assert sessions is not None
             assert [row.connected for row in sessions] == [True]
@@ -2990,7 +3018,7 @@ async def test_closing_answers_a_call_in_flight_on_a_token_connection(
         await asyncio.wait_for(served.gate.started.wait(), 5)
     cancelled = await _next(reader)
     assert isinstance(cancelled, Result)
-    assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+    assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
     assert await _next(reader) is None
     assert [e["event"] for e in _events(served)] == ["start", "connect", "end", "stop"]
     writer.close()
@@ -3006,7 +3034,7 @@ async def test_closing_answers_a_call_in_flight_on_an_adopted_connection(
         await asyncio.wait_for(served.gate.started.wait(), 5)
     cancelled = await _next(reader)
     assert isinstance(cancelled, Result)
-    assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+    assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
     assert await _next(reader) is None
     await asyncio.wait_for(adopted, 5)
     assert [e["event"] for e in _events(served)] == ["start", "connect", "end", "stop"]

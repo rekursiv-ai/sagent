@@ -1,8 +1,9 @@
-"""What a tool is: something the model calls by name, which says what it did.
+"""The ``Tool`` protocol: something the model calls by name.
 
-A tool returns a session record typed by what it did -- a ``EditResult``
-names its edits, a ``BashResult`` its exit code -- so the session keeps
-the act itself, not a description of it. The runtime fills in ``call_id``.
+``Tool.call`` returns a ``ToolStreamingResult`` at once. It has two streams, the
+tool's standard output and standard error, and a future of the tool's result: a
+dataclass with an ``exit_code``. The caller passes it to ``settled``, which
+reads the streams and returns the call's ``ToolResult`` record.
 
 A tool holds no agent's state; each call gets that agent's ``ToolContext``, so
 one tool serves every agent. The context also carries what the session's agents
@@ -33,14 +34,29 @@ Typical usage example:
       def serialize_key(self, context, arguments) -> str | None:
           return None
 
-      async def call(self, context, arguments) -> EchoResult:
+      def call(
+          self,
+          context,
+          arguments,
+      ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
+          return whole_output(self._say(arguments))
+
+      async def _say(self, arguments) -> ToolOutput[UncategorizedToolResult, str, str]:
           a = parse(arguments, Echo.Arguments)
-          return EchoResult(call_id="", content=a.text)  # Echo's own result type
+          return ToolOutput(
+              stdout=(a.text,) * a.times,
+              result=UncategorizedToolResult(),
+          )
+
+  echo: Tool = Echo()
+  result = await settled(echo.call(context, {"text": "hi"}))  # A ``ToolResult``.
 """
 
 from __future__ import annotations
 
+from asyncio import Future
 from collections.abc import (
+    AsyncIterator,
     Callable,
     Mapping,
     Sequence,
@@ -48,10 +64,11 @@ from collections.abc import (
 )
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from types import NoneType, UnionType
+from types import MappingProxyType, NoneType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
+    Generic,
     Literal,
     Protocol,
     TypeAliasType,
@@ -60,9 +77,13 @@ from typing import (
     get_args,
     get_origin,
     get_type_hints,
+    overload,
     runtime_checkable,
 )
+from typing_extensions import NoDefault, TypeVar
 
+import asyncio
+import contextlib
 import difflib
 import functools
 import hashlib
@@ -73,13 +94,15 @@ from treekle import PlainTree
 from wesearch.fetch import FetchSession
 from wesearch.fetch.session import default_session
 
+from sagent.runtime.exceptions import describe
+from sagent.session.types import ToolResult
+
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Coroutine, Iterable, Iterator
 
     from _typeshed import DataclassInstance
 
-    from sagent.session.types import AnyToolResult
     from sagent.tools.display import ToolDisplay
 
 
@@ -89,16 +112,58 @@ __all__ = [
     "FileTracker",
     "Reminding",
     "Skipping",
+    "Stream",
     "Tool",
     "ToolContext",
+    "ToolOutput",
+    "ToolStreamingResult",
     "checked",
     "json_schema",
     "parse",
+    "settled",
+    "whole_output",
 ]
 
 
-class Tool(Protocol):
-    """Something the model can call by name."""
+# Defined here as well as in ``session.types``: ruff reads a type variable's
+# default only in the module that defines it, and seeing none, UP046 rewrites
+# each class to ``class ToolOutput[...]``, which drops the defaults.
+Result_co = TypeVar("Result_co", covariant=True, default=object)
+"""Type of a tool's result, such as ``ReadResult``; it has an ``exit_code``."""
+
+StreamOut_co = TypeVar("StreamOut_co", covariant=True, default=object)
+"""Type of each item a tool writes to standard output."""
+
+StreamErr_co = TypeVar("StreamErr_co", covariant=True, default=object)
+"""Type of each item a tool writes to standard error."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
+    """A running tool call: its two output streams and the future of its result.
+
+    The streams need not be read: an unread stream never blocks the tool. Both
+    streams end by the time ``result`` is done, however the call ends.
+    """
+
+    result: Future[Result_co]
+    """The tool's result. It raises what the tool raised; cancelling it stops the tool."""
+
+    stdout: AsyncIterator[StreamOut_co]
+    """The tool's standard output, item by item as the tool writes it."""
+
+    stderr: AsyncIterator[StreamErr_co]
+    """The tool's standard error, item by item as the tool writes it."""
+
+
+class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
+    """Something the model can call by name.
+
+    The type parameters are the result class, the standard output item type,
+    and the standard error item type. A bare ``Tool`` is a tool of any three.
+    A ``Tool[EditResult, Splice | str, str]`` returns an ``EditResult``, writes
+    text and ``Splice`` items to standard output, and text to standard error.
+    """
 
     @property
     def name(self) -> str:
@@ -132,8 +197,8 @@ class Tool(Protocol):
         """Return which calls this one must not overlap.
 
         Calls with the same key run one at a time, in the order the model made
-        them; ``"*"`` runs alone, after every keyed call before it; ``None``
-        runs beside anything.
+        them. ``"*"`` waits for every keyed call before it, and every later
+        call waits for it. ``None`` runs beside anything.
 
         Args:
           context: The calling agent's state.
@@ -145,26 +210,182 @@ class Tool(Protocol):
         """
         ...
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
-        """Run with the model's arguments, and return what the tool did.
+    ) -> ToolStreamingResult[Result_co, StreamOut_co, StreamErr_co]:
+        """Start the tool with the model's arguments and return at once.
+
+        A tool writes each item when it has it, such as a line its process
+        printed, a match, or a path. A tool that has nothing until it finishes
+        writes everything then.
 
         Args:
           context: The calling agent's state.
           arguments: What the model passed.
 
         Returns:
-          result: The session record of what the tool did.
+          streaming_result: The tool's output streams and the future of its
+            result. The result's ``exit_code`` is ``0`` for success.
 
         Raises:
-          ValueError: The arguments do not fit the schema; the runtime returns
-            the message to the model as an error.
+          ValueError: The arguments do not fit the schema. It is raised here or
+            from ``streaming_result.result``; the caller returns the message to
+            the model as an error.
 
         """
         ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolOutput(Generic[Result_co, StreamOut_co, StreamErr_co]):
+    """The complete output of a tool that does not stream; see ``whole_output``."""
+
+    stdout: tuple[StreamOut_co, ...] = ()
+    """The items for standard output."""
+
+    stderr: tuple[StreamErr_co, ...] = ()
+    """The items for standard error, such as why the tool did nothing."""
+
+    result: Result_co
+    """The tool's result: its own class or an ``UncategorizedToolResult``."""
+
+
+def whole_output[R, O, E](
+    coroutine: Coroutine[object, object, ToolOutput[R, O, E]],
+) -> ToolStreamingResult[R, O, E]:
+    """Start ``coroutine`` and return its ``ToolOutput`` as a ``ToolStreamingResult``.
+
+    Args:
+      coroutine: The tool's work. It starts now, on the running loop.
+
+    Returns:
+      streaming_result: Its streams get the output's items when ``coroutine``
+        returns, and nothing when it raises or is cancelled. Its ``result``
+        raises what ``coroutine`` raised.
+
+    """
+    stdout, stderr = Stream[O](), Stream[E]()
+    return ToolStreamingResult(
+        result=asyncio.ensure_future(_write_output(coroutine, stdout, stderr)),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+class Stream[T]:
+    """One output stream of a tool: the tool writes items, the caller iterates.
+
+    A write never waits for a reader. Items are held until read, and dropped
+    with the stream if nobody reads them.
+    """
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[T | _Closed] = asyncio.Queue()
+
+    def write(self, item: T) -> None:
+        """Append ``item`` to the stream."""
+        self._queue.put_nowait(item)
+
+    def close(self) -> None:
+        """End the stream; iteration stops after the items already written."""
+        self._queue.put_nowait(_Closed())
+
+    def __aiter__(self) -> Stream[T]:
+        """Return the stream; it can be iterated once."""
+        return self
+
+    async def __anext__(self) -> T:
+        """Return the next item, waiting for it; stop when the stream is closed."""
+        item = await self._queue.get()
+        if isinstance(item, _Closed):
+            # Put back, so a second iteration past the end stops too and never waits.
+            self._queue.put_nowait(item)
+            raise StopAsyncIteration
+        return item
+
+
+@overload
+async def settled(
+    streaming_result: ToolStreamingResult[ToolResult, object, object],
+    *,
+    call_id: str = "",
+) -> ToolResult: ...
+
+
+@overload
+async def settled[R, O, E](
+    streaming_result: ToolStreamingResult[R, O, E],
+    *,
+    call_id: str = "",
+) -> ToolResult[R, O, E | str]: ...
+
+
+async def settled(
+    streaming_result: ToolStreamingResult[object, object, object],
+    *,
+    call_id: str = "",
+) -> ToolResult:
+    """Read ``streaming_result`` to its end and return the call's record.
+
+    This never raises for the tool's failure or for a cancel, so every call
+    gets a record. When cancelled, it stops the tool and waits for it to stop.
+
+    Args:
+      streaming_result: What ``Tool.call`` returned.
+      call_id: The id of the call the record answers.
+
+    Returns:
+      result: The record, with the items read from both streams. Its state is
+        ``done`` with the tool's result; ``failed`` when the tool raised, with
+        the error as the last item of ``stderr``; or ``cancelled``. A tool
+        that relays a call run elsewhere returns that call's record as its
+        result, and that record is returned with ``call_id`` set.
+
+    """
+    stdout: list[object] = []
+    stderr: list[object] = []
+    readers = (
+        asyncio.ensure_future(_collect(streaming_result.stdout, stdout)),
+        asyncio.ensure_future(_collect(streaming_result.stderr, stderr)),
+    )
+    result_future = streaming_result.result
+    try:
+        # Not ``gather``: a cancel must reach the tool now, not when the readers end.
+        _ = await asyncio.wait(readers, return_when=asyncio.FIRST_EXCEPTION)
+        for reader in readers:
+            if reader.done():
+                reader.result()
+        result = await result_future
+    except asyncio.CancelledError:
+        state, errors = "cancelled", ()
+    except Exception as error:  # noqa: BLE001 -- A tool's failure is the call's answer, not its runner's.
+        state, errors = "failed", (describe(error),)
+    else:
+        if isinstance(result, ToolResult):
+            return replace(result, call_id=call_id)
+        return ToolResult(
+            call_id=call_id,
+            state="done",
+            stdout=tuple(stdout),
+            stderr=tuple(stderr),
+            result=result,
+        )
+    for reader in readers:
+        _ = reader.cancel()
+    # The tool may still run: this call was cancelled, or a stream raised.
+    _ = result_future.cancel()
+    # A second cancel must not leave the tool's process half stopped.
+    while not result_future.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            _ = await asyncio.wait((result_future,))
+    return ToolResult(
+        call_id=call_id,
+        state=state,
+        stdout=tuple(stdout),
+        stderr=(*stderr, *errors),
+    )
 
 
 @runtime_checkable
@@ -537,13 +758,30 @@ def checked(value: object, hint: object, *, key: str) -> object:
       TypeError: ``hint`` is a type this does not check.
 
     """
-    if hint is PlainTree:
+    if hint is PlainTree or hint is object:
         return value
     if isinstance(hint, TypeAliasType):
         return checked(value, _value(hint), key=key)
+    # A bare generic record leaves its type parameters unbound; each means its default.
+    if isinstance(hint, TypeVar):
+        # On 3.12 a ``typing.TypeVar`` or a PEP 695 parameter has no ``__default__``.
+        default = cast(object, getattr(hint, "__default__", NoDefault))
+        return checked(value, object if default is NoDefault else default, key=key)
     origin, args = get_origin(hint), _args(hint)
     if origin is Annotated:
         return checked(value, args[0], key=key)
+    if _is_record(origin):
+        parameters = cast("_Generic", origin).__parameters__
+        return _checked_record(
+            value,
+            origin,
+            key=key,
+            # ``typing`` fills each omitted argument with its default, so every
+            # parameter has one.
+            type_arguments={
+                parameter: args[i] for i, parameter in enumerate(parameters)
+            },
+        )
     if origin is Literal:
         # ``True == 1``, so the type must match as well as the value.
         if any(value == a and type(value) is type(a) for a in args):
@@ -616,13 +854,16 @@ def _checked_items(
     return tuple(checked(v, args[i], key=key) for i, v in enumerate(value))
 
 
+# ``type_arguments`` maps each type parameter of a generic ``kind`` to the type given
+# for it.
 def _checked_record[R: DataclassInstance](
     value: object,
     kind: type[R],
     *,
     key: str,
+    type_arguments: Mapping[object, object] = MappingProxyType({}),
 ) -> R:
-    """Return ``value``, a ``kind``, once each of its fields is of its type."""
+    """Return ``value`` if it is a ``kind`` and each field is of its type."""
     if not isinstance(value, kind):
         raise _misfit(key, kind.__name__, value)
     # ``value`` may be a subclass of ``kind``, whose fields are its own.
@@ -630,10 +871,34 @@ def _checked_record[R: DataclassInstance](
     for f in fields(value):
         _ = checked(
             cast(object, getattr(value, f.name)),
-            hints[f.name],
+            _substituted(hints[f.name], type_arguments),
             key=f"{key}.{f.name}",
         )
     return value
+
+
+class _Parameterized(Protocol):
+    """A type with unbound type parameters, such as ``tuple[T, ...]``."""
+
+    def __getitem__(self, arguments: tuple[object, ...]) -> object: ...
+
+
+class _Generic(Protocol):
+    """A generic class."""
+
+    __parameters__: tuple[object, ...]
+
+
+def _substituted(hint: object, type_arguments: Mapping[object, object]) -> object:
+    """Return ``hint`` with each type parameter replaced by its type argument."""
+    if isinstance(hint, TypeVar):
+        return type_arguments.get(hint, hint)
+    parameters = cast("tuple[object, ...]", getattr(hint, "__parameters__", ()))
+    if not type_arguments or not parameters:
+        return hint
+    return cast("_Parameterized", hint)[
+        tuple(type_arguments.get(p, p) for p in parameters)
+    ]
 
 
 def _is_record(hint: object) -> TypeGuard[type[DataclassInstance]]:
@@ -777,3 +1042,38 @@ def _schema(hint: object) -> dict[str, PlainTree]:
         if hint is kind:
             return {"type": name}
     raise TypeError(f"No JSON schema for {hint!r}.")
+
+
+class _Closed:
+    """The marker that ends a ``Stream``; a tool cannot write one."""
+
+
+async def _collect[T](stream: AsyncIterator[T], items: list[T]) -> None:
+    """Append each item of ``stream`` to ``items`` until the stream ends."""
+    # Appended one at a time, so a cancel midway keeps the items already read.
+    while True:
+        try:
+            items.append(await anext(stream))
+        except StopAsyncIteration:
+            return
+
+
+# ``coroutine`` is awaited inside the task that is the call's ``result`` future,
+# so cancelling that future cancels the tool, and the tool's
+# ``asyncio.current_task()`` is that future, which ``Runtime.push_after`` matches.
+async def _write_output[R, O, E](
+    coroutine: Coroutine[object, object, ToolOutput[R, O, E]],
+    stdout: Stream[O],
+    stderr: Stream[E],
+) -> R:
+    """Await ``coroutine``, write its output to the streams, and return its result."""
+    try:
+        output = await coroutine
+        for item in output.stdout:
+            stdout.write(item)
+        for item in output.stderr:
+            stderr.write(item)
+    finally:
+        stdout.close()
+        stderr.close()
+    return output.result

@@ -5,9 +5,8 @@ model knows what it is replacing. A file read and then changed may not.
 
 Typical usage example:
 
-  result = await Edit().call(
-      context, {"file_path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}
-  )
+  streaming_result = Edit().call(context, {"file_path": "a.py", "old_string": "x = 1", "new_string": "x = 2"})
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
@@ -28,7 +27,13 @@ from sagent.tools.command_analyzer import (
     resolve,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 from sagent.tools.write import file_lock_path, write_file
 
 
@@ -123,11 +128,11 @@ class Edit:
             "replace_all": bool(every),
         }
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> EditResult:
+    ) -> ToolStreamingResult[EditResult, Splice | str, str]:
         """Replace ``old_string`` with ``new_string`` in ``file_path``.
 
         ``old_string`` must occur once, unless ``replace_all``.
@@ -137,9 +142,17 @@ class Edit:
           arguments: What the model passed, as ``Edit.Arguments``.
 
         Returns:
-          result: Each replacement made, or why none was.
+          streaming_result: The line the model reads, then each replacement made; or why
+            none was.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[EditResult, Splice | str, str]:
         a = parse(arguments, Edit.Arguments)
         async with file_lock(file_lock_path(context.path(a.file_path))):
             return await asyncio.to_thread(_edit, context, a)
@@ -148,7 +161,7 @@ class Edit:
 def _edit(
     context: ToolContext,
     a: Edit.Arguments,
-) -> EditResult:
+) -> ToolOutput[EditResult, Splice | str, str]:
     """Make the replacement ``a`` asks for, if the file is as the model last saw it."""
     path = context.path(a.file_path)
     # ``str.replace("", ...)`` inserts between every character.
@@ -183,13 +196,15 @@ def _edit(
     edited = text.replace(old, new)
     write_file(path, (edited.replace("\n", "\r\n") if crlf else edited).encode())
     context.files.saw(path)
-    return EditResult(
-        call_id="",
-        path=str(path),
-        edits=tuple(
-            Splice(before=old, after=new, start=start, count=old.count("\n") + 1)
-            for start in _lines_at(text, old)
+    return ToolOutput(
+        stdout=(
+            f"Edited {path}.",
+            *(
+                Splice(before=old, after=new, start=start, count=old.count("\n") + 1)
+                for start in _lines_at(text, old)
+            ),
         ),
+        result=EditResult(path=str(path)),
     )
 
 
@@ -205,5 +220,5 @@ def _lines_at(text: str, needle: str) -> list[int]:
     return lines
 
 
-def _error(message: str) -> EditResult:
-    return EditResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[EditResult, str, str]:
+    return ToolOutput(stderr=(message,), result=EditResult(exit_code=1))

@@ -16,8 +16,9 @@ Typical usage example:
 
   async with RemoteSession([tls_link(r) for r in saved()], team=team) as remote:
       tool = RemoteTool(remote=remote)
-      await tool.call(context, {"endpoint": "gpu1", "tool": "Bash",
+      streaming_result = tool.call(context, {"endpoint": "gpu1", "tool": "Bash",
                                 "arguments": {"command": "nvidia-smi", ...}})
+      result = await settled(streaming_result)  # The record the endpoint made of the call.
 """
 
 from __future__ import annotations
@@ -69,9 +70,9 @@ from sagent.host.wire import (
 from sagent.lib.userdirs import config_dir
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime.exceptions import describe
-from sagent.session.types import AnyToolResult, RemoteToolResult
+from sagent.session.types import RemoteToolResult, ToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import Stream, ToolStreamingResult, json_schema, parse
 from sagent.types import AsyncResource
 
 
@@ -299,7 +300,7 @@ class Endpoint:
         """When contact was lost, while no ping since has restored it."""
 
         self._writer: asyncio.StreamWriter | None = None
-        self._pending: dict[str, asyncio.Future[AnyToolResult]] = {}
+        self._pending: dict[str, asyncio.Future[ToolResult]] = {}
         self._queued: list[Message] = []
         self._changed = asyncio.Condition()
 
@@ -344,7 +345,7 @@ class Endpoint:
         window: str,
         tool: str,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolResult:
         """Run ``tool`` there for the agent ``agent``; return its result.
 
         A cancel stops the call there too.
@@ -356,9 +357,11 @@ class Endpoint:
           arguments: What the model passed it.
 
         Returns:
-          result: The tool's own result, or an error saying why there is none: the
-            endpoint lost the call while disconnected, or was out of contact past its
-            grace. Either way its ``wire_id`` is the id the call went by.
+          result: The call's record as the endpoint made it. When the endpoint lost
+            the call while disconnected, or was out of contact past its grace, a
+            ``done`` record made here whose ``RemoteToolResult`` has exit code 1 and
+            whose ``stderr`` says why. Either way its ``wire_id`` is the id the call
+            went by.
 
         Raises:
           ValueError: The endpoint is down, or does not offer ``tool``; nothing was
@@ -374,7 +377,7 @@ class Endpoint:
             # An outage nothing waited on counts against no call made after it.
             self._lost_at = None
         call_id = uuid.uuid4().hex
-        result = self._pending[call_id] = asyncio.Future[AnyToolResult]()
+        result = self._pending[call_id] = asyncio.Future[ToolResult]()
         self._writer.write(
             encoded(
                 Call(
@@ -397,12 +400,13 @@ class Endpoint:
             self._send(Cancel(id=call_id))
             raise
         except ValueError as error:
-            # Said as the runtime would say it, but named by the id it was sent by.
-            record = RemoteToolResult(
+            # ``done`` with exit code 1, not ``failed``: RemoteTool ran and reports
+            # that the endpoint lost the call.
+            record = ToolResult(
                 call_id="",
-                endpoint=self.name,
-                content=describe(error),
-                is_error=True,
+                state="done",
+                stderr=(describe(error),),
+                result=RemoteToolResult(endpoint=self.name, exit_code=1),
             )
         return replace(record, wire_id=call_id)
 
@@ -642,13 +646,17 @@ class Endpoint:
         result = self._pending.pop(sent, None)
         if result is not None and not result.done():
             result.set_result(
-                RemoteToolResult(
+                ToolResult(
                     call_id="",
-                    endpoint=self.name,
-                    content=f"{self.name}'s sagent sent a result this sagent cannot "
-                    "read, so what the call did there is unknown here: check before "
-                    "repeating it, and update sagent where it is older.",
-                    is_error=True,
+                    state="done",
+                    result=RemoteToolResult(endpoint=self.name, exit_code=1),
+                    stderr=(
+                        (
+                            f"{self.name}'s sagent sent a result this sagent cannot "
+                            "read, so what the call did there is unknown here: check before "
+                            "repeating it, and update sagent where it is older."
+                        ),
+                    ),
                 ),
             )
         if (answer := self._describing.get(sent)) is not None:
@@ -955,11 +963,11 @@ class RemoteTool:
             self._reminder(context.label, name, e) for name, e in named.items()
         )
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[ToolResult, object, object]:
         """List the endpoints, show a tool there, or run it there.
 
         Args:
@@ -967,21 +975,42 @@ class RemoteTool:
           arguments: What the model passed, as ``RemoteTool.Arguments``.
 
         Returns:
-          result: A listing, a schema, or the remote tool's own result.
+          streaming_result: Both streams are empty. The result is a ``ToolResult``
+            record: of the listing, of the schema, or the record the endpoint
+            made of the call it ran.
 
         Raises:
-          ValueError: No endpoint, or no tool there, has the name given; or the
-            endpoint is down.
+          ValueError: No endpoint, or no tool there, has the name given, or the
+            endpoint is down; raised from ``streaming_result.result``.
 
         """
+        nothing = Stream[object]()
+        nothing.close()
+        return ToolStreamingResult(
+            result=asyncio.ensure_future(self._run(context, arguments)),
+            stdout=nothing,
+            stderr=nothing,
+        )
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolResult:
+        """Return the record of the listing, the schema, or the call run there."""
         a = parse(arguments, RemoteTool.Arguments)
         if a.tool == "AgentSend":
             raise ValueError("Use AgentSend directly for local and remote messaging.")
         named = self.remote.endpoints()
         if not a.endpoint:
-            return _said(
-                "\n".join(self._listing(n, e) for n, e in named.items())
-                or "No endpoints; add one with `sagent remote add`.",
+            return ToolResult(
+                call_id="",
+                state="done",
+                stdout=(
+                    "\n".join((self._listing(n, e) for n, e in named.items()))
+                    or "No endpoints; add one with `sagent remote add`.",
+                ),
+                result=RemoteToolResult(),
             )
         endpoint = named.get(a.endpoint)
         if endpoint is None:
@@ -989,16 +1018,25 @@ class RemoteTool:
                 f"No endpoint {a.endpoint!r}; endpoints: {', '.join(named) or 'none'}.",
             )
         if not a.tool:
-            return _said(self._listing(a.endpoint, endpoint), a.endpoint)
+            return ToolResult(
+                call_id="",
+                state="done",
+                stdout=(self._listing(a.endpoint, endpoint),),
+                result=RemoteToolResult(endpoint=a.endpoint),
+            )
         if a.arguments is None:
             here = self.local.get(a.tool)
             known = here is not None and here.digest == endpoint.tools.get(a.tool)
             spec = here if known else await endpoint.spec(a.tool)
             if spec is None:
                 raise ValueError(f"{a.endpoint} does not offer {a.tool}.")
-            return _said(
-                f"{spec.description}\n\nSchema:\n{json_dumps(spec.schema, indent=2)}",
-                a.endpoint,
+            return ToolResult(
+                call_id="",
+                state="done",
+                stdout=(
+                    f"{spec.description}\n\nSchema:\n{json_dumps(spec.schema, indent=2)}",
+                ),
+                result=RemoteToolResult(endpoint=a.endpoint),
             )
         return await endpoint.call(
             agent=context.label,
@@ -1043,7 +1081,3 @@ class RemoteTool:
             return f"{name} (down)"
         changed = "; tools changed" if told not in (None, endpoint.changes) else ""
         return f"{name} (up: {', '.join(endpoint.tools) or 'no tools'}{changed})"
-
-
-def _said(text: str, endpoint: str = "") -> RemoteToolResult:
-    return RemoteToolResult(call_id="", endpoint=endpoint, content=text)

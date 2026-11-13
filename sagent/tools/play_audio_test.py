@@ -12,8 +12,9 @@ import subprocess
 
 import pytest
 
+from sagent.session.types import PlayAudioResult
 from sagent.tools.play_audio import PlayAudio
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 @pytest.fixture
@@ -159,14 +160,16 @@ async def test_a_host_with_no_working_player_still_succeeds_and_warns(
     monkeypatch.setattr(PlayAudio, "_play", play)
 
     with caplog.at_level(logging.WARNING, logger="sagent.tools.play_audio"):
-        result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "ding.wav"})
+        result = await settled(
+            PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "ding.wav"}),
+        )
 
     play.assert_called_once_with(wav)
-    assert (result.text(), result.is_error, result.call_id, result.path) == (
+    assert result.result == PlayAudioResult(path=str(wav))
+    assert (result.text(), result.is_error, result.call_id) == (
         "Played ding.wav (best effort): unavailable",
-        None,
+        False,
         "",
-        str(wav),
     )
     assert caplog.messages == ["PlayAudio: unavailable"]
 
@@ -191,7 +194,7 @@ async def test_what_is_no_wav_file_is_an_error(
     play = Mock(return_value="")
     monkeypatch.setattr(PlayAudio, "_play", play)
 
-    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": name})
+    result = await settled(PlayAudio().call(ToolContext(cwd=tmp_path), {"path": name}))
 
     assert result.is_error is True
     assert result.call_id == ""
@@ -209,13 +212,14 @@ async def test_an_upper_case_suffix_is_still_a_wav(
     play = Mock(return_value="")
     monkeypatch.setattr(PlayAudio, "_play", play)
 
-    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "DING.WAV"})
+    result = await settled(
+        PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "DING.WAV"}),
+    )
 
-    assert (result.text(), result.is_error, result.call_id, result.path) == (
+    assert (result.text(), result.is_error, result.call_id) == (
         "Played DING.WAV.",
-        None,
+        False,
         "",
-        str(sound),
     )
     play.assert_called_once_with(sound)
 
@@ -223,7 +227,7 @@ async def test_an_upper_case_suffix_is_still_a_wav(
 @pytest.mark.asyncio
 async def test_a_call_without_a_path_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Missing argument 'path'"):
-        await PlayAudio().call(ToolContext(cwd=tmp_path), {})
+        await PlayAudio().call(ToolContext(cwd=tmp_path), {}).result
 
 
 if __name__ == "__main__":

@@ -2,10 +2,9 @@
 
 Typical usage example:
 
-  result = await PaperDetails().call(context, {"ids": ["2106.15928"]})
-  result = await PaperDetails().call(
-      context, {"ids": "2106.15928", "operation": "citations"},
-  )
+  result = await settled(PaperDetails().call(context, {"ids": ["2106.15928"]}))
+  streaming_result = PaperDetails().call(context, {"ids": "2106.15928", "operation": "citations"})
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
@@ -31,12 +30,18 @@ import cachetools
 from sagent.session.types import PaperDetailsResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import (
-    error,
     listed,
     paper_ids,
     summary_ids,
 )
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -147,11 +152,11 @@ class PaperDetails:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> PaperDetailsResult:
+    ) -> ToolStreamingResult[PaperDetailsResult, str, str]:
         """Look up the papers ``ids`` names, or one paper's references or citations.
 
         Args:
@@ -159,12 +164,19 @@ class PaperDetails:
           arguments: What the model passed, as ``PaperDetails.Arguments``.
 
         Returns:
-          result: A block per paper, or one line per related paper.
+          streaming_result: A block per paper, or one line per related paper.
 
         Raises:
           ValueError: The arguments contradict each other.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PaperDetailsResult, str, str]:
         a = parse(arguments, PaperDetails.Arguments)
         ids = paper_ids(a.ids)
         if not ids:
@@ -196,7 +208,7 @@ class PaperDetails:
             )
             cached = self.cache.get(key)
             if cached is not None:
-                return PaperDetailsResult(call_id="", content=cached)
+                return ToolOutput(stdout=(cached,), result=PaperDetailsResult())
             source = "openalex" if a.source == "openalex" else "s2"
             listing = await (
                 asyncio.to_thread(
@@ -220,10 +232,10 @@ class PaperDetails:
                 )
             )
         except PaperError as e:
-            return error(PaperDetailsResult, str(e))
+            return ToolOutput(stderr=(str(e),), result=PaperDetailsResult(exit_code=1))
         text = listed(listing, a.abstract_chars, more="exist")
         self.cache[key] = text
-        return PaperDetailsResult(call_id="", content=text)
+        return ToolOutput(stdout=(text,), result=PaperDetailsResult())
 
     async def _metadata(
         self,
@@ -231,13 +243,13 @@ class PaperDetails:
         abstract_chars: int | None,
         *,
         session: FetchSession,
-    ) -> PaperDetailsResult:
+    ) -> ToolOutput[PaperDetailsResult, str, str]:
         """Look up every id in one batched request, in input order."""
         wire = [s2_wire_id(*normalize_id(raw)) for raw in raw_ids]
         key = ("metadata", abstract_chars, tuple(wire))
         cached = self.cache.get(key)
         if cached is not None:
-            return PaperDetailsResult(call_id="", content=cached)
+            return ToolOutput(stdout=(cached,), result=PaperDetailsResult())
         if len(wire) == 1:
             records = [
                 await asyncio.to_thread(
@@ -260,4 +272,4 @@ class PaperDetails:
         )
         if all(r is not None for r in records):
             self.cache[key] = text
-        return PaperDetailsResult(call_id="", content=text)
+        return ToolOutput(stdout=(text,), result=PaperDetailsResult())

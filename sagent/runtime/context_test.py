@@ -37,6 +37,7 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     SystemMessage,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
@@ -86,8 +87,13 @@ def _user(text: str) -> UserMessage:
     return UserMessage(content=text)
 
 
-def _result(call_id: str, text: str = "ok") -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id=call_id, content=text)
+def _result(call_id: str, text: str = "ok") -> ToolResult:
+    return ToolResult(
+        call_id=call_id,
+        state="done",
+        stdout=(text,),
+        result=UncategorizedToolResult(),
+    )
 
 
 def _calling(*ids: str) -> Response:
@@ -105,7 +111,7 @@ def _texts(tape: Sequence[TapeRecord]) -> list[str]:
                     if isinstance(r, AssistantMessage)
                 ),
             )
-        elif isinstance(m, UncategorizedToolResult):
+        elif isinstance(m, ToolResult):
             out.append(m.text())
         elif isinstance(m, (UserMessage, AgentToAgentMessage, SystemMessage)):
             out.append(m.content or "")

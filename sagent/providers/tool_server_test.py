@@ -30,15 +30,16 @@ from sagent.session.types import (
     Attachment,
     BashResult,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from sagent.session.types import AnyToolResult
     from sagent.tools.types import ToolContext
 
 
@@ -78,8 +79,24 @@ async def test_held_calls_are_reported_once_each_oldest_first() -> None:
     assert a.call_id != b.call_id
     assert len(a.call_id) == 32
     assert isinstance(a.arguments, MappingProxyType)
-    await mount.answer(a, UncategorizedToolResult(call_id=a.call_id, content="A"))
-    await mount.answer(b, UncategorizedToolResult(call_id=b.call_id, content="B"))
+    await mount.answer(
+        a,
+        ToolResult(
+            call_id=a.call_id,
+            state="done",
+            stdout=("A",),
+            result=UncategorizedToolResult(),
+        ),
+    )
+    await mount.answer(
+        b,
+        ToolResult(
+            call_id=b.call_id,
+            state="done",
+            stdout=("B",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert _texts(await first) == ["A"]
     assert _texts(await second) == ["B"]
 
@@ -93,7 +110,15 @@ async def test_called_waits_for_a_call() -> None:
     holding = asyncio.ensure_future(mount.hold("Echo", arguments={}))
     call = await waiting
     assert call.name == "Echo"
-    await mount.answer(call, UncategorizedToolResult(call_id="", content="x"))
+    await mount.answer(
+        call,
+        ToolResult(
+            call_id="",
+            state="done",
+            stdout=("x",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     await holding
 
 
@@ -104,12 +129,28 @@ async def test_an_answered_call_is_never_reported() -> None:
     await asyncio.sleep(0)
     # The caller knew of the call from the CLI's own output.
     known = ToolCall(call_id="c", name="Echo", arguments={"k": 1})
-    await mount.answer(known, UncategorizedToolResult(call_id="c", content="r"))
+    await mount.answer(
+        known,
+        ToolResult(
+            call_id="c",
+            state="done",
+            stdout=("r",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert _texts(await holding) == ["r"]
     later = asyncio.ensure_future(mount.hold("Echo", arguments={"k": 2}))
     reported = await mount.called()
     assert dict(reported.arguments) == {"k": 2}
-    await mount.answer(reported, UncategorizedToolResult(call_id="", content="s"))
+    await mount.answer(
+        reported,
+        ToolResult(
+            call_id="",
+            state="done",
+            stdout=("s",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     await later
 
 
@@ -121,7 +162,15 @@ async def test_an_answer_matches_its_call_by_name_and_arguments() -> None:
     mine = asyncio.ensure_future(mount.hold("Echo", arguments={"k": 1}))
     await asyncio.sleep(0)
     call = ToolCall(call_id="c", name="Echo", arguments={"k": 1})
-    await mount.answer(call, UncategorizedToolResult(call_id="c", content="mine"))
+    await mount.answer(
+        call,
+        ToolResult(
+            call_id="c",
+            state="done",
+            stdout=("mine",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert _texts(await mine) == ["mine"]
     assert not other_name.done()
     assert not other_args.done()
@@ -136,7 +185,15 @@ async def test_an_answer_waits_for_its_call_to_arrive() -> None:
     mount = McpMount("http://x/1")
     call = ToolCall(call_id="c", name="Echo", arguments={})
     answering = asyncio.ensure_future(
-        mount.answer(call, UncategorizedToolResult(call_id="c", content="late")),
+        mount.answer(
+            call,
+            ToolResult(
+                call_id="c",
+                state="done",
+                stdout=("late",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
     )
     await asyncio.sleep(0)
     assert not answering.done()
@@ -153,7 +210,10 @@ async def test_an_answer_to_a_call_never_made_times_out(
     mount = McpMount("http://x/1")
     call = ToolCall(call_id="c", name="Echo", arguments={})
     with pytest.raises(TimeoutError):
-        await mount.answer(call, UncategorizedToolResult(call_id="c"))
+        await mount.answer(
+            call,
+            ToolResult(call_id="c", state="done", result=UncategorizedToolResult()),
+        )
 
 
 def test_an_answer_waits_a_minute_by_default() -> None:
@@ -169,11 +229,22 @@ async def test_an_answer_to_a_call_the_cli_gave_up_on_is_dropped() -> None:
     with pytest.raises(asyncio.CancelledError):
         await holding
     call = ToolCall(call_id="c", name="Echo", arguments={})
-    await mount.answer(call, UncategorizedToolResult(call_id="c", content="x"))
+    await mount.answer(
+        call,
+        ToolResult(
+            call_id="c",
+            state="done",
+            stdout=("x",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     # Answered, it waits no more: a second answer finds nothing to answer.
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.01):
-            await mount.answer(call, UncategorizedToolResult(call_id="c"))
+            await mount.answer(
+                call,
+                ToolResult(call_id="c", state="done", result=UncategorizedToolResult()),
+            )
 
 
 @pytest.mark.asyncio
@@ -198,12 +269,15 @@ async def test_a_result_reaches_the_cli_with_its_images_and_error_flag() -> None
     pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF")
     holding = asyncio.ensure_future(mount.hold("Bash", arguments={}))
     call = await mount.called()
-    result = BashResult(
+    result = ToolResult(
         call_id=call.call_id,
-        stdout="out",
-        exit_code=1,
-        is_error=True,
-        attachments=(png, pdf),
+        state="failed",
+        stdout=(
+            "out",
+            png,
+            pdf,
+        ),
+        result=BashResult(exit_code=1),
     )
     await mount.answer(call, result)
     reply = await holding
@@ -225,7 +299,12 @@ async def test_a_result_with_no_error_flag_is_no_error() -> None:
     call = await mount.called()
     await mount.answer(
         call,
-        UncategorizedToolResult(call_id=call.call_id, content="ok"),
+        ToolResult(
+            call_id=call.call_id,
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
     )
     assert (await holding).is_error is False
 
@@ -256,7 +335,15 @@ async def test_a_cli_lists_a_mounts_tools_and_its_call_waits_for_the_caller() ->
             calling = asyncio.ensure_future(client.call_tool("Echo", {"text": "hi"}))
             call = await mount.called()
             assert (call.name, dict(call.arguments)) == ("Echo", {"text": "hi"})
-            await mount.answer(call, UncategorizedToolResult(call_id="", content="hi!"))
+            await mount.answer(
+                call,
+                ToolResult(
+                    call_id="",
+                    state="done",
+                    stdout=("hi!",),
+                    result=UncategorizedToolResult(),
+                ),
+            )
             result = await calling
         async with _client(other.url) as client:
             assert (await client.list_tools()).tools == []
@@ -420,13 +507,20 @@ class _Tool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AnyToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="")
+        return ToolOutput(result=UncategorizedToolResult())
 
 
 if __name__ == "__main__":

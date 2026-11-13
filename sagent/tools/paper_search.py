@@ -5,7 +5,7 @@ owns every backend, rank fusion, and per-source rate limits.
 
 Typical usage example:
 
-  result = await PaperSearch().call(context, {"query": "diffusion models"})
+  result = await settled(PaperSearch().call(context, {"query": "diffusion models"}))
 """
 
 from __future__ import annotations
@@ -25,8 +25,14 @@ import cachetools
 
 from sagent.session.types import PaperSearchResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.paper_common import error
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -125,11 +131,11 @@ class PaperSearch:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> PaperSearchResult:
+    ) -> ToolStreamingResult[PaperSearchResult, str, str]:
         """Search for ``query`` with the filters given.
 
         Args:
@@ -137,12 +143,19 @@ class PaperSearch:
           arguments: What the model passed, as ``PaperSearch.Arguments``.
 
         Returns:
-          result: One paper per line, or why there are none.
+          streaming_result: One paper per line, or why there are none.
 
         Raises:
           ValueError: The query is empty, or the years are inverted.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PaperSearchResult, str, str]:
         a = parse(arguments, PaperSearch.Arguments)
         query = a.query.strip()
         if not query:
@@ -166,7 +179,7 @@ class PaperSearch:
         )
         cached = self.cache.get(key)
         if cached is not None:
-            return PaperSearchResult(call_id="", query=a.query, content=cached)
+            return ToolOutput(stdout=(cached,), result=PaperSearchResult(query=a.query))
         try:
             found = await asyncio.to_thread(
                 search,
@@ -179,13 +192,18 @@ class PaperSearch:
                 session=context.fetch_session,
             )
         except BotDetectionError as e:
-            return error(
-                PaperSearchResult,
-                f"{_named(a.source)} returned a CAPTCHA: {e}. The scraping IP is"
-                " rate-limited; retry later, change egress IP, or use another source.",
+            return ToolOutput(
+                stderr=(
+                    (
+                        f"{_named(a.source)} returned a CAPTCHA: {e}. The scraping IP"
+                        " is rate-limited; retry later, change egress IP, or use"
+                        " another source."
+                    ),
+                ),
+                result=PaperSearchResult(exit_code=1),
             )
         except PaperError as e:
-            return error(PaperSearchResult, str(e))
+            return ToolOutput(stderr=(str(e),), result=PaperSearchResult(exit_code=1))
         shown = found.records if a.limit is None else found.records[: a.limit]
         text = (
             "\n".join(format_record(r, abstract_chars=a.abstract_chars) for r in shown)
@@ -195,7 +213,7 @@ class PaperSearch:
         )
         if found.complete:
             self.cache[key] = text
-        return PaperSearchResult(call_id="", query=a.query, content=text)
+        return ToolOutput(stdout=(text,), result=PaperSearchResult(query=a.query))
 
 
 # A source with no name here is named by its words: ``some_source`` is ``Some Source``.

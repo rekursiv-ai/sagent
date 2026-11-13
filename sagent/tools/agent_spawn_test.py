@@ -54,11 +54,18 @@ from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    settled,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
     from sagent.agent.types import Factory, Journal, Shrinker
+    from sagent.model.types import Request, Response
     from sagent.providers.types import ProviderResources
 
 
@@ -110,13 +117,20 @@ class _Tool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="ok")
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 @dataclass(slots=True, kw_only=True)
@@ -127,18 +141,18 @@ class _Wait(_Tool):
     stopped: asyncio.Event = field(default_factory=asyncio.Event)
 
     @override
-    async def call(
+    async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
         self.started.set()
         try:
             await asyncio.Event().wait()
         finally:
             self.stopped.set()
-        return UncategorizedToolResult(call_id="", content="never")
+        return ToolOutput(stdout=("never",), result=UncategorizedToolResult())
 
 
 @dataclass(slots=True, kw_only=True)
@@ -253,8 +267,22 @@ async def _spawn(
     arguments: dict[str, PlainTree],
     *,
     label: str = "Agent",
-) -> AgentSpawnResult:
-    return await setup.spawn.call(ToolContext(cwd=tmp_path, label=label), arguments)
+) -> ToolResult:
+    streaming_result = setup.spawn.call(
+        ToolContext(cwd=tmp_path, label=label),
+        arguments,
+    )
+    result = await settled(streaming_result)
+    if result.state == "failed":
+        _ = streaming_result.result.result()
+    return result
+
+
+def _spawn_result(result: ToolResult) -> AgentSpawnResult:
+    """Return the ``AgentSpawnResult`` of a spawn's record."""
+    spawn_result = result.result
+    assert isinstance(spawn_result, AgentSpawnResult)
+    return spawn_result
 
 
 def _kept(journal: Path) -> str:
@@ -329,17 +357,15 @@ def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
     )
     spawn = AgentSpawn(team=team)
 
-    def said(label: str) -> str:
-        return spawn.reminder(ToolContext(cwd=tmp_path, label=label))
-
-    assert said("Agent") == (
-        "Your children: leaf, asked (owes you a reply), asker (you owe it a reply)."
-    )
-    assert said("stranger") == ""
-    assert said("leaf") == (
-        "Your children: kid. Spawn budget: you are a leaf agent; AgentSpawn will refuse."
-    )
-    assert said("kid") == "Spawn budget: you are a leaf agent; AgentSpawn will refuse."
+    assert [
+        spawn.reminder(ToolContext(cwd=tmp_path, label=label))
+        for label in ("Agent", "stranger", "leaf", "kid")
+    ] == [
+        "Your children: leaf, asked (owes you a reply), asker (you owe it a reply).",
+        "",
+        "Your children: kid. Spawn budget: you are a leaf agent; AgentSpawn will refuse.",
+        "Spawn budget: you are a leaf agent; AgentSpawn will refuse.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -358,8 +384,8 @@ async def test_a_child_spends_from_its_parents_budget_which_halts_past_it(
 
         result = await _spawn(setup, tmp_path, {"prompt": "spend"})
 
-        assert (result.state, result.text()) == (
-            "failed",
+        assert (result.is_error, result.text()) == (
+            True,
             "BudgetExhaustedError: Budget exhausted: $1.20 >= $1.00",
         )
         assert setup.parent.spend_usd == pytest.approx(1.2)
@@ -448,9 +474,9 @@ async def test_a_child_tells_its_parent_when_it_stops_but_not_after_its_spawn(
 @pytest.mark.asyncio
 async def test_a_spawn_detaches_at_its_childs_first_quota_wait() -> None:
     """Blocked in the call, the parent would read none of a week's wait."""
-    detached: list[asyncio.Task[None] | None] = []
+    detached: list[asyncio.Future[object] | None] = []
     parent = Mock(spec=Agent, runtime=Mock(detach=detached.append))
-    task = asyncio.create_task(asyncio.sleep(0))
+    task = asyncio.Future[object]()
     waits = agent_spawn._DetachOnWait(parent=parent, task=task)
     for exception, attempt in (
         (OverloadedError("busy"), 1),
@@ -460,9 +486,37 @@ async def test_a_spawn_detaches_at_its_childs_first_quota_wait() -> None:
         waits(
             types.ModelCallSuspended(exception=exception, until=0.0, attempt=attempt),
         )
-    await task
 
     assert detached == [task]
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_in_flight_detaches_its_own_call_when_its_child_waits_on_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply(calls=[call("Wait")]), tools=[wait])
+    detached: list[object] = []
+    monkeypatch.setattr(setup.parent.runtime, "detach", detached.append)
+    async with setup.team:
+        streaming_result = setup.spawn.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"prompt": "go"},
+        )
+        await wait.started.wait()
+        setup.team["Agent_0"].runtime.publish(
+            types.ModelCallSuspended(
+                exception=RateLimitedError("spent"),
+                until=0.0,
+                attempt=1,
+            ),
+        )
+
+        # ``result`` is the task the spawn runs in, which the parent's runtime tracks.
+        assert detached == [streaming_result.result]
+        _ = streaming_result.result.cancel()
+        assert (await settled(streaming_result)).state == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -481,31 +535,33 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
 
     result = await _spawn(setup, tmp_path, {"prompt": "count the TODOs"})
 
-    assert result.is_error is False
-    assert (result.agent_id, result.agent_kind, result.state) == (
-        "Agent_0",
-        "persistent",
-        "completed",
+    spawn_result = _spawn_result(result)
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("three TODOs",),
+        result=AgentSpawnResult(
+            agent_id="Agent_0",
+            agent_kind="persistent",
+            prompt="count the TODOs",
+            model="scripted",
+            state="completed",
+            tokens=15,
+            duration_sec=spawn_result.duration_sec,
+            tool_calls=1,
+        ),
     )
-    assert (result.content, result.prompt, result.model) == (
-        "three TODOs",
-        "count the TODOs",
-        "scripted",
-    )
-    assert (result.tokens, result.tool_calls, result.output_file) == (15, 1, None)
-    # The runtime stamps the call's id; a tool leaves it empty.
-    assert result.call_id == ""
-    assert result.duration_sec is not None
-    assert 0.0 <= result.duration_sec < 60.0
+    assert spawn_result.duration_sec is not None
+    assert 0.0 <= spawn_result.duration_sec < 60.0
     assert list(setup.team) == ["Agent", "Agent_0"]
     (done,) = [e for e in setup.seen if isinstance(e, types.ChildDoneEvent)]
     assert (done.label, done.tokens, done.cost) == ("Agent_0", 15, 0.5)
-    assert 0.0 <= done.elapsed <= result.duration_sec
+    assert 0.0 <= done.elapsed <= spawn_result.duration_sec
     forwarded = [e for e in setup.seen if isinstance(e, types.ChildEvent)]
     assert {e.label for e in forwarded} == {"Agent_0"}
     assert [type(e.inner) for e in forwarded] == [
         types.ModelResponseComplete,
-        UncategorizedToolResult,
+        ToolResult,
         types.ModelResponseComplete,
     ]
     # A child's move to another login is the parent's to show too.
@@ -542,7 +598,11 @@ async def test_a_child_that_fails_says_why_and_stays(tmp_path: Path) -> None:
     result = await _spawn(setup, tmp_path, {"prompt": "go", "label": "worker"})
 
     assert result.is_error is True
-    assert (result.state, result.content) == ("failed", "ValueError: model down")
+    assert (_spawn_result(result).state, result.text()) == (
+        "failed",
+        "ValueError: model down",
+    )
+    assert _spawn_result(result).exit_code == 1
     assert list(setup.team) == ["Agent", "worker"]
     assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
 
@@ -558,8 +618,8 @@ async def test_a_child_held_to_its_round_cap_fails_with_the_cap(tmp_path: Path) 
 
     result = await _spawn(setup, tmp_path, {"prompt": "go", "max_tool_call_rounds": 1})
 
-    assert result.state == "failed"
-    assert (result.content or "").startswith("RoundLimitError")
+    assert result.is_error is True
+    assert result.text().startswith("RoundLimitError")
     assert len(setup.children.requests) == 2
 
 
@@ -571,7 +631,7 @@ async def test_a_child_at_its_round_cap_answers_with_what_it_has(
 
     result = await _spawn(setup, tmp_path, {"prompt": "go", "max_tool_call_rounds": 1})
 
-    assert (result.state, result.content) == ("completed", "found it")
+    assert (result.is_error, result.text()) == (False, "found it")
 
 
 @pytest.mark.asyncio
@@ -619,7 +679,7 @@ async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
             assert "Unknown tools Grep; yours: AgentSpawn, Read" in result.text()
             assert "kid" not in setup.team
             return
-        assert result.is_error is not True, result.text()
+        assert result.is_error is False, result.text()
         child = setup.team["kid"]
         expected = (
             frozenset({*tools, "AgentSend"})
@@ -630,7 +690,7 @@ async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
         )
         assert child.allowed == expected
         (read,) = (r for r in child.session if isinstance(r, ToolResult))
-        assert read.is_error is (True if tools in (["Grep"], []) else None)
+        assert read.is_error is (tools in (["Grep"], []))
         assert read.text() == (
             "Read is not available to this agent." if tools in (["Grep"], []) else "ok"
         )
@@ -668,12 +728,12 @@ async def test_final_round_watchers_inherit_configured_permissions(
             for r in parent.session
             if isinstance(r, ToolResult) and r.call_id == "watch"
         )
-        assert result.is_error is not True, result.text()
+        assert result.is_error is False, result.text()
         watcher = setup.team["watcher"]
         assert watcher.allowed == allowed
         await asyncio.wait_for(wait.started.wait(), timeout=5)
         assert setup.children.requests[0].allowed == allowed
-    assert wait.stopped.is_set()
+    await asyncio.wait_for(wait.stopped.wait(), timeout=5)
 
 
 @pytest.mark.asyncio
@@ -685,8 +745,7 @@ async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> 
         await wait.started.wait()
         _ = task.cancel()
 
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert (await task).state == "cancelled"
         await asyncio.wait_for(wait.stopped.wait(), timeout=5)
         assert list(setup.team) == ["Agent", "Agent_0"]
     assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
@@ -807,7 +866,7 @@ async def test_a_persistent_child_inherits_from_its_parent_unless_told(
         )
         heir, own = setup.team["Agent_0"], setup.team["told"]
 
-        assert inherited.state == told.state == "completed"
+        assert inherited.is_error is told.is_error is False
         assert list(heir.tools) == list(own.tools) == ["Read", "Grep", "AgentSend"]
         assert (heir.allowed, own.allowed) == (None, frozenset({"Grep", "AgentSend"}))
         assert (heir.system_prompt, own.system_prompt) == (
@@ -993,7 +1052,7 @@ async def test_a_child_asked_again_is_nudged_until_it_replies_by_agentsend(
         (told,) = await _messages(setup.parent, 1)
         await seen.idle()
 
-    assert result.content == "first answer"
+    assert result.text() == "first answer"
     assert told == AgentToAgentMessage(
         sender="helper",
         recipient="Agent",
@@ -1047,7 +1106,7 @@ async def test_a_child_of_a_journaled_parent_keeps_its_own_journal(
 
     (spec,) = setup.team.standing("Agent")
     path = Path(spec.journal)
-    assert result.output_file == str(path)
+    assert _spawn_result(result).output_file == str(path)
     assert path.parent.parent == tmp_path / "parent"
     assert "done" in _kept(path)
     assert spec.label == "Agent_0"
@@ -1088,9 +1147,13 @@ async def test_a_label_of_anything_but_plain_characters_starts_no_child(
     monkeypatch.setattr(AgentSpawn, "_start", start)
 
     with pytest.raises(ValueError, match=r"^A label is 1 to 64 letters, digits"):
-        _ = await AgentSpawn(team=team).call(
-            ToolContext(cwd=tmp_path, label="Agent"),
-            {"prompt": "go", "label": label},
+        _ = (
+            await AgentSpawn(team=team)
+            .call(
+                ToolContext(cwd=tmp_path, label="Agent"),
+                {"prompt": "go", "label": label},
+            )
+            .result
         )
 
     model.assert_not_awaited()
@@ -1108,7 +1171,7 @@ async def test_a_plain_label_names_the_child_and_never_its_folder(
 
         result = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
 
-    assert result.agent_id == label
+    assert _spawn_result(result).agent_id == label
     (spec,) = setup.team.standing("Agent")
     assert spec.label == label
     folder = Path(spec.journal).parent.name
@@ -1121,13 +1184,14 @@ async def test_a_label_used_again_keeps_a_journal_of_its_own(tmp_path: Path) -> 
         setup = _setup(tmp_path, reply("first"), reply("second"), journal=journal)
         async with setup.team:
             spawned = {"prompt": "go", "label": "helper"}
-            first = await _spawn(setup, tmp_path, dict(spawned))
+            _ = await _spawn(setup, tmp_path, dict(spawned))
+            (first,) = setup.team.standing("Agent")
             await setup.team.stop("helper")
-            second = await _spawn(setup, tmp_path, dict(spawned))
+            _ = await _spawn(setup, tmp_path, dict(spawned))
+            (second,) = setup.team.standing("Agent")
 
-    assert first.output_file != second.output_file
-    assert second.output_file is not None
-    assert "first" not in _kept(Path(second.output_file))
+    assert first.journal != second.journal
+    assert "first" not in _kept(Path(second.journal))
 
 
 @pytest.mark.asyncio
@@ -1221,7 +1285,7 @@ async def test_a_persistent_child_of_a_parent_in_memory_does_not_stand(
         )
 
         assert setup.team.standing("Agent") == []
-    assert result.state == "completed"
+    assert result.is_error is False
 
 
 async def _first_session(tmp_path: Path, *specs: dict[str, PlainTree]) -> None:
@@ -1622,8 +1686,11 @@ async def test_parallel_spawns_each_get_a_label_of_their_own(tmp_path: Path) -> 
             _spawn(setup, tmp_path, {"prompt": "b"}),
         )
 
-    assert sorted(r.agent_id or "" for r in results) == ["Agent_0", "Agent_1"]
-    assert all(r.state == "completed" for r in results)
+    assert sorted(_spawn_result(r).agent_id or "" for r in results) == [
+        "Agent_0",
+        "Agent_1",
+    ]
+    assert all(_spawn_result(r).state == "completed" for r in results)
 
 
 @pytest.mark.asyncio
@@ -1649,7 +1716,7 @@ async def test_stopping_a_parent_mid_spawn_ends_the_spawn(
         await setup.team.stop("p")
 
         result = await asyncio.wait_for(task, timeout=5)
-        assert result.state == "failed"
+        assert result.is_error is True
         assert "p" not in setup.team
 
 
@@ -1697,7 +1764,7 @@ async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("arguments", "said"),
+    ("arguments", "expected_text"),
     [
         ({"account": "work"}, "as work"),
         ({"account": "work", "provider": "scripted"}, "as work"),
@@ -1708,14 +1775,14 @@ async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
 async def test_a_child_told_an_account_signs_in_as_it(
     tmp_path: Path,
     arguments: dict[str, PlainTree],
-    said: str,
+    expected_text: str,
 ) -> None:
     setup = _setup(tmp_path)
     setup.team.catalog = ModelCatalog(factories=_as_account)
 
     result = await _spawn(setup, tmp_path, {"prompt": "who?", **arguments})
 
-    assert (result.state, result.text()) == ("completed", said)
+    assert (result.is_error, result.text()) == (False, expected_text)
     assert setup.team.catalog.account is None
 
 
@@ -1795,7 +1862,18 @@ async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
 async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
     tmp_path: Path,
 ) -> None:
-    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    owed: list[dict[str, str]] = []
+
+    def answer(request: Request) -> Response:
+        del request
+        owed.append(dict(team.owes("watcher")))
+        return reply("watching")
+
+    team = Team(
+        catalog=ModelCatalog(
+            factories={"scripted": partial(ScriptedProvider, replies=[answer])},
+        ),
+    )
     spawn = AgentSpawn(team=team)
     root = Agent(
         model=ScriptedProvider()["scripted"],
@@ -1809,23 +1887,32 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
             ValueError,
             match=r"^A watcher needs a policy in prompt\.$",
         ):
-            _ = await spawn.call(context, {"prompt": " ", "watch": True})
-        started = await spawn.call(context, {"prompt": "keep me honest", "watch": True})
+            _ = await spawn.call(context, {"prompt": " ", "watch": True}).result
+        started = await settled(
+            spawn.call(context, {"prompt": "keep me honest", "watch": True}),
+        )
 
-        assert started == AgentSpawnResult(
+        assert started == ToolResult(
             call_id="",
-            agent_id="watcher",
-            agent_kind="watcher",
-            state="running",
-            content="Started your watcher, watcher; it owes you a reply.",
+            state="done",
+            stdout=("Started your watcher, watcher; it owes you a reply.",),
+            result=AgentSpawnResult(
+                agent_id="watcher",
+                agent_kind="watcher",
+                state="running",
+            ),
         )
         assert team.resolve("parent", by="Agent") == ["watcher"]
-        assert team.owes("watcher") == {"Agent": "keep me honest"}
-        told = [
-            m.content or ""
-            for m in team["watcher"].runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
-        ]
+        told: list[str] = []
+        async with asyncio.timeout(5):
+            while not owed or len(told) < 2:
+                await asyncio.sleep(0)
+                told = [
+                    r.content or ""
+                    for r in team["watcher"].session
+                    if isinstance(r, AgentToAgentMessage)
+                ]
+        assert owed[0] == {"Agent": "keep me honest"}
         assert told[0].startswith("<skill name='watch' source='builtin'>")
         assert told[1] == "keep me honest"
         assert spawn.serialize_key(context, {"watch": True}) == "parent"
@@ -2174,7 +2261,11 @@ async def test_an_agent_on_another_machine_spawns_a_child_here(tmp_path: Path) -
     setup.team.reach("far", relay=relay)
     setup.team.stand_in = partial(_here, tmp_path)
     result = await _spawn(setup, tmp_path, {"prompt": "go"}, label="far")
-    assert (result.agent_id, result.content, result.state) == (
+    assert (
+        _spawn_result(result).agent_id,
+        result.text(),
+        _spawn_result(result).state,
+    ) == (
         "far_0",
         "done",
         "completed",

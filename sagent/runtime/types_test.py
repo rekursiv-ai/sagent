@@ -23,8 +23,8 @@ from sagent.runtime.types import (
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
-    BashResult,
     SystemMessage,
+    ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
@@ -94,7 +94,12 @@ def test_compact_complete_takes_every_field_from_the_override() -> None:
 
 
 def test_detached_result_is_keyed_by_its_results_call() -> None:
-    result = BashResult(call_id="c7", stdout="ok")
+    result = ToolResult(
+        call_id="c7",
+        state="done",
+        stdout=("ok",),
+        result=UncategorizedToolResult(),
+    )
     assert DetachedResult(result=result).call_id == "c7"
 
 
@@ -112,7 +117,7 @@ def test_detached_result_is_keyed_by_its_results_call() -> None:
             ),
             "assistant",
         ),
-        (UncategorizedToolResult(call_id="c"), None),
+        (ToolResult(call_id="c", state="done", result=UncategorizedToolResult()), None),
         (SystemMessage(content="n"), None),
         (TurnContext(cwd="/x"), None),
     ],

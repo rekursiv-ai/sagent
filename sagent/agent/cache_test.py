@@ -34,7 +34,12 @@ from sagent.session.types import (
 from sagent.tools.bash import Bash
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -75,13 +80,20 @@ class _Reminding:
         del context
         return self.told
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="noted")
+        return ToolOutput(stdout=("noted",), result=UncategorizedToolResult())
 
 
 def _offered(tools: Sequence[Tool]) -> list[str]:

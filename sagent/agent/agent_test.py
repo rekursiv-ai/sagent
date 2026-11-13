@@ -58,7 +58,6 @@ from sagent.session.types import (
     SystemMessage,
     TokenUsage,
     ToolCall,
-    ToolErrorResult,
     ToolResult,
     TurnContext,
     UncategorizedRecord,
@@ -68,7 +67,12 @@ from sagent.session.types import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -184,13 +188,20 @@ class _Tool:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="ok")
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 @dataclass(slots=True, kw_only=True)
@@ -307,7 +318,7 @@ async def test_send_returns_what_the_model_said_last(tmp_path: Path) -> None:
         assert await agent.send("go") == "done"
 
     second = provider.requests[1].records
-    results = [r for r in second if isinstance(r, ToolErrorResult)]
+    results = [r for r in second if isinstance(r, ToolResult) and r.state == "failed"]
     assert [r.text() for r in results] == ["Unknown tool: Nope"]
 
 
@@ -1034,7 +1045,7 @@ async def test_a_call_still_running_when_its_session_ended_resumes_killed(
         ContextClear(system_prompt="S"),
         UserMessage(content="go"),
         ToolCall(call_id="c1", name="Echo"),
-        UncategorizedToolResult(call_id="c1", content=markers.detached, stub="pending"),
+        ToolResult(call_id="c1", state="pending", stdout=(markers.detached,)),
         AssistantMessage(content="waiting"),
     )
     provider, agent = _agent(tmp_path, reply("ok"), journal=journal)
@@ -1042,7 +1053,7 @@ async def test_a_call_still_running_when_its_session_ended_resumes_killed(
         _ = await agent.send("and?")
 
     killed = [
-        (r.text(), r.stub)
+        (r.text(), r.state)
         for r in journal
         if isinstance(r, ToolResult) and r.call_id == f"c1{markers.arrival}"
     ]
@@ -1198,7 +1209,12 @@ def test_appended_records_are_turns_and_what_no_turn_holds_is_dropped(
 ) -> None:
     _, agent = _agent(tmp_path)
     turn = (AssistantMessage(content="reading"), ToolCall(call_id="c1", name="Read"))
-    result = UncategorizedToolResult(call_id="c1", content="text")
+    result = ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("text",),
+        result=UncategorizedToolResult(),
+    )
 
     agent.session.append(
         ContextClear(summary="the gist", history=(UserMessage(content="kept"),)),
@@ -2156,12 +2172,17 @@ async def test_a_resumed_session_signs_in_as_the_account_it_stood(
     [
         [
             reply(calls=[call("Nope", "c1")]),
-            UncategorizedToolResult(call_id="c1", content="[detached]", stub="pending"),
+            ToolResult(call_id="c1", state="pending", stdout=("[detached]",)),
         ],
         [UserMessage(content="are you there?")],
         [
             reply(calls=[call("Nope", "c1")]),
-            UncategorizedToolResult(call_id="c1", content="ok"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
         ],
     ],
     ids=["job-running-at-quit", "unanswered-message", "unanswered-result"],
@@ -2338,7 +2359,12 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     _ = agent.runtime.append_history(UserMessage(content="go"))
     _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
     _ = agent.runtime.append_history(
-        UncategorizedToolResult(call_id="c1", content="long output", is_error=True),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("long output",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
     )
     session.persist()
 
@@ -2352,19 +2378,21 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     _, resumed = _agent(tmp_path, journal=journal)
     _session(resumed).resume()
     assert list(_session(resumed)) == list(session)
-    assert UncategorizedToolResult(
+    assert ToolResult(
         call_id="c1",
-        content="long output",
-        is_error=True,
+        state="done",
+        stdout=("long output",),
+        result=UncategorizedToolResult(exit_code=1),
         shown="[pruned]",
     ) in list(session)
 
 
-def _result(n: int) -> UncategorizedToolResult:
-    return UncategorizedToolResult(
+def _result(n: int) -> ToolResult:
+    return ToolResult(
         call_id=f"c{n}",
-        content=f"output {n}",
-        is_error=True,
+        state="done",
+        stdout=(f"output {n}",),
+        result=UncategorizedToolResult(exit_code=1),
     )
 
 
@@ -2903,14 +2931,19 @@ async def test_every_record_the_agent_writes_is_timed(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "splice",
     [
-        UncategorizedToolResult(call_id="c1", content="was a message"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("was a message",),
+            result=UncategorizedToolResult(),
+        ),
         UserMessage(content="was a result"),
     ],
     ids=["message-to-result", "result-to-message"],
 )
 def test_a_record_spliced_into_another_kind_writes_a_new_window(
     tmp_path: Path,
-    splice: UncategorizedToolResult | UserMessage,
+    splice: ToolResult | UserMessage,
 ) -> None:
     journal = RecordingJournal()
     _, agent = _agent(tmp_path, journal=journal)
@@ -2918,7 +2951,12 @@ def test_a_record_spliced_into_another_kind_writes_a_new_window(
     session.resume()
     _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
     replaced = agent.runtime.append_history(
-        UncategorizedToolResult(call_id="c1", content="out")
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("out",),
+            result=UncategorizedToolResult(),
+        )
         if isinstance(splice, UserMessage)
         else UserMessage(content="go"),
     )

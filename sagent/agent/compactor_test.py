@@ -66,7 +66,12 @@ from sagent.session.types import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
 from sagent.tools.skill import Skill, SkillInfo
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -144,8 +149,13 @@ def _turn(text: str = "", *calls: ToolCall) -> Response:
     return reply(text, calls=calls)
 
 
-def _result(call_id: str, text: str = "ok") -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id=call_id, content=text)
+def _result(call_id: str, text: str = "ok") -> ToolResult:
+    return ToolResult(
+        call_id=call_id,
+        state="done",
+        stdout=(text,),
+        result=UncategorizedToolResult(),
+    )
 
 
 def _instruction(request: Request) -> str:
@@ -613,7 +623,15 @@ def _said(attached: tuple[Attachment, ...]) -> ModelContextEvent:
 
 
 def _returned(attached: tuple[Attachment, ...]) -> ModelContextEvent:
-    return UncategorizedToolResult(call_id="c", content="y" * 40, attachments=attached)
+    return ToolResult(
+        call_id="c",
+        state="done",
+        stdout=(
+            "y" * 40,
+            *(attached),
+        ),
+        result=UncategorizedToolResult(),
+    )
 
 
 @pytest.mark.parametrize("carrier", [_said, _returned], ids=["user", "result"])
@@ -907,12 +925,11 @@ async def test_attachments_are_sent_unchanged_and_kept_in_the_tail(
     image = Attachment(mime_descriptor="image/png", data=b"png")
     pdf = Attachment(mime_descriptor="application/pdf", data=b"pdf")
     other = Attachment(mime_descriptor="audio/wav", data=b"wav")
-    shot = UncategorizedToolResult(
+    shot = ToolResult(
         call_id="c1",
-        content="shot",
-        attachments=(image,),
-        is_error=True,
-        stub="pending",
+        state="pending",
+        stdout=("shot", image),
+        result=UncategorizedToolResult(exit_code=1),
     )
     history = (
         _user("look", image, pdf),
@@ -930,7 +947,7 @@ async def test_attachments_are_sent_unchanged_and_kept_in_the_tail(
     assert sent == _records(history[:-1])
     assert any(r.attachments for r in sent if isinstance(r, (UserMessage, ToolResult)))
     marked = next(r for r in sent if isinstance(r, ToolResult))
-    assert (marked.call_id, marked.is_error, marked.stub) == ("c1", True, "pending")
+    assert (marked.call_id, marked.is_error, marked.state) == ("c1", True, "pending")
     first = splice.payload[0]
     assert isinstance(first, UserMessage)
     assert first.attachments == (image,)
@@ -1361,7 +1378,12 @@ def test_a_skill_that_failed_to_load_is_not_restored(
     history = [
         _user("go"),
         _turn("", call("Skill", "c1", skill="tdd")),
-        UncategorizedToolResult(call_id="c1", content="no", is_error=True),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("no",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
         _turn("done"),
     ]
 
@@ -2066,13 +2088,20 @@ class _Wait:
         del context, arguments
         return None
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
         del context, arguments
-        return UncategorizedToolResult(call_id="", content="")
+        return ToolOutput(stdout=("",), result=UncategorizedToolResult())
 
 
 def test_a_job_still_running_is_named_after_the_summary(
@@ -2197,7 +2226,12 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
         ContextClear(system_prompt="S"),
         UserMessage(content="first ask"),
         ToolCall(call_id="c0", name="Read", arguments={"file_path": "a.py"}),
-        UncategorizedToolResult(call_id="c0", content="the file body"),
+        ToolResult(
+            call_id="c0",
+            state="done",
+            stdout=("the file body",),
+            result=UncategorizedToolResult(),
+        ),
         Thinking(content="hmm"),
         AssistantMessage(content="read it"),
         ContextClear(
@@ -2769,7 +2803,12 @@ async def test_error_results_are_sent_whole_regardless_of_length(
     result: str,
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY)
-    returned = UncategorizedToolResult(call_id="c1", content=result, is_error=True)
+    returned = ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=(result,),
+        result=UncategorizedToolResult(exit_code=1),
+    )
     history = (_user("go"), _turn("", call("Read", "c1")), returned, _turn("ok"))
 
     _ = await _compact(SummaryCompactor(agent), agent, history)

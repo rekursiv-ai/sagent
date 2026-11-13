@@ -20,7 +20,7 @@ the caller's watcher instead, ``prompt`` its first request.
 Typical usage example:
 
   spawn = AgentSpawn(team=team)
-  result = await spawn.call(context, {"prompt": "list the TODOs in src/", "tools": ["Grep"]})
+  result = await settled(spawn.call(context, {"prompt": "list the TODOs in src/", "tools": ["Grep"]}))
   await spawn.resume("Agent")          # After resuming the root's session.
 """
 
@@ -56,7 +56,16 @@ from sagent.session.types import (
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
-from sagent.tools.types import Arg, FileTracker, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    FileTracker,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    settled,
+    whole_output,
+)
 from sagent.tools.watch import Feed
 
 
@@ -206,11 +215,11 @@ class AgentSpawn:
             if part
         )
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AgentSpawnResult:
+    ) -> ToolStreamingResult[AgentSpawnResult, str, str]:
         """Build the child, join it to the team, and run or start it.
 
         Args:
@@ -218,16 +227,24 @@ class AgentSpawn:
           arguments: What the model passed, as ``AgentSpawn.Arguments``.
 
         Returns:
-          result: The child's last text, or why it failed; with ``watch``, the
+          streaming_result: The child's last text, or why it failed; with ``watch``, the
             caller's new watcher, sent ``prompt`` as a request after the
             ``watch`` skill.
 
         Raises:
-          ValueError: The caller is in no team or may not spawn, a tool or model
-            is unknown, or the label is malformed, taken or reserved; with ``watch``,
-            the prompt is empty or the caller is no unwatched root.
+          ValueError: The caller is in no team or may not spawn, a tool or
+            model is unknown, or the label is malformed, taken or reserved;
+            with ``watch``, the prompt is empty or the caller is no unwatched
+            root.
 
         """
+        return whole_output(self._spawn(context, arguments))
+
+    async def _spawn(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[AgentSpawnResult, str, str]:
         a = parse(arguments, AgentSpawn.Arguments)
         parent_label = context.label
         parent = self._parent(parent_label)
@@ -238,12 +255,13 @@ class AgentSpawn:
                 raise ValueError("A watcher needs a policy in prompt.")
             label = await self.start_watcher(parent_label)
             self.team.send(parent_label, recipient=label, content=a.prompt)
-            return AgentSpawnResult(
-                call_id="",
-                agent_id=label,
-                agent_kind="watcher",
-                state="running",
-                content=f"Started your watcher, {label}; it owes you a reply.",
+            return ToolOutput(
+                stdout=(f"Started your watcher, {label}; it owes you a reply.",),
+                result=AgentSpawnResult(
+                    agent_id=label,
+                    agent_kind="watcher",
+                    state="running",
+                ),
             )
         if not self.team.can_spawn(parent_label):
             raise ValueError(
@@ -412,9 +430,11 @@ class AgentSpawn:
         target = self.team[watched]
         skill = target.tools.get("Skill")
         loader = skill if isinstance(skill, Skill) else Skill()
-        how = await loader.call(
-            target.runtime.tool_context,
-            {"skill": "watch", "args": watched},
+        how = await settled(
+            loader.call(
+                target.runtime.tool_context,
+                {"skill": "watch", "args": watched},
+            ),
         )
         return await self.watch(watched, before=how.text())
 
@@ -580,7 +600,7 @@ class AgentSpawn:
         label: str,
         parent: Agent,
         a: AgentSpawn.Arguments,
-    ) -> AgentSpawnResult:
+    ) -> ToolOutput[AgentSpawnResult, str, str]:
         """Run ``child`` on the prompt to idle; it stays, its inbox open."""
         started = time.monotonic()
         tally = _Tally()
@@ -607,21 +627,21 @@ class AgentSpawn:
                     cost=tally.cost,
                 ),
             )
-        return AgentSpawnResult(
-            call_id="",
-            is_error=state != "completed",
-            agent_id=label,
-            agent_kind="persistent",
-            prompt=a.prompt,
-            content=reply,
-            model=child.model.capability.model_id,
-            state=state,
-            tokens=tally.tokens,
-            duration_sec=time.monotonic() - started,
-            tool_calls=tally.calls,
-            output_file=str(child.session.journal.path)
-            if child.session.journal.path
-            else None,
+        kept = child.session.journal.path
+        return ToolOutput(
+            stdout=(reply,),
+            result=AgentSpawnResult(
+                agent_id=label,
+                agent_kind="persistent",
+                prompt=a.prompt,
+                model=child.model.capability.model_id,
+                state=state,
+                tokens=tally.tokens,
+                duration_sec=time.monotonic() - started,
+                tool_calls=tally.calls,
+                output_file=str(kept) if kept else None,
+                exit_code=int(state != "completed"),
+            ),
         )
 
     # A member's own; for an outside member, this machine's, as sagent here would run.
@@ -779,7 +799,7 @@ class _DetachOnWait:
     """
 
     parent: Agent
-    task: asyncio.Task[None] | None
+    task: asyncio.Future[object] | None
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Detach the spawn's call at the child's first quota wait."""

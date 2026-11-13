@@ -30,6 +30,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -117,14 +118,33 @@ def test_encode_renders_each_record_as_its_input_item() -> None:
         AssistantMessage(content=""),
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
         ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
-        UncategorizedToolResult(call_id="toolu_b", content="missing", is_error=True),
-        UncategorizedToolResult(
-            call_id="toolu_a",
-            content="x = 1",
-            attachments=(image, pdf),
+        ToolResult(
+            call_id="toolu_b",
+            state="done",
+            stdout=("missing",),
+            result=UncategorizedToolResult(exit_code=1),
         ),
-        UncategorizedToolResult(call_id="toolu_c", attachments=(image,)),
-        UncategorizedToolResult(call_id="toolu_d", is_error=True),
+        ToolResult(
+            call_id="toolu_a",
+            state="done",
+            stdout=(
+                "x = 1",
+                image,
+                pdf,
+            ),
+            result=UncategorizedToolResult(),
+        ),
+        ToolResult(
+            call_id="toolu_c",
+            state="done",
+            stdout=(image,),
+            result=UncategorizedToolResult(),
+        ),
+        ToolResult(
+            call_id="toolu_d",
+            state="done",
+            result=UncategorizedToolResult(exit_code=1),
+        ),
     )
     assert _encode(Request(records=records))["input"] == [
         {"role": "user", "content": "Earlier: a bug."},

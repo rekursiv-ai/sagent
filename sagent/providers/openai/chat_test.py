@@ -27,6 +27,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -134,16 +135,23 @@ def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
         ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
         TokenUsage(),
-        UncategorizedToolResult(
+        ToolResult(
             call_id="toolu_a",
-            content="x = 1",
-            attachments=(image,),
+            state="done",
+            stdout=(
+                "x = 1",
+                image,
+            ),
+            result=UncategorizedToolResult(),
         ),
-        UncategorizedToolResult(
+        ToolResult(
             call_id="toolu_b",
-            content="gone",
-            is_error=True,
-            attachments=(image,),
+            state="done",
+            stdout=(
+                "gone",
+                image,
+            ),
+            result=UncategorizedToolResult(exit_code=1),
         ),
         Thinking(content="hmm"),
         UserMessage(content="next"),
@@ -537,13 +545,37 @@ def test_a_results_images_follow_its_run_of_results() -> None:
     }
     records = (
         ToolCall(call_id="a", name="Read"),
-        UncategorizedToolResult(call_id="a", content="1", attachments=(image,)),
+        ToolResult(
+            call_id="a",
+            state="done",
+            stdout=(
+                "1",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
         AssistantMessage(content="next"),
         ToolCall(call_id="b", name="Read"),
-        UncategorizedToolResult(call_id="b", content="2", attachments=(image,)),
+        ToolResult(
+            call_id="b",
+            state="done",
+            stdout=(
+                "2",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
         UserMessage(content="and"),
         # A result whose call this request never made.
-        UncategorizedToolResult(call_id="z", content="3", attachments=(image,)),
+        ToolResult(
+            call_id="z",
+            state="done",
+            stdout=(
+                "3",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
     )
 
     messages = _encode(Request(records=records))["messages"]
@@ -830,7 +862,12 @@ def test_native_thinking_is_not_overwritten_by_a_tool_only_turn() -> None:
         Request(
             records=(
                 *response.records,
-                UncategorizedToolResult(call_id="original", content="ok"),
+                ToolResult(
+                    call_id="original",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
             ),
         ),
         capability=capability,

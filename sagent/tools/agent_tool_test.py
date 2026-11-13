@@ -18,16 +18,11 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.runtime.context import validate_context
-from sagent.session.types import (
-    ToolErrorResult,
-    ToolResult,
-    UncategorizedToolResult,
-    UserMessage,
-)
+from sagent.session.types import ToolResult, UncategorizedToolResult, UserMessage
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_session import AgentSession
 from sagent.tools.agent_tool import target_agent
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -79,9 +74,11 @@ async def test_state_targets_self_or_descendants_without_granting_tools(
     target: str,
 ) -> None:
     team, control, _ = _setup(tmp_path)
-    result = await control.call(
-        team["root"].runtime.tool_context,
-        {"agent": target, "effort": "high", "diagnostics": True},
+    result = await settled(
+        control.call(
+            team["root"].runtime.tool_context,
+            {"agent": target, "effort": "high", "diagnostics": True},
+        ),
     )
     label = target or "root"
     assert f"label: {label}" in result.text()
@@ -127,9 +124,11 @@ async def test_session_reads_reach_any_team_member(
         "ids": [0],
         "text": "words",
     }
-    result = await AgentSession(team=team).call(
-        ToolContext(cwd=tmp_path / "grand", label="grand"),
-        arguments,
+    result = await settled(
+        AgentSession(team=team).call(
+            ToolContext(cwd=tmp_path / "grand", label="grand"),
+            arguments,
+        ),
     )
     assert f"{label}'s words" in result.text()
     resolved.assert_called_once_with(target, by="grand")
@@ -149,7 +148,7 @@ async def test_session_changes_refuse_unrelated_agents(
         await session.call(
             team["root"].runtime.tool_context,
             {"agent": "peer", "action": action},
-        )
+        ).result
     assert team["peer"].runtime.inbox.drain_nowait() == []
 
 
@@ -161,11 +160,18 @@ async def test_session_mutation_queues_on_the_target_only(
 ) -> None:
     team, _, session = _setup(tmp_path)
     target = team["grand"]
-    target.session.append(UncategorizedToolResult(call_id="old", content="old output"))
+    target.session.append(
+        ToolResult(
+            call_id="old",
+            state="done",
+            stdout=("old output",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     arguments: dict[str, PlainTree] = {"agent": "grand", "action": action}
     if action == "prune":
         arguments.update({"ids": [1], "reason": "obsolete"})
-    await session.call(team["root"].runtime.tool_context, arguments)
+    await settled(session.call(team["root"].runtime.tool_context, arguments))
     await asyncio.sleep(0)
     (queued,) = target.runtime.inbox.drain_nowait()
     if action == "prune":
@@ -189,7 +195,7 @@ async def test_state_changes_refuse_ancestors_siblings_and_peers(
         await control.call(
             team["grand"].runtime.tool_context,
             {"agent": target, "effort": "high"},
-        )
+        ).result
     assert all(a.model.settings.thinking_effort == "none" for a in team.values())
 
 
@@ -275,14 +281,13 @@ async def test_runtime_admission_holds_across_the_round_cap(
     ]
     result = arrived if arrived is not None else results[-1]
     if permitted:
-        assert result.is_error is not True, result.text()
+        assert result.is_error is False, result.text()
         assert (
             "thinking_effort" in result.text()
             if name == "AgentSelf"
             else "grand's words" in result.text()
         )
     else:
-        assert isinstance(result, ToolErrorResult)
         assert "not available" in result.text()
     assert team["grand"].model.settings.thinking_effort == (
         "high" if permitted and name == "AgentSelf" else "none"
@@ -297,10 +302,12 @@ async def test_a_watcher_is_not_a_mutation_target(tmp_path: Path) -> None:
         await control.call(
             team["root"].runtime.tool_context,
             {"agent": "parent", "effort": "high"},
-        )
-    result = await session.call(
-        team["root"].runtime.tool_context,
-        {"agent": "parent", "action": "list"},
+        ).result
+    result = await settled(
+        session.call(
+            team["root"].runtime.tool_context,
+            {"agent": "parent", "action": "list"},
+        ),
     )
     assert "peer's words" in result.text()
 
@@ -312,9 +319,11 @@ async def test_target_status_events_publish_on_the_target_only(tmp_path: Path) -
     child_events: list[types.RuntimeEvent] = []
     team["root"].runtime.observers.append(root_events.append)
     team["grand"].runtime.observers.append(child_events.append)
-    await control.call(
-        team["root"].runtime.tool_context,
-        {"agent": "grand", "status": "Checking the target state"},
+    await settled(
+        control.call(
+            team["root"].runtime.tool_context,
+            {"agent": "grand", "status": "Checking the target state"},
+        ),
     )
     assert child_events == [types.StatusChanged(text="Checking the target state")]
     assert root_events == []
@@ -340,7 +349,7 @@ async def test_invalid_target_call_does_not_drop_a_sibling_call(tmp_path: Path) 
     async with caller:
         assert await asyncio.wait_for(caller.send("probe"), timeout=5) == "recovered"
     results = {r.call_id: r for r in caller.session if isinstance(r, ToolResult)}
-    assert isinstance(results["bad"], ToolErrorResult)
+    assert results["bad"].state == "failed"
     assert "names 0 agents" in results["bad"].text()
     assert "grand's words" in results["good"].text()
     validate_context(caller.runtime.context().messages)
@@ -356,16 +365,18 @@ async def test_invalid_target_patch_leaves_both_agents_unchanged(
         await control.call(
             team["root"].runtime.tool_context,
             {"agent": "grand", "model": "scripted", "output": "redacted"},
-        )
+        ).result
     assert [a.model for a in team.values()] == models
 
 
 @pytest.mark.asyncio
 async def test_peer_messaging_changes_the_target_only(tmp_path: Path) -> None:
     team, control, _ = _setup(tmp_path)
-    await control.call(
-        team["root"].runtime.tool_context,
-        {"agent": "grand", "peer_messaging": False},
+    await settled(
+        control.call(
+            team["root"].runtime.tool_context,
+            {"agent": "grand", "peer_messaging": False},
+        ),
     )
     assert team.peer_messaging("root")
     assert not team.peer_messaging("grand")
@@ -412,9 +423,11 @@ async def test_switching_a_running_descendant_keeps_its_active_request_alive(
     async with child:
         running = asyncio.create_task(child.send("first"))
         await asyncio.wait_for(held.started.wait(), timeout=5)
-        await control.call(
-            team["root"].runtime.tool_context,
-            {"agent": "grand", "model": "scripted", "effort": "high"},
+        await settled(
+            control.call(
+                team["root"].runtime.tool_context,
+                {"agent": "grand", "model": "scripted", "effort": "high"},
+            ),
         )
         assert child.model is not held
         assert child.model.settings.thinking_effort == "high"

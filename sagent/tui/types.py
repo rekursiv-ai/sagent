@@ -62,10 +62,10 @@ if TYPE_CHECKING:
     )
     from sagent.session.types import (
         AgentToAgentMessage,
-        AnyToolResult,
         AssistantMessage,
         Thinking,
         ToolCall,
+        ToolResult,
         UserMessage,
     )
     from sagent.tools.display import Overflow
@@ -102,7 +102,7 @@ type Record = (
     | AssistantMessage
     | Thinking
     | ToolCall
-    | AnyToolResult
+    | ToolResult
 )
 """What replay feeds, one journal record at a time.
 
@@ -467,9 +467,9 @@ class ScrollbackPane(Protocol):
         every Record. A ChildEvent recurses on its inner event, in brief,
         under the child's label.
 
-        Each ToolResult subclass draws by its own fields: EditResult's
-        Splices and WriteResult as diffs, BashResult as output
-        and exit code, the rest as their content cut to the tool's display.
+        A tool result is drawn by its result class: an edit's splices and a
+        write's content as a diff, a failure in full, and any other as its text,
+        cut to the tool's display.
         Dispatch ends in assert_never: a new Shown member without a case fails
         type-checking.
 

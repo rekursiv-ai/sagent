@@ -16,10 +16,10 @@ from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.session.types import (
     AgentToAgentMessage,
-    AnyToolResult,
     Attachment,
     SystemMessage,
     ToolCall,
+    ToolResult,
     TurnContext,
     UserMessage,
 )
@@ -89,8 +89,9 @@ def labeled_agent_send_text(entry: AgentToAgentMessage) -> str:
     return text if text.startswith(prefix) else f"{prefix}{text}"
 
 
-# The state of a stand-in result is ``ToolResult.stub``, never its text, so these
-# words may change and a tool's own output that reads like one is never taken for it.
+# Code tells a pending or cancelled call's record by ``ToolResult.state``, never by
+# this text, so the words may change, and a tool's output that happens to match
+# them is never mistaken for a placeholder.
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Markers:
     """What the runtime writes into the context for the calls it answers itself."""
@@ -374,7 +375,7 @@ class CohortStarted:
 class DetachedResult:
     """A previously-detached tool completed."""
 
-    result: AnyToolResult
+    result: ToolResult
 
     @property
     def call_id(self) -> str:
@@ -386,7 +387,7 @@ class DetachedResult:
 class LazyEvent:
     """A result held until the next event that drives a model round: none of its own."""
 
-    payload: AnyToolResult
+    payload: ToolResult
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -509,7 +510,7 @@ type ModelContextEvent = (
     UserMessage
     | AgentToAgentMessage
     | Response
-    | AnyToolResult
+    | ToolResult
     | SystemMessage
     | TurnContext
 )
@@ -561,7 +562,7 @@ type RuntimeEvent = (
     | ModelIdle
     | AgentIdle
     | CohortStarted
-    | AnyToolResult
+    | ToolResult
     | DetachedResult
     | LazyEvent
     | CohortComplete

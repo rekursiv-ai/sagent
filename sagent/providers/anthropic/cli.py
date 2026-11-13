@@ -256,8 +256,10 @@ class AnthropicCLIModel(AsyncResource):
             for attachment in record.attachments
         ]
         bare = [
-            replace(record, attachments=())
-            if isinstance(record, (UserMessage, AgentToAgentMessage, ToolResult))
+            record.attached(())
+            if isinstance(record, ToolResult)
+            else replace(record, attachments=())
+            if isinstance(record, (UserMessage, AgentToAgentMessage))
             else record
             for record in request.records
         ]
@@ -680,13 +682,10 @@ def _new_lines(records: Sequence[SessionRecord]) -> list[str]:
     return [line for record in records if (line := _said(record))]
 
 
-def _shrunk[R: ToolResult](result: R, *, limits: ModelLimits) -> R:
+def _shrunk(result: ToolResult, *, limits: ModelLimits) -> ToolResult:
     """Return ``result`` with each image shrunk to ``limits``, as the API path does."""
-    return replace(
-        result,
-        attachments=tuple(
-            _shrunk_attachment(a, limits=limits) for a in result.attachments
-        ),
+    return result.attached(
+        [_shrunk_attachment(a, limits=limits) for a in result.attachments],
     )
 
 

@@ -10,10 +10,11 @@ import time
 
 import pytest
 
+from sagent.session.types import GlobResult
 from sagent.tools import glob_tool
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.glob_tool import Glob
-from sagent.tools.types import ToolContext, parse
+from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -132,7 +133,7 @@ async def test_a_tilde_path_is_the_home_directory(
 
 @pytest.mark.asyncio
 async def test_a_malformed_pattern_is_an_error(tmp_path: Path) -> None:
-    result = await Glob().call(ToolContext(cwd=tmp_path), {"pattern": "{a"})
+    result = await settled(Glob().call(ToolContext(cwd=tmp_path), {"pattern": "{a"}))
     assert result.is_error is True
     assert result.call_id == ""
     assert result.text() == "unclosed alternate group in glob: '{a'"
@@ -191,14 +192,14 @@ async def test_a_full_result_says_where_to_resume(
         ),
     )
 
-    result = await Glob().call(context, {"pattern": "f*", "offset": 1})
+    result = await settled(Glob().call(context, {"pattern": "f*", "offset": 1}))
 
     assert result.text() == (
         f"{tmp_path / 'f1'}\n... (1 more; pass offset=2 to continue)"
     )
     assert len(result.text()) <= context.max_result_chars
     assert result.call_id == ""
-    assert result.is_error is None
+    assert result.is_error is False
     matched.assert_called_once_with(tmp_path, "f*")
 
 
@@ -237,7 +238,7 @@ async def test_arguments_that_do_not_fit_are_refused(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match=r"argument|must be"):
-        await Glob().call(ToolContext(cwd=tmp_path), arguments)
+        await Glob().call(ToolContext(cwd=tmp_path), arguments).result
 
 
 @pytest.mark.parametrize(
@@ -294,9 +295,15 @@ def test_a_find_glob_cannot_repeat_stays_a_shell_command(command: str) -> None:
 
 async def _glob(cwd: Path, **arguments: PlainTree) -> str:
     """Return what Glob shows for ``arguments`` in a fresh context at ``cwd``."""
-    result = await Glob().call(ToolContext(cwd=cwd), arguments)
+    result = await settled(Glob().call(ToolContext(cwd=cwd), arguments))
     assert result.call_id == ""
-    assert result.is_error is None, result.text()
+    assert result.is_error is False, result.text()
+    tool_result = result.result
+    assert isinstance(tool_result, GlobResult)
+    assert (tool_result.pattern, tool_result.path) == (
+        arguments.get("pattern"),
+        arguments.get("path", "."),
+    )
     return result.text()
 
 

@@ -5,12 +5,12 @@ back as itself, a PDF as a JPEG per page, a notebook as cells and outputs.
 
 Typical usage example:
 
-  result = await Read().call(context, {"file_path": "a.py", "offset": 10})
+  result = await settled(Read().call(context, {"file_path": "a.py", "offset": 10}))
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, cast
 
@@ -24,10 +24,7 @@ import time
 from treekle import PlainTree, ReadError, from_plain, json_loads
 
 from sagent.model.image import PDFIUM
-from sagent.session.types import (
-    Attachment,
-    ReadResult,
-)
+from sagent.session.types import Attachment, LineSpan, ReadResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
@@ -37,7 +34,14 @@ from sagent.tools.command_analyzer import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.memory import Memory
-from sagent.tools.types import Arg, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -188,11 +192,11 @@ class Read:
             return refusal
         return {"file_path": target, **lines}
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> ReadResult:
+    ) -> ToolStreamingResult[ReadResult, Attachment | LineSpan | str, str]:
         """Read ``file_path``.
 
         Args:
@@ -200,9 +204,17 @@ class Read:
           arguments: What the model passed, as ``Read.Arguments``.
 
         Returns:
-          result: What the file holds, or why it could not be read.
+          streaming_result: What the file holds, its pictures after the text that names
+            them, or why it could not be read.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[ReadResult, Attachment | LineSpan | str, str]:
         a = parse(arguments, Read.Arguments)
         try:
             return await asyncio.to_thread(self._read, context, a)
@@ -213,7 +225,7 @@ class Read:
         self,
         context: ToolContext,
         a: Read.Arguments,
-    ) -> ReadResult:
+    ) -> ToolOutput[ReadResult, Attachment | LineSpan | str, str]:
         """Read the file ``a`` names, by its kind."""
         path = context.path(a.file_path)
         if not path.exists():
@@ -234,23 +246,20 @@ class Read:
                     " a read takes. Shrink it with Bash first.",
                 )
             context.files.saw(path)
-            return ReadResult(
-                call_id="",
-                path=str(path),
-                content=f"[image: {path}]",
-                attachments=(Attachment(mime_descriptor=mime, data=path.read_bytes()),),
+            return ToolOutput(
+                stdout=(
+                    f"[image: {path}]",
+                    Attachment(mime_descriptor=mime, data=path.read_bytes()),
+                ),
+                result=ReadResult(path=str(path)),
             )
-        result = _read_text(
+        return _read_text(
             context,
             path,
             offset=a.offset,
             limit=a.limit,
             last_lines=a.last_lines,
         )
-        age = _memory_age(path)
-        if age and result.content is not None:
-            return replace(result, content=age + result.content)
-        return result
 
     def _read_pdf(
         self,
@@ -258,7 +267,7 @@ class Read:
         path: Path,
         *,
         pages: str,
-    ) -> ReadResult:
+    ) -> ToolOutput[ReadResult, Attachment | LineSpan | str, str]:
         """Render a PDF's pages as JPEGs, as many as fit the byte budget."""
         with path.open("rb") as f:
             if f.read(5) != b"%PDF-":
@@ -307,13 +316,12 @@ class Read:
         note = f"[PDF: {path.name}, pages {first}-{end} of {total}]"
         if end < last:
             note += f' Pass pages="{end + 1}-{last}" for the rest.'
-        return ReadResult(
-            call_id="",
-            path=str(path),
-            content=note,
-            attachments=tuple(
-                Attachment(mime_descriptor="image/jpeg", data=jpeg) for jpeg in jpegs
+        return ToolOutput(
+            stdout=(
+                note,
+                *(Attachment(mime_descriptor="image/jpeg", data=j) for j in jpegs),
             ),
+            result=ReadResult(path=str(path)),
         )
 
 
@@ -404,51 +412,41 @@ def _read_text(
     offset: int,
     limit: int | None,
     last_lines: int | None,
-) -> ReadResult:
+) -> ToolOutput[ReadResult, LineSpan | str, str]:
     """Read ``path`` as numbered lines, windowed and bounded."""
     lines_asked = (offset, limit, last_lines)
     if context.files.shown(path, lines=lines_asked):
-        return ReadResult(
-            call_id="",
-            path=str(path),
-            status="unchanged",
-            shown=f"[File unchanged since last read: {path}]",
+        return ToolOutput(
+            stdout=(f"[File unchanged since last read: {path}]",),
+            result=ReadResult(path=str(path), status="unchanged"),
         )
     with path.open("rb") as f:
         if b"\x00" in f.read(8192):
-            return ReadResult(
-                call_id="",
-                path=str(path),
-                status="binary",
-                shown=f"[Binary file: {path} ({path.stat().st_size:,} bytes).]",
+            return ToolOutput(
+                stdout=(f"[Binary file: {path} ({path.stat().st_size:,} bytes).]",),
+                result=ReadResult(path=str(path), status="binary"),
             )
     # Seen before read, so a write in between shows as a change.
     context.files.saw(path)
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return ReadResult(
-            call_id="",
-            path=str(path),
-            status="undecodable",
-            shown=f"[{path} is not UTF-8. Use Bash with an explicit decoder.]",
+        return ToolOutput(
+            stdout=(f"[{path} is not UTF-8. Use Bash with an explicit decoder.]",),
+            result=ReadResult(path=str(path), status="undecodable"),
         )
     if not text:
-        return ReadResult(
-            call_id="",
-            path=str(path),
-            status="empty",
-            shown=f"[File exists but is empty: {path}]",
+        return ToolOutput(
+            stdout=(f"[File exists but is empty: {path}]",),
+            result=ReadResult(path=str(path), status="empty"),
         )
     lines = text.splitlines(keepends=True)
     total = len(lines)
     start = offset - 1 if last_lines is None else max(0, total - last_lines)
     if start >= total:
-        return ReadResult(
-            call_id="",
-            path=str(path),
-            status="past_end",
-            shown=f"[offset {offset} is past the end: {path} has {total} lines]",
+        return ToolOutput(
+            stdout=(f"[offset {offset} is past the end: {path} has {total} lines]",),
+            result=ReadResult(path=str(path), status="past_end"),
         )
     end = total if limit is None else min(start + limit, total)
     numbered = [f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])]
@@ -463,12 +461,13 @@ def _read_text(
         body = "".join(numbered[:kept])
     body += _more(total, start=start, kept=kept)
     context.files.showed(path, lines=lines_asked)
+    # A partial read records its line range, so the pruner can drop it once later
+    # reads cover those lines.
     whole = start == 0 and kept == total
-    return ReadResult(
-        call_id="",
-        path=str(path),
-        content=body,
-        ranges=() if whole else ((start + 1, kept),),
+    span = () if whole else (LineSpan(start=start + 1, count=kept),)
+    return ToolOutput(
+        stdout=(_memory_age(path) + body, *span),
+        result=ReadResult(path=str(path)),
     )
 
 
@@ -502,7 +501,7 @@ def _more(total: int, *, start: int, kept: int) -> str:
 def _read_notebook(
     context: ToolContext,
     path: Path,
-) -> ReadResult:
+) -> ToolOutput[ReadResult, str, str]:
     """Render a notebook's cells and their outputs as text."""
     try:
         notebook = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
@@ -526,10 +525,9 @@ def _read_notebook(
     body, kept = context.fit(parts, reserve=len(note))
     if kept < len(parts):
         body += f"\n... ({len(parts) - kept:,} more notebook sections omitted.)"
-    return ReadResult(
-        call_id="",
-        path=str(path),
-        content=body or "(empty notebook)",
+    return ToolOutput(
+        stdout=(body or "(empty notebook)",),
+        result=ReadResult(path=str(path)),
     )
 
 
@@ -583,5 +581,5 @@ def _render(
     return jpegs
 
 
-def _error(message: str) -> ReadResult:
-    return ReadResult(call_id="", shown=message, is_error=True)
+def _error(message: str) -> ToolOutput[ReadResult, str, str]:
+    return ToolOutput(stderr=(message,), result=ReadResult(exit_code=1))

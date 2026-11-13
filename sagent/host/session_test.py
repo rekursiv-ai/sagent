@@ -41,15 +41,20 @@ from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import (
     AgentToAgentMessage,
-    BashResult,
-    ReadResult,
-    ToolErrorResult,
+    ToolResult,
+    UncategorizedToolResult,
 )
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.bash import Bash
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteSession
-from sagent.tools.types import Tool, ToolContext
+from sagent.tools.types import (
+    Tool,
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -218,23 +223,34 @@ def test_contexts_are_kept_per_agent_and_reset_for_a_new_window(tmp_path: Path) 
 async def test_a_failure_and_an_unknown_tool_are_results(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     call = Call(id="1", agent="a", window="w", tool="Read", arguments={"x": 1})
-    run = AsyncMock(side_effect=ValueError("bad input"))
-    tool = Mock(spec=Read, call=run)
+
+    async def bad() -> ToolOutput[UncategorizedToolResult, str, str]:
+        raise ValueError("bad input")
+
+    call_mock = Mock(return_value=whole_output(bad()))
+    tool = Mock(spec=Read, call=call_mock)
 
     failed = await session._result(cast(Tool, tool), context, call=call)
+    unstartable = Mock(spec=Read, call=Mock(side_effect=ValueError("no start")))
+    never = await session._result(cast(Tool, unstartable), context, call=call)
+    assert never == ToolResult(
+        call_id="",
+        state="failed",
+        stderr=("ValueError: no start",),
+    )
     unknown = await session._result(None, context, call=replace(call, tool="Train"))
 
-    assert failed == ToolErrorResult(
+    assert failed == ToolResult(
         call_id="",
-        content="ValueError: bad input",
-        is_error=True,
+        state="failed",
+        stderr=("ValueError: bad input",),
     )
-    assert unknown == ToolErrorResult(
+    assert unknown == ToolResult(
         call_id="",
-        content="Unknown tool: Train",
-        is_error=True,
+        state="failed",
+        stderr=("Unknown tool: Train",),
     )
-    run.assert_awaited_once_with(context, call.arguments)
+    call_mock.assert_called_once_with(context, call.arguments)
 
 
 @pytest.mark.asyncio
@@ -245,11 +261,7 @@ async def test_the_end_of_input_cancels_what_runs(
     started = asyncio.Event()
     cleaned: list[bool] = []
 
-    async def run(
-        context: ToolContext,
-        arguments: Mapping[str, PlainTree],
-    ) -> BashResult:
-        del context, arguments
+    async def wait_until_cancelled() -> ToolOutput[UncategorizedToolResult, str, str]:
         started.set()
         try:
             await asyncio.Event().wait()
@@ -257,14 +269,21 @@ async def test_the_end_of_input_cancels_what_runs(
             cleaned.append(True)
         raise AssertionError("The call must be cancelled.")
 
-    monkeypatch.setattr(Bash, "call", AsyncMock(side_effect=run))
+    def start(
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
+        del context, arguments
+        return whole_output(wait_until_cancelled())
+
+    monkeypatch.setattr(Bash, "call", Mock(side_effect=start))
     async with _host(tmp_path) as (reader, writer):
         _ = await received(reader)
         writer.write(_call("1", agent="a", window="w", tool="Bash"))
         await started.wait()
         writer.write_eof()
         cancelled = await _result(reader)
-        assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+        assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
         assert cleaned == [True]
 
 
@@ -275,7 +294,7 @@ async def test_a_call_cancelled_before_it_starts_is_answered(tmp_path: Path) -> 
         call = _call("1", agent="a", window="w", tool="Read", file_path="a.txt")
         writer.write(encoded(Cancel(id="missing")) + call + encoded(Cancel(id="1")))
         cancelled = await _result(reader)
-        assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+        assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
 
 
 async def _said(reader: asyncio.StreamReader) -> Message | None:
@@ -518,7 +537,17 @@ def test_handoff_buffers_results_and_agent_messages_until_resumed() -> None:
         writer=cast(asyncio.StreamWriter, Mock(write=lines.append)),
     )
     held = [
-        encoded(Result(id="1", record=ReadResult(call_id="", content="read"))),
+        encoded(
+            Result(
+                id="1",
+                record=ToolResult(
+                    call_id="",
+                    state="done",
+                    stdout=("read",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        ),
         encoded(
             Note(id="n", sender="kid", recipient="caller", content="held", kind="ask"),
         ),

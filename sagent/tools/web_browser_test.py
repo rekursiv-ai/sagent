@@ -22,7 +22,7 @@ from wesearch.fetch import FetchSession
 import pytest
 
 from sagent.session.types import WebBrowserResult
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 from sagent.tools.web_browser import WebBrowser
 
 
@@ -121,7 +121,7 @@ async def test_forwarding_uses_the_callers_session(
         "max_chars": 17,
         "timeout_sec": 4.5,
     }
-    await tool.call(context, arguments)
+    await settled(tool.call(context, arguments))
     assert calls.seen == [
         {
             **arguments,
@@ -154,9 +154,9 @@ async def test_inspection_is_structured_and_image_is_an_attachment(
         ),
         screenshot=b"png bytes",
     )
-    result = await tool.call(ToolContext(), {"action": "screenshot", "tab_id": "t"})
-    assert isinstance(result, WebBrowserResult)
-    assert result.action == "screenshot"
+    result = await settled(
+        tool.call(ToolContext(), {"action": "screenshot", "tab_id": "t"}),
+    )
     body = json_loads(result.text(), dict[str, object])
     assert body == {
         "tab": {"tab_id": "t", "url": "https://example.com", "title": "Page"},
@@ -191,9 +191,9 @@ async def test_errors_are_tool_results(
     error: Exception,
 ) -> None:
     calls.error = error
-    result = await tool.call(ToolContext(), {"action": "inspect", "tab_id": "gone"})
-    assert isinstance(result, WebBrowserResult)
-    assert result.action == "inspect"
+    result = await settled(
+        tool.call(ToolContext(), {"action": "inspect", "tab_id": "gone"}),
+    )
     assert result.call_id == ""
     assert result.is_error is True
     assert "Unknown tab" in result.text()
@@ -236,17 +236,20 @@ async def test_independent_tabs_do_not_block_the_event_loop(
     context = ToolContext()
     results = await asyncio.gather(
         *(
-            tool.call(context, {"action": "inspect", "tab_id": tab})
+            settled(tool.call(context, {"action": "inspect", "tab_id": tab}))
             for tab in ("a", "b")
         ),
     )
-    assert all(result.is_error is not True for result in results)
+    assert all(result.is_error is False for result in results)
+    assert all(
+        result.result == WebBrowserResult(action="inspect") for result in results
+    )
 
 
 @pytest.mark.asyncio
 async def test_defaults_and_no_image(tool: Tool, calls: Calls) -> None:
     context = ToolContext()
-    result = await tool.call(context, {"action": "tabs"})
+    result = await settled(tool.call(context, {"action": "tabs"}))
     assert result.call_id == ""
     assert result.attachments == ()
     assert calls.seen == [
@@ -277,9 +280,11 @@ async def test_mode_control_forwards_without_owning_lifecycle(
 ) -> None:
     calls.result = BrowserResult(mode=mode, restarted=restart)
     context = ToolContext()
-    result = await tool.call(
-        context,
-        {"action": "mode", "mode": mode, "restart": restart},
+    result = await settled(
+        tool.call(
+            context,
+            {"action": "mode", "mode": mode, "restart": restart},
+        ),
     )
     body = json_loads(result.text(), dict[str, object])
     assert body["mode"] == mode

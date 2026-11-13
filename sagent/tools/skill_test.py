@@ -16,10 +16,10 @@ import sys
 import pytest
 
 from sagent.lib.userdirs import base_dir_variables, data_dir
-from sagent.session.types import SkillResult
+from sagent.session.types import SkillResult, ToolResult
 from sagent.tools import skill
 from sagent.tools.skill import Skill, SkillInfo
-from sagent.tools.types import ToolContext, json_schema
+from sagent.tools.types import ToolContext, json_schema, settled
 
 
 _CWD: Final[Path] = Path(__file__).resolve().parent
@@ -521,15 +521,22 @@ def test_a_skills_directory_made_later_is_found(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_call_returns_the_escaped_body_in_a_skill_block(tmp_path: Path) -> None:
     _write(tmp_path, "alpha", name="alpha", body="hello <world> & </skill>\n")
-    result = await Skill(user_dir=tmp_path / "u").call(
-        ToolContext(cwd=tmp_path),
-        {"skill": "alpha"},
+    result = await settled(
+        Skill(user_dir=tmp_path / "u").call(
+            ToolContext(cwd=tmp_path),
+            {"skill": "alpha"},
+        ),
     )
-    assert result == SkillResult(
+    assert result == ToolResult(
         call_id="",
-        skill="alpha",
-        content="<skill name='alpha' source='project'>\n"
-        "hello &lt;world&gt; &amp; &lt;/skill&gt;\n</skill>",
+        state="done",
+        stdout=(
+            (
+                "<skill name='alpha' source='project'>\n"
+                "hello &lt;world&gt; &amp; &lt;/skill&gt;\n</skill>"
+            ),
+        ),
+        result=SkillResult(skill="alpha"),
     )
 
 
@@ -555,11 +562,13 @@ def test_a_block_escapes_what_html_escape_without_quotes_does(args: str) -> None
 @pytest.mark.asyncio
 async def test_call_appends_the_escaped_args(tmp_path: Path) -> None:
     _write(tmp_path, "alpha", name="alpha", body="body\n")
-    result = await Skill(user_dir=tmp_path / "u").call(
-        ToolContext(cwd=tmp_path),
-        {"skill": "alpha", "args": "<go>"},
+    result = await settled(
+        Skill(user_dir=tmp_path / "u").call(
+            ToolContext(cwd=tmp_path),
+            {"skill": "alpha", "args": "<go>"},
+        ),
     )
-    assert result.content == (
+    assert result.text() == (
         "<skill name='alpha' source='project'>\nbody\n\nArguments: &lt;go&gt;\n</skill>"
     )
 
@@ -568,11 +577,13 @@ async def test_call_appends_the_escaped_args(tmp_path: Path) -> None:
 async def test_call_finds_skills_from_the_callers_cwd(tmp_path: Path) -> None:
     user = tmp_path / "user"
     _write(user, "mine", name="mine", body="user body\n")
-    result = await Skill(user_dir=user / ".sagent" / "skills").call(
-        ToolContext(cwd=tmp_path / "elsewhere"),
-        {"skill": "mine"},
+    result = await settled(
+        Skill(user_dir=user / ".sagent" / "skills").call(
+            ToolContext(cwd=tmp_path / "elsewhere"),
+            {"skill": "mine"},
+        ),
     )
-    assert result.content == "<skill name='mine' source='user'>\nuser body\n</skill>"
+    assert result.text() == "<skill name='mine' source='user'>\nuser body\n</skill>"
 
 
 @pytest.mark.asyncio
@@ -594,9 +605,13 @@ async def test_an_unknown_skill_raises_naming_those_available(
         match=rf"^Unknown skill 'bet'\. Available: {re.escape(available)}\.$",
     ):
         # A prefix of a real name, so only an exact match may load.
-        await Skill(user_dir=tmp_path / "u").call(
-            ToolContext(cwd=tmp_path),
-            {"skill": "bet"},
+        await (
+            Skill(user_dir=tmp_path / "u")
+            .call(
+                ToolContext(cwd=tmp_path),
+                {"skill": "bet"},
+            )
+            .result
         )
 
 
@@ -615,7 +630,11 @@ async def test_bad_arguments_raise(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        await Skill(user_dir=tmp_path / "u").call(ToolContext(cwd=tmp_path), arguments)
+        await (
+            Skill(user_dir=tmp_path / "u")
+            .call(ToolContext(cwd=tmp_path), arguments)
+            .result
+        )
 
 
 def test_the_description_is_read_as_utf8_whatever_the_locale(

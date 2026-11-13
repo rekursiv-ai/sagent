@@ -128,7 +128,12 @@ async def test_passes_continue_oldest_first_and_stop_once_the_whole_fits() -> No
 @pytest.mark.asyncio
 async def test_a_partition_never_cuts_a_call_from_its_result() -> None:
     turn = reply("r" * 10, calls=[call("Read", "c1")])
-    result = UncategorizedToolResult(call_id="c1", content="t" * 10)
+    result = ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("t" * 10,),
+        result=UncategorizedToolResult(),
+    )
     context: list[ModelContextEvent] = [
         UserMessage(content="u" * 10),
         turn,

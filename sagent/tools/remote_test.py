@@ -59,7 +59,11 @@ from sagent.model.scripted import (
 )
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.jsonl import JsonlJournal, read_record
-from sagent.session.types import AnyToolResult, ReadResult, RemoteToolResult
+from sagent.session.types import (
+    RemoteToolResult,
+    ToolResult,
+    UncategorizedToolResult,
+)
 from sagent.tools import remote
 from sagent.tools.read import Read
 from sagent.tools.remote import (
@@ -73,7 +77,7 @@ from sagent.tools.remote import (
     saved,
     tls_link,
 )
-from sagent.tools.types import ToolContext
+from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
@@ -168,9 +172,14 @@ async def test_listing_compares_remote_digests_without_connecting(
     tool = RemoteTool(remote=session, local={"Read": read, "Write": write})
     context = ToolContext()
     listing = "gpu1  up\n  same as here: Read\n  differs here, ask its schema: Write\n  only there, ask its schema: Train"
-    assert (await tool.call(context, {})).text() == listing
-    one = await tool.call(context, {"endpoint": "gpu1"})
-    assert one == RemoteToolResult(call_id="", content=listing, endpoint="gpu1")
+    assert (await settled(tool.call(context, {}))).text() == listing
+    one = await settled(tool.call(context, {"endpoint": "gpu1"}))
+    assert one == ToolResult(
+        call_id="",
+        state="done",
+        stdout=(listing,),
+        result=RemoteToolResult(endpoint="gpu1"),
+    )
     assert tool.reminder(context) == "remote: gpu1 (up: Read, Write, Train)"
     assert connection.lines == []
 
@@ -179,14 +188,14 @@ async def test_listing_compares_remote_digests_without_connecting(
 async def test_empty_and_down_listings_need_no_connection(endpoint: Endpoint) -> None:
     empty = RemoteTool(remote=RemoteSession([]))
     assert empty.reminder(ToolContext()) == ""
-    assert (await empty.call(ToolContext(), {})).text() == (
+    assert (await settled(empty.call(ToolContext(), {}))).text() == (
         "No endpoints; add one with `sagent remote add`."
     )
     session = RemoteSession([])
     session._endpoints = [endpoint]
     tool = RemoteTool(remote=session)
     assert (
-        await tool.call(ToolContext(), {})
+        await settled(tool.call(ToolContext(), {}))
     ).text() == "gpu1  down: not yet connected"
     assert tool.reminder(ToolContext()) == "remote: gpu1 (down)"
 
@@ -205,16 +214,21 @@ async def test_schemas_are_asked_only_when_the_local_digest_differs(
     session._endpoints = [endpoint]
     tool = RemoteTool(remote=session, local={"Read": read})
     for name, expected in (("Read", read), ("Train", train)):
-        shown = await tool.call(ToolContext(), {"endpoint": "gpu1", "tool": name})
-        assert shown == RemoteToolResult(
+        shown = await settled(
+            tool.call(ToolContext(), {"endpoint": "gpu1", "tool": name}),
+        )
+        assert shown == ToolResult(
             call_id="",
-            content=f"{expected.description}\n\nSchema:\n{json_dumps(expected.schema, indent=2)}",
-            endpoint="gpu1",
+            state="done",
+            stdout=(
+                f"{expected.description}\n\nSchema:\n{json_dumps(expected.schema, indent=2)}",
+            ),
+            result=RemoteToolResult(endpoint="gpu1"),
         )
     spec.assert_awaited_once_with("Train")
     spec.return_value = None
     with pytest.raises(ValueError, match="gpu1 does not offer Train"):
-        await tool.call(ToolContext(), {"endpoint": "gpu1", "tool": "Train"})
+        await tool.call(ToolContext(), {"endpoint": "gpu1", "tool": "Train"}).result
 
 
 @pytest.mark.asyncio
@@ -222,20 +236,24 @@ async def test_tool_dispatch_forwards_identity_window_and_the_result(
     endpoint: Endpoint,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = ReadResult(call_id="c", path="/a", content="there")
+    result = ToolResult(
+        call_id="c",
+        state="done",
+        stdout=("there",),
+        result=UncategorizedToolResult(),
+    )
     invoke = AsyncMock(return_value=result)
     monkeypatch.setattr(endpoint, "call", invoke)
     session = RemoteSession([])
     session._endpoints = [endpoint]
     context = ToolContext(label="worker")
     tool = RemoteTool(remote=session)
-    assert (
-        await tool.call(
+    assert await settled(
+        tool.call(
             context,
             {"endpoint": "gpu1", "tool": "Read", "arguments": {"file_path": "/a"}},
-        )
-        is result
-    )
+        ),
+    ) == replace(result, call_id="")
     invoke.assert_awaited_once_with(
         agent="worker",
         window=context.files.window,
@@ -243,9 +261,9 @@ async def test_tool_dispatch_forwards_identity_window_and_the_result(
         arguments={"file_path": "/a"},
     )
     with pytest.raises(ValueError, match="No endpoint 'gpu9'; endpoints: gpu1"):
-        await tool.call(context, {"endpoint": "gpu9"})
+        await tool.call(context, {"endpoint": "gpu9"}).result
     with pytest.raises(ValueError, match="Use AgentSend directly"):
-        await tool.call(context, {"endpoint": "gpu1", "tool": "AgentSend"})
+        await tool.call(context, {"endpoint": "gpu1", "tool": "AgentSend"}).result
 
 
 @pytest.mark.asyncio
@@ -257,7 +275,12 @@ async def test_calls_are_correlated_and_acknowledged_at_the_endpoint(
     endpoint._writer = connection.writer
     endpoint.tools = {"Read": "d"}
     sent = connection.sent
-    result = ReadResult(call_id="r", path="/a", content="there")
+    result = ToolResult(
+        call_id="r",
+        state="done",
+        stdout=("there",),
+        result=UncategorizedToolResult(),
+    )
     async with asyncio.TaskGroup() as tasks:
         calling = tasks.create_task(
             endpoint.call(agent="Agent", window="w", tool="Read", arguments={"x": 2}),
@@ -370,7 +393,7 @@ async def test_goodbye_cancels_every_pending_call(
     connection: _Connection,
     connected: bool,
 ) -> None:
-    pending = asyncio.Future[AnyToolResult]()
+    pending = asyncio.Future[ToolResult]()
     endpoint._pending["r"] = pending
     endpoint._writer = connection.writer if connected else None
     endpoint.bye()
@@ -386,7 +409,7 @@ async def test_goodbye_cancels_every_pending_call(
 async def test_welcome_retains_only_calls_the_server_still_holds(
     endpoint: Endpoint,
 ) -> None:
-    kept, lost = asyncio.Future[AnyToolResult](), asyncio.Future[AnyToolResult]()
+    kept, lost = asyncio.Future[ToolResult](), asyncio.Future[ToolResult]()
     endpoint._pending.update(kept=kept, lost=lost)
     endpoint._welcome(_welcome(calls=("kept",), tools={"Read": "d"}))
     assert endpoint.name == "gpu1"
@@ -512,7 +535,7 @@ async def test_a_connection_drop_fails_descriptions_but_preserves_calls(
     address = socket_address(tmp_path / "daemon.sock")
     endpoint = _endpoint_on(team, local_link(address))
     description = asyncio.Future[ToolSpec | None]()
-    pending = asyncio.Future[AnyToolResult]()
+    pending = asyncio.Future[ToolResult]()
     endpoint._describing["d"] = description
     endpoint._pending["r"] = pending
     monkeypatch.setattr(
@@ -660,8 +683,11 @@ async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
         kind="reply",
     )
     missing = Note(id="lost", sender="w", recipient="gone", content="hi", kind="ask")
-    result = Result(id="unknown", record=ReadResult(call_id="", path="/a"))
-    cancelled = asyncio.Future[AnyToolResult]()
+    result = Result(
+        id="unknown",
+        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+    )
+    cancelled = asyncio.Future[ToolResult]()
     cancelled.cancel()
     endpoint._pending["cancelled"] = cancelled
     monkeypatch.setattr(
@@ -1036,10 +1062,10 @@ def _called(message: Message | None) -> str:
 
 _READ = ToolSpec.from_tool(Read())
 _TRAIN = ToolSpec(description="Train a model.", schema={"type": "object"})
-_DONE = ReadResult(call_id="", path="/done")
+_DONE = ToolResult(call_id="", state="done", result=UncategorizedToolResult())
 
 
-async def _ran(endpoint: Endpoint) -> AnyToolResult:
+async def _ran(endpoint: Endpoint) -> ToolResult:
     """Return what a ``Gate`` call there came to, less the id it went by."""
     record = await asyncio.wait_for(
         endpoint.call(agent="a", window="w", tool="Gate", arguments={}),
@@ -1098,9 +1124,8 @@ async def test_a_call_out_of_contact_past_its_grace_fails_as_unknown_with_no_bye
         )
         failure = await asyncio.wait_for(calling, 5)
         # Named as it went on the wire, so the relay's log line says whether it got by.
-        assert isinstance(failure, RemoteToolResult)
-        assert (failure.endpoint, failure.is_error, failure.wire_id) == (
-            "gpu1",
+        assert (failure.state, failure.is_error, failure.wire_id) == (
+            "done",
             True,
             ids[0],
         )
@@ -1475,9 +1500,8 @@ async def test_a_result_this_sagent_cannot_read_ends_its_call_and_is_acked(
         assert endpoint._pending == {}
         await asyncio.wait_for(resent.wait(), 5)
         assert await _ran(endpoint) == _DONE
-    assert isinstance(failure, RemoteToolResult)
-    assert (failure.endpoint, failure.is_error, failure.wire_id) == (
-        "gpu1",
+    assert (failure.state, failure.is_error, failure.wire_id) == (
+        "done",
         True,
         ids[0],
     )
@@ -1601,7 +1625,7 @@ async def test_a_call_cancelled_as_the_server_forgets_it_leaves_the_endpoint_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calling: list[asyncio.Task[AnyToolResult]] = []
+    calling: list[asyncio.Task[ToolResult]] = []
     granted = Endpoint._granted
     back = asyncio.Event()
 
@@ -2028,9 +2052,9 @@ async def test_the_session_records_a_call_by_the_models_id_and_its_id_on_the_wir
     (record,) = [
         r
         for r in map(read_record, path.read_bytes().splitlines())
-        if isinstance(r, ReadResult)
+        if isinstance(r, ToolResult)
     ]
-    assert (record.call_id, record.wire_id, record.path) == ("toolu_1", ids[0], "/done")
+    assert (record.call_id, record.wire_id) == ("toolu_1", ids[0])
 
 
 class _Clock:

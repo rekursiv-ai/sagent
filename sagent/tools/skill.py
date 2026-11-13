@@ -13,7 +13,7 @@ body, whole. A ``cd`` changes neither: the list stays as the window first read i
 Typical usage example:
 
   skill = Skill()
-  result = await skill.call(context, {"skill": "tdd", "args": "the parser"})
+  result = await settled(skill.call(context, {"skill": "tdd", "args": "the parser"}))
 """
 
 from __future__ import annotations
@@ -36,7 +36,13 @@ from sagent.agent.agents_md import frontmatter
 from sagent.lib.userdirs import data_dir
 from sagent.session.types import SkillResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -231,11 +237,11 @@ class Skill:
             ],
         )
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> SkillResult:
+    ) -> ToolStreamingResult[SkillResult, str, str]:
         """Return the named skill's body, and ``args``, in a ``<skill>`` block.
 
         Args:
@@ -243,19 +249,29 @@ class Skill:
           arguments: What the model passed, as ``Skill.Arguments``.
 
         Returns:
-          result: The body, escaped so it cannot close its block early.
+          streaming_result: The body, escaped so it cannot close its block early.
 
         Raises:
           ValueError: No skill visible from ``cwd`` has the name.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[SkillResult, str, str]:
         a = parse(arguments, Skill.Arguments)
         skills = await asyncio.to_thread(self.discover, context.origin)
         match = next((s for s in skills if s.name == a.skill), None)
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
             raise ValueError(f"Unknown skill {a.skill!r}. Available: {names}.")
-        return SkillResult(call_id="", skill=match.name, content=match.block(a.args))
+        return ToolOutput(
+            stdout=(match.block(a.args),),
+            result=SkillResult(skill=match.name),
+        )
 
 
 # Each directory is entered once by its resolved path, so a link back up the

@@ -11,7 +11,7 @@ Typical usage example:
 
   memory = Memory(directory=project_dir(Path.cwd()) / "memory")
   index = memory.briefing(context)
-  result = await memory.call(context, {"action": "forget", "name": "testing"})
+  result = await settled(memory.call(context, {"action": "forget", "name": "testing"}))
 """
 
 from __future__ import annotations
@@ -34,7 +34,13 @@ from sagent.lib.yaml import (
 )
 from sagent.session.types import MemoryResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import json_schema, parse
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -142,11 +148,11 @@ class Memory:
         del context, arguments
         return str(self.directory / "MEMORY.md")
 
-    async def call(
+    def call(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> MemoryResult:
+    ) -> ToolStreamingResult[MemoryResult, str, str]:
         """Save or forget the memory ``name``, and its index line.
 
         Args:
@@ -154,22 +160,29 @@ class Memory:
           arguments: What the model passed, as ``Memory.Arguments``.
 
         Returns:
-          result: What was saved or forgotten, or why nothing was.
+          streaming_result: What was saved or forgotten, or why nothing was.
 
         """
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[MemoryResult, str, str]:
         del context
         a = parse(arguments, Memory.Arguments)
         try:
             text = await asyncio.to_thread(self._apply, a)
         except ValueError as e:
-            return MemoryResult(
-                call_id="",
-                action=a.action,
-                name=a.name,
-                shown=str(e),
-                is_error=True,
+            return ToolOutput(
+                stderr=(str(e),),
+                result=MemoryResult(action=a.action, name=a.name, exit_code=1),
             )
-        return MemoryResult(call_id="", action=a.action, name=a.name, content=text)
+        return ToolOutput(
+            stdout=(text,),
+            result=MemoryResult(action=a.action, name=a.name),
+        )
 
     def _apply(self, a: Memory.Arguments) -> str:
         """Apply the action to the directory; raise ``ValueError`` for a bad call."""
