@@ -5,7 +5,7 @@ It also holds the hypothesis properties of the request, coalescing, and rescue p
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -293,6 +293,23 @@ class Blocking:
         yield self.answers.pop(0)
 
 
+class _Inbox(GatedDeque[RuntimeEvent]):
+    """An inbox that knows while the loop waits on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited_on = False
+        """Whether the loop is in ``drain`` now."""
+
+    @override
+    async def drain(self) -> list[RuntimeEvent]:
+        self.waited_on = True
+        try:
+            return await super().drain()
+        finally:
+            self.waited_on = False
+
+
 class Harness:
     """A runtime on a scripted model, its events, and a running loop."""
 
@@ -311,9 +328,10 @@ class Harness:
             session_id="s",
             tool_context=ToolContext(cwd=cwd),
         )
+        self._inbox = _Inbox()
+        self.runtime.inbox = self._inbox
         self.events: list[RuntimeEvent] = []
-        self._observed = asyncio.Event()
-        self.runtime.observers.append(self._record)
+        self.runtime.observers.append(self.events.append)
         self._task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Self:
@@ -323,12 +341,27 @@ class Harness:
     async def __aexit__(self, *exc: object) -> None:
         assert self._task is not None
         self.runtime.push(Quit())
-        async with asyncio.timeout(2):
+        try:
+            await self.until(self._task.done)
             await self._task
-        others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in others:
-            task.cancel()
-        await asyncio.gather(*others, return_exceptions=True)
+        finally:
+            others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for task in others:
+                task.cancel()
+            # A tool may take its cancel and still wait for the test, as
+            # ``Stopping`` does; the limit's own cancel then stops it.
+            async with asyncio.timeout(2):
+                await asyncio.gather(*others, return_exceptions=True)
+
+    async def finished[T](self, work: Awaitable[T]) -> T:
+        """Return what ``work`` returns, failing once it never can, as ``until`` does."""
+        task = asyncio.ensure_future(work)
+        try:
+            await self.until(task.done)
+        finally:
+            if not task.done():
+                _ = task.cancel()
+        return task.result()
 
     def push(self, *events: RuntimeEvent) -> None:
         for event in events:
@@ -338,13 +371,40 @@ class Harness:
         return sum(isinstance(e, kind) for e in self.events)
 
     async def seen(self, kind: type, n: int = 1) -> None:
-        try:
-            async with asyncio.timeout(2):
-                while self.count(kind) < n:
-                    self._observed.clear()
-                    await self._observed.wait()
-        except TimeoutError:
-            pytest.fail("condition never held")
+        await self.until(lambda: self.count(kind) >= n)
+
+    # Each stopped call is forgotten when its task ends, and a retry timer is
+    # held until its suspension ends: either may still wake the loop.
+    def stalled(self) -> bool:
+        """Return whether the loop waits for input with nothing in flight to send any."""
+        rt = self.runtime
+        return (
+            self._inbox.waited_on
+            and rt.inbox.empty()
+            and rt.model_call is None
+            and rt.compact_task is None
+            and not rt._calls
+            and rt._retry_timer is None
+        )
+
+    # Bounded by time, not loop turns, while anything is in flight: a subprocess
+    # or a thread finishes when it finishes, however many turns the loop takes
+    # meanwhile. A stalled runtime gets 50 turns, for a task of the test's own
+    # that is about to send it something.
+    async def until(self, done: Callable[[], bool]) -> None:
+        """Run the loop until ``done()`` holds, failing once it never can."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+        stalled = 0
+        while not done():
+            stalled = stalled + 1 if self.stalled() else 0
+            if stalled > 50:
+                pytest.fail(
+                    "condition never held: the runtime waits, nothing in flight",
+                )
+            if loop.time() > deadline:
+                pytest.fail("condition never held")
+            await asyncio.sleep(0)
 
     def requests(self) -> list[Request]:
         return self.provider.requests
@@ -379,10 +439,6 @@ class Harness:
     ) -> list[str]:
         return [e.content or "" for e in self.events if isinstance(e, kind)]
 
-    def _record(self, event: RuntimeEvent) -> None:
-        self.events.append(event)
-        self._observed.set()
-
 
 async def run_once(rt: Runtime, msg: UserMessage) -> list[ModelContextEvent]:
     """Drive ``rt`` through ``msg`` until the model idles or fails; return what it added.
@@ -407,9 +463,14 @@ async def run_once(rt: Runtime, msg: UserMessage) -> list[ModelContextEvent]:
     try:
         waiter = asyncio.ensure_future(done.wait())
         try:
-            _ = await asyncio.wait((waiter, task), return_when=asyncio.FIRST_COMPLETED)
+            _ = await asyncio.wait(
+                (waiter, task),
+                timeout=2,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         finally:
             waiter.cancel()
+        assert done.is_set() or task.done(), "the model neither idled nor failed"
         added = {record.ref for record in rt.tape[start:]}
         resolved = rt.context()
         return [
@@ -421,21 +482,7 @@ async def run_once(rt: Runtime, msg: UserMessage) -> list[ModelContextEvent]:
         rt.observers.remove(watch)
         rt.push(Quit())
         with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-async def until(predicate: Callable[[], bool], *, timeout_sec: float = 2.0) -> None:
-    """Run the loop until ``predicate`` holds, failing if it never does.
-
-    Bounded by time, not loop turns: a subprocess or a thread finishes when it
-    finishes, however many turns the loop takes meanwhile.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_sec
-    while not predicate():
-        if loop.time() > deadline:
-            pytest.fail("condition never held")
-        await asyncio.sleep(0)
+            await asyncio.wait_for(task, timeout=2)
 
 
 async def spin(steps: int = 50) -> None:
@@ -697,6 +744,8 @@ def test_a_runtime_writes_the_markers_it_is_given() -> None:
 
 def test_a_new_runtime_has_nothing_in_flight() -> None:
     rt = Runtime(model=ScriptedProvider()["scripted"])
+    assert rt.inbox.empty()
+    assert rt.inbox.gate_armed is False
     assert rt.persistent_retry is False
     assert rt._cohort_seen is False
     assert (rt._model_call_generation, rt._compact_generation) == (0, 0)
@@ -726,7 +775,7 @@ async def test_a_reply_repeating_a_call_id_is_an_error() -> None:
 async def test_stream_events_are_published(event: RuntimeEvent) -> None:
     async with Harness() as h:
         h.push(event)
-        await until(lambda: event in h.events)
+        await h.until(lambda: event in h.events)
 
 
 @pytest.mark.parametrize(
@@ -764,9 +813,9 @@ async def test_tools_run_in_parallel_and_the_model_waits_for_all() -> None:
         tools=[a, b],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: a.started == ["a"] and b.started == ["b"])
+        await h.until(lambda: a.started == ["a"] and b.started == ["b"])
         a.release.set()
-        await until(lambda: bool(h.results("c1")))
+        await h.until(lambda: bool(h.results("c1")))
         await spin()
         assert len(h.requests()) == 1
         b.release.set()
@@ -809,7 +858,7 @@ async def test_a_preempted_cohort_never_completes(stop: RuntimeEvent) -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(stop)
         await h.seen(ModelIdle)
     assert h.count(CohortComplete) == 0
@@ -928,7 +977,7 @@ async def test_a_result_pushed_for_a_running_call_answers_it() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         pushed = ToolResult(
             call_id="t1",
             state="done",
@@ -969,7 +1018,7 @@ async def test_same_key_calls_run_in_order_and_others_in_parallel() -> None:
     )
     async with Harness(script, reply("done"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: len(tool.started) == 3)
+        await h.until(lambda: len(tool.started) == 3)
         await spin()
         assert sorted(tool.started) == ["e1", "e2", "r"]
         tool.release.set()
@@ -990,7 +1039,7 @@ async def test_an_exclusive_call_serializes_with_every_keyed_call() -> None:
     )
     async with Harness(script, reply("done"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: len(tool.started) == 2)
+        await h.until(lambda: len(tool.started) == 2)
         await spin()
         assert sorted(tool.started) == ["e1", "r"]
         tool.release.set()
@@ -1013,7 +1062,7 @@ async def test_calls_on_either_side_of_an_exclusive_call_run_in_parallel() -> No
     )
     async with Harness(script, reply("done"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: len(tool.started) == 2)
+        await h.until(lambda: len(tool.started) == 2)
         await spin()
         assert sorted(tool.started) == ["e1", "e2"]
         tool.release.set()
@@ -1034,7 +1083,7 @@ async def test_an_unkeyed_call_waits_for_an_exclusive_call_before_it() -> None:
     )
     async with Harness(script, reply("done"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert tool.started == ["bash"]
         tool.release.set()
@@ -1053,7 +1102,7 @@ async def test_an_exclusive_call_does_not_wait_for_an_unkeyed_call_before_it() -
     )
     async with Harness(script, reply("done"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: len(tool.started) == 2)
+        await h.until(lambda: len(tool.started) == 2)
         tool.release.set()
         await h.seen(ModelIdle)
     assert sorted(tool.started) == ["bash", "r"]
@@ -1071,9 +1120,9 @@ async def test_killing_a_serialized_call_runs_the_rest_of_its_group() -> None:
     )
     async with Harness(script, reply("stopped"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="e1"))
-        await until(lambda: tool.started == ["one", "two"])
+        await h.until(lambda: tool.started == ["one", "two"])
         tool.release.set()
         await h.seen(ModelIdle)
     assert tool.finished == ["two"]
@@ -1152,11 +1201,11 @@ async def test_a_background_call_waits_for_the_calls_before_it() -> None:
     )
     async with Harness(script, *_replies(3), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert tool.started == ["e1"]
         tool.release.set()
-        await until(lambda: tool.finished == ["e1", "e2"])
+        await h.until(lambda: tool.finished == ["e1", "e2"])
 
 
 @pytest.mark.asyncio
@@ -1172,9 +1221,9 @@ async def test_nothing_waits_for_a_background_call() -> None:
     )
     async with Harness(script, *_replies(3), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: sorted(tool.started) == ["e1", "e2", "r"])
+        await h.until(lambda: sorted(tool.started) == ["e1", "e2", "r"])
         tool.release.set()
-        await until(lambda: len(tool.finished) == 3)
+        await h.until(lambda: len(tool.finished) == 3)
 
 
 @pytest.mark.asyncio
@@ -1190,13 +1239,13 @@ async def test_a_background_call_does_not_split_a_group() -> None:
     )
     async with Harness(script, reply("moved on"), reply("seen"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: "e1" in tool.started)
+        await h.until(lambda: "e1" in tool.started)
         h.push(Detach(call_id="e1"))
-        await until(lambda: bool(h.results("e1")))
+        await h.until(lambda: bool(h.results("e1")))
         await spin()
         assert [r.state for r in h.results("e3")] == ["pending"]
         tool.release.set()
-        await until(lambda: len(tool.finished) == 3)
+        await h.until(lambda: len(tool.finished) == 3)
 
 
 @pytest.mark.asyncio
@@ -1208,8 +1257,8 @@ async def test_a_refused_call_is_answered_without_waiting() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
-        await until(lambda: bool(h.results("u")))
+        await h.until(lambda: bool(tool.started))
+        await h.until(lambda: bool(h.results("u")))
         tool.release.set()
         await h.seen(ModelIdle)
 
@@ -1230,7 +1279,7 @@ async def test_a_queued_call_is_a_job() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: tool.started == ["w"])
+        await h.until(lambda: tool.started == ["w"])
         await spin()
         assert {cid: job.state for cid, job in h.runtime.jobs.items()} == {
             "w": "running",
@@ -1239,7 +1288,7 @@ async def test_a_queued_call_is_a_job() -> None:
         }
         tool.release.set()
         await h.seen(ModelIdle)
-        await until(lambda: not h.runtime.jobs)
+        await h.until(lambda: not h.runtime.jobs)
     assert sorted(tool.finished) == ["b", "q", "w"]
 
 
@@ -1259,7 +1308,7 @@ async def test_a_queued_background_call_is_listed_and_cancellable() -> None:
         tools=[tool, BackgroundTask()],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(h.results("c1")))
+        await h.until(lambda: bool(h.results("c1")))
         tool.release.set()
         await h.seen(ModelIdle)
     _, *rows = h.results("l1")[0].text().splitlines()
@@ -1282,7 +1331,7 @@ async def test_kill_all_stops_the_queued_calls_of_a_group() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill())
         await h.seen(ModelIdle)
         await spin()
@@ -1306,11 +1355,11 @@ async def test_an_unkeyed_background_call_waits_for_an_exclusive_call_before_it(
     )
     async with Harness(script, *_replies(3), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert tool.started == ["bash"]
         tool.release.set()
-        await until(lambda: tool.finished == ["bash", "r"])
+        await h.until(lambda: tool.finished == ["bash", "r"])
 
 
 @pytest.mark.asyncio
@@ -1324,7 +1373,7 @@ async def test_a_detach_after_its_group_stopped_keeps_the_cohort_complete() -> N
     )
     async with Harness(script, reply("stopped"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="e1"), Kill(call_id="e2"), Detach(call_id="e1"))
         await h.seen(ModelIdle)
     assert h.count(CohortComplete) == 1
@@ -1339,7 +1388,7 @@ async def test_a_killed_call_is_answered_once() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="t1"))
         await h.seen(ModelIdle)
         await h.seen(AgentIdle)
@@ -1360,12 +1409,12 @@ async def test_a_group_detaches_by_a_call_already_killed() -> None:
     )
     async with Harness(script, reply("moved on"), reply("seen"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="e1"), Detach(call_id="e1"))
         await h.seen(ModelIdle)
         assert [r.state for r in h.results("e2")] == ["pending"]
         tool.release.set()
-        await until(lambda: tool.finished == ["two"])
+        await h.until(lambda: tool.finished == ["two"])
 
 
 @pytest.mark.asyncio
@@ -1380,9 +1429,9 @@ async def test_killing_a_queued_call_runs_the_rest_of_its_group() -> None:
     )
     async with Harness(script, reply("stopped"), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="e2"))
-        await until(lambda: bool(h.results("e2")))
+        await h.until(lambda: bool(h.results("e2")))
         tool.release.set()
         await h.seen(ModelIdle)
     assert tool.finished == ["one", "three"]
@@ -1407,13 +1456,13 @@ async def test_detached_calls_keep_their_serialization() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(_user("redirect"))
         await h.seen(ModelIdle)
         await spin()
         assert tool.started == ["one"]
         tool.release.set()
-        await until(lambda: tool.finished == ["one", "two"])
+        await h.until(lambda: tool.finished == ["one", "two"])
 
 
 @pytest.mark.parametrize("verb", [Kill(call_id="t1"), Kill(), Clear()])
@@ -1427,15 +1476,14 @@ async def test_a_verb_stopping_the_tools_acts_after_a_halt(verb: RuntimeEvent) -
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Halt())
         await h.seen(Halt)
         h.push(verb)
-        await until(
+        await h.until(
             lambda: (
                 not (h.runtime.cohort or h.runtime.running_tools or h.runtime.detached)
             ),
-            timeout_sec=0.5,
         )
         await spin()
         assert len(h.requests()) == 1
@@ -1464,7 +1512,7 @@ async def _while_halted(actions: Sequence[str]) -> None:
         compactor=Summarizer(),
     ) as h:
         h.push(_user("go"))
-        await until(lambda: len(tool.started) == 2)
+        await h.until(lambda: len(tool.started) == 2)
         h.push(Halt())
         await h.seen(Halt)
         for action in actions:
@@ -1503,7 +1551,7 @@ async def test_a_halted_cohort_the_user_resumes_never_completes() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Halt())
         await h.seen(Halt)
         await spin()
@@ -1579,7 +1627,7 @@ async def test_a_call_is_waited_for_when_it_may_not_be_detached(
     ) as h:
         h.runtime.detach_after_sec = 0.01 if limited else None
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         # No detach was ever set to fire.
         assert timers == []
         assert h.runtime.cohort == {"t1"}
@@ -1607,10 +1655,10 @@ async def test_a_later_reply_does_not_wait_for_a_call_detached_after_the_limit(
     ) as h:
         h.runtime.detach_after_sec = 0.01
         h.push(_user("go"))
-        await until(lambda: tool.started == ["a", "b"])
+        await h.until(lambda: tool.started == ["a", "b"])
         assert tool.finished == []
         tool.release.set()
-        await until(lambda: sorted(tool.finished) == ["a", "b"])
+        await h.until(lambda: sorted(tool.finished) == ["a", "b"])
 
 
 @pytest.mark.parametrize("key", ["*", "/f", None])
@@ -1627,12 +1675,12 @@ async def test_a_later_reply_does_not_wait_for_a_call_the_user_detached(
         tools=[writer, reader],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(writer.started))
+        await h.until(lambda: bool(writer.started))
         h.push(_user("read it now"))
-        await until(lambda: [r.text() for r in h.results("r")] == ["ok"])
+        await h.until(lambda: [r.text() for r in h.results("r")] == ["ok"])
         assert writer.finished == []
         writer.release.set()
-        await until(lambda: bool(_arrival(h, "w")))
+        await h.until(lambda: bool(_arrival(h, "w")))
 
 
 @pytest.mark.parametrize("key", ["*", None])
@@ -1651,11 +1699,11 @@ async def test_a_later_reply_does_not_wait_for_a_background_call(
         tools=[server, reader],
     ) as h:
         h.push(_user("start the server"))
-        await until(lambda: bool(server.started))
+        await h.until(lambda: bool(server.started))
         h.push(_user("now read"))
-        await until(lambda: reader.started == ["reader"])
+        await h.until(lambda: reader.started == ["reader"])
         server.release.set()
-        await until(lambda: bool(_arrival(h, "s1")))
+        await h.until(lambda: bool(_arrival(h, "s1")))
 
 
 @pytest.mark.parametrize("same_reply", [True, False])
@@ -1676,9 +1724,9 @@ async def test_the_model_can_cancel_a_background_writer(same_reply: bool) -> Non
     ) as h:
         h.push(_user("start the server"))
         if not same_reply:
-            await until(lambda: bool(server.started))
+            await h.until(lambda: bool(server.started))
             h.push(_user("stop it"))
-        await until(lambda: bool(_arrival(h, "s1")))
+        await h.until(lambda: bool(_arrival(h, "s1")))
     assert [r.text() for r in h.results("c1")] == ["Cancelling server (s1)."]
     assert [r.state for r in _arrival(h, "s1")] == ["cancelled"]
     assert server.finished == []
@@ -1696,13 +1744,13 @@ async def test_a_detached_call_still_holds_its_reply_s_next_call() -> None:
     )
     async with Harness(script, *_replies(3), tools=[tool]) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Detach(call_id="e1"))
-        await until(lambda: bool(h.results("e1")))
+        await h.until(lambda: bool(h.results("e1")))
         await spin()
         assert tool.started == ["one"]
         tool.release.set()
-        await until(lambda: tool.finished == ["one", "bash"])
+        await h.until(lambda: tool.finished == ["one", "bash"])
 
 
 @pytest.mark.asyncio
@@ -1716,14 +1764,14 @@ async def test_a_killed_call_holds_what_it_touches_until_it_stops() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="a"))
-        await until(lambda: len(h.requests()) == 2)
+        await h.until(lambda: len(h.requests()) == 2)
         await spin()
         assert tool.started == ["a"]
         tool.release.set()
         tool.stopped.set()
-        await until(lambda: [r.text() for r in h.results("b")] == ["b done"])
+        await h.until(lambda: [r.text() for r in h.results("b")] == ["b done"])
     assert tool.started == ["a", "b"]
 
 
@@ -1751,13 +1799,13 @@ async def test_a_call_killed_twice_is_forgotten_once_it_stops(
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         with caplog.at_level(logging.ERROR):
             h.push(Kill(call_id="a"), Kill(call_id="a"))
             await h.seen(ModelIdle)
             assert list(h.runtime._stopping.values()) == ["/f"]
             tool.stopped.set()
-            await until(lambda: not h.runtime._stopping)
+            await h.until(lambda: not h.runtime._stopping)
             await spin()
         assert h.runtime._calls == {}
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -1773,11 +1821,11 @@ async def test_a_call_killed_while_it_waits_is_answered_cancelled() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Kill(call_id="a"))
-        await until(lambda: "b" in h.runtime.cohort)
+        await h.until(lambda: "b" in h.runtime.cohort)
         h.push(Kill(call_id="b"))
-        await until(lambda: any(r.state == "cancelled" for r in h.results("b")))
+        await h.until(lambda: any(r.state == "cancelled" for r in h.results("b")))
         tool.stopped.set()
         await spin()
     assert tool.started == ["a"]
@@ -1799,7 +1847,7 @@ async def test_each_slow_group_is_detached_on_its_own() -> None:
             "pending",
         ]
         tool.release.set()
-        await until(lambda: len(tool.finished) == 2)
+        await h.until(lambda: len(tool.finished) == 2)
 
 
 @pytest.mark.parametrize("background", [True, False])
@@ -1814,7 +1862,7 @@ async def test_a_call_detaches_by_the_task_that_runs_it(background: bool) -> Non
     ) as h:
         h.runtime.allow_background = background
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.runtime.detach(h.runtime._calls["t1"].result_future)
         h.runtime.detach(asyncio.create_task(asyncio.sleep(0)))
         if background:
@@ -1824,7 +1872,7 @@ async def test_a_call_detaches_by_the_task_that_runs_it(background: bool) -> Non
             await spin()
             assert h.runtime.cohort == {"t1"}
         tool.release.set()
-        await until(lambda: bool(tool.finished))
+        await h.until(lambda: bool(tool.finished))
 
 
 @pytest.mark.asyncio
@@ -1845,7 +1893,7 @@ async def test_a_user_message_mid_cohort_detaches_the_running_tool() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(_user("redirect"))
         await h.seen(ModelIdle)
         (stub,) = h.results("t1")
@@ -1890,7 +1938,7 @@ async def test_a_copied_delivery_runs_and_returns_the_result_again() -> None:
         tools=[tool, BackgroundTask()],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(_user("redirect"))
         await h.seen(ModelIdle)
         tool.release.set()
@@ -1912,12 +1960,12 @@ async def test_a_detached_result_keeps_its_structure() -> None:
         tools=[tool, ok],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started and ok.started))
+        await h.until(lambda: bool(tool.started and ok.started))
         h.push(_user("redirect"))
         await h.seen(ModelIdle)
         tool.release.set()
         ok.release.set()
-        await until(lambda: bool(_arrival(h, "t1") and _arrival(h, "t2")))
+        await h.until(lambda: bool(_arrival(h, "t1") and _arrival(h, "t2")))
     (failed,) = _arrival(h, "t1")
     (passed,) = _arrival(h, "t2")
     assert failed.is_error is True
@@ -1937,9 +1985,9 @@ async def test_a_detached_result_waits_for_the_running_cohort() -> None:
         tools=[first, second],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(first.started))
+        await h.until(lambda: bool(first.started))
         h.push(_user("preempt"))
-        await until(lambda: bool(second.started))
+        await h.until(lambda: bool(second.started))
         first.release.set()
         await h.seen(DetachedResult)
         await spin()
@@ -1975,7 +2023,7 @@ async def test_kill_one_call_answers_it_cancelled() -> None:
         tools=[slow, fast],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(h.results("f1")))
+        await h.until(lambda: bool(h.results("f1")))
         h.push(Kill(call_id="s1"))
         await h.seen(ModelIdle)
     (killed,) = h.results("s1")
@@ -2004,15 +2052,15 @@ async def test_kill_all_stops_running_and_detached_tools(
             tools=[tool],
         ) as h:
             h.push(_user("go"))
-            await until(lambda: len(tool.started) == 1)
+            await h.until(lambda: len(tool.started) == 1)
             h.push(_user("redirect"))
             await h.seen(ModelIdle)
             h.push(_user("again"))
-            await until(lambda: len(tool.started) == 2)
+            await h.until(lambda: len(tool.started) == 2)
             detached = h.runtime.detached["t1"]
             h.push(Kill())
             await h.seen(ModelIdle, 2)
-            await until(detached.done)
+            await h.until(detached.done)
             assert not h.runtime.detached
     assert tool.finished == []
     assert [r.text() for r in h.results("t2")] == [Markers().cancelled]
@@ -2035,7 +2083,7 @@ async def test_kill_all_logs_the_cohort_it_started_and_stopped(
             tools=[tool],
         ) as h:
             h.push(_user("go"))
-            await until(lambda: bool(tool.started))
+            await h.until(lambda: bool(tool.started))
             h.push(Kill())
             await h.seen(ModelIdle)
     messages = [r.getMessage() for r in caplog.records]
@@ -2073,7 +2121,7 @@ async def test_a_running_call_killed_by_id_publishes_its_own_end(
             tools=[tool, BackgroundTask()],
         ) as h:
             h.push(_user("go"))
-            await until(lambda: bool(tool.started))
+            await h.until(lambda: bool(tool.started))
             await spin()
             h.push(Kill(call_id=killed))
             await h.seen(DetachedResult)
@@ -2102,13 +2150,13 @@ async def test_kill_by_id_cancels_a_detached_call_and_says_so(
             tools=[tool],
         ) as h:
             h.push(_user("go"))
-            await until(lambda: bool(tool.started))
+            await h.until(lambda: bool(tool.started))
             h.push(_user("redirect"))
             await h.seen(ModelIdle)
             task = h.runtime.detached["t1"]
             h.push(Kill(call_id="t1"))
             await h.seen(ModelIdle, 2)
-            await until(lambda: h.runtime.jobs == {})
+            await h.until(lambda: h.runtime.jobs == {})
             assert task.done()
             assert "t1" not in h.runtime.detached
     assert "runtime kill detached tool: call_id=t1" in caplog.messages
@@ -2133,15 +2181,15 @@ async def test_quit_cancels_running_and_detached_tools() -> None:
     )
     task = asyncio.create_task(h.runtime.run_forever())
     h.push(_user("go"))
-    await until(lambda: len(tool.started) == 1)
+    await h.until(lambda: len(tool.started) == 1)
     h.push(_user("redirect"))
     await h.seen(ModelIdle)
     h.push(_user("more"))
-    await until(lambda: len(tool.started) == 2)
+    await h.until(lambda: len(tool.started) == 2)
     running = h.runtime.running_tools["t2"]
     detached = h.runtime.detached["t1"]
     h.push(Quit())
-    await task
+    await h.finished(task)
     # Closed means stopped: no tool is still on its way out once the loop ends.
     assert running.done()
     assert detached.done()
@@ -2160,7 +2208,7 @@ async def test_quit_stops_waiting_for_a_tool_that_does_not_stop(
     h = Harness(reply(calls=[call("echo", "t1")]), tools=[tool])
     task = asyncio.create_task(h.runtime.run_forever())
     h.push(_user("go"))
-    await until(lambda: len(tool.started) == 1)
+    await h.until(lambda: len(tool.started) == 1)
     running = h.runtime.running_tools["t1"]
 
     with caplog.at_level(logging.WARNING, logger=runtime.__name__):
@@ -2172,7 +2220,7 @@ async def test_quit_stops_waiting_for_a_tool_that_does_not_stop(
     ]
     assert not running.done()
     tool.stopped.set()
-    _ = await asyncio.wait({running})
+    await h.until(running.done)
 
 
 async def _with_stub(
@@ -2423,9 +2471,9 @@ async def test_a_result_posted_behind_the_message_that_detached_its_call_is_publ
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(_user("redirect"), posted)
-        await until(lambda: bool(_arrival(h, "t1")))
+        await h.until(lambda: bool(_arrival(h, "t1")))
     assert posted in h.events
     assert [r.text() for r in h.results("t1")] == [Markers().detached]
     assert [r.text() for r in _arrival(h, "t1")] == ["early"]
@@ -2442,7 +2490,7 @@ async def test_a_detached_result_survives_compaction() -> None:
         compactor=Summarizer(),
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Compact())
         await h.seen(ModelIdle)
         tool.release.set()
@@ -2460,7 +2508,7 @@ async def test_a_cleared_call_delivers_nothing() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Clear())
         await h.seen(ClearComplete)
         tool.release.set()
@@ -2633,7 +2681,7 @@ async def test_a_forged_id_colliding_with_a_real_arrival_is_renamed() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(_user("redirect"))
         await h.seen(ModelResponseComplete, 2)
         tool.release.set()
@@ -2904,7 +2952,7 @@ async def test_a_reply_with_no_message_waits_on_its_calls() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("start"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert h.count(ModelCallStarted) == 1
         tool.release.set()
@@ -2938,9 +2986,9 @@ async def test_input_buffered_mid_stream_is_answered_before_the_agent_idles(
     monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
     async with h:
         h.push(_user("first"))
-        await blocking.entered.wait()
+        await h.until(blocking.entered.is_set)
         h.push(_user("mid-stream"))
-        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        await h.until(lambda: bool(h.runtime.pending_mid_stream()))
         await spin()
         assert h.count(AgentIdle) == 0
         assert h.published() == ["first"]
@@ -3029,7 +3077,7 @@ async def test_halt_leaves_running_tools_their_slot() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Halt())
         await h.seen(Halt)
         tool.release.set()
@@ -3077,7 +3125,7 @@ async def test_halt_cancels_a_blocked_stream_and_says_so_before_any_input(
     monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
     async with h:
         h.push(_user("go"))
-        await blocking.entered.wait()
+        await h.until(blocking.entered.is_set)
         h.push(Halt())
         await h.seen(ModelResponseCancelled)
         assert blocking.cancelled == 1
@@ -3297,6 +3345,18 @@ async def test_each_request_asks_for_no_more_reply_than_the_room_left() -> None:
 
 
 @pytest.mark.asyncio
+async def test_each_reply_carries_the_measurement_of_the_request_it_answered() -> None:
+    billed = TokenCount(request=120, cache_read=20)
+    async with Harness(reply("ok", tokens=billed)) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+    (answer,) = [e for e in h.history() if isinstance(e, Response)]
+    assert answer.measurement is not None
+    assert (answer.measurement.prompt, answer.measurement.records) == (140, 1)
+    assert h.runtime.token_accounting.has_measurements
+
+
+@pytest.mark.asyncio
 async def test_context_updates_are_noted_before_each_round() -> None:
     asked: list[int] = []
 
@@ -3362,7 +3422,7 @@ async def test_queued_input_waits_for_the_round_chain_to_end() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("user1"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(UserQueuedMessage(text="queued"))
         await spin()
         tool.release.set()
@@ -3433,7 +3493,7 @@ async def test_deferred_input_waits_for_running_tools() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(UserDeferredMessage(text="later"))
         await spin()
         assert "later" not in h.texts()
@@ -3493,7 +3553,7 @@ async def test_clear_drops_staged_input() -> None:
     h.provider.replies.append(reply("fresh"))
     async with h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(
             UserQueuedMessage(text="lost queued"),
             UserDeferredMessage(text="lost deferred"),
@@ -3650,7 +3710,7 @@ async def test_a_failed_compaction_keeps_the_tape_and_frees_the_gate() -> None:
         h.runtime.append_history(reply("kept too"))
         h.push(Compact())
         await h.seen(CompactFailed)
-        await until(lambda: h.runtime.compact_task is None)
+        await h.until(lambda: h.runtime.compact_task is None)
         h.push(_user("next"))
         await h.seen(ModelIdle)
     failed = next(e for e in h.events if isinstance(e, CompactFailed))
@@ -3668,7 +3728,7 @@ async def test_a_second_compact_while_compacting_is_dropped(
         async with Harness(reply("post"), compactor=summarizer) as h:
             h.runtime.append_history(_user("old"))
             h.push(Compact())
-            await summarizer.entered.wait()
+            await h.until(summarizer.entered.is_set)
             h.push(Compact())
             await spin()
             summarizer.release.set()
@@ -3684,9 +3744,9 @@ async def test_halt_and_clear_cancel_a_running_compaction(verb: RuntimeEvent) ->
     async with Harness(compactor=summarizer) as h:
         h.runtime.append_history(_user("old"))
         h.push(Compact())
-        await summarizer.entered.wait()
+        await h.until(summarizer.entered.is_set)
         h.push(verb)
-        await until(lambda: h.runtime.compact_task is None)
+        await h.until(lambda: h.runtime.compact_task is None)
         summarizer.release.set()
         await spin()
     failed = [e for e in h.events if isinstance(e, CompactFailed)]
@@ -3702,10 +3762,10 @@ async def test_a_superseded_compaction_posts_nothing() -> None:
     h = Harness(compactor=summarizer)
     h.runtime.append_history(_user("old"))
     task = asyncio.create_task(h.runtime._compact_and_post(""))
-    await summarizer.entered.wait()
+    await h.until(summarizer.entered.is_set)
     h.runtime._compact_generation += 1
     summarizer.release.set()
-    await task
+    await h.finished(task)
     assert h.runtime.inbox.drain_nowait() == []
     assert h.texts() == ["old"]
 
@@ -3715,10 +3775,10 @@ async def test_a_superseded_failed_compaction_posts_nothing() -> None:
     summarizer = Summarizer(hold=True, error=RuntimeError("late"))
     h = Harness(compactor=summarizer)
     task = asyncio.create_task(h.runtime._compact_and_post(""))
-    await summarizer.entered.wait()
+    await h.until(summarizer.entered.is_set)
     h.runtime._compact_generation += 1
     summarizer.release.set()
-    await task
+    await h.finished(task)
     assert h.runtime.inbox.drain_nowait() == []
 
 
@@ -3785,7 +3845,7 @@ async def test_compact_detaches_running_tools() -> None:
         compactor=summarizer,
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(Compact())
         await h.seen(ModelIdle)
         assert set(h.runtime.detached) == {"t1"}
@@ -3800,9 +3860,9 @@ async def test_input_during_compaction_survives_it_once() -> None:
         h.runtime.append_history(_user("original"))
         h.runtime.append_history(reply("old answer"))
         h.push(Compact())
-        await summarizer.entered.wait()
+        await h.until(summarizer.entered.is_set)
         h.push(_user("new one"), _user("new two"))
-        await until(lambda: h.texts()[-2:] == ["new one", "new two"])
+        await h.until(lambda: h.texts()[-2:] == ["new one", "new two"])
         assert len(h.requests()) == 0
         summarizer.release.set()
         await h.seen(ModelIdle)
@@ -3827,7 +3887,7 @@ async def test_compact_cancels_a_blocked_stream_and_compacts_without_it(
     monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
     async with h:
         h.push(_user("go"))
-        await blocking.entered.wait()
+        await h.until(blocking.entered.is_set)
         h.push(Compact())
         await h.seen(ModelIdle)
         assert blocking.cancelled == 1
@@ -3892,8 +3952,8 @@ async def test_iterating_the_runtime_yields_published_events() -> None:
     await spin(3)
     h.runtime.publish(ModelIdle())
     h.runtime.publish(AgentIdle())
-    assert await first == ModelIdle()
-    assert await anext(events) == AgentIdle()
+    assert await h.finished(first) == ModelIdle()
+    assert await h.finished(anext(events)) == AgentIdle()
     waiting = asyncio.ensure_future(anext(events))
     await spin(3)
     waiting.cancel()
@@ -3935,7 +3995,7 @@ async def test_a_cold_start_is_idle_and_starts_no_cohort() -> None:
 async def test_a_queued_quit_is_not_idle() -> None:
     h = Harness()
     h.push(Quit())
-    await h.runtime.run_forever()
+    await h.finished(h.runtime.run_forever())
     assert h.count(AgentIdle) == 0
 
 
@@ -3963,7 +4023,7 @@ async def test_idle_waits_for_running_tools() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert h.count(AgentIdle) == 0
         tool.release.set()
@@ -3977,7 +4037,7 @@ async def test_idle_waits_for_a_running_compaction() -> None:
         await h.seen(AgentIdle)
         h.runtime.append_history(_user("old"))
         h.push(Compact())
-        await summarizer.entered.wait()
+        await h.until(summarizer.entered.is_set)
         await spin()
         assert h.count(AgentIdle) == 1
         summarizer.release.set()
@@ -4018,7 +4078,7 @@ async def test_dispatch_predicates_by_state() -> None:
             True,
         )
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         assert (rt.is_idle, rt.accepts_user_dispatch, rt.accepts_deferred_dispatch) == (
             False,
             True,
@@ -4053,7 +4113,7 @@ async def test_scheduled_work_runs_between_turns() -> None:
 
     async with h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         scheduled = asyncio.create_task(h.runtime.schedule(work))
         await spin()
         assert seen == []
@@ -4097,7 +4157,7 @@ async def test_quit_settles_work_still_waiting_for_a_safe_point() -> None:
     scheduled = asyncio.ensure_future(h.runtime.schedule(work))
     await spin()
     h.push(Quit())
-    await loop_task
+    await h.finished(loop_task)
     await spin()
     try:
         assert scheduled.done()
@@ -4113,7 +4173,7 @@ async def test_scheduled_work_reports_what_it_raised() -> None:
 
     async with Harness(reply("still alive")) as h:
         with pytest.raises(ValueError, match="bad work"):
-            await h.runtime.schedule(work)
+            await h.finished(h.runtime.schedule(work))
         h.push(_user("go"))
         await h.seen(ModelIdle)
 
@@ -4151,13 +4211,13 @@ async def test_jobs_list_running_calls_and_cancel_them() -> None:
     ) as h:
         assert h.runtime.jobs == {}
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         job = h.runtime.jobs["t1"]
         assert (job.call.name, job.state) == ("echo", "running")
         assert job.started <= time.time()
         job.cancel()
         await h.seen(ModelIdle)
-        await until(lambda: h.runtime.jobs == {})
+        await h.until(lambda: h.runtime.jobs == {})
     assert [r.text() for r in h.results("t1")] == [Markers().cancelled]
 
 
@@ -4765,7 +4825,7 @@ async def test_a_tape_the_loop_cannot_read_stops_it(
         ],
     )
     with pytest.raises(InvalidContextError, match="duplicate tape ref"):
-        await h.runtime.run_forever()
+        await h.finished(h.runtime.run_forever())
 
 
 def _tape(*refs: TapeRef) -> tuple[TapeRecord, ...]:
@@ -4931,7 +4991,7 @@ async def test_work_cancelled_on_its_own_cancels_only_its_caller() -> None:
 
     async with Harness(reply("still alive")) as h:
         with pytest.raises(asyncio.CancelledError):
-            await h.runtime.schedule(work)
+            await h.finished(h.runtime.schedule(work))
         h.push(_user("go"))
         await h.seen(ModelIdle)
     assert h.answers() == ["still alive"]
@@ -4951,7 +5011,7 @@ async def test_a_caller_leaving_mid_work_leaves_the_loop_running(*, fail: bool) 
 
     async with Harness(reply("ok")) as h:
         waiting = asyncio.create_task(h.runtime.schedule(work))
-        await started.wait()
+        await h.until(started.is_set)
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
         release.set()
@@ -4970,7 +5030,7 @@ async def test_cancelling_the_loop_during_scheduled_work_stops_it() -> None:
     h = Harness()
     loop_task = asyncio.create_task(h.runtime.run_forever())
     waiting = asyncio.create_task(h.runtime.schedule(work))
-    await started.wait()
+    await h.until(started.is_set)
     loop_task.cancel()
     await asyncio.gather(loop_task, return_exceptions=True)
     assert loop_task.cancelled()
@@ -5028,7 +5088,7 @@ async def test_a_pass_that_fails_after_its_events_is_logged_and_the_next_goes_on
         async with Harness(reply("answered")) as h:
             h.runtime.prune = broken
             h.push(_user("go"))
-            await until(lambda: bool(caplog.messages))
+            await h.until(lambda: bool(caplog.messages))
             assert caplog.messages == ["dispatch loop iteration raised: prune broke"]
             assert h.requests() == []
             h.push(_user("again"))
@@ -5075,7 +5135,7 @@ async def test_input_held_for_a_cancelled_reply_is_taken_in_once_it_ends() -> No
     async with Harness(reply("answer to hey")) as h:
         h.runtime.model_call = asyncio.create_task(_forever())
         h.push(_user("hey"))
-        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        await h.until(lambda: bool(h.runtime.pending_mid_stream()))
         h.push(ModelResponseCancelled(output_chars_estimate=0))
         await h.seen(ModelIdle)
     assert h.runtime.pending_mid_stream() == ()
@@ -5208,10 +5268,10 @@ async def test_finished_detached_tasks_are_pruned_and_never_reported() -> None:
         await done
         h.runtime.detached["x"] = done
         h.push(Kill(call_id="x"))
-        await until(lambda: "x" not in h.runtime.detached)
+        await h.until(lambda: "x" not in h.runtime.detached)
         h.runtime.detached["y"] = done
         h.push(SaveSession())
-        await until(lambda: "y" not in h.runtime.detached)
+        await h.until(lambda: "y" not in h.runtime.detached)
         await spin()
     assert h.runtime._pending_commits == []
     assert h.requests() == []
@@ -5223,11 +5283,11 @@ async def test_quit_cancels_a_running_compaction() -> None:
     h = Harness(compactor=summarizer)
     loop_task = asyncio.create_task(h.runtime.run_forever())
     h.push(Compact())
-    await summarizer.entered.wait()
+    await h.until(summarizer.entered.is_set)
     compaction = h.runtime.compact_task
     assert compaction is not None
     h.push(Quit())
-    await loop_task
+    await h.finished(loop_task)
     await spin(3)
     assert compaction.done()
     assert h.count(CompactComplete) == 0
@@ -5428,6 +5488,8 @@ async def test_a_background_call_is_answered_at_once_and_delivered_later() -> No
     ) as h:
         h.push(_user("go"))
         await h.seen(ModelIdle)
+        # The job runs apart from the reply: it may start after the model idles.
+        await h.until(lambda: bool(tool.started))
         assert tool.finished == []
         assert h.count(CohortStarted) == 0
         (stub,) = h.results("b1")
@@ -5572,7 +5634,7 @@ async def test_foreground_and_background_calls_in_one_reply() -> None:
         tools=[fg, bg],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(fg.started and bg.started))
+        await h.until(lambda: bool(fg.started and bg.started))
         await spin()
         assert len(h.requests()) == 1
         assert h.runtime.cohort == {"f1"}
@@ -5710,7 +5772,7 @@ async def test_background_task_foreground_returns_the_result_once() -> None:
         tools=[tool, BackgroundTask()],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         await spin()
         assert len(h.requests()) == 1
         tool.release.set()
@@ -5737,7 +5799,7 @@ async def test_foreground_of_a_delivered_result_returns_it() -> None:
             ),
         )
         await h.seen(ModelIdle)
-        result = await h.runtime.foreground("c1")
+        result = await h.finished(h.runtime.foreground("c1"))
     assert result == ToolResult(
         call_id="c1",
         state="done",
@@ -5772,7 +5834,7 @@ async def test_foreground_takes_a_result_waiting_to_be_delivered() -> None:
         )
         await h.seen(Halt)
         assert len(h.runtime._pending_commits) == 2
-        assert await h.runtime.foreground("c1") == ToolResult(
+        assert await h.finished(h.runtime.foreground("c1")) == ToolResult(
             call_id="c1",
             state="done",
             stdout=("REAL",),
@@ -5812,6 +5874,30 @@ async def test_a_tool_that_cannot_start_answers_its_call_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failure_with_no_error_text_is_still_answered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A record made elsewhere, as on a far host, may say only that it failed."""
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(
+            reply(
+                calls=[call("BackgroundTask", "w1", operation="foreground", id="c1")],
+            ),
+            reply("ok"),
+            tools=[BackgroundTask()],
+        ) as h:
+            h.push(
+                _user("go"),
+                DetachedResult(result=ToolResult(call_id="c1", state="failed")),
+            )
+            await h.seen(ModelIdle)
+    assert h.results("w1") == [ToolResult(call_id="w1", state="failed")]
+    assert "runtime tool failed: call_id=w1 tool=BackgroundTask error=" in (
+        caplog.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_event_pushed_after_a_call_follows_its_result() -> None:
     """An event handled before the result would detach the call that pushed it."""
     h = Harness(reply(calls=[call("echo", "t1")]), reply("ok"))
@@ -5846,7 +5932,7 @@ async def test_an_event_pushed_after_no_call_of_this_runtime_is_pushed_at_once(
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.runtime.push_after(
             asyncio.Future[object]() if has_foreign_task else None,
             _user("now"),
@@ -5854,7 +5940,7 @@ async def test_an_event_pushed_after_no_call_of_this_runtime_is_pushed_at_once(
         await h.seen(ModelIdle)
         assert [r.state for r in h.results("e1")] == ["pending"]
         tool.release.set()
-        await until(lambda: len(tool.finished) == 2)
+        await h.until(lambda: len(tool.finished) == 2)
 
 
 @pytest.mark.asyncio
@@ -5872,7 +5958,7 @@ async def test_a_foreground_given_up_leaves_the_result_to_be_delivered() -> None
         tools=[tool, BackgroundTask()],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: "b1" in h.runtime._foreground_waiters)
+        await h.until(lambda: "b1" in h.runtime._foreground_waiters)
         h.push(Kill(call_id="w1"))
         await h.seen(ModelIdle)
         assert h.runtime._foreground_waiters == {}
@@ -6254,7 +6340,7 @@ async def test_an_outage_without_advice_backs_off_then_gives_up(
         h.runtime.persistent_retry = True
         h.push(_user("go"))
         for n in range(1, failures + 1):
-            await until(lambda n=n: len(timers) == n)
+            await h.until(lambda n=n: len(timers) == n)
             h.runtime.service_suspended_until = time.time() - 1
             _, wake, args = timers[-1]
             wake(*args)
@@ -6310,9 +6396,11 @@ async def test_forged_ids_keep_counting_across_replies() -> None:
         reply("done"),
     ) as h:
         h.push(_user("go"))
-        await until(lambda: len(h.requests()) == 1 and bool(h.runtime._pending_commits))
+        await h.until(
+            lambda: len(h.requests()) == 1 and bool(h.runtime._pending_commits),
+        )
         h.push(_user("again"))
-        await until(
+        await h.until(
             lambda: len(h.requests()) == 2 and len(h.runtime._pending_commits) == 1,
         )
         h.push(_user("last"))
@@ -6399,7 +6487,7 @@ async def test_a_foregrounded_result_is_never_delivered_again() -> None:
         tools=[tool, BackgroundTask()],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: "b1" in h.runtime._foreground_waiters)
+        await h.until(lambda: "b1" in h.runtime._foreground_waiters)
         tool.release.set()
         await h.seen(ModelIdle)
         h.push(
@@ -6563,7 +6651,7 @@ async def test_a_peer_message_does_not_release_queued_input_early() -> None:
         tools=[tool],
     ) as h:
         h.push(AgentToAgentMessage(sender="A", content="go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(UserQueuedMessage(text="queued"))
         await spin()
         tool.release.set()
@@ -6577,9 +6665,9 @@ async def test_a_second_compact_does_not_drop_the_rest_of_its_batch() -> None:
     summarizer = Summarizer(hold=True)
     async with Harness(reply("post"), compactor=summarizer) as h:
         h.push(Compact())
-        await summarizer.entered.wait()
+        await h.until(summarizer.entered.is_set)
         h.push(Compact(), _user("typed while compacting"))
-        await until(lambda: "typed while compacting" in h.texts())
+        await h.until(lambda: "typed while compacting" in h.texts())
         summarizer.release.set()
         await h.seen(ModelIdle)
 
@@ -6600,8 +6688,8 @@ async def test_work_can_be_scheduled_again_and_again() -> None:
         ran.append(len(ran))
 
     async with Harness() as h:
-        await h.runtime.schedule(work)
-        await h.runtime.schedule(work)
+        await h.finished(h.runtime.schedule(work))
+        await h.finished(h.runtime.schedule(work))
     assert ran == [0, 1]
 
 
@@ -7241,7 +7329,7 @@ async def test_quit_logs_what_is_in_flight(
     with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
         async with h:
             h.push(_user("go"))
-            await blocking.entered.wait()
+            await h.until(blocking.entered.is_set)
     assert (
         "runtime quit: model_call=True compact_task=False running_tools=0 cohort=0"
         " detached=0"
@@ -7258,7 +7346,7 @@ async def test_quit_gives_up_all_the_work_queued_behind_it() -> None:
         Scheduled(work=_forever, done=second),
     )
 
-    await h.runtime.run_forever()
+    await h.finished(h.runtime.run_forever())
 
     assert (first.cancelled(), second.cancelled()) == (True, True)
 
@@ -7274,7 +7362,7 @@ async def test_halt_logs_what_is_in_flight(
     with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
         async with h:
             h.push(_user("go"))
-            await blocking.entered.wait()
+            await h.until(blocking.entered.is_set)
             h.push(_user("typed"), Halt())
             await h.seen(ModelIdle)
     assert (
@@ -7282,6 +7370,22 @@ async def test_halt_logs_what_is_in_flight(
         " detached=0 mid_stream=1"
     ) in caplog.messages
     assert h.texts() == ["go", "typed", "after"]
+
+
+@pytest.mark.asyncio
+async def test_a_halt_that_takes_typed_input_goes_on_with_its_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed input is answered, so nothing waits for the user."""
+    h = Harness()
+    blocking = Blocking(answers=[reply("after")])
+    monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
+    async with h:
+        h.push(_user("go"))
+        await h.until(blocking.entered.is_set)
+        h.push(_user("typed"), Halt(), _user("also"))
+        await h.seen(ModelIdle)
+    assert h.texts() == ["go", "typed", "also", "after"]
 
 
 @pytest.mark.parametrize(
@@ -7336,6 +7440,20 @@ async def test_a_failure_keeps_the_input_that_came_with_it() -> None:
         )
         await h.seen(ModelIdle)
     assert h.texts() == ["b", "c", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_takes_typed_input_goes_on_with_its_batch() -> None:
+    """The typed input is answered, so nothing waits for the user."""
+    async with Harness(reply("ok")) as h:
+        h.runtime.model_call = asyncio.create_task(_forever())
+        h.push(
+            _user("typed"),
+            ModelResponseError(exception=RuntimeError("model exploded")),
+            _user("also"),
+        )
+        await h.seen(ModelIdle)
+    assert h.texts() == ["typed", "also", "ok"]
 
 
 @pytest.mark.asyncio
@@ -7463,7 +7581,7 @@ async def test_a_task_of_the_loop_that_crashes_is_logged(
         monkeypatch.setattr(h.runtime, crashing, crash)
         with caplog.at_level(logging.ERROR, logger=runtime.__name__):
             h.push(event)
-            await until(lambda: bool(caplog.records))
+            await h.until(lambda: bool(caplog.records))
     (record,) = caplog.records
     assert (record.name, record.levelno, record.getMessage()) == (
         runtime.__name__,
@@ -7694,7 +7812,7 @@ async def test_a_pending_stub_is_not_handed_to_a_caller_waiting_on_the_call() ->
         await spin()
         assert not waiting.done()
         tool.release.set()
-        result = await waiting
+        result = await h.finished(waiting)
     assert result is not None
     assert result.text() == "REAL"
 
@@ -7708,7 +7826,7 @@ async def test_a_detach_asked_by_no_task_running_a_call_detaches_nothing() -> No
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.runtime.detach(None)
         h.runtime.detach(asyncio.create_task(asyncio.sleep(0)))
         await spin()
@@ -7751,12 +7869,12 @@ async def test_a_peer_s_message_mid_cohort_detaches_the_running_tool() -> None:
         tools=[tool],
     ) as h:
         h.push(_user("go"))
-        await until(lambda: bool(tool.started))
+        await h.until(lambda: bool(tool.started))
         h.push(AgentToAgentMessage(sender="Sender", content="redirect"))
         await h.seen(ModelIdle)
         assert [r.text() for r in h.results("t1")] == [Markers().detached]
         tool.release.set()
-        await until(lambda: bool(tool.finished))
+        await h.until(lambda: bool(tool.finished))
 
 
 @pytest.mark.parametrize(
@@ -7774,7 +7892,7 @@ async def test_input_held_for_a_cancelled_reply_goes_ahead_of_what_follows_it(
     async with Harness(reply("answer")) as h:
         h.runtime.model_call = asyncio.create_task(_forever())
         h.push(_user("held"))
-        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        await h.until(lambda: bool(h.runtime.pending_mid_stream()))
         h.push(ModelResponseCancelled(output_chars_estimate=0), following)
         await h.seen(ModelIdle)
     assert h.texts() == ["held", "next", "answer"]
@@ -7853,7 +7971,7 @@ async def test_a_retry_ends_the_failure_s_hold_before_a_compaction_it_starts() -
         await spin()
         h.runtime.compact_due = lambda: due.pop() if due else False
         h.runtime.retry()
-        await summarizer.entered.wait()
+        await h.until(summarizer.entered.is_set)
         assert not h.runtime.stopped
         summarizer.release.set()
         await h.seen(ModelIdle)
@@ -7879,7 +7997,7 @@ async def test_input_held_for_a_reply_is_taken_in_where_the_reply_ended(
         h.runtime.persistent_retry = True
         h.runtime.model_call = asyncio.create_task(_forever())
         h.push(_user("typed"))
-        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        await h.until(lambda: bool(h.runtime.pending_mid_stream()))
         if ending == "switched-away":
             h.runtime.model = h.provider["scripted"]
         if ending == "calls":
@@ -7888,7 +8006,7 @@ async def test_input_held_for_a_reply_is_taken_in_where_the_reply_ended(
                 generation=-1,
             )
         h.push(ended, types.Nudge(content="nudged"))
-        await until(lambda: "nudged" in h.texts())
+        await h.until(lambda: "nudged" in h.texts())
         await spin()
         said = [t for t in h.texts() if t in ("typed", "nudged")]
     assert said == ["typed", "nudged"]

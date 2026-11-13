@@ -559,6 +559,13 @@ class Runtime:
         # What the user sent while the model streamed; it joins the context once
         # the reply ends, and the reply's calls run on detached.
         self._mid_stream_queue: list[UserMessage | AgentToAgentMessage] = []
+        # Input sent to wait until the model is done: the queued is committed then,
+        # the deferred at the idle after that.
+        self._queued: list[UserQueuedMessage | AgentSendQueuedMessage] = []
+        self._deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
+        # Whether the runtime waits for the user; input sent to wait is then
+        # committed at once.
+        self._awaiting_user = False  # pragma: no mutate -- None is as false.
         # What waits for the next model round to be committed (``_flush_pending``).
         self._pending_commits: list[_PendingCommit] = []
         # Calls whose result was delivered forward, or is queued to be: a second
@@ -1293,10 +1300,6 @@ class Runtime:
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
-        awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
-        queued: list[UserQueuedMessage | AgentSendQueuedMessage] = []
-        deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
-
         while True:
             self._collect_detached()
             if self._fully_drained():
@@ -1310,212 +1313,22 @@ class Runtime:
                 try:
                     match item:
                         case Quit():
-                            logger.debug(
-                                "runtime quit: model_call=%s compact_task=%s "
-                                "running_tools=%d cohort=%d detached=%d",
-                                self.model_call is not None,
-                                self.compact_task is not None,
-                                len(self.running_tools),
-                                len(self.cohort),
-                                len(self.detached),
-                            )
-                            if self.model_call:
-                                self.model_call.cancel()
-                            if self.compact_task:
-                                self.compact_task.cancel()
-                            stopped = [
-                                *self.running_tools.values(),
-                                *self.detached.values(),
-                                *self._stopping,
-                            ]
-                            for t in self.running_tools.values():
-                                t.cancel()
-                            # Background work too, or it runs on after shutdown.
-                            self._cancel_detached()
-                            # Work no loop will reach: its callers stop waiting.
-                            for later in (
-                                *self._scheduled,
-                                *items[item_idx + 1 :],
-                                *self.inbox.drain_nowait(),
-                            ):
-                                if isinstance(later, Scheduled):
-                                    _ = later.done.cancel()
-                            if self._retry_timer is not None:
-                                self._retry_timer.cancel()
-                            # A cancelled tool takes a moment to stop, as a shell
-                            # does. The loop ends when they have all stopped, or
-                            # after ``_QUIT_WAIT_SEC``: a tool that ignores its
-                            # cancel must not keep the process from exiting.
-                            if stopped:
-                                _, still_running = await asyncio.wait(
-                                    stopped,
-                                    timeout=_QUIT_WAIT_SEC,
-                                )
-                                if still_running:
-                                    logger.warning(
-                                        "runtime quit: %d tool(s) did not stop",
-                                        len(still_running),
-                                    )
+                            await self._on_quit(items[item_idx + 1 :])
                             return
 
                         case Halt():
-                            self.publish(item)
-                            logger.debug(
-                                "runtime halt: model_call=%s compact_task=%s "
-                                "running_tools=%d cohort=%d detached=%d "
-                                "mid_stream=%d",
-                                self.model_call is not None,
-                                self.compact_task is not None,
-                                len(self.running_tools),
-                                len(self.cohort),
-                                len(self.detached),
-                                len(self._mid_stream_queue),
-                            )
-                            self._cancel_model_and_compaction()
-                            # The user took the turn over: what a failure waited
-                            # for no longer calls the model.
-                            self._end_suspension()
-                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
-                            # Tools keep running. What the user typed during the
-                            # stream is what the runtime would wait for.
-                            if not self._drain_mid_stream_queue():
-                                self.inbox.push_front(
-                                    Await.user(),
-                                    *items[item_idx + 1 :],
-                                )
-                                awaiting_user = True
+                            if self._on_halt(item, later=items[item_idx + 1 :]):
                                 break
 
                         case Clear():
-                            self._cancel_model_and_compaction()
-                            self._stop_all_tools(mode="detach")
-                            # With no call registered, a late result matches
-                            # nothing and is dropped.
-                            self._cancel_detached()
-                            self._pending_commits.clear()
-                            self._forwarded_call_ids.clear()
-                            queued.clear()
-                            deferred.clear()
-                            self._mid_stream_queue.clear()
-                            self._refusals.clear()
-                            # A new conversation does not inherit the old
-                            # one's failure, or its wait for a rate limit.
-                            self._end_suspension()
-                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
-                            self.append_clear()
-                            self.inbox.push_front(
-                                Await.user(),
-                                # A tool that finished as the user cleared
-                                # posted its result behind the ``Clear``, or
-                                # waits behind a Halt; delivering it would
-                                # carry the wiped session's work into the
-                                # fresh one.
-                                *(
-                                    i
-                                    for i in (
-                                        *items[item_idx + 1 :],
-                                        *self.inbox.drain_nowait(),
-                                    )
-                                    if not isinstance(i, DetachedResult)
-                                ),
-                            )
-                            # After the gate: input an observer pushes in reply
-                            # must count as new, or it never releases the gate.
-                            self.publish(ClearComplete())
-                            awaiting_user = True
+                            self._on_clear(items[item_idx + 1 :])
                             break
 
-                        case ModelResponseError(exception=exc):
-                            wake = (
-                                await self._after_failure(exc)
-                                if self._called_model is self.model
-                                else None
-                            )
-                            # A failure of a model switched away from says nothing
-                            # of the one in use: the gate asks it, at once.
-                            if self._called_model is not self.model:
-                                self.model_call = None
-                                _ = self._drain_mid_stream_queue()
-                                continue
-                            # A request too long for the window is compaction's job: compact,
-                            # and let the gate call again, under the same breaker.
-                            if (
-                                isinstance(exc, ContextOverflowError)
-                                and self.compactor is not None
-                                and self._auto_compactions < 2
+                        case ModelResponseError():
+                            if await self._on_model_response_error(
+                                item,
+                                later=items[item_idx + 1 :],
                             ):
-                                logger.warning(
-                                    "model context overflowed; compacting: %s",
-                                    exc,
-                                )
-                                self.model_call = None
-                                self._auto_compactions += 1
-                                self.inbox.push_front(
-                                    Compact(trigger="auto"),
-                                    *items[item_idx + 1 :],
-                                )
-                                break
-                            # A long rate limit or outage, for an agent that waits them
-                            # out: hold the model call until the advised time, backing
-                            # off to 5 minutes, then call again; 60 in a row end the turn.
-                            if (
-                                isinstance(exc, RetryableError)
-                                and self.persistent_retry
-                                and self._retries < 60
-                            ):
-                                self.model_call = None
-                                delay = (
-                                    max(
-                                        exc.retry_after_sec,
-                                        min(5.0 * (1 << self._retries), 300.0),
-                                    )
-                                    if wake is None
-                                    else max(wake - time.time(), 0.0)
-                                )
-                                self._retries += 1
-                                self.service_suspended_until = time.time() + delay
-                                self.publish(
-                                    ModelCallSuspended(
-                                        exception=exc,
-                                        until=self.service_suspended_until,
-                                        attempt=self._retries,
-                                    ),
-                                )
-                                # Input typed during the failed stream is part
-                                # of what the retry asks.
-                                _ = self._drain_mid_stream_queue()
-                                # Any input wakes the loop; ``SaveSession`` changes nothing else.
-                                self._retry_timer = (
-                                    asyncio.get_running_loop().call_later(
-                                        delay,
-                                        self.inbox.push_back,
-                                        SaveSession(),
-                                    )
-                                )
-                                continue
-                            logger.debug(
-                                "runtime model response error: error=%s "
-                                "model_call=%s compact_task=%s running_tools=%d "
-                                "cohort=%d detached=%d",
-                                type(exc).__name__,
-                                self.model_call is not None,
-                                self.compact_task is not None,
-                                len(self.running_tools),
-                                len(self.cohort),
-                                len(self.detached),
-                            )
-                            self.model_call = None
-                            self._end_suspension()
-                            # The error is shown, never put in the context.
-                            committed = self._drain_mid_stream_queue()
-                            self.publish(item)
-                            if not committed:
-                                self._failed = True
-                                self.inbox.push_front(
-                                    Await.failure(),
-                                    *items[item_idx + 1 :],
-                                )
-                                awaiting_user = True
                                 break
 
                         # Released from a failure's wait, or ending a suspension's:
@@ -1524,103 +1337,19 @@ class Runtime:
                             self.recheck_quota = True
                             self._end_suspension()
                             self._failed = False  # pragma: no mutate -- read for truth; None is as false.
-                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
-                        case Kill(call_id=cid):
-                            if cid is None:
-                                logger.debug(
-                                    "runtime kill all tools: running_tools=%d "
-                                    "cohort=%d detached=%d",
-                                    len(self.running_tools),
-                                    len(self.cohort),
-                                    len(self.detached),
-                                )
-                                self._stop_all_tools(mode="kill")
-                                self._cancel_detached()
-                            elif cid in self.running_tools:
-                                logger.debug("runtime kill tool: call_id=%s", cid)
-                                self._stop_tool(
-                                    cid,
-                                    self.running_tools.pop(cid),
-                                    mode="kill",
-                                )
-                                self.cohort.discard(cid)
-                            else:
-                                # Its own late result then matches nothing; the
-                                # model is told it was cancelled instead.
-                                task = self.detached.pop(cid, None)
-                                if task is not None:
-                                    logger.debug(
-                                        "runtime kill detached tool: call_id=%s",
-                                        cid,
-                                    )
-                                    self._kill_detached(cid, task)
-                                else:
-                                    logger.debug(
-                                        "runtime kill missed tool: call_id=%s",
-                                        cid,
-                                    )
+                        case Kill():
+                            self._on_kill(item)
 
                         # The group goes as one, whichever of its calls is named.
                         case Detach(call_id=cid) if cid in self._groups and any(
                             c.call_id in self.cohort for c in self._groups[cid]
                         ):
-                            for member in self._groups[cid]:
-                                mid = member.call_id
-                                if mid not in self.cohort:
-                                    continue
-                                logger.debug(
-                                    "runtime tool detached after %ss: call_id=%s",
-                                    self.detach_after_sec,
-                                    mid,
-                                )
-                                self._stop_tool(
-                                    mid,
-                                    self.running_tools.pop(mid),
-                                    mode="detach",
-                                )
-                                self.cohort.discard(mid)
-                            if not self.cohort:
-                                self._cohort_seen = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._on_detach(item)
 
-                        case Compact(args=args, trigger=trigger):
-                            if self.compact_task and not self.compact_task.done():
-                                logger.debug(
-                                    "runtime compact ignored while compact_task active",
-                                )
-                                continue
-                            self._compaction = trigger
-                            logger.debug(
-                                "runtime compact start: model_call=%s "
-                                "running_tools=%d cohort=%d detached=%d args=%r",
-                                self.model_call is not None,
-                                len(self.running_tools),
-                                len(self.cohort),
-                                len(self.detached),
-                                args,
-                            )
-                            self._cancel_model()
-                            self._stop_all_tools(mode="detach")
-                            # A compaction calls the model too: not on a spent login.
-                            await self._before_call(turn_start=False)
-                            # What the user typed goes into what is compacted;
-                            # only ``Clear`` discards it.
-                            for staged in queued:
-                                self._commit_user(_message_from_queued(staged))
-                            queued.clear()
-                            _ = self._drain_mid_stream_queue()
-                            self.compact_task = asyncio.create_task(
-                                self._compact_and_post(args),
-                            )
-                            self.compact_task.add_done_callback(
-                                log_task_exception(
-                                    logger,
-                                    "compaction task crashed",
-                                ),
-                            )
-                            started = CompactStarted()
-                            self.append_history(started)
-                            self.publish(started)
+                        case Compact():
+                            await self._on_compact(item)
 
                         case CompactComplete():
                             self.compact_task = None
@@ -1645,7 +1374,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case AgentToAgentMessage():
                             if self.model_call is not None:
@@ -1654,7 +1383,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         # A nudge to a busy agent is moot: it is nudged again
                         # at its next idle if it still owes.
@@ -1663,7 +1392,7 @@ class Runtime:
                                 self.append_history(
                                     SystemMessage(content=content, subtype="nudge"),
                                 )
-                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         # Input that ends the wait for the user is the user
                         # resuming; held for idle, the halted turn would be
@@ -1673,15 +1402,15 @@ class Runtime:
                             | AgentSendQueuedMessage()
                             | UserDeferredMessage()
                             | AgentSendDeferredMessage()
-                        ) if awaiting_user:
+                        ) if self._awaiting_user:
                             self._commit_user(_message_from_queued(item))
-                            awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
 
                         case UserQueuedMessage() | AgentSendQueuedMessage():
-                            queued.append(item)
+                            self._queued.append(item)
 
                         case UserDeferredMessage() | AgentSendDeferredMessage():
-                            deferred.append(item)
+                            self._deferred.append(item)
 
                         case ModelResponsePartial():
                             self.publish(item)
@@ -1689,46 +1418,8 @@ class Runtime:
                         case ModelResponseThinking():
                             self.publish(item)
 
-                        case ModelResponseComplete(
-                            response=msg,
-                            generation=generation,
-                        ):
-                            if generation not in (-1, self._model_call_generation):
-                                logger.debug(
-                                    "runtime stale model response ignored: "
-                                    "generation=%d current=%d",
-                                    generation,
-                                    self._model_call_generation,
-                                )
-                                continue
-                            self._auto_compactions = 0
-                            self._retries = 0
-                            self.model_call = None
-                            msg = self._rewrite_calls(
-                                self._sanitize_forged_arrivals(msg),
-                            )
-                            self._gate_calls(msg)
-                            cut_in = (
-                                self.before_tool_spawn(msg)
-                                if self.before_tool_spawn is not None
-                                else None
-                            )
-                            self.append_history(msg)
-                            # Observers see the turn as recorded, rewrites included.
-                            self.publish(dataclasses.replace(item, response=msg))
-                            if cut_in is not None:
-                                self._mid_stream_queue.append(cut_in)
-                            if calls(msg.records):
-                                # What the user sent as the reply streamed is answered
-                                # next; the reply's calls run on, detached, and no
-                                # wait on them begins.
-                                cut = bool(self._mid_stream_queue)
-                                self._start_calls(calls(msg.records), waited=not cut)
-                                if cut:
-                                    self._stop_all_tools(mode="detach")
-                                    _ = self._drain_mid_stream_queue()
-                            elif not self._drain_mid_stream_queue():
-                                self.publish(ModelIdle())
+                        case ModelResponseComplete():
+                            self._on_model_response_complete(item)
 
                         case ModelResponseCancelled():
                             self.model_call = None
@@ -1786,123 +1477,419 @@ class Runtime:
 
             # A failure here leaves the batch taken; the next pass goes on.
             try:
-                if self._scheduled and self._engine_quiescent:
-                    scheduled = self._scheduled
-                    self._scheduled = []
-                    for work in scheduled:
-                        await self._run_scheduled(work)
-
-                if not self.cohort and self._cohort_seen:
-                    logger.debug(
-                        "runtime cohort complete: running_tools=%d detached=%d",
-                        len(self.running_tools),
-                        len(self.detached),
-                    )
-                    self.publish(CohortComplete())
-                    self._cohort_seen = False  # pragma: no mutate -- None is as false.
-
-                # What the user sent as the reply streamed, if no ending of the reply
-                # took it in already.
-                if (
-                    self._mid_stream_queue
-                    and self.model_call is None
-                    and not self.cohort
-                ):
-                    _ = self._drain_mid_stream_queue()
-
-                # Staged input waits until the model is done, not merely between
-                # rounds: a tool result still to answer means it is not.
-                if (
-                    self._engine_quiescent
-                    and not self._should_call_model()
-                    and (queued or deferred)
-                ):
-                    # Queued first; deferred waits for the idle after it.
-                    staged = queued or deferred
-                    for waiting in staged:
-                        self._commit_user(_message_from_queued(waiting))
-                    staged.clear()
-
-                # A delivery drives its own round; the rest ride one that content
-                # drives.
-                if (
-                    self._pending_commits
-                    and self._ready_to_advance
-                    and (self._should_call_model() or self._has_waking_commit())
-                ):
-                    self._flush_pending()
-
-                # Prune first: a drop that brings the context back under the
-                # compaction trigger spares the compaction.
-                if (
-                    self.prune is not None
-                    and self._ready_to_advance
-                    and self._should_call_model()
-                ):
-                    _ = self.prune()
-                # Compact first when the compactor says the next request would not fit.
-                # Twice with no model call between means compacting does not help, so
-                # the call goes ahead and the provider's error says why.
-                compact_first = (
-                    self._ready_to_advance
-                    and self._should_call_model()
-                    and self.compactor is not None
-                    and self.compact_due is not None
-                    and self._auto_compactions < 2
-                    and self.compact_due()
-                )
-                if compact_first:
-                    self._auto_compactions += 1
-                    self.inbox.push_back(Compact(trigger="auto"))
-                elif (
-                    self._ready_to_advance
-                    and self._should_call_model()
-                    and (
-                        self.service_suspended_until is None
-                        or time.time() >= self.service_suspended_until
-                    )
-                ):
-                    if self.context_updates is not None:
-                        for note in self.context_updates():
-                            self.append_history(note)
-                    logger.debug(
-                        "runtime model call start: history=%d detached=%d queued=%d",
-                        len(self.context().messages),
-                        len(self.detached),
-                        len(queued),
-                    )
-                    exc = self._context_validation_error()
-                    if exc is not None:
-                        # Raised, it would repeat every pass on the same tape;
-                        # the user is told, and the runtime waits for them.
-                        log_exception_or_warning(
-                            logger,
-                            "model-call gate context unrepairable",
-                            exc,
-                        )
-                        # The gate first, as for ``Clear``.
-                        self.inbox.push_front(Await.recovery())
-                        self.publish(ModelResponseError(exception=exc))
-                        awaiting_user = True
-                    else:
-                        # Whatever released a failure's wait, or ended a
-                        # suspension's, the turn goes on, on the model asked now.
-                        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
-                        self.service_suspended_until = None
-                        await self._before_call(turn_start=self._steps == 0)
-                        self._called_model = self.model
-                        model_call: asyncio.Task[None] = asyncio.create_task(
-                            self._stream_and_post(self._next_generation()),
-                        )
-                        self.model_call = model_call
-                        model_call.add_done_callback(
-                            log_task_exception(logger, "model-call task crashed"),
-                        )
-                        self.publish(ModelCallStarted())
-
-                self.publish(SaveSession())
+                await self._advance()
             except Exception as exc:  # noqa: BLE001 -- The loop must outlive one pass's failure.
                 log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
+
+    async def _on_quit(self, later: Sequence[RuntimeEvent]) -> None:
+        """Cancel everything in flight; wait for the cancelled tools to stop."""
+        logger.debug(
+            "runtime quit: model_call=%s compact_task=%s "
+            "running_tools=%d cohort=%d detached=%d",
+            self.model_call is not None,
+            self.compact_task is not None,
+            len(self.running_tools),
+            len(self.cohort),
+            len(self.detached),
+        )
+        if self.model_call:
+            self.model_call.cancel()
+        if self.compact_task:
+            self.compact_task.cancel()
+        stopped = [
+            *self.running_tools.values(),
+            *self.detached.values(),
+            *self._stopping,
+        ]
+        for t in self.running_tools.values():
+            t.cancel()
+        # Background work too, or it runs on after shutdown.
+        self._cancel_detached()
+        # Work no loop will reach: its callers stop waiting.
+        for event in (*self._scheduled, *later, *self.inbox.drain_nowait()):
+            if isinstance(event, Scheduled):
+                _ = event.done.cancel()
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+        # A cancelled tool takes a moment to stop, as a shell does. The loop ends
+        # when they have all stopped, or after ``_QUIT_WAIT_SEC``: a tool that
+        # ignores its cancel must not keep the process from exiting.
+        if stopped:
+            _, still_running = await asyncio.wait(stopped, timeout=_QUIT_WAIT_SEC)
+            if still_running:
+                logger.warning(
+                    "runtime quit: %d tool(s) did not stop",
+                    len(still_running),
+                )
+
+    def _on_halt(self, item: Halt, *, later: Sequence[RuntimeEvent]) -> bool:
+        """Cancel the model call and any compaction; return whether ``later`` now waits for the user."""
+        self.publish(item)
+        logger.debug(
+            "runtime halt: model_call=%s compact_task=%s "
+            "running_tools=%d cohort=%d detached=%d "
+            "mid_stream=%d",
+            self.model_call is not None,
+            self.compact_task is not None,
+            len(self.running_tools),
+            len(self.cohort),
+            len(self.detached),
+            len(self._mid_stream_queue),
+        )
+        self._cancel_model_and_compaction()
+        # The user took the turn over: what a failure waited for no longer calls
+        # the model.
+        self._end_suspension()
+        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+        # Tools keep running. What the user typed during the stream is what the
+        # runtime would wait for.
+        if self._drain_mid_stream_queue():
+            return False
+        self.inbox.push_front(Await.user(), *later)
+        self._awaiting_user = True
+        return True
+
+    def _on_clear(self, later: Sequence[RuntimeEvent]) -> None:
+        """Stop everything, hide the tape, and wait for the user."""
+        self._cancel_model_and_compaction()
+        self._stop_all_tools(mode="detach")
+        # With no call registered, a late result matches nothing and is dropped.
+        self._cancel_detached()
+        self._pending_commits.clear()
+        self._forwarded_call_ids.clear()
+        self._queued.clear()
+        self._deferred.clear()
+        self._mid_stream_queue.clear()
+        self._refusals.clear()
+        # A new conversation does not inherit the old one's failure, or its wait
+        # for a rate limit.
+        self._end_suspension()
+        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+        self.append_clear()
+        self.inbox.push_front(
+            Await.user(),
+            # A tool that finished as the user cleared posted its result behind
+            # the ``Clear``, or waits behind a Halt; delivering it would carry the
+            # wiped session's work into the fresh one.
+            *(
+                i
+                for i in (*later, *self.inbox.drain_nowait())
+                if not isinstance(i, DetachedResult)
+            ),
+        )
+        # After the gate: input an observer pushes in reply must count as new, or
+        # it never releases the gate.
+        self.publish(ClearComplete())
+        self._awaiting_user = True
+
+    async def _on_model_response_error(
+        self,
+        item: ModelResponseError,
+        *,
+        later: Sequence[RuntimeEvent],
+    ) -> bool:
+        """Compact, suspend, end the turn, or drop the failure; return whether ``later`` was put back."""
+        exc = item.exception
+        wake = (
+            await self._after_failure(exc) if self._called_model is self.model else None
+        )
+        # A failure of a model switched away from says nothing of the one in use:
+        # the gate asks it, at once.
+        if self._called_model is not self.model:
+            self.model_call = None
+            _ = self._drain_mid_stream_queue()
+            return False
+        # A request too long for the window is compaction's job: compact,
+        # and let the gate call again, under the same breaker.
+        if (
+            isinstance(exc, ContextOverflowError)
+            and self.compactor is not None
+            and self._auto_compactions < 2
+        ):
+            logger.warning("model context overflowed; compacting: %s", exc)
+            self.model_call = None
+            self._auto_compactions += 1
+            self.inbox.push_front(Compact(trigger="auto"), *later)
+            return True
+        # A long rate limit or outage, for an agent that waits them out: hold the
+        # model call until the advised time, backing off to 5 minutes, then call
+        # again; 60 in a row end the turn.
+        if (
+            isinstance(exc, RetryableError)
+            and self.persistent_retry
+            and self._retries < 60
+        ):
+            self.model_call = None
+            delay = (
+                max(exc.retry_after_sec, min(5.0 * (1 << self._retries), 300.0))
+                if wake is None
+                else max(wake - time.time(), 0.0)
+            )
+            self._retries += 1
+            self.service_suspended_until = time.time() + delay
+            self.publish(
+                ModelCallSuspended(
+                    exception=exc,
+                    until=self.service_suspended_until,
+                    attempt=self._retries,
+                ),
+            )
+            # Input typed during the failed stream is part of what the retry asks.
+            _ = self._drain_mid_stream_queue()
+            # Any input wakes the loop; ``SaveSession`` changes nothing else.
+            self._retry_timer = asyncio.get_running_loop().call_later(
+                delay,
+                self.inbox.push_back,
+                SaveSession(),
+            )
+            return False
+        logger.debug(
+            "runtime model response error: error=%s "
+            "model_call=%s compact_task=%s running_tools=%d "
+            "cohort=%d detached=%d",
+            type(exc).__name__,
+            self.model_call is not None,
+            self.compact_task is not None,
+            len(self.running_tools),
+            len(self.cohort),
+            len(self.detached),
+        )
+        self.model_call = None
+        self._end_suspension()
+        # The error is shown, never put in the context.
+        committed = self._drain_mid_stream_queue()
+        self.publish(item)
+        if not committed:
+            self._failed = True
+            self.inbox.push_front(Await.failure(), *later)
+            self._awaiting_user = True
+            return True
+        return False
+
+    def _on_kill(self, item: Kill) -> None:
+        """Cancel the call ``item`` names, or every call."""
+        cid = item.call_id
+        if cid is None:
+            logger.debug(
+                "runtime kill all tools: running_tools=%d cohort=%d detached=%d",
+                len(self.running_tools),
+                len(self.cohort),
+                len(self.detached),
+            )
+            self._stop_all_tools(mode="kill")
+            self._cancel_detached()
+        elif cid in self.running_tools:
+            logger.debug("runtime kill tool: call_id=%s", cid)
+            self._stop_tool(cid, self.running_tools.pop(cid), mode="kill")
+            self.cohort.discard(cid)
+        else:
+            # Its own late result then matches nothing; the model is told it was
+            # cancelled instead.
+            task = self.detached.pop(cid, None)
+            if task is not None:
+                logger.debug("runtime kill detached tool: call_id=%s", cid)
+                self._kill_detached(cid, task)
+            else:
+                logger.debug("runtime kill missed tool: call_id=%s", cid)
+
+    def _on_detach(self, item: Detach) -> None:
+        """Answer each waited-on call of the group with a stub, and let it run on."""
+        for member in self._groups[item.call_id]:
+            mid = member.call_id
+            if mid not in self.cohort:
+                continue
+            logger.debug(
+                "runtime tool detached after %ss: call_id=%s",
+                self.detach_after_sec,
+                mid,
+            )
+            self._stop_tool(mid, self.running_tools.pop(mid), mode="detach")
+            self.cohort.discard(mid)
+        if not self.cohort:
+            self._cohort_seen = False  # pragma: no mutate -- None is as false.
+
+    async def _on_compact(self, item: Compact) -> None:
+        """Start a compaction, unless one runs; what the user typed goes into it."""
+        if self.compact_task and not self.compact_task.done():
+            logger.debug("runtime compact ignored while compact_task active")
+            return
+        self._compaction = item.trigger
+        logger.debug(
+            "runtime compact start: model_call=%s "
+            "running_tools=%d cohort=%d detached=%d args=%r",
+            self.model_call is not None,
+            len(self.running_tools),
+            len(self.cohort),
+            len(self.detached),
+            item.args,
+        )
+        self._cancel_model()
+        self._stop_all_tools(mode="detach")
+        # A compaction calls the model too: not on a spent login.
+        await self._before_call(turn_start=False)
+        # What the user typed goes into what is compacted; only ``Clear`` discards it.
+        for staged in self._queued:
+            self._commit_user(_message_from_queued(staged))
+        self._queued.clear()
+        _ = self._drain_mid_stream_queue()
+        self.compact_task = asyncio.create_task(self._compact_and_post(item.args))
+        self.compact_task.add_done_callback(
+            log_task_exception(logger, "compaction task crashed"),
+        )
+        started = CompactStarted()
+        self.append_history(started)
+        self.publish(started)
+
+    def _on_model_response_complete(self, item: ModelResponseComplete) -> None:
+        """Record the reply and start its calls, unless a newer call replaced its own."""
+        if item.generation not in (-1, self._model_call_generation):
+            logger.debug(
+                "runtime stale model response ignored: generation=%d current=%d",
+                item.generation,
+                self._model_call_generation,
+            )
+            return
+        self._auto_compactions = 0
+        self._retries = 0
+        self.model_call = None
+        msg = self._rewrite_calls(self._sanitize_forged_arrivals(item.response))
+        self._gate_calls(msg)
+        cut_in = (
+            self.before_tool_spawn(msg) if self.before_tool_spawn is not None else None
+        )
+        self.append_history(msg)
+        # Observers see the turn as recorded, rewrites included.
+        self.publish(dataclasses.replace(item, response=msg))
+        if cut_in is not None:
+            self._mid_stream_queue.append(cut_in)
+        if calls(msg.records):
+            # What the user sent as the reply streamed is answered next; the reply's
+            # calls run on, detached, and no wait on them begins.
+            cut = bool(self._mid_stream_queue)
+            self._start_calls(calls(msg.records), waited=not cut)
+            if cut:
+                self._stop_all_tools(mode="detach")
+                _ = self._drain_mid_stream_queue()
+        elif not self._drain_mid_stream_queue():
+            self.publish(ModelIdle())
+
+    async def _advance(self) -> None:
+        """Run what a batch leaves due: scheduled work, staged input, a model call."""
+        if self._scheduled and self._engine_quiescent:
+            scheduled = self._scheduled
+            self._scheduled = []
+            for work in scheduled:
+                await self._run_scheduled(work)
+
+        if not self.cohort and self._cohort_seen:
+            logger.debug(
+                "runtime cohort complete: running_tools=%d detached=%d",
+                len(self.running_tools),
+                len(self.detached),
+            )
+            self.publish(CohortComplete())
+            self._cohort_seen = False  # pragma: no mutate -- None is as false.
+
+        # What the user sent as the reply streamed, if no ending of the reply
+        # took it in already.
+        if self._mid_stream_queue and self.model_call is None and not self.cohort:
+            _ = self._drain_mid_stream_queue()
+
+        # Staged input waits until the model is done, not merely between
+        # rounds: a tool result still to answer means it is not.
+        if (
+            self._engine_quiescent
+            and not self._should_call_model()
+            and (self._queued or self._deferred)
+        ):
+            # Queued first; deferred waits for the idle after it.
+            staged = self._queued or self._deferred
+            for waiting in staged:
+                self._commit_user(_message_from_queued(waiting))
+            staged.clear()
+
+        # A delivery drives its own round; the rest ride one that content
+        # drives.
+        if (
+            self._pending_commits
+            and self._ready_to_advance
+            and (self._should_call_model() or self._has_waking_commit())
+        ):
+            self._flush_pending()
+
+        # Prune first: a drop that brings the context back under the
+        # compaction trigger spares the compaction.
+        if (
+            self.prune is not None
+            and self._ready_to_advance
+            and self._should_call_model()
+        ):
+            _ = self.prune()
+        # Compact first when the compactor says the next request would not fit.
+        # Twice with no model call between means compacting does not help, so
+        # the call goes ahead and the provider's error says why.
+        compact_first = (
+            self._ready_to_advance
+            and self._should_call_model()
+            and self.compactor is not None
+            and self.compact_due is not None
+            and self._auto_compactions < 2
+            and self.compact_due()
+        )
+        if compact_first:
+            self._auto_compactions += 1
+            self.inbox.push_back(Compact(trigger="auto"))
+        elif (
+            self._ready_to_advance
+            and self._should_call_model()
+            and (
+                self.service_suspended_until is None
+                or time.time() >= self.service_suspended_until
+            )
+        ):
+            await self._call_model()
+
+        self.publish(SaveSession())
+
+    async def _call_model(self) -> None:
+        """Start a model call; a context past repair waits for the user instead."""
+        if self.context_updates is not None:
+            for note in self.context_updates():
+                self.append_history(note)
+        logger.debug(
+            "runtime model call start: history=%d detached=%d queued=%d",
+            len(self.context().messages),
+            len(self.detached),
+            len(self._queued),
+        )
+        exc = self._context_validation_error()
+        if exc is not None:
+            # Raised, it would repeat every pass on the same tape; the user is told,
+            # and the runtime waits for them.
+            log_exception_or_warning(
+                logger,
+                "model-call gate context unrepairable",
+                exc,
+            )
+            # The gate first, as for ``Clear``.
+            self.inbox.push_front(Await.recovery())
+            self.publish(ModelResponseError(exception=exc))
+            self._awaiting_user = True
+        else:
+            # Whatever released a failure's wait, or ended a suspension's, the turn
+            # goes on, on the model asked now.
+            self._failed = False  # pragma: no mutate -- None is as false.
+            self.service_suspended_until = None
+            await self._before_call(turn_start=self._steps == 0)
+            self._called_model = self.model
+            model_call: asyncio.Task[None] = asyncio.create_task(
+                self._stream_and_post(self._next_generation()),
+            )
+            self.model_call = model_call
+            model_call.add_done_callback(
+                log_task_exception(logger, "model-call task crashed"),
+            )
+            self.publish(ModelCallStarted())
 
     # The hooks are advisory: one that raises is logged, and the runtime goes on
     # as without it, or the turn would hang with no call in flight to end it.
@@ -2660,13 +2647,14 @@ class Runtime:
                 stderr=(describe(exc),),
             )
         if result.state == "failed":
-            # The last item of ``stderr`` is ``describe(error)``. Only its type
-            # is logged: the message may hold the tool's output.
+            # A failure made here ends ``stderr`` with ``describe(error)``; a record
+            # made elsewhere may hold none. Only the error's type is logged: the
+            # message may hold the tool's output.
             logger.debug(
                 "runtime tool failed: call_id=%s tool=%s error=%s",
                 call.call_id,
                 call.name,
-                str(result.stderr[-1]).partition(":")[0],
+                str(result.stderr[-1]).partition(":")[0] if result.stderr else "",
             )
         if result.state == "cancelled":
             logger.debug(
