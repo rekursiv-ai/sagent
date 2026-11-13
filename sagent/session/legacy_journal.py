@@ -4,7 +4,8 @@ The experimental sagent wrote ``session.jsonl`` as a tape: ``kind: history``
 records, and ``context_splice`` records that hide some of them and show a
 payload in their place; before splices, ``context_override``, ``context_clear``
 and ``update`` records did the same. Before the tape, v3 wrote ``kind:
-message`` records of nested ``descriptor`` parts.
+message`` records of nested ``descriptor`` parts, and before v3, ``kind:
+message`` records tagged by ``role``.
 
 :func:`convert` plays a log back to what its model last saw, as that sagent
 did, and returns it as one window: a ``ContextClear``, then each record. Its
@@ -23,8 +24,9 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Literal
 
 import base64
@@ -60,10 +62,14 @@ from sagent.runtime.tape import (
 from sagent.session.jsonl import record_line
 from sagent.session.projects import is_session, legacy_log
 from sagent.session.types import (
+    AgentSpawnResult,
     AgentToAgentMessage,
     AssistantMessage,
     Attachment,
+    BashResult,
     ContextClear,
+    EditResult,
+    ReadResult,
     SessionRecord,
     SystemMessage,
     Thinking,
@@ -71,6 +77,8 @@ from sagent.session.types import (
     ToolResult,
     UncategorizedToolResult,
     UserMessage,
+    WebFetchResult,
+    WriteResult,
 )
 
 
@@ -134,9 +142,9 @@ def convert(path: Path) -> tuple[SessionRecord, ...]:
         if kind == "meta" or (kind is None and "session_id" in record):
             meta = record
         elif kind == "message":
-            v4 = _from_v3(record)
-            if v4 is not None:
-                tape.append(v4)
+            entry = _history(record)
+            if entry is not None:
+                tape.append(entry)
         elif kind in (
             "history",
             "context_splice",
@@ -144,6 +152,7 @@ def convert(path: Path) -> tuple[SessionRecord, ...]:
             "context_clear",
             "clear",
             "update",
+            "persistent_agent",
         ):
             tape.append(record)
     tape_records = _tape(tape, _str(meta.get("session_id")))
@@ -229,6 +238,7 @@ def _records(path: Path) -> Iterator[_Record]:
 # duplicated ref moved past every other, and ordinal order.
 def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
     """Return the old records as today's tape."""
+    entries = _Entries()
     tape: list[TapeRecord] = []
     # Never keyed by ``None``, which an update with no id looks up and misses.
     ids: dict[int | None, int] = {}
@@ -238,16 +248,19 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
         ref = _ref(record.get("ref")) or TapeRef(session_id=session_id, ordinal=cursor)
         built: TapeRecord | None = None
         if kind == "history":
-            event = _event(record)
+            event = entries.read(record)
             if event is not None:
                 built = ReferrableTapeEvent(ref=ref, event=event)
                 n = _int(record.get("id"))
                 if isinstance(event, ToolResult) and n is not None:
                     ids[n] = len(tape)
+        elif kind == "persistent_agent":
+            directory = PurePath(_str(record.get("session_dir")))
+            entries.children[_str(record.get("label"))] = directory.name
         elif kind in ("clear", "context_clear"):
             built = _splice(ref=ref, mask=full_tape_mask(tape), strategy="clear")
         elif kind == "update":
-            _patch(tape, ids.get(_int(record.get("id"))), record)
+            _patch(entries, tape, ids.get(_int(record.get("id"))), record)
         else:
             built = _splice(
                 ref=ref,
@@ -261,14 +274,28 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
                         else "insert_after",
                     ),
                 ),
-                payload=_payload(record.get("payload")),
-                paired=frozenset(_strs(record.get("paired_externally"))),
+                payload=_payload(entries, record.get("payload")),
+                paired=frozenset(
+                    s
+                    for s in _list(record.get("paired_externally"))
+                    if isinstance(s, str)
+                ),
                 strategy=_str(record.get("strategy")),
             )
         if built is not None:
             tape.append(built)
             cursor = max(cursor, built.ref.ordinal + 1)
     return sorted(_unique(tape), key=lambda r: r.ref.ordinal)
+
+
+def _payload(entries: _Entries, raw: PlainTree) -> tuple[ModelContextEvent, ...]:
+    """Return a splice payload's entries."""
+    events: list[ModelContextEvent] = []
+    for item in _list(raw):
+        event = entries.read(_object(item))
+        if event is not None:
+            events.append(event)
+    return tuple(events)
 
 
 def _splice(
@@ -309,13 +336,14 @@ def _splice(
 # where it moved, and one written before it never meant to.
 def _unique(tape: list[TapeRecord]) -> list[TapeRecord]:
     """Return ``tape`` with each ref held once."""
+    if not tape:
+        return []
     masked = masked_refs_by_alive(tape, alive_splices(tape))
     after = max(
         (
             *(r.ref.ordinal for r in tape),
             *(m.hi for r in tape if isinstance(r, ContextSplice) for m in r.mask),
         ),
-        default=-1,
     )
     seen: set[TapeRef] = set()
     moved: list[tuple[TapeRef, TapeRef]] = []
@@ -350,7 +378,12 @@ def _carried(
     return replace(record, mask=merge_mask_ranges(record.mask + extra))
 
 
-def _patch(tape: list[TapeRecord], at: int | None, record: _Record) -> None:
+def _patch(
+    entries: _Entries,
+    tape: list[TapeRecord],
+    at: int | None,
+    record: _Record,
+) -> None:
     """Rewrite the result at ``at`` as an ``update`` record says."""
     if at is None:
         return
@@ -358,18 +391,14 @@ def _patch(tape: list[TapeRecord], at: int | None, record: _Record) -> None:
     assert isinstance(held, ReferrableTapeEvent)
     result = held.event
     assert isinstance(result, ToolResult)
-    content = _str(record.get("content"))
-    stub = _stub(None, content)
     tape[at] = replace(
         held,
-        event=ToolResult(
+        event=entries.result(
+            result.call_id,
+            _str(record.get("content")),
+            failed=_bool(record.get("is_error")),
             timestamp=result.timestamp,
-            call_id=result.call_id,
-            state=stub or "done",
-            stdout=(*((content,) if content else ()), *result.attachments),
-            result=None
-            if stub
-            else UncategorizedToolResult(exit_code=int(_bool(record.get("is_error")))),
+            attachments=result.attachments,
         ),
     )
 
@@ -422,76 +451,211 @@ def _mask(record: _Record, ref: TapeRef) -> tuple[MaskRange, ...]:
     return (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
 
 
-def _payload(raw: PlainTree) -> tuple[ModelContextEvent, ...]:
-    """Return a splice payload's entries."""
-    return tuple(
-        event for item in _list(raw) if (event := _event(_object(item))) is not None
+# ``spend`` is the agent's and its children's, as an agent's spend counts today;
+# ``own_spend``, its own alone, stands in for a log that kept nothing else.
+def _spent(meta: _Record) -> float:
+    """Return what the log says its agent and its children spent, in USD."""
+    for key in ("spend", "own_spend"):
+        buckets = _object(meta.get(key))
+        if buckets:
+            return sum(
+                v
+                for v in buckets.values()
+                if isinstance(v, int | float) and not isinstance(v, bool)
+            )
+    cost = meta.get("total_cost_usd")
+    return (
+        float(cost)
+        if isinstance(cost, int | float) and not isinstance(cost, bool)
+        else 0.0
     )
 
 
-def _event(record: _Record) -> ModelContextEvent | None:
-    """Return the old history entry as today's; ``None`` for one the model never saw."""
-    kind = record.get("type")
-    text = _str(record.get("text"))
-    attachments = _attachments(record.get("attachments"))
-    timestamp = _time(record.get("timestamp"))
-    if kind == "user":
-        return UserMessage(timestamp=timestamp, content=text, attachments=attachments)
-    if kind == "agent_send":
-        return AgentToAgentMessage(
-            timestamp=timestamp,
-            content=text,
-            attachments=attachments,
-            sender=_str(record.get("source")) or None,
-        )
-    if kind == "system_message":
-        return SystemMessage(timestamp=timestamp, content=text)
-    if kind == "assistant":
-        return _turn(record, text=text, timestamp=timestamp)
-    if kind == "tool_result":
-        content = _str(record.get("content"))
-        stub = _stub(record.get("result_kind"), content)
-        return ToolResult(
-            timestamp=timestamp,
-            call_id=_str(record.get("call_id")),
-            state=stub or "done",
-            stdout=(*((content,) if content else ()), *attachments),
-            result=None
-            if stub
-            else UncategorizedToolResult(exit_code=int(_bool(record.get("is_error")))),
-        )
+def _history(record: _Record) -> _Record | None:
+    """Return a v3 or role ``message`` record as the history record it stood for."""
+    if "descriptor" in record:
+        return _from_v3(record)
+    if "role" in record:
+        return _from_role(record)
     return None
 
 
-# Gemini's signature rides on its part; a call with no id or name was never sent.
-def _turn(record: _Record, *, text: str, timestamp: str | None) -> Response:
-    """Return an old assistant entry as one model turn."""
-    signed = _signature(record)
-    calls = [
-        ToolCall(
+@dataclass(slots=True, kw_only=True)
+class _Entries:
+    """Read history entries in order, typing each result by the call it answers.
+
+    A result names only the id of its call, so each call read is remembered.
+    """
+
+    calls: dict[str, ToolCall] = field(default_factory=dict[str, ToolCall])
+    children: dict[str, str] = field(default_factory=dict[str, str])
+    """Each spawned child's directory name, by the label its spawn gave it."""
+
+    def read(self, entry: _Record) -> ModelContextEvent | None:
+        """Return one history entry as the tape's event.
+
+        Args:
+          entry: A ``kind: history`` record, or a splice payload's entry.
+
+        Returns:
+          event: The record it says; an assistant turn is one ``Response`` of
+            its thinking, text and calls, in that order, possibly none;
+            ``None`` for an entry no model saw.
+
+        """
+        kind = entry.get("type")
+        text = _str(entry.get("text"))
+        attachments = _attachments(entry.get("attachments"))
+        timestamp = _time(entry.get("timestamp"))
+        if kind == "user":
+            return UserMessage(
+                timestamp=timestamp,
+                content=text,
+                attachments=attachments,
+            )
+        if kind == "agent_send":
+            return AgentToAgentMessage(
+                timestamp=timestamp,
+                content=text,
+                attachments=attachments,
+                sender=_str(entry.get("source")) or None,
+            )
+        # The agent's own reminders to its model: the harness, never the user.
+        if kind == "system_message":
+            return SystemMessage(timestamp=timestamp, content=text, subtype="reminder")
+        if kind == "assistant":
+            return self._turn(entry, text=text, timestamp=timestamp)
+        if kind == "tool_result":
+            return self.result(
+                _str(entry.get("call_id")),
+                _str(entry.get("content")),
+                failed=_bool(entry.get("is_error")),
+                kind=entry.get("result_kind"),
+                timestamp=timestamp,
+                attachments=attachments,
+            )
+        return None
+
+    def result(
+        self,
+        call_id: str,
+        content: str,
+        *,
+        failed: bool,
+        kind: PlainTree = None,
+        timestamp: str | None = None,
+        attachments: tuple[Attachment, ...] = (),
+    ) -> ToolResult:
+        """Return a result as today's, typed by the call it answers.
+
+        Args:
+          call_id: The call answered.
+          content: The text the model read.
+          failed: Whether the call failed: its result is then untyped, with a
+            nonzero exit code, since a failed call did not do what it names.
+          kind: The ``result_kind`` it was written with, if any.
+          timestamp: When it was written.
+          attachments: What came with it.
+
+        Returns:
+          result: A stand-in stays what it stood for, with no result.
+
+        """
+        stub = _stub(kind, content)
+        return ToolResult(
             timestamp=timestamp,
             call_id=call_id,
-            name=name,
-            arguments=_object(call.get("args")),
-            extra=_signature(call),
+            state=stub or "done",
+            stdout=(*((content,) if content else ()), *attachments),
+            result=None if stub else self._typed(call_id, failed=failed),
+            extra={"is_error": failed},
         )
-        for call in map(_object, _list(record.get("tool_calls")))
-        if (call_id := _str(call.get("id"))) and (name := _str(call.get("name")))
-    ]
-    said = (
-        [AssistantMessage(timestamp=timestamp, content=text, extra=signed)]
-        if text
-        else []
-    )
-    thinking = [
-        t for b in _list(record.get("thinking_blocks")) if (t := _thinking(_object(b)))
-    ]
-    return Response(
-        records=(*thinking, *said, *calls),
-        tokens=TokenCount(),
-        spend=TokenCost(),
-        stop_reason="",
-    )
+
+    def _typed(
+        self,
+        call_id: str,
+        *,
+        failed: bool,
+    ) -> (
+        BashResult
+        | ReadResult
+        | WriteResult
+        | EditResult
+        | WebFetchResult
+        | AgentSpawnResult
+        | UncategorizedToolResult
+    ):
+        """Return a result's type and fields from the call it answers."""
+        call = self.calls.get(call_id)
+        if failed or call is None:
+            return UncategorizedToolResult(exit_code=int(failed))
+        name = call.name.lower()
+        args = call.arguments
+        path = _str(args.get("file_path") or args.get("path")) or None
+        if name == "bash":
+            command = _str(args.get("command"))
+            return BashResult(command=(command,) if command else None)
+        if name == "read":
+            return ReadResult(path=path)
+        if name == "write":
+            return WriteResult(path=path, content=_str(args.get("content")) or None)
+        if name == "edit":
+            return EditResult(path=path)
+        if name == "webfetch":
+            return WebFetchResult(url=_str(args.get("url")) or None)
+        if name == "agentspawn":
+            label = _str(args.get("label"))
+            return AgentSpawnResult(
+                agent_id=self.children.get(label) if label else None,
+                agent_kind=label or None,
+                prompt=_str(args.get("prompt")) or None,
+                model=_str(args.get("model_id")) or None,
+            )
+        return UncategorizedToolResult()
+
+    # Gemini's signature rides on its part; a call with no id or name was never sent.
+    def _turn(
+        self,
+        entry: _Record,
+        *,
+        text: str,
+        timestamp: str | None,
+    ) -> Response:
+        """Return an assistant entry as one model turn, remembering each call."""
+        calls = [
+            ToolCall(
+                timestamp=timestamp,
+                call_id=call_id,
+                name=name,
+                arguments=_object(call.get("args")),
+                extra=_signature(call),
+            )
+            for call in map(_object, _list(entry.get("tool_calls")))
+            if (call_id := _str(call.get("id"))) and (name := _str(call.get("name")))
+        ]
+        self.calls.update((call.call_id, call) for call in calls)
+        said = (
+            [
+                AssistantMessage(
+                    timestamp=timestamp,
+                    content=text,
+                    extra=_signature(entry),
+                ),
+            ]
+            if text
+            else []
+        )
+        thinking = [
+            t
+            for b in _list(entry.get("thinking_blocks"))
+            if (t := _thinking(_object(b), timestamp))
+        ]
+        return Response(
+            records=(*thinking, *said, *calls),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="",
+        )
 
 
 def _signature(record: _Record) -> dict[str, PlainTree]:
@@ -501,22 +665,24 @@ def _signature(record: _Record) -> dict[str, PlainTree]:
 
 
 # Anthropic seals its thinking with a signature, or redacts it whole; OpenAI seals its
-# reasoning beside its id.
-def _thinking(block: _Record) -> Thinking | None:
+# reasoning beside its id. The oldest blocks name no type, only their thinking.
+def _thinking(block: _Record, timestamp: str | None) -> Thinking | None:
     """Return a thinking block as today's ``Thinking``; ``None`` for one unknown."""
-    kind = block.get("type")
+    kind = block.get("type", "thinking" if "thinking" in block else None)
     if kind == "thinking":
         return Thinking(
-            content=_str(block.get("thinking")),
+            timestamp=timestamp,
+            content=_str(block.get("thinking")) or None,
             encrypted=_str(block.get("signature")) or None,
         )
     if kind == "redacted_thinking":
-        return Thinking(encrypted=_str(block.get("data")) or None)
+        return Thinking(timestamp=timestamp, encrypted=_str(block.get("data")) or None)
     if kind != "reasoning":
         return None
     content = "".join(_str(_object(p).get("text")) for p in _list(block.get("content")))
     summary = "".join(_str(_object(p).get("text")) for p in _list(block.get("summary")))
     return Thinking(
+        timestamp=timestamp,
         content=content or _str(block.get("text")) or None,
         summary=summary or None,
         encrypted=_str(block.get("encrypted_content")) or None,
@@ -576,54 +742,70 @@ def _time(raw: PlainTree) -> str | None:
     return None
 
 
-# ``spend`` is the agent's and its children's, as an agent's spend counts today;
-# ``own_spend``, its own alone, stands in for a log that kept nothing else.
-def _spent(meta: _Record) -> float:
-    """Return what the log says its agent and its children spent, in USD."""
-    for key in ("spend", "own_spend"):
-        buckets = _object(meta.get(key))
-        if buckets:
-            return sum(
-                v
-                for v in buckets.values()
-                if isinstance(v, int | float) and not isinstance(v, bool)
-            )
-    cost = meta.get("total_cost_usd")
-    return (
-        float(cost)
-        if isinstance(cost, int | float) and not isinstance(cost, bool)
-        else 0.0
-    )
+# The oldest family: a turn names its calls' arguments ``input`` or ``args``.
+def _from_role(record: _Record) -> _Record | None:
+    """Return a role-tagged ``message`` record as the history record it stood for."""
+    role = record.get("role")
+    text = _str(record.get("content"))
+    if role == "user":
+        return {"kind": "history", "type": "user", "text": text}
+    if role == "assistant":
+        return {
+            "kind": "history",
+            "type": "assistant",
+            "text": text,
+            "thinking_blocks": record.get("thinking_blocks"),
+            "tool_calls": [
+                {
+                    "id": call.get("id"),
+                    "name": call.get("name"),
+                    "args": call.get("input") or call.get("args"),
+                }
+                for call in map(_object, _list(record.get("tool_calls")))
+            ],
+        }
+    if role == "tool":
+        return {
+            "kind": "history",
+            "type": "tool_result",
+            "call_id": record.get("tool_call_id"),
+            "content": text,
+            "is_error": record.get("is_error"),
+        }
+    return None
 
 
 # v3 parts nest: a turn holds text, thinking, and calls, each a call's id and arguments.
 def _from_v3(record: _Record) -> _Record | None:
-    """Return a v3 ``message`` record as the tape's ``history`` record."""
+    """Return a v3 ``message`` record as the history record it stood for."""
     descriptor = record.get("descriptor")
-    parts = [_object(p) for p in _list(record.get("content"))]
+    content = record.get("content")
+    parts = [_object(p) for p in _list(content)]
     base: dict[str, PlainTree] = {
         "kind": "history",
         "timestamp": record.get("_timestamp"),
         "id": record.get("_id"),
     }
-    if descriptor == "text/x-user-message":
-        return {**base, "type": "user", "text": _str(record.get("content"))}
-    if descriptor == "multipart/x-user-message":
+    if descriptor in (
+        "text/x-user-message",
+        "multipart/x-user-message",
+        "multipart/x-user-turn",
+    ):
         return {
             **base,
             "type": "user",
-            "text": _joined(parts, "text/plain"),
+            "text": _text(content, parts),
             "attachments": _v3_attachments(parts),
         }
-    if descriptor == "multipart/x-model-message":
+    if descriptor in ("multipart/x-model-message", "multipart/x-assistant-turn"):
         return {
             **base,
             "type": "assistant",
-            "text": _joined(parts, "text/plain"),
+            "text": _joined(parts, "text/plain", "text/markdown"),
             "thinking_blocks": [
                 p.get("content")
                 for p in parts
-                if _str(p.get("descriptor")).startswith("application/x-thinking-")
+                if _str(p.get("descriptor")).startswith("application/x-thinking")
             ],
             "tool_calls": [
                 _v3_call(p)
@@ -636,12 +818,7 @@ def _from_v3(record: _Record) -> _Record | None:
             **base,
             "type": "tool_result",
             "call_id": _joined(parts, "text/x-queue-id"),
-            "content": "\n".join(
-                t
-                for p in parts
-                if p.get("descriptor") in ("text/plain", "text/x-error")
-                if (t := _str(p.get("content")))
-            ),
+            "content": _text(content, parts, "text/x-error"),
             "is_error": any(p.get("descriptor") == "text/x-error" for p in parts),
             "attachments": _v3_attachments(parts),
         }
@@ -649,7 +826,7 @@ def _from_v3(record: _Record) -> _Record | None:
 
 
 def _v3_call(part: _Record) -> dict[str, PlainTree]:
-    """Return a v3 call part as the tape's ``{id, name, args}``."""
+    """Return a v3 call part as the history's ``{id, name, args}``."""
     pieces = [_object(p) for p in _list(part.get("content"))]
     tool = next(
         (
@@ -667,7 +844,7 @@ def _v3_call(part: _Record) -> dict[str, PlainTree]:
 
 
 def _v3_attachments(parts: Sequence[_Record]) -> list[PlainTree]:
-    """Return a v3 message's image parts as the tape's ``{mime, data}``."""
+    """Return a v3 message's image parts as the history's ``{mime, data}``."""
     return [
         {
             "mime": _str(p.get("descriptor")),
@@ -678,12 +855,19 @@ def _v3_attachments(parts: Sequence[_Record]) -> list[PlainTree]:
     ]
 
 
-def _joined(parts: Sequence[_Record], descriptor: str) -> str:
-    """Return the text of the parts of one ``descriptor``, a line each."""
+def _text(content: PlainTree, parts: Sequence[_Record], *more: str) -> str:
+    """Return a v3 message's text: its string, or its text parts, a line each."""
+    if isinstance(content, str):
+        return content
+    return _joined(parts, "text/plain", "text/markdown", *more)
+
+
+def _joined(parts: Sequence[_Record], *descriptors: str) -> str:
+    """Return the text of the parts of the ``descriptors``, a line each."""
     return "\n".join(
         t
         for p in parts
-        if p.get("descriptor") == descriptor
+        if p.get("descriptor") in descriptors
         if (t := _str(p.get("content")))
     )
 
@@ -702,11 +886,6 @@ def _list(raw: PlainTree) -> list[PlainTree]:
         return from_plain(raw, list[PlainTree])
     except ReadError:
         return []
-
-
-def _strs(raw: PlainTree) -> list[str]:
-    """Return the strings of a JSON array."""
-    return [s for s in _list(raw) if isinstance(s, str)]
 
 
 def _str(raw: PlainTree) -> str:

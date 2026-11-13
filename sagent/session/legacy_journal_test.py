@@ -1,4 +1,7 @@
-"""Tests for reading old sagent session logs as today's records."""
+"""Tests for reading old sagent session logs as today's records.
+
+The tests after ``_AT`` read one old record at a time; those before it, a whole log.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import pytest
 
 from sagent.lib.userdirs import data_dir
 from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.types import Response
 from sagent.runtime.tape import ContextSplice
 from sagent.session import legacy_journal, projects
 from sagent.session.jsonl import JsonlJournal
@@ -23,15 +27,22 @@ from sagent.session.legacy_journal import (
     upgrade,
 )
 from sagent.session.types import (
+    AgentSpawnResult,
     AgentToAgentMessage,
     AssistantMessage,
     Attachment,
+    BashResult,
     ContextClear,
+    EditResult,
+    ReadResult,
     SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
+    UncategorizedToolResult,
     UserMessage,
+    WebFetchResult,
+    WriteResult,
 )
 
 
@@ -459,52 +470,6 @@ def test_what_cannot_be_read_is_skipped(tmp_path: Path) -> None:
     )
 
 
-def test_thinking_keeps_the_seal_each_provider_reads(tmp_path: Path) -> None:
-    path = _log(
-        tmp_path,
-        _user(0, "q"),
-        {
-            "kind": "history",
-            "ref": _ref(1),
-            "type": "assistant",
-            "text": "a",
-            "thought_signature": "g1",
-            "thinking_blocks": [
-                {"type": "thinking", "thinking": "hmm", "signature": "s1"},
-                {"type": "redacted_thinking", "data": "r1"},
-                {
-                    "type": "reasoning",
-                    "id": "rs_1",
-                    "encrypted_content": "e1",
-                    "summary": [{"text": "sum"}, {"text": "med"}],
-                    "content": [{"text": "why"}, {"text": " not"}],
-                },
-                {"type": "reasoning", "text": "plain"},
-            ],
-            "tool_calls": [
-                {"id": "c1", "name": "Read", "args": {}, "thought_signature": "g2"},
-            ],
-        },
-        _result(2, "c1", "ok"),
-    )
-    history = _history(path)
-    assert [r for r in history if isinstance(r, Thinking)] == [
-        Thinking(content="hmm", encrypted="s1"),
-        Thinking(encrypted="r1"),
-        Thinking(
-            content="why not",
-            summary="summed",
-            encrypted="e1",
-            extra={"reasoning_id": "rs_1"},
-        ),
-        Thinking(content="plain"),
-    ]
-    (said,) = [r for r in history if isinstance(r, AssistantMessage)]
-    (called,) = [r for r in history if isinstance(r, ToolCall)]
-    assert said.extra == {"thoughtSignature": "g1"}
-    assert called.extra == {"thoughtSignature": "g2"}
-
-
 def test_a_payload_not_valid_alone_is_repaired(tmp_path: Path) -> None:
     path = _log(
         tmp_path,
@@ -565,62 +530,41 @@ def test_a_repaired_payload_keeps_where_it_goes_and_what_answers_it_later(
     assert _texts(answered)[-2:] == ["call c9", "done"]
 
 
-def test_a_v3_result_without_an_error_part_is_no_error(tmp_path: Path) -> None:
+def test_a_payload_entry_no_model_saw_is_left_out(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        _user(0, "a"),
+        {
+            "kind": "context_splice",
+            "ref": _ref(1),
+            "mask": [[_ref(0), _ref(0)]],
+            "payload": [{"type": "compact_started"}, {"type": "user", "text": "kept"}],
+        },
+    )
+    assert _texts(path) == ["kept"]
+
+
+def test_a_spawn_result_names_the_child_its_label_started(tmp_path: Path) -> None:
     path = _log(
         tmp_path,
         {
-            "kind": "message",
-            "descriptor": "multipart/x-model-message",
-            "content": [
-                {
-                    "descriptor": "multipart/x-tool-call",
-                    "content": [
-                        {"descriptor": "text/x-queue-id", "content": "c1"},
-                        {"descriptor": "application/x-tool-ls", "content": {}},
-                    ],
-                },
+            "kind": "history",
+            "ref": _ref(0),
+            "type": "assistant",
+            "tool_calls": [
+                {"id": "sp", "name": "AgentSpawn", "args": {"label": "rev"}},
             ],
         },
-        {
-            "kind": "message",
-            "descriptor": "multipart/x-tool-result",
-            "content": [
-                {"descriptor": "text/x-queue-id", "content": "c1"},
-                {"descriptor": "text/plain", "content": "ok"},
-            ],
-        },
+        {"kind": "persistent_agent", "label": "rev", "session_dir": "/p/s/3640f519"},
+        _result(1, "sp", "started"),
     )
-    result = _history(path)[-1]
-    assert isinstance(result, ToolResult)
-    assert (result.text(), result.is_error) == ("ok", False)
+    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
+    assert result.result == AgentSpawnResult(agent_id="3640f519", agent_kind="rev")
 
 
 def test_an_unanswered_call_is_answered_interrupted(tmp_path: Path) -> None:
     path = _log(tmp_path, _user(0, "go"), _call(1, "c1"))
     assert _texts(path) == ["go", "call c1", "[interrupted]"]
-
-
-@pytest.mark.parametrize(
-    ("extra", "content", "stub"),
-    [
-        ({"result_kind": "pending"}, "x", "pending"),
-        ({"result_kind": "cancelled"}, "x", "cancelled"),
-        ({"result_kind": "final"}, _DETACHED, None),
-        ({}, _DETACHED, "pending"),
-        ({}, "[Running in background: Bash as job c1]", "pending"),
-        ({}, _CANCELLED, "cancelled"),
-        ({}, "plain", None),
-    ],
-)
-def test_a_stand_in_result_keeps_what_it_stood_for(
-    tmp_path: Path,
-    extra: dict[str, PlainTree],
-    content: str,
-    stub: str | None,
-) -> None:
-    path = _log(tmp_path, _call(0, "c1"), _result(1, "c1", content, **extra))
-    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
-    assert result.state == (stub or "done")
 
 
 @pytest.mark.parametrize(
@@ -642,63 +586,6 @@ def test_the_spend_is_what_the_agent_and_its_children_spent(
     clear, *_ = convert(_log(tmp_path, {"kind": "meta", **meta}))
     assert isinstance(clear, ContextClear)
     assert clear.extra["spend_usd"] == spent
-
-
-@pytest.mark.parametrize(
-    ("raw", "when"),
-    [
-        (1_790_000_000.0, "2026-09-21T14:13:20+00:00"),
-        (1_790_000_000_000_000_000, "2026-09-21T14:13:20+00:00"),
-        (130811.8, None),
-        (True, None),
-        ("x", None),
-    ],
-    ids=["seconds", "nanoseconds", "monotonic", "bool", "string"],
-)
-def test_a_time_is_kept_only_when_it_names_a_date(
-    tmp_path: Path,
-    raw: PlainTree,
-    when: str | None,
-) -> None:
-    path = _log(
-        tmp_path,
-        {
-            "kind": "history",
-            "ref": _ref(0),
-            "type": "user",
-            "text": "a",
-            "timestamp": raw,
-        },
-    )
-    (user,) = _history(path)
-    assert isinstance(user, UserMessage)
-    assert user.timestamp == when
-
-
-def test_peers_and_notes_keep_their_kind(tmp_path: Path) -> None:
-    path = _log(
-        tmp_path,
-        _user(0, "go"),
-        _said(1, "ok"),
-        {"kind": "history", "ref": _ref(2), "type": "system_message", "text": "note"},
-        {
-            "kind": "history",
-            "ref": _ref(3),
-            "type": "agent_send",
-            "source": "Agent",
-            "text": "hi",
-        },
-    )
-    history = _history(path)
-    assert [type(r) for r in history] == [
-        UserMessage,
-        AssistantMessage,
-        SystemMessage,
-        AgentToAgentMessage,
-    ]
-    peer = history[-1]
-    assert isinstance(peer, AgentToAgentMessage)
-    assert peer.sender == "Agent"
 
 
 def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
@@ -777,49 +664,6 @@ def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
     assert result.is_error is True
 
 
-def test_every_kind_keeps_its_time_and_attachments(tmp_path: Path) -> None:
-    when, at = 1_790_000_000, "2026-09-21T14:13:20+00:00"
-    seen = {"timestamp": when, "attachments": [{"mime": "image/png", "data": _PNG}]}
-    path = _log(
-        tmp_path,
-        {**_user(0, "u"), **seen},
-        {**_call(1, "c1", "said"), "timestamp": when},
-        {**_result(2, "c1", "out"), **seen},
-        {
-            "kind": "history",
-            "ref": _ref(3),
-            "type": "system_message",
-            "text": "n",
-            **seen,
-        },
-        {"kind": "history", "ref": _ref(4), "type": "agent_send", "text": "p", **seen},
-    )
-    png = (Attachment(mime_descriptor="image/png", data=b"\x89PNG"),)
-    user, said, call, result, note, peer = _history(path)
-    assert user == UserMessage(timestamp=at, content="u", attachments=png)
-    assert said == AssistantMessage(timestamp=at, content="said")
-    assert isinstance(call, ToolCall)
-    assert call.timestamp == at
-    assert isinstance(result, ToolResult)
-    assert (result.timestamp, result.attachments) == (at, png)
-    assert note == SystemMessage(timestamp=at, content="n")
-    assert peer == AgentToAgentMessage(timestamp=at, content="p", attachments=png)
-
-
-def test_an_attachment_that_is_no_strict_base64_is_dropped(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    path = _log(
-        tmp_path,
-        {**_user(0, "u"), "attachments": [{"mime": "image/png", "data": "iVBO!!Rw=="}]},
-    )
-    (user,) = _history(path)
-    assert isinstance(user, UserMessage)
-    assert user.attachments == ()
-    assert caplog.messages == ["dropping an attachment that does not decode"]
-
-
 def test_a_line_of_no_record_is_logged_with_its_file(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -827,20 +671,6 @@ def test_a_line_of_no_record_is_logged_with_its_file(
     path = _log(tmp_path, "{nope", _user(0, "u"))
     assert _texts(path) == ["u"]
     assert caplog.messages == [f"skipping a line of {path} that holds no record"]
-
-
-def test_a_value_of_the_wrong_type_reads_as_none_given(tmp_path: Path) -> None:
-    path = _log(
-        tmp_path,
-        {"kind": "history", "ref": _ref(0), "type": "user", "text": 5},
-        _call(1, "c", "x"),
-        _result(2, "c", "out", is_error="yes"),
-    )
-    user, said, _, result = _history(path)
-    assert user == UserMessage(content="")
-    assert said == AssistantMessage(content="x")
-    assert isinstance(result, ToolResult)
-    assert result.is_error is False
 
 
 @pytest.mark.parametrize(("held", "named"), [("x", "x"), (1, True), (None, None)])
@@ -943,12 +773,6 @@ def test_a_barrier_hides_up_to_its_anchor_or_before_itself(tmp_path: Path) -> No
         _user(1, "b"),
     )
     assert _texts(first) == ["b"]
-
-
-def test_a_turn_without_a_signature_carries_none(tmp_path: Path) -> None:
-    (said,) = _history(_log(tmp_path, _said(0, "x")))
-    assert isinstance(said, AssistantMessage)
-    assert said.extra == {}
 
 
 def test_a_kindless_record_without_a_session_id_is_no_meta(tmp_path: Path) -> None:
@@ -1061,34 +885,6 @@ def test_an_update_names_a_tool_result_alone(tmp_path: Path) -> None:
     assert _texts(path) == ["go", "said"]
 
 
-@pytest.mark.parametrize(
-    ("raw", "when"),
-    [
-        (1_000_000_000, None),
-        (1_000_000_000.5, "2001-09-09T01:46:40.500000+00:00"),
-        (1_000_000_000_000_000, None),
-        (1_790_000_000_000, None),
-        (1_000_000_000_500_000_000, "2001-09-09T01:46:40.500000+00:00"),
-        (1_000_000_000_000_000_000, None),
-        (1e300, None),
-    ],
-    ids=[
-        "exactly-2001",
-        "just-after",
-        "1e15-is-seconds",
-        "milliseconds",
-        "nanoseconds",
-        "nanoseconds-at-2001",
-        "neither",
-    ],
-)
-def test_a_time_s_bounds(tmp_path: Path, raw: PlainTree, when: str | None) -> None:
-    path = _log(tmp_path, {**_user(0, "a"), "timestamp": raw})
-    (user,) = _history(path)
-    assert isinstance(user, UserMessage)
-    assert user.timestamp == when
-
-
 def test_records_sharing_a_ref_move_just_past_everything_else() -> None:
     tape = legacy_journal._tape(
         [
@@ -1104,8 +900,10 @@ def test_records_sharing_a_ref_move_just_past_everything_else() -> None:
 
 
 def test_an_old_turn_costs_nothing_and_stopped_for_no_reason() -> None:
-    turn = legacy_journal._turn({}, text="hi", timestamp=None)
-    assert (turn.tokens, turn.spend, turn.stop_reason) == (
+    turn = legacy_journal._Entries().read({"type": "assistant", "text": "hi"})
+    assert isinstance(turn, Response)
+    assert (turn.records, turn.tokens, turn.spend, turn.stop_reason) == (
+        (AssistantMessage(content="hi"),),
         TokenCount(),
         TokenCost(),
         "",
@@ -1215,6 +1013,455 @@ def test_old_sessions_are_found_under_the_per_user_root() -> None:
     root = data_dir() / "rekursiv-ai" / "sagent" / "projects"
     log = _session(root / "_w" / "feed00000000")
     assert find_old("fe") == [log]
+
+
+_AT = "2026-09-21T14:13:20+00:00"
+
+
+def _read(*records: dict[str, PlainTree]) -> list[SessionRecord]:
+    """Read ``records`` in order as one session; a message as its history record."""
+    entries = legacy_journal._Entries()
+    out: list[SessionRecord] = []
+    for record in records:
+        entry = (
+            record
+            if record.get("kind") == "history"
+            else legacy_journal._history(record)
+        )
+        assert entry is not None
+        event = entries.read(entry)
+        if isinstance(event, Response):
+            out.extend(event.records)
+        elif event is not None:
+            out.append(event)
+    return out
+
+
+def _entry(kind: str, **fields: PlainTree) -> dict[str, PlainTree]:
+    return {"kind": "history", "type": kind, **fields}
+
+
+def _turn(*calls: dict[str, PlainTree]) -> dict[str, PlainTree]:
+    return _entry("assistant", tool_calls=list(calls))
+
+
+def _answer(call_id: str, content: str, **fields: PlainTree) -> dict[str, PlainTree]:
+    return _entry("tool_result", call_id=call_id, content=content, **fields)
+
+
+def _results(records: list[SessionRecord]) -> list[ToolResult]:
+    return [r for r in records if isinstance(r, ToolResult)]
+
+
+def _part(descriptor: str, content: PlainTree = None) -> dict[str, PlainTree]:
+    return {"descriptor": descriptor, "content": content}
+
+
+def _v3(
+    descriptor: str,
+    content: PlainTree,
+    **fields: PlainTree,
+) -> dict[str, PlainTree]:
+    return {"kind": "message", "descriptor": descriptor, "content": content, **fields}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"kind": "message"},
+        {"kind": "message", "descriptor": "application/x-unknown", "content": "x"},
+        {"kind": "message", "role": "system", "content": "x"},
+    ],
+    ids=["untagged", "unknown-descriptor", "unknown-role"],
+)
+def test_a_message_no_model_saw_is_no_entry(record: dict[str, PlainTree]) -> None:
+    assert legacy_journal._history(record) is None
+
+
+def test_an_entry_no_model_saw_reads_as_nothing() -> None:
+    assert legacy_journal._Entries().read(_entry("compact_complete")) is None
+
+
+def test_every_kind_keeps_its_time_and_attachments() -> None:
+    seen: dict[str, PlainTree] = {
+        "timestamp": 1_790_000_000,
+        "attachments": [{"mime": "image/png", "data": _PNG}],
+    }
+    png = (Attachment(mime_descriptor="image/png", data=b"\x89PNG"),)
+
+    user, note, peer, said, call, result = _read(
+        _entry("user", text="u", **seen),
+        _entry("system_message", text="n", **seen),
+        _entry("agent_send", text="p", source="Agent", **seen),
+        _entry(
+            "assistant",
+            text="said",
+            timestamp=1_790_000_000,
+            tool_calls=[{"id": "c1", "name": "Grep", "args": {}}],
+        ),
+        _answer("c1", "out", **seen),
+    )
+
+    assert user == UserMessage(timestamp=_AT, content="u", attachments=png)
+    assert note == SystemMessage(timestamp=_AT, content="n", subtype="reminder")
+    assert peer == AgentToAgentMessage(
+        timestamp=_AT,
+        content="p",
+        attachments=png,
+        sender="Agent",
+    )
+    assert said == AssistantMessage(timestamp=_AT, content="said")
+    assert call == ToolCall(timestamp=_AT, call_id="c1", name="Grep")
+    assert result == ToolResult(
+        timestamp=_AT,
+        call_id="c1",
+        state="done",
+        stdout=("out", *png),
+        result=UncategorizedToolResult(),
+        extra={"is_error": False},
+    )
+
+
+def test_a_peer_with_no_source_names_no_sender() -> None:
+    (peer,) = _read(_entry("agent_send", text="p"))
+    assert peer == AgentToAgentMessage(content="p")
+
+
+def test_an_attachment_that_is_no_strict_base64_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (user,) = _read(
+        _entry(
+            "user",
+            attachments=[
+                {"mime": "image/png", "data": "iVBO!!Rw=="},
+                {"mime": "", "data": _PNG},
+                "x",
+            ],
+        ),
+    )
+    assert user == UserMessage(content="")
+    assert caplog.messages == ["dropping an attachment that does not decode"]
+
+
+def test_a_value_of_the_wrong_type_reads_as_none_given() -> None:
+    user, said, _, result = _read(
+        _entry("user", text=5),
+        _entry("assistant", text="x", tool_calls=[{"id": "c", "name": "Grep"}]),
+        _answer("c", "out", is_error="yes"),
+    )
+    assert user == UserMessage(content="")
+    assert said == AssistantMessage(content="x")
+    assert isinstance(result, ToolResult)
+    assert result.is_error is False
+
+
+def test_a_turn_splits_into_thinking_text_and_calls_each_sealed() -> None:
+    records = _read(
+        _entry(
+            "assistant",
+            text="a",
+            thought_signature="g1",
+            thinking_blocks=[
+                {"type": "thinking", "thinking": "hmm", "signature": "s1"},
+                {"thinking": "old"},
+                {"type": "redacted_thinking", "data": "r1"},
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "e1",
+                    "summary": [{"text": "sum"}, {"text": "med"}],
+                    "content": [{"text": "why"}, {"text": " not"}],
+                },
+                {"type": "reasoning", "text": "plain"},
+                {"type": "unknown"},
+                "x",
+            ],
+            tool_calls=[
+                {"id": "c1", "name": "Read", "args": {}, "thought_signature": "g2"},
+                {"id": "", "name": "Read"},
+                {"id": "c2", "name": ""},
+                "x",
+            ],
+        ),
+    )
+    assert records == [
+        Thinking(content="hmm", encrypted="s1"),
+        Thinking(content="old"),
+        Thinking(encrypted="r1"),
+        Thinking(
+            content="why not",
+            summary="summed",
+            encrypted="e1",
+            extra={"reasoning_id": "rs_1"},
+        ),
+        Thinking(content="plain"),
+        AssistantMessage(content="a", extra={"thoughtSignature": "g1"}),
+        ToolCall(call_id="c1", name="Read", extra={"thoughtSignature": "g2"}),
+    ]
+
+
+def test_an_empty_turn_says_nothing() -> None:
+    turn = legacy_journal._Entries().read(_entry("assistant", text=""))
+    assert isinstance(turn, Response)
+    assert turn.records == ()
+
+
+@pytest.mark.parametrize(
+    ("fields", "content", "stub"),
+    [
+        ({"result_kind": "pending"}, "x", "pending"),
+        ({"result_kind": "cancelled"}, "x", "cancelled"),
+        ({"result_kind": "final"}, _DETACHED, None),
+        ({}, _DETACHED, "pending"),
+        ({}, "[Running in background: Bash as job c1]", "pending"),
+        ({}, _CANCELLED, "cancelled"),
+        ({}, "plain", None),
+    ],
+)
+def test_a_stand_in_result_keeps_what_it_stood_for(
+    fields: dict[str, PlainTree],
+    content: str,
+    stub: str | None,
+) -> None:
+    (result,) = _results(_read(_answer("c1", content, **fields)))
+    assert (result.state, result.result is None) == (stub or "done", stub is not None)
+
+
+def test_a_result_is_typed_by_the_call_it_answers() -> None:
+    """A result names only its call; the call says what the result was."""
+    records = _read(
+        _turn(
+            {"id": "b", "name": "Bash", "args": {"command": "ls"}},
+            {"id": "b0", "name": "Bash"},
+            {"id": "r", "name": "Read", "args": {"file_path": "a.py"}},
+            {"id": "w", "name": "Write", "args": {"path": "b.py", "content": "z"}},
+            {"id": "e", "name": "Edit", "args": {"file_path": "a.py"}},
+            {"id": "f", "name": "WebFetch", "args": {"url": "https://x.org"}},
+            {"id": "g", "name": "Grep"},
+        ),
+        *(_answer(i, "out") for i in ("b", "b0", "r", "w", "e", "f", "g", "nope")),
+    )
+    assert [r.result for r in _results(records)] == [
+        BashResult(command=("ls",)),
+        BashResult(),
+        ReadResult(path="a.py"),
+        WriteResult(path="b.py", content="z"),
+        EditResult(path="a.py"),
+        WebFetchResult(url="https://x.org"),
+        UncategorizedToolResult(),
+        UncategorizedToolResult(),
+    ]
+    assert {r.text() for r in _results(records)} == {"out"}
+
+
+def test_a_failed_call_did_not_do_what_it_names() -> None:
+    """A refused edit changed nothing; typing it as an edit hid the refusal."""
+    records = _read(
+        _turn({"id": "e", "name": "Edit", "args": {"file_path": "a.py"}}),
+        _answer("e", "modified since read", is_error=True),
+    )
+    (result,) = _results(records)
+    assert result.result == UncategorizedToolResult(exit_code=1)
+    assert (result.is_error, result.extra) == (True, {"is_error": True})
+
+
+def test_an_entry_s_spawn_result_names_its_child() -> None:
+    entries = legacy_journal._Entries(children={"rev": "3640f519"})
+    spawn = {"label": "rev", "prompt": "review x", "model_id": "luna"}
+    _ = entries.read(
+        _turn(
+            {"id": "s1", "name": "AgentSpawn", "args": spawn},
+            {"id": "s2", "name": "AgentSpawn", "args": {"prompt": "count"}},
+        ),
+    )
+
+    results = [entries.read(_answer(i, "ok")) for i in ("s1", "s2")]
+
+    assert [r.result for r in results if isinstance(r, ToolResult)] == [
+        AgentSpawnResult(
+            agent_id="3640f519",
+            agent_kind="rev",
+            prompt="review x",
+            model="luna",
+        ),
+        AgentSpawnResult(prompt="count"),
+    ]
+
+
+def test_an_update_keeps_what_it_rewrote() -> None:
+    png = (Attachment(mime_descriptor="image/png", data=b"\x89PNG"),)
+    assert legacy_journal._Entries().result(
+        "c",
+        "new",
+        failed=False,
+        timestamp=_AT,
+        attachments=png,
+    ) == ToolResult(
+        timestamp=_AT,
+        call_id="c",
+        state="done",
+        stdout=("new", *png),
+        result=UncategorizedToolResult(),
+        extra={"is_error": False},
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "when"),
+    [
+        (1_790_000_000.0, _AT),
+        (1_790_000_000_000_000_000, _AT),
+        (130811.8, None),
+        (True, None),
+        ("x", None),
+        (1_000_000_000, None),
+        (1_000_000_000.5, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000_000_000, None),
+        (1_790_000_000_000, None),
+        (1_000_000_000_500_000_000, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000_000_000_000, None),
+        (1e300, None),
+    ],
+    ids=[
+        "seconds",
+        "nanoseconds",
+        "monotonic",
+        "bool",
+        "string",
+        "exactly-2001",
+        "just-after",
+        "1e15-is-seconds",
+        "milliseconds",
+        "nanoseconds-past-2001",
+        "nanoseconds-at-2001",
+        "neither",
+    ],
+)
+def test_a_time_is_kept_only_when_it_names_a_date(
+    raw: PlainTree,
+    when: str | None,
+) -> None:
+    assert legacy_journal._time(raw) == when
+
+
+def test_a_v3_session_reads_like_history() -> None:
+    call = _part(
+        "multipart/x-tool-call",
+        [
+            _part("text/x-queue-id", "c1"),
+            _part("application/x-tool-read", {"file_path": "a"}),
+        ],
+    )
+    records = _read(
+        _v3("text/x-user-message", "hi", _timestamp=1_790_000_000_000_000_000),
+        _v3("multipart/x-user-turn", "turn"),
+        _v3(
+            "multipart/x-user-message",
+            [
+                _part("text/plain", "look"),
+                _part("text/markdown", "here"),
+                _part("image/png", {"_bytes": _PNG}),
+            ],
+        ),
+        _v3(
+            "multipart/x-assistant-turn",
+            [
+                _part("text/x-queue-id", "msg_1"),
+                _part("text/plain", "reading"),
+                _part("application/x-thinking", {"thinking": "t", "signature": "s"}),
+                _part("multipart/x-tool-call", [_part("text/x-queue-id", "c0")]),
+                call,
+            ],
+        ),
+        _v3(
+            "multipart/x-tool-result",
+            [
+                _part("text/x-queue-id", "c1"),
+                _part("text/plain", "line"),
+                _part("text/x-error", "failed"),
+                _part("image/png", {"_bytes": _PNG}),
+                _part("application/x-file-stat", {}),
+            ],
+        ),
+        _v3("multipart/x-model-message", [_part("text/markdown", "ok")]),
+        _v3("multipart/x-tool-result", "raw"),
+    )
+    png = Attachment(mime_descriptor="image/png", data=b"\x89PNG")
+    assert records == [
+        UserMessage(timestamp=_AT, content="hi"),
+        UserMessage(content="turn"),
+        UserMessage(content="look\nhere", attachments=(png,)),
+        Thinking(content="t", encrypted="s"),
+        AssistantMessage(content="reading"),
+        ToolCall(call_id="c1", name="read", arguments={"file_path": "a"}),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("line\nfailed", png),
+            result=UncategorizedToolResult(exit_code=1),
+            extra={"is_error": True},
+        ),
+        AssistantMessage(content="ok"),
+        ToolResult(
+            call_id="",
+            state="done",
+            stdout=("raw",),
+            result=UncategorizedToolResult(),
+            extra={"is_error": False},
+        ),
+    ]
+
+
+def test_a_role_session_reads_like_history() -> None:
+    records = _read(
+        {"kind": "message", "role": "user", "content": "hi"},
+        {
+            "kind": "message",
+            "role": "assistant",
+            "content": "",
+            "thinking_blocks": [{"thinking": "hm", "signature": "s"}],
+            "tool_calls": [
+                {"id": "t1", "name": "Bash", "input": {"command": "ls"}},
+                {"id": "t2", "name": "Bash", "args": {"command": "pwd"}},
+            ],
+        },
+        {
+            "kind": "message",
+            "role": "tool",
+            "tool_call_id": "t1",
+            "content": "[exit code: 2]",
+            "is_error": False,
+        },
+    )
+    assert records == [
+        UserMessage(content="hi"),
+        Thinking(content="hm", encrypted="s"),
+        ToolCall(call_id="t1", name="Bash", arguments={"command": "ls"}),
+        ToolCall(call_id="t2", name="Bash", arguments={"command": "pwd"}),
+        ToolResult(
+            call_id="t1",
+            state="done",
+            stdout=("[exit code: 2]",),
+            result=BashResult(command=("ls",)),
+            extra={"is_error": False},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(3, 3), (True, None), ("3", None)],
+)
+def test_an_int_is_an_int_and_never_a_bool(
+    raw: PlainTree,
+    expected: int | None,
+) -> None:
+    assert legacy_journal._int(raw) == expected
+
+
+def test_a_bool_is_a_bool_alone() -> None:
+    assert (legacy_journal._bool(True), legacy_journal._bool(1)) == (True, False)
 
 
 if __name__ == "__main__":
