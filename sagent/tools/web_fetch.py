@@ -188,9 +188,15 @@ class WebFetch:
         a = parse(arguments, WebFetch.Arguments)
         has_body = a.json is not None or a.form is not None
         if a.method == "GET" and has_body:
-            return _error("'json' and 'form' require method='POST'.")
+            return ToolOutput(
+                stderr=("'json' and 'form' require method='POST'.",),
+                result=WebFetchResult(exit_code=1),
+            )
         if a.json is not None and a.form is not None:
-            return _error("'json' and 'form' are mutually exclusive.")
+            return ToolOutput(
+                stderr=("'json' and 'form' are mutually exclusive.",),
+                result=WebFetchResult(exit_code=1),
+            )
         policy = replace(
             self.policy,
             transport=a.transport or self.policy.transport,
@@ -213,9 +219,15 @@ class WebFetch:
             except BotDetectionError as e:
                 # Which block it was decides the remedy: Cloudflare, a
                 # puzzle, or Google's /sorry page.
-                return _error(e.explain(a.url))
+                return ToolOutput(
+                    stderr=(e.explain(a.url),),
+                    result=WebFetchResult(exit_code=1),
+                )
             except (FetchError, ValueError, OSError) as e:
-                return _error(f"Fetch failed: {e}")
+                return ToolOutput(
+                    stderr=(f"Fetch failed: {e}",),
+                    result=WebFetchResult(exit_code=1),
+                )
             text = fetched.text
             if a.method == "GET":
                 self._cache[key] = text
@@ -232,7 +244,3 @@ class WebFetch:
                 size=len(text),
             ),
         )
-
-
-def _error(message: str) -> ToolOutput[WebFetchResult, str, str]:
-    return ToolOutput(stderr=(message,), result=WebFetchResult(exit_code=1))

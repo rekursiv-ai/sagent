@@ -943,7 +943,11 @@ class Server(AsyncResource):
                 session,
                 Result(
                     id=message.id,
-                    record=_error(f"This session is ending: {session.reason}."),
+                    record=ToolResult(
+                        call_id="",
+                        state="failed",
+                        stderr=(f"This session is ending: {session.reason}.",),
+                    ),
                 ),
             )
         elif isinstance(message, Call) and message.tool not in session.granted:
@@ -951,7 +955,11 @@ class Server(AsyncResource):
                 session,
                 Result(
                     id=message.id,
-                    record=_error(f"{self._name} does not offer {message.tool}."),
+                    record=ToolResult(
+                        call_id="",
+                        state="failed",
+                        stderr=(f"{self._name} does not offer {message.tool}.",),
+                    ),
                 ),
             )
         elif isinstance(message, Call) and session.host is not None:
@@ -1027,7 +1035,14 @@ class Server(AsyncResource):
         for call_id in list(session.running):
             self._deliver(
                 session,
-                Result(id=call_id, record=_error("The host of this session stopped.")),
+                Result(
+                    id=call_id,
+                    record=ToolResult(
+                        call_id="",
+                        state="failed",
+                        stderr=("The host of this session stopped.",),
+                    ),
+                ),
             )
         await host.stop()
         host.writer.close()
@@ -1320,7 +1335,3 @@ def _valid_session_id(value: str) -> bool:
         c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
         for c in value
     )
-
-
-def _error(text: str) -> ToolResult:
-    return ToolResult(call_id="", state="failed", stderr=(text,))

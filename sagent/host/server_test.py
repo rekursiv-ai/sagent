@@ -600,6 +600,8 @@ async def test_a_reconnect_gets_what_finished_while_it_was_gone(
         encoded(result),
     ]
     server._relay(session, Ack(id="1"))
+    # A client that reconnects may ack the same result again.
+    server._relay(session, Ack(id="1"))
     sent.clear()
 
     assert (

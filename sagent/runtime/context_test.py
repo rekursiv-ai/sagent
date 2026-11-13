@@ -87,15 +87,6 @@ def _user(text: str) -> UserMessage:
     return UserMessage(content=text)
 
 
-def _result(call_id: str, text: str = "ok") -> ToolResult:
-    return ToolResult(
-        call_id=call_id,
-        state="done",
-        stdout=(text,),
-        result=UncategorizedToolResult(),
-    )
-
-
 def _calling(*ids: str) -> Response:
     return reply(calls=[call("echo", cid) for cid in ids])
 
@@ -408,8 +399,33 @@ def test_a_duplicate_ref_is_refused() -> None:
         [_user("hi"), reply("hello")],
         # A window may open on the model's turn, as after a summary.
         [reply("hello"), _user("hi")],
-        [_user("go"), _calling("t1"), _result("t1"), reply("done")],
-        [_user("go"), _calling("t1", "t2"), _result("t2"), _result("t1")],
+        [
+            _user("go"),
+            _calling("t1"),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            reply("done"),
+        ],
+        [
+            _user("go"),
+            _calling("t1", "t2"),
+            ToolResult(
+                call_id="t2",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ],
         [_user("a"), AgentToAgentMessage(sender="A", content="b"), _user("c")],
         [_user("a"), SystemMessage(content="n"), _user("b"), reply("both")],
         [
@@ -417,7 +433,12 @@ def test_a_duplicate_ref_is_refused() -> None:
             SystemMessage(content="cwd: /x"),
             _calling("c1"),
             TurnContext(cwd="/x"),
-            _result("c1"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
             SystemMessage(content="later"),
             reply("done"),
         ],
@@ -435,19 +456,69 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
             [reply("a"), SystemMessage(content="n"), reply("b")],
             "^provider context violates role alternation$",
         ),
-        ([_result("t1")], "orphan ToolResult"),
         (
-            [_user("go"), _calling("t1"), _result("t1"), _result("t2")],
+            [
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ],
+            "orphan ToolResult",
+        ),
+        (
+            [
+                _user("go"),
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+                ToolResult(
+                    call_id="t2",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ],
             "orphan ToolResult",
         ),
         ([_user("go"), _calling("t1")], "without results at end"),
         ([_user("go"), _calling("t1"), reply("oops")], "pending tool calls"),
         (
-            [_user("go"), _calling("t1"), _user("wait"), _result("t1")],
+            [
+                _user("go"),
+                _calling("t1"),
+                _user("wait"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ],
             "user message before",
         ),
         (
-            [_user("go"), _calling("t1"), _result("t1", "a"), _result("t1", "b")],
+            [
+                _user("go"),
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("a",),
+                    result=UncategorizedToolResult(),
+                ),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("b",),
+                    result=UncategorizedToolResult(),
+                ),
+            ],
             "duplicate ToolResult",
         ),
     ],
@@ -489,7 +560,15 @@ def test_a_compacted_tool_round_validates() -> None:
     tape = [
         _event(0, _user("go")),
         _event(1, _calling("t1")),
-        _event(2, _result("t1")),
+        _event(
+            2,
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
         _splice(
             3,
             mask=(MaskRange(session_id="s", lo=0, hi=2),),
@@ -504,12 +583,27 @@ def test_a_result_spliced_over_its_stub_validates() -> None:
     tape = [
         _event(0, _user("go")),
         _event(1, _calling("t1")),
-        _event(2, _result("t1", Markers().detached)),
+        _event(
+            2,
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=(Markers().detached,),
+                result=UncategorizedToolResult(),
+            ),
+        ),
         _splice(
             3,
             mask=(_one(2),),
             insert_after=_ref(1),
-            payload=(_result("t1", "real"),),
+            payload=(
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("real",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
             paired_externally=frozenset({"t1"}),
         ),
     ]

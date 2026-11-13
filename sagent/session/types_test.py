@@ -67,6 +67,7 @@ from sagent.session.types import (
     WebSearchHit,
     WebSearchResult,
     WriteResult,
+    current_plain,
     former_kind,
     record_classes,
     stored_plain,
@@ -674,6 +675,11 @@ def test_a_former_shell_result_reads_its_streams_and_a_failing_exit(
     assert former_kind(marked) == "BashResult"
     silent = _formerly("ShellCommandResult", exit_code=3)
     assert (silent.stdout, silent.stderr, silent.text()) == ((), (), "\n[exit 3]")
+    empty = _formerly("BashResult", stdout="", stderr="")
+    assert (empty.stdout, empty.stderr) == ((), ())
+    # Only a shell record had an exit code; one on another record is no result's.
+    stray = _formerly("ReadResult", path="a.py", exit_code=7)
+    assert (stray.result, stray.extra) == (ReadResult(path="a.py"), {"exit_code": 7})
 
 
 @pytest.mark.parametrize(
@@ -713,12 +719,23 @@ def test_only_a_bash_result_adds_its_exit_code_to_the_text() -> None:
 def test_former_write_and_edit_results_read_as_their_summary_line() -> None:
     written = _formerly("WriteResult", path="a.py", content="the file's text")
     edit = {"py/object": "Splice", "before": "a", "after": "b", "start": 3}
-    edited = _formerly("EditResult", path="a.py", edits={"py/tuple": [edit]})
+    image = {"py/object": "Attachment", "mime_descriptor": "image/png", "data": ""}
+    edited = _formerly(
+        "EditResult",
+        path="a.py",
+        edits={"py/tuple": [edit]},
+        attachments={"py/tuple": [image]},
+    )
 
     assert (written.text(), written.stdout) == ("Wrote a.py.", ("Wrote a.py.",))
     assert written.result == WriteResult(path="a.py", content="the file's text")
     assert edited.text() == "Edited a.py."
-    assert edited.stdout == ("Edited a.py.", Splice(before="a", after="b", start=3))
+    assert edited.stdout == (
+        "Edited a.py.",
+        Splice(before="a", after="b", start=3),
+        Attachment(mime_descriptor="image/png", data=b""),
+    )
+    assert (written.extra, edited.extra) == ({}, {})
     assert _formerly("FileWriteResult").text() == "Wrote the file."
     assert _formerly("FileEditResult").text() == "Edited the file."
 
@@ -747,6 +764,12 @@ def test_a_former_web_search_reads_as_its_hits_title_url_snippet() -> None:
         read.stdout
     )
     assert _formerly("WebSearchResult").text() == ""
+    image = {"py/object": "Attachment", "mime_descriptor": "image/png", "data": ""}
+    pictured = _formerly("WebSearchResult", content=bare, attachments=[image])
+    assert pictured.stdout == (
+        *read.stdout,
+        Attachment(mime_descriptor="image/png", data=b""),
+    )
 
 
 def test_a_former_result_keeps_its_attachments_after_its_text() -> None:
@@ -764,7 +787,19 @@ def test_a_former_result_keeps_its_attachments_after_its_text() -> None:
         LineSpan(start=1),
         Attachment(mime_descriptor="image/png", data=b""),
     )
-    assert read.result == ReadResult(path="a.png")
+    assert (read.result, read.extra) == (ReadResult(path="a.png"), {})
+
+
+def test_a_former_record_converts_to_exactly_the_fields_it_had() -> None:
+    assert current_plain(
+        {"py/object": "ToolErrorResult", "call_id": "1", "content": ""},
+    ) == {
+        "py/object": "ToolResult",
+        "call_id": "1",
+        "state": "failed",
+        "stdout": [],
+        "stderr": [],
+    }
 
 
 def test_a_former_field_the_record_lacks_is_kept_in_extra_as_json() -> None:
@@ -807,11 +842,12 @@ def test_a_former_placeholder_and_a_former_error_keep_their_state(
     for tag in ("ToolResult", "UncategorizedToolResult"):
         read = _formerly(tag, **fields)
         assert (read.state, read.result, read.is_error) == (state, result, failed)
-        assert read.shown == fields.get("shown")
-    # Only a done call has its tool's result class.
+        assert (read.shown, read.extra) == (fields.get("shown"), {})
+    # Only a done call has its tool's result class; another keeps the fields in ``extra``.
     typed = _formerly("ReadResult", path="a.py", **fields)
     assert (typed.state, typed.is_error) == (state, failed)
     assert isinstance(typed.result, ReadResult) is (state == "done")
+    assert typed.extra == ({} if state == "done" else {"path": "a.py"})
 
 
 @pytest.mark.parametrize("code", [0, 2, -9])

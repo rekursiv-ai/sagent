@@ -85,15 +85,6 @@ def _peer(sender: str, text: str) -> AgentToAgentMessage:
     return AgentToAgentMessage(sender=sender, content=text)
 
 
-def _result(call_id: str, text: str = "ok") -> ToolResult:
-    return ToolResult(
-        call_id=call_id,
-        state="done",
-        stdout=(text,),
-        result=UncategorizedToolResult(),
-    )
-
-
 def _calling(*ids: str) -> Response:
     return reply(calls=[call("Bash", cid) for cid in ids])
 
@@ -269,7 +260,23 @@ def test_two_adjacent_model_turns_are_rejected() -> None:
 
 
 def test_a_paired_tool_round_constructs() -> None:
-    splice = _splice(payload=(_calling("t1", "t2"), _result("t2"), _result("t1")))
+    splice = _splice(
+        payload=(
+            _calling("t1", "t2"),
+            ToolResult(
+                call_id="t2",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    )
     assert len(splice.payload) == 3
 
 
@@ -280,7 +287,18 @@ def test_an_unanswered_call_is_rejected() -> None:
 
 def test_a_call_answered_after_a_user_turn_is_rejected() -> None:
     with pytest.raises(InvalidPayloadError, match=_unpaired("t1")):
-        _ = _splice(payload=(_calling("t1"), _user("wait"), _result("t1")))
+        _ = _splice(
+            payload=(
+                _calling("t1"),
+                _user("wait"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
 
 
 def test_a_call_unanswered_before_the_next_model_turn_is_rejected() -> None:
@@ -295,7 +313,16 @@ def test_an_orphan_result_is_rejected() -> None:
             "orphan ToolResult for call_id 't1' in payload (no matching ToolCall; not in paired_externally)",
         ),
     ):
-        _ = _splice(payload=(_result("t1"),))
+        _ = _splice(
+            payload=(
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
 
 
 def test_a_duplicate_result_is_rejected() -> None:
@@ -303,7 +330,23 @@ def test_a_duplicate_result_is_rejected() -> None:
         InvalidPayloadError,
         match=_exactly("duplicate ToolResult for call_id 't1' in payload"),
     ):
-        _ = _splice(payload=(_calling("t1"), _result("t1"), _result("t1", "again")))
+        _ = _splice(
+            payload=(
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("again",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
 
 
 def test_one_call_id_in_two_model_turns_is_rejected() -> None:
@@ -312,13 +355,38 @@ def test_one_call_id_in_two_model_turns_is_rejected() -> None:
         match=_exactly("duplicate tool_call id 't1' across model turns in payload"),
     ):
         _ = _splice(
-            payload=(_calling("t1"), _result("t1"), _calling("t1"), _result("t1")),
+            payload=(
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
         )
 
 
 def test_externally_paired_result_and_call_construct() -> None:
     external = frozenset({"t1"})
-    assert _splice(payload=(_result("t1"),), paired_externally=external).payload
+    assert _splice(
+        payload=(
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+        paired_externally=external,
+    ).payload
     assert _splice(payload=(_calling("t1"),), paired_externally=external).payload
 
 
@@ -333,23 +401,61 @@ def test_an_external_declaration_covers_only_the_ids_it_names() -> None:
 def test_an_id_paired_locally_cannot_also_be_external() -> None:
     external = frozenset({"t1"})
     with pytest.raises(InvalidPayloadError, match=_BOTH):
-        _ = _splice(payload=(_calling("t1"), _result("t1")), paired_externally=external)
+        _ = _splice(
+            payload=(
+                _calling("t1"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            paired_externally=external,
+        )
     with pytest.raises(InvalidPayloadError, match=_BOTH):
         _ = _splice(
-            payload=(_user("u"), _result("t1"), _calling("t1")),
+            payload=(
+                _user("u"),
+                ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+                _calling("t1"),
+            ),
             paired_externally=external,
         )
 
 
 def test_an_external_result_may_stand_between_two_user_turns() -> None:
-    payload = (_user("a"), _result("t1"), _user("b"))
+    payload = (
+        _user("a"),
+        ToolResult(
+            call_id="t1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+        _user("b"),
+    )
     splice = _splice(payload=payload, paired_externally=frozenset({"t1"}))
     assert splice.payload == payload
 
 
 def test_an_external_result_closes_a_local_model_turn() -> None:
     splice = _splice(
-        payload=(reply("a"), _result("t1"), reply("b")),
+        payload=(
+            reply("a"),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            reply("b"),
+        ),
         paired_externally=frozenset({"t1"}),
     )
     assert len(splice.payload) == 3
@@ -361,7 +467,12 @@ def test_notes_are_neutral_to_alternation_and_pairing() -> None:
         SystemMessage(content="cwd: /x"),
         _calling("c1"),
         TurnContext(cwd="/x"),
-        _result("c1"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         SystemMessage(content="later"),
         reply("done"),
     )
@@ -396,7 +507,16 @@ def test_overlapping_mask_ranges_are_rejected() -> None:
 
 def test_repair_answers_unanswered_calls_in_sorted_order() -> None:
     out = tape._pair_and_dedup_tool_calls(
-        [_calling("c2", "c1", "c3"), _result("c3"), _user("done")],
+        [
+            _calling("c2", "c1", "c3"),
+            ToolResult(
+                call_id="c3",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            _user("done"),
+        ],
     )
     assert _texts(out) == ["", "ok", "[interrupted]", "[interrupted]", "done"]
     synthesized = [e for e in out if isinstance(e, ToolResult) and e.is_error is True]
@@ -411,10 +531,25 @@ def test_repair_answers_calls_left_open_at_the_end() -> None:
 def test_repair_drops_orphan_and_duplicate_results() -> None:
     out = tape._pair_and_dedup_tool_calls(
         [
-            _result("ghost"),
+            ToolResult(
+                call_id="ghost",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
             _calling("c1"),
-            _result("c1", "first"),
-            _result("c1", "second"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("first",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("second",),
+                result=UncategorizedToolResult(),
+            ),
         ],
     )
     assert _texts(out) == ["", "first"]
@@ -423,7 +558,24 @@ def test_repair_drops_orphan_and_duplicate_results() -> None:
 def test_repair_drops_a_call_id_an_earlier_turn_declared() -> None:
     first = reply("one", calls=[call("Bash", "c1")])
     again = reply("two", calls=[call("Bash", "c1"), call("Bash", "c2")])
-    out = tape._pair_and_dedup_tool_calls([first, _result("c1"), again, _result("c2")])
+    out = tape._pair_and_dedup_tool_calls(
+        [
+            first,
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            again,
+            ToolResult(
+                call_id="c2",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ],
+    )
     second = out[2]
     assert isinstance(second, Response)
     assert [c.call_id for c in calls(second.records)] == ["c2"]
@@ -432,21 +584,54 @@ def test_repair_drops_a_call_id_an_earlier_turn_declared() -> None:
 
 def test_repair_drops_a_turn_left_empty() -> None:
     out = tape._pair_and_dedup_tool_calls(
-        [_calling("c1"), _result("c1"), _calling("c1"), _result("c1")],
+        [
+            _calling("c1"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            _calling("c1"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ],
     )
     assert len(out) == 2
 
 
 def test_a_user_turn_interrupts_an_open_call() -> None:
     out = tape._pair_and_dedup_tool_calls(
-        [_calling("t1"), _user("stop"), _result("t1", "late")],
+        [
+            _calling("t1"),
+            _user("stop"),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("late",),
+                result=UncategorizedToolResult(),
+            ),
+        ],
     )
     assert _texts(out) == ["", "[interrupted]", "stop"]
 
 
 def test_an_agent_message_waits_for_the_open_call() -> None:
     """A peer's send is not an interrupt: the real result still lands."""
-    am, peer, tr = _calling("t1"), _peer("rev", "finding"), _result("t1", "real")
+    am, peer, tr = (
+        _calling("t1"),
+        _peer("rev", "finding"),
+        ToolResult(
+            call_id="t1",
+            state="done",
+            stdout=("real",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert tape._pair_and_dedup_tool_calls([am, peer, tr]) == [am, tr, peer]
 
 
@@ -455,7 +640,12 @@ def test_held_agent_messages_keep_their_arrival_order() -> None:
         [
             _calling("c1"),
             _peer("A", "first"),
-            _result("c1", "done"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("done",),
+                result=UncategorizedToolResult(),
+            ),
             _peer("A", "second"),
         ],
     )
@@ -481,9 +671,19 @@ def test_repair_is_idempotent() -> None:
     payload: list[ModelContextEvent] = [
         _calling("c1", "c2"),
         _peer("A", "x"),
-        _result("c1"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         _user("u"),
-        _result("ghost"),
+        ToolResult(
+            call_id="ghost",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
     ]
     once = tape._pair_and_dedup_tool_calls(payload)
     assert tape._pair_and_dedup_tool_calls(once) == once
@@ -508,7 +708,18 @@ def test_splice_safe_repair_of_a_turn_merged_across_a_note_is_a_fixed_point() ->
 def test_splice_safe_repair_never_strands_two_model_turns() -> None:
     """Dropping a hollow duplicate between two turns leaves them adjacent."""
     out = splice_safe_repair(
-        [_calling("t1"), _result("t1"), reply("a"), _calling("t1"), reply("b")],
+        [
+            _calling("t1"),
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            reply("a"),
+            _calling("t1"),
+            reply("b"),
+        ],
     )
     assert _texts(out)[-1] == "ab"
     assert _splice(payload=out).payload == out
@@ -574,7 +785,16 @@ def test_a_leading_note_does_not_merge() -> None:
 
 
 def test_a_tool_result_blocks_a_model_turn_merge() -> None:
-    payload = (reply("a"), _result("t"), reply("b"))
+    payload = (
+        reply("a"),
+        ToolResult(
+            call_id="t",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+        reply("b"),
+    )
     assert coalesce_roles(payload) == payload
 
 
@@ -606,7 +826,23 @@ def test_model_turn_merge_dedupes_call_ids() -> None:
     (merged,) = out
     assert isinstance(merged, Response)
     assert [c.call_id for c in calls(merged.records)] == ["t1", "t2"]
-    assert _splice(payload=(*out, _result("t1"), _result("t2"))).payload
+    assert _splice(
+        payload=(
+            *out,
+            ToolResult(
+                call_id="t1",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+            ToolResult(
+                call_id="t2",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    ).payload
 
 
 def test_model_turn_merge_drops_signed_thinking_and_keeps_sealed() -> None:
@@ -638,10 +874,20 @@ def test_coalesce_roles_is_idempotent() -> None:
 
 def test_unpaired_call_ids_names_both_missing_sides() -> None:
     payload = (
-        _result("tr-only"),
+        ToolResult(
+            call_id="tr-only",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         _calling("open", "closed"),
         SystemMessage(content="n"),
-        _result("closed"),
+        ToolResult(
+            call_id="closed",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         _user("closes the turn"),
         _calling("last"),
     )
@@ -649,13 +895,37 @@ def test_unpaired_call_ids_names_both_missing_sides() -> None:
 
 
 def test_unpaired_call_ids_closes_pending_at_the_next_model_turn() -> None:
-    assert unpaired_call_ids((_calling("a"), _calling("b"), _result("b"))) == frozenset(
+    assert unpaired_call_ids(
+        (
+            _calling("a"),
+            _calling("b"),
+            ToolResult(
+                call_id="b",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
+    ) == frozenset(
         {"a"},
     )
 
 
 def test_unpaired_call_ids_of_a_paired_payload_is_empty() -> None:
-    assert unpaired_call_ids((_calling("a"), _result("a"))) == frozenset()
+    assert (
+        unpaired_call_ids(
+            (
+                _calling("a"),
+                ToolResult(
+                    call_id="a",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
+        == frozenset()
+    )
 
 
 def test_same_sender() -> None:
@@ -698,7 +968,13 @@ def _histories() -> st.SearchStrategy[list[ModelContextEvent]]:
             st.lists(_call_ids(), max_size=3, unique=True),
             signed=st.booleans(),
         ),
-        st.builds(_result, _call_ids(), text),
+        st.builds(
+            ToolResult,
+            call_id=_call_ids(),
+            state=st.just("done"),
+            stdout=st.tuples(text),
+            result=st.just(UncategorizedToolResult()),
+        ),
         st.one_of(
             st.builds(SystemMessage, content=text),
             st.just(TurnContext(cwd="/x")),

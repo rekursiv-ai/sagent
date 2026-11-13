@@ -152,7 +152,7 @@ async def test_a_path_that_lists_nothing_is_an_error(
     finally:
         if setup == "locked":
             target.chmod(0o700)
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, ListResult(exit_code=1))
     assert result.call_id == ""
     assert result.text().startswith(message.format(target))
 

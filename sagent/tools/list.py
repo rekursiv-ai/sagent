@@ -228,13 +228,22 @@ def _list(context: ToolContext, a: List.Arguments) -> ToolOutput[ListResult, str
     """List the directory ``a`` names."""
     directory = context.path(a.path or ".")
     if not directory.exists():
-        return _error(f"Not found: {directory}")
+        return ToolOutput(
+            stderr=(f"Not found: {directory}",),
+            result=ListResult(exit_code=1),
+        )
     if not directory.is_dir():
-        return _error(f"Not a directory: {directory}")
+        return ToolOutput(
+            stderr=(f"Not a directory: {directory}",),
+            result=ListResult(exit_code=1),
+        )
     try:
         entries = list(directory.iterdir())
     except OSError as e:
-        return _error(f"Error reading {directory}: {e}")
+        return ToolOutput(
+            stderr=(f"Error reading {directory}: {e}",),
+            result=ListResult(exit_code=1),
+        )
     if not a.show_hidden:
         entries = [e for e in entries if not e.name.startswith(".")]
     sort_paths(entries, a.sort)
@@ -263,7 +272,3 @@ def _stat(path: Path, key: str) -> float:
     except OSError:
         return 0
     return stat.st_mtime if key == "mtime" else stat.st_size
-
-
-def _error(message: str) -> ToolOutput[ListResult, str, str]:
-    return ToolOutput(stderr=(message,), result=ListResult(exit_code=1))

@@ -149,15 +149,6 @@ def _turn(text: str = "", *calls: ToolCall) -> Response:
     return reply(text, calls=calls)
 
 
-def _result(call_id: str, text: str = "ok") -> ToolResult:
-    return ToolResult(
-        call_id=call_id,
-        state="done",
-        stdout=(text,),
-        result=UncategorizedToolResult(),
-    )
-
-
 def _instruction(request: Request) -> str:
     """Return the summary instruction: the request's last record."""
     last = request.records[-1]
@@ -197,7 +188,12 @@ def _lead(splice: ContextSplice) -> str:
 _HISTORY: tuple[ModelContextEvent, ...] = (
     _user("fix the bug"),
     _turn("reading", call("Read", "c1", file_path="a.py")),
-    _result("c1", "def f(): ..."),
+    ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("def f(): ...",),
+        result=UncategorizedToolResult(),
+    ),
     _turn("fixed it"),
 )
 
@@ -618,35 +614,30 @@ def test_the_request_size_starts_from_the_newest_billed_reply(
     assert _request_tokens(ScriptedProvider()["scripted"], context) == tokens
 
 
-def _said(attached: tuple[Attachment, ...]) -> ModelContextEvent:
-    return _user("y" * 40, *attached)
-
-
-def _returned(attached: tuple[Attachment, ...]) -> ModelContextEvent:
-    return ToolResult(
-        call_id="c",
-        state="done",
-        stdout=(
-            "y" * 40,
-            *(attached),
-        ),
-        result=UncategorizedToolResult(),
-    )
-
-
-@pytest.mark.parametrize("carrier", [_said, _returned], ids=["user", "result"])
+@pytest.mark.parametrize("carrier", ["user", "result"])
 def test_an_attachment_since_the_bill_counts_what_the_model_says(
-    carrier: Callable[[tuple[Attachment, ...]], ModelContextEvent],
+    carrier: str,
 ) -> None:
     model = ScriptedProvider()["scripted"]
     image = Attachment(mime_descriptor="image/png", data=b"x" * 400)
     billed = reply("ok", tokens=TokenCount(request=10))
+    without_image, with_image = (
+        _user("y" * 40, *attachments)
+        if carrier == "user"
+        else ToolResult(
+            call_id="c",
+            state="done",
+            stdout=("y" * 40, *attachments),
+            result=UncategorizedToolResult(),
+        )
+        for attachments in ((), (image,))
+    )
 
-    bare = _request_tokens(model, (billed, carrier(())))
-    attached = _request_tokens(model, (billed, carrier((image,))))
+    bare = _request_tokens(model, (billed, without_image))
+    attached = _request_tokens(model, (billed, with_image))
 
     assert attached - bare == model.attachment_tokens(image) > 0
-    assert _request_tokens(model, (carrier((image,)),)) == (
+    assert _request_tokens(model, (with_image,)) == (
         40 // 4 + model.attachment_tokens(image)
     )
 
@@ -885,9 +876,19 @@ async def test_the_kept_tail_never_cuts_a_call_from_its_result(tmp_path: Path) -
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         _turn("", call("Read", "c2")),
-        _result("c2"),
+        ToolResult(
+            call_id="c2",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         _user("next"),
     )
 
@@ -903,7 +904,15 @@ async def test_a_tail_an_open_call_spans_is_summarized_with_the_rest(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY)
-    history = (_turn("", call("Read", "c1")), _result("c1"))
+    history = (
+        _turn("", call("Read", "c1")),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
 
     with caplog.at_level(logging.WARNING):
         splice = await _compact(SummaryCompactor(agent, keep_recent=1), agent, history)
@@ -962,12 +971,27 @@ async def test_the_summary_request_preserves_notes_peers_and_skill_bodies(
         _user("go"),
         TurnContext(cwd=str(tmp_path)),
         _turn("", call("Read", "c1"), call("Read", "c2")),
-        _result("c1", "first result"),
-        _result("c2", "second result"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("first result",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolResult(
+            call_id="c2",
+            state="done",
+            stdout=("second result",),
+            result=UncategorizedToolResult(),
+        ),
         AgentToAgentMessage(content="status", sender="reviewer"),
         _turn("", call("Skill", "s1")),
         AgentToAgentMessage(content="peer note", sender="reviewer"),
-        _result("s1", "the whole skill body"),
+        ToolResult(
+            call_id="s1",
+            state="done",
+            stdout=("the whole skill body",),
+            result=UncategorizedToolResult(),
+        ),
         SystemMessage(content="a reminder"),
         _turn("done"),
     )
@@ -987,7 +1011,12 @@ async def test_an_overflow_keeps_results_whole_and_preserves_the_unselected_suff
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1", "result"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("result",),
+            result=UncategorizedToolResult(),
+        ),
         _turn("ok"),
     )
 
@@ -1025,7 +1054,15 @@ async def test_an_overflow_with_small_results_retains_the_oldest_prefix(
 @pytest.mark.asyncio
 async def test_an_overflowing_indivisible_pair_is_not_discarded(tmp_path: Path) -> None:
     provider, agent = _agent(tmp_path, ContextOverflowError("too long"))
-    history = (_turn("", call("Read", "c1")), _result("c1"))
+    history = (
+        _turn("", call("Read", "c1")),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
 
     with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
         _ = await _compact(SummaryCompactor(agent), agent, history)
@@ -1044,7 +1081,12 @@ async def test_a_summary_that_overflows_every_attempt_errors_with_bounded_calls(
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1", "result"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("result",),
+            result=UncategorizedToolResult(),
+        ),
         _turn("ok"),
     )
     compactor = (
@@ -1280,7 +1322,12 @@ def _loaded(name: str, call_id: str) -> list[ModelContextEvent]:
     return [
         _user("go"),
         _turn("", call("Skill", call_id, skill=name)),
-        _result(call_id, f"<skill name='{name}' source='project'>\nsteps\n</skill>"),
+        ToolResult(
+            call_id=call_id,
+            state="done",
+            stdout=(f"<skill name='{name}' source='project'>\nsteps\n</skill>",),
+            result=UncategorizedToolResult(),
+        ),
         _turn("done"),
     ]
 
@@ -2790,7 +2837,16 @@ def test_a_calls_arguments_and_sealed_thinking_count_as_the_model_reads_them() -
     assert (
         _request_tokens(
             ScriptedProvider()["scripted"],
-            (_user("go"), turn, _result("c1")),
+            (
+                _user("go"),
+                turn,
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
         )
         == (len("go") + len('{"file_path": "pppp"}') + len("ok")) // 4
     )
@@ -2825,8 +2881,18 @@ async def test_an_overflow_shortens_to_the_previous_safe_tool_boundary(
         *_HISTORY,
         _user("last ask"),
         _turn("", call("Read", "c2"), call("Read", "c3")),
-        _result("c2", "first"),
-        _result("c3", "second"),
+        ToolResult(
+            call_id="c2",
+            state="done",
+            stdout=("first",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolResult(
+            call_id="c3",
+            state="done",
+            stdout=("second",),
+            result=UncategorizedToolResult(),
+        ),
     )
 
     splice = await _compact(SummaryCompactor(agent), agent, history)
@@ -3235,7 +3301,12 @@ async def test_prefix_summary_keeps_the_tool_result_and_attachment_unchanged(
     history = (
         _user("go", image),
         _turn("", call("Read", "c1")),
-        _result("c1", "body" * 10_000),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("body" * 10_000,),
+            result=UncategorizedToolResult(),
+        ),
         _turn("done"),
     )
     _hold(agent, history)

@@ -166,18 +166,29 @@ def _edit(
     path = context.path(a.file_path)
     # ``str.replace("", ...)`` inserts between every character.
     if not a.old_string:
-        return _error("old_string is empty.")
+        return ToolOutput(
+            stderr=("old_string is empty.",),
+            result=EditResult(exit_code=1),
+        )
     if not path.is_file():
-        return _error(f"{path} is not a file.")
+        return ToolOutput(
+            stderr=(f"{path} is not a file.",),
+            result=EditResult(exit_code=1),
+        )
     if context.files.changed(path):
-        return _error(
-            f"{path} changed since it was read, by the user, a linter, or"
-            " another agent. Read it again before editing it.",
+        return ToolOutput(
+            stderr=(
+                f"{path} changed since it was read, by the user, a linter, or another agent. Read it again before editing it.",
+            ),
+            result=EditResult(exit_code=1),
         )
     try:
         raw = path.read_bytes().decode()
     except UnicodeDecodeError:
-        return _error(f"{path} is not UTF-8. Use Bash with an explicit decoder.")
+        return ToolOutput(
+            stderr=(f"{path} is not UTF-8. Use Bash with an explicit decoder.",),
+            result=EditResult(exit_code=1),
+        )
     # Read shows a CRLF file with ``\n``, so the strings the model quotes have
     # ``\n``; the file keeps its ``\r\n``. A file of mixed endings is matched as is.
     crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
@@ -186,11 +197,16 @@ def _edit(
         text, old, new = (s.replace("\r\n", "\n") for s in (raw, old, new))
     count = text.count(old)
     if count == 0:
-        return _error("old_string not found in file.")
+        return ToolOutput(
+            stderr=("old_string not found in file.",),
+            result=EditResult(exit_code=1),
+        )
     if count > 1 and not a.replace_all:
-        return _error(
-            f"old_string found {count} times. Set replace_all, or give more"
-            " context to make it unique.",
+        return ToolOutput(
+            stderr=(
+                f"old_string found {count} times. Set replace_all, or give more context to make it unique.",
+            ),
+            result=EditResult(exit_code=1),
         )
     # Every occurrence: without ``replace_all`` there is exactly one.
     edited = text.replace(old, new)
@@ -218,7 +234,3 @@ def _lines_at(text: str, needle: str) -> list[int]:
         scanned = at
         at = text.find(needle, at + len(needle))
     return lines
-
-
-def _error(message: str) -> ToolOutput[EditResult, str, str]:
-    return ToolOutput(stderr=(message,), result=EditResult(exit_code=1))

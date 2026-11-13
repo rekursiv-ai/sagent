@@ -108,10 +108,16 @@ class PlayAudio:
     ) -> ToolOutput[PlayAudioResult, str, str]:
         path = context.path(parse(arguments, PlayAudio.Arguments).path)
         if not path.is_file():
-            return _error(f"Not a file: {path}")
+            return ToolOutput(
+                stderr=(f"Not a file: {path}",),
+                result=PlayAudioResult(exit_code=1),
+            )
         if path.suffix.lower() != ".wav":
-            return _error(
-                f"Unsupported format {path.suffix!r}; only .wav is supported.",
+            return ToolOutput(
+                stderr=(
+                    f"Unsupported format {path.suffix!r}; only .wav is supported.",
+                ),
+                result=PlayAudioResult(exit_code=1),
             )
         failure = await asyncio.to_thread(self._play, path)
         if failure:
@@ -166,7 +172,3 @@ class PlayAudio:
                 return ""
             tried.append(f"{argv[0]} (exit {done.returncode})")
         return "no audio backend worked: " + "; ".join(tried)
-
-
-def _error(message: str) -> ToolOutput[PlayAudioResult, str, str]:
-    return ToolOutput(stderr=(message,), result=PlayAudioResult(exit_code=1))

@@ -1248,18 +1248,13 @@ def _converted_record(tag: str, former: Mapping[str, object]) -> dict[str, objec
         stdout.append(former.get("content"))
         # ``ranges`` held the lines a read returned, each as ``(start, count)``.
         stdout.extend(
-            {
-                "py/object": "LineSpan",
-                **dict(zip(("start", "count"), _tuple_items(span), strict=False)),
-            }
-            for span in _tuple_items(former.get("ranges"))
+            {"py/object": "LineSpan", "start": start, "count": count}
+            for start, count in map(_tuple_items, _tuple_items(former.get("ranges")))
         )
         output_fields = {"content", "ranges"}
     # A field declared ``tuple[X, ...]`` stored each ``X`` without a class tag.
     stdout.extend(
-        {**cast("Mapping[str, object]", item), "py/object": item_class}
-        if isinstance(item, Mapping) and "py/object" not in item
-        else item
+        {"py/object": item_class, **cast("Mapping[str, object]", item)}
         for item_field, item_class in item_fields
         for item in _tuple_items(former.get(item_field))
     )
