@@ -58,6 +58,7 @@ from asyncio import Future
 from collections.abc import (
     AsyncIterator,
     Callable,
+    Coroutine,
     Mapping,
     Sequence,
     Set as AbstractSet,
@@ -74,6 +75,7 @@ from typing import (
     TypeAliasType,
     TypeGuard,
     cast,
+    final,
     get_args,
     get_origin,
     get_type_hints,
@@ -99,7 +101,7 @@ from sagent.session.types import ToolResult
 
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Iterable, Iterator
+    from collections.abc import Iterable, Iterator
 
     from _typeshed import DataclassInstance
 
@@ -142,8 +144,9 @@ StreamErr_co = TypeVar("StreamErr_co", covariant=True, default=object)
 class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
     """A running tool call: its two output streams and the future of its result.
 
-    The streams need not be read: an unread stream never blocks the tool. Both
-    streams end by the time ``result`` is done, however the call ends.
+    The streams need not be read: an unread stream never blocks the tool. A
+    ``Stream`` the tool left open ends when ``result`` is done, however the call
+    ends, as a process's pipes end when it exits.
     """
 
     result: Future[Result_co]
@@ -154,6 +157,17 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
 
     stderr: AsyncIterator[StreamErr_co]
     """The tool's standard error, item by item as the tool writes it."""
+
+    def __post_init__(self) -> None:
+        self.result.add_done_callback(self._end_streams)
+
+    # Any other iterator ends itself: only a ``Stream`` waits for a write.
+    def _end_streams(self, result: object) -> None:
+        """Close each ``Stream``, so a reader stops after what the tool wrote."""
+        del result
+        for stream in (self.stdout, self.stderr):
+            if isinstance(stream, Stream):
+                stream.close()
 
 
 class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
@@ -238,6 +252,9 @@ class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
         ...
 
 
+# Final, so a checker knows that no ``ToolOutput`` is also a coroutine, which
+# ``whole_output`` takes in its place.
+@final
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolOutput(Generic[Result_co, StreamOut_co, StreamErr_co]):
     """The complete output of a tool that does not stream; see ``whole_output``."""
@@ -253,22 +270,23 @@ class ToolOutput(Generic[Result_co, StreamOut_co, StreamErr_co]):
 
 
 def whole_output[R, O, E](
-    coroutine: Coroutine[object, object, ToolOutput[R, O, E]],
+    output: Coroutine[object, object, ToolOutput[R, O, E]] | ToolOutput[R, O, E],
 ) -> ToolStreamingResult[R, O, E]:
-    """Start ``coroutine`` and return its ``ToolOutput`` as a ``ToolStreamingResult``.
+    """Return a ``ToolOutput``, or the one a coroutine returns, as a ``ToolStreamingResult``.
 
     Args:
-      coroutine: The tool's work. It starts now, on the running loop.
+      output: The tool's output, or the tool's work that returns it. A
+        coroutine starts now, on the running loop.
 
     Returns:
-      streaming_result: Its streams get the output's items when ``coroutine``
+      streaming_result: Its streams get the output's items when the work
         returns, and nothing when it raises or is cancelled. Its ``result``
-        raises what ``coroutine`` raised.
+        raises what the work raised.
 
     """
     stdout, stderr = Stream[O](), Stream[E]()
     return ToolStreamingResult(
-        result=asyncio.ensure_future(_write_output(coroutine, stdout, stderr)),
+        result=asyncio.ensure_future(_write_output(output, stdout, stderr)),
         stdout=stdout,
         stderr=stderr,
     )
@@ -1058,22 +1076,25 @@ async def _collect[T](stream: AsyncIterator[T], items: list[T]) -> None:
             return
 
 
-# ``coroutine`` is awaited inside the task that is the call's ``result`` future,
+# A coroutine is awaited inside the task that is the call's ``result`` future,
 # so cancelling that future cancels the tool, and the tool's
 # ``asyncio.current_task()`` is that future, which ``Runtime.push_after`` matches.
 async def _write_output[R, O, E](
-    coroutine: Coroutine[object, object, ToolOutput[R, O, E]],
+    output: Coroutine[object, object, ToolOutput[R, O, E]] | ToolOutput[R, O, E],
     stdout: Stream[O],
     stderr: Stream[E],
 ) -> R:
-    """Await ``coroutine``, write its output to the streams, and return its result."""
+    """Write ``output`` to the streams, awaiting it first if need be; return its result."""
+    # Closed here, not left to the result's end: the call's record is then made
+    # in the loop turn the tool ends in, with whatever the tool queued for its
+    # agent, and not a turn after it.
     try:
-        output = await coroutine
-        for item in output.stdout:
+        whole = await output if isinstance(output, Coroutine) else output
+        for item in whole.stdout:
             stdout.write(item)
-        for item in output.stderr:
+        for item in whole.stderr:
             stderr.write(item)
     finally:
         stdout.close()
         stderr.close()
-    return output.result
+    return whole.result

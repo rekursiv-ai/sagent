@@ -391,6 +391,68 @@ async def test_a_live_call_is_recorded_once_its_streams_end() -> None:
     )
 
 
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+@pytest.mark.asyncio
+async def test_a_tool_that_leaves_its_streams_open_is_recorded_when_it_ends(
+    *,
+    fails: bool,
+) -> None:
+    """As a process's pipes end when it exits: no reader waits for a tool that stopped."""
+    out, err = Stream[str](), Stream[str]()
+
+    async def tool() -> UncategorizedToolResult:
+        out.write("out\n")
+        err.write("err\n")
+        if fails:
+            raise ValueError("no")
+        return UncategorizedToolResult()
+
+    streaming_result = ToolStreamingResult(
+        result=asyncio.ensure_future(tool()),
+        stdout=out,
+        stderr=err,
+    )
+    async with asyncio.timeout(0.2):
+        result = await settled(streaming_result)
+
+    assert result == (
+        ToolResult(
+            call_id="",
+            state="failed",
+            stdout=("out\n",),
+            stderr=("err\n", "ValueError: no"),
+        )
+        if fails
+        else ToolResult(
+            call_id="",
+            state="done",
+            stdout=("out\n",),
+            stderr=("err\n",),
+            result=UncategorizedToolResult(),
+        )
+    )
+    assert [item async for item in out] == []
+    assert [item async for item in err] == []
+
+
+@pytest.mark.asyncio
+async def test_an_output_that_is_already_whole_is_written_as_it_is() -> None:
+    """A tool with its answer at hand, such as a refusal, needs no coroutine."""
+    output = ToolOutput(
+        stdout=("out",),
+        stderr=("err",),
+        result=UncategorizedToolResult(exit_code=2),
+    )
+
+    assert await settled(whole_output(output), call_id="c1") == ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("out",),
+        stderr=("err",),
+        result=UncategorizedToolResult(exit_code=2),
+    )
+
+
 def test_schema_names_each_field_and_requires_those_without_defaults() -> None:
     schema = json_schema(_Arguments)
     assert schema["type"] == "object"

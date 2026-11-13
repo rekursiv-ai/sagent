@@ -4118,7 +4118,7 @@ async def test_scheduled_work_runs_between_turns() -> None:
         await spin()
         assert seen == []
         tool.release.set()
-        await scheduled
+        await h.finished(scheduled)
         await h.seen(ModelIdle)
     assert seen == [(1, 1)]
 
@@ -4139,7 +4139,7 @@ async def test_scheduled_work_waits_out_a_halt() -> None:
         await spin()
         assert ran == []
         h.push(_user("resume"))
-        await scheduled
+        await h.finished(scheduled)
     assert ran == [True]
 
 
@@ -4897,7 +4897,7 @@ async def test_push_front_goes_ahead_of_queued_items() -> None:
     dq.push_back("a")
     dq.push_back("b")
     dq.push_front("X", "Y")
-    assert await dq.drain() == ["X", "Y", "a", "b"]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == ["X", "Y", "a", "b"]
     assert dq.empty()
 
 
@@ -4918,7 +4918,11 @@ async def test_a_gate_holds_the_drain_until_a_new_match() -> None:
     await spin(5)
     assert not drained.done()
     dq.push_back(_user("fresh"))
-    assert await drained == [_user("pre-existing"), SaveSession(), _user("fresh")]
+    assert await asyncio.wait_for(drained, timeout=1) == [
+        _user("pre-existing"),
+        SaveSession(),
+        _user("fresh"),
+    ]
     assert not dq.gate_armed
 
 
@@ -4927,14 +4931,14 @@ async def test_quit_always_releases_a_gate() -> None:
     dq: GatedDeque[object] = GatedDeque()
     dq.push_front(Await(types=(UserMessage,)))
     dq.push_back(Quit())
-    assert await dq.drain() == [Quit()]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == [Quit()]
 
 
 @pytest.mark.asyncio
 async def test_items_pushed_with_the_await_count_as_new() -> None:
     dq: GatedDeque[object] = GatedDeque()
     dq.push_front(Await(types=(UserMessage,)), _user("redirect"))
-    assert await dq.drain() == [_user("redirect")]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == [_user("redirect")]
 
 
 @pytest.mark.asyncio
@@ -4945,10 +4949,14 @@ async def test_a_passing_item_is_handed_over_and_the_rest_wait_their_turn() -> N
     dq.push_back(SaveSession())
     dq.push_back(Halt())
     dq.push_back(Clear())
-    assert await dq.drain() == [Halt()]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == [Halt()]
     assert dq.gate_armed
     dq.push_back(_user("fresh"))
-    assert await dq.drain() == [SaveSession(), Clear(), _user("fresh")]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == [
+        SaveSession(),
+        Clear(),
+        _user("fresh"),
+    ]
     assert not dq.gate_armed
 
 
@@ -5599,7 +5607,7 @@ async def test_a_delayed_call_sleeps_then_runs() -> None:
         await h.seen(ModelIdle)
         assert h.runtime.jobs["d1"].state == "sleeping"
         assert tool.started == []
-        await h.runtime.detached["d1"]
+        await h.finished(h.runtime.detached["d1"])
         await h.seen(ModelIdle, 2)
         assert h.runtime.jobs == {}
     assert [r.text() for r in _arrival(h, "d1")] == ["later"]
@@ -6000,7 +6008,8 @@ async def test_background_task_names_what_was_wrong(
 
 @pytest.mark.asyncio
 async def test_foreground_of_no_such_call_is_none() -> None:
-    assert await Harness().runtime.foreground("nope") is None
+    h = Harness()
+    assert await h.finished(h.runtime.foreground("nope")) is None
 
 
 def _recording_timers(
@@ -6433,7 +6442,10 @@ async def test_a_gate_ignores_queued_items_of_other_kinds() -> None:
     dq.push_back(SaveSession())
     dq.push_front(Await(types=(UserMessage,)))
     dq.push_back(_user("fresh"))
-    assert await dq.drain() == [SaveSession(), _user("fresh")]
+    assert await asyncio.wait_for(dq.drain(), timeout=1) == [
+        SaveSession(),
+        _user("fresh"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -6594,6 +6606,121 @@ async def test_every_bash_call_in_a_reply_is_rewritten(tmp_path: Path) -> None:
         ("b1", "Read"),
         ("b2", "Read"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_under_the_id_of_a_running_call_gets_an_id_of_its_own() -> None:
+    """A provider may number its calls anew in each reply."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "c0", tag="first", out="first")]),
+        reply(calls=[call("echo", "c0", tag="second", out="second")]),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: tool.started == ["first"])
+        h.push(_user("and again"))
+        await h.until(lambda: tool.started == ["first", "second"])
+        assert set(h.runtime._calls) == {"c0", "c0_1"}
+        tool.release.set()
+        await h.until(lambda: bool(_arrival(h, "c0")) and bool(h.results("c0_1")))
+        await h.until(lambda: not h.runtime._calls)
+    assert [r.text() for r in h.results("c0_1")] == ["second"]
+    assert [r.text() for r in _arrival(h, "c0")] == ["first"]
+    validate_context(h.history())
+
+
+@pytest.mark.asyncio
+async def test_a_call_under_the_id_of_a_delivered_call_is_delivered_too() -> None:
+    """Under the same id, its result would read as delivered already and be dropped."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "c0", background=True, out="first")]),
+        reply("waiting"),
+        reply("got the first"),
+        reply(calls=[call("echo", "c0", background=True, out="second")]),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+        tool.release.set()
+        await h.seen(ModelIdle, 2)
+        h.push(_user("and again"))
+        await h.until(lambda: bool(_arrival(h, "c0_1")))
+    assert [r.text() for r in _arrival(h, "c0")] == ["first"]
+    assert [r.text() for r in _arrival(h, "c0_1")] == ["second"]
+    validate_context(h.history())
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_frees_no_id_of_a_call_still_running() -> None:
+    """The summary holds no call, yet the call's entries are still under its id."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "c0", tag="first", out="first")]),
+        reply(calls=[call("echo", "c0", tag="second", out="second")]),
+        *_replies(3),
+        tools=[tool],
+        compactor=Summarizer(),
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: tool.started == ["first"])
+        h.push(Compact())
+        await h.until(lambda: tool.started == ["first", "second"])
+        assert set(h.runtime._calls) == {"c0", "c0_1"}
+        tool.release.set()
+        await h.until(lambda: bool(_arrival(h, "c0")) and bool(h.results("c0_1")))
+    assert [r.text() for r in h.results("c0_1")] == ["second"]
+    assert [r.text() for r in _arrival(h, "c0")] == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_frees_no_id_of_a_call_already_delivered() -> None:
+    """The summary holds no delivery, yet the id still reads as delivered."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "c0", background=True, out="first")]),
+        reply("waiting"),
+        reply("got the first"),
+        reply("compacted"),
+        reply(calls=[call("echo", "c0", background=True, out="second")]),
+        *_replies(3),
+        tools=[tool],
+        compactor=Summarizer(),
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+        tool.release.set()
+        await h.seen(ModelIdle, 2)
+        h.push(Compact())
+        await h.seen(ModelIdle, 3)
+        h.push(_user("and again"))
+        await h.until(lambda: bool(_arrival(h, "c0_1")))
+    assert [r.text() for r in _arrival(h, "c0_1")] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_a_split_call_skips_the_ids_earlier_calls_have(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("alpha\n")
+    (tmp_path / "b.txt").write_text("beta\n")
+    tools: list[Tool] = [Bash(peers=(Read(),)), Read()]
+    async with Harness(
+        reply(calls=[_bash("b1_1", "echo taken")]),
+        reply(calls=[_bash("b1", "cat a.txt; cat b.txt")]),
+        reply("read them"),
+        tools=tools,
+        cwd=tmp_path,
+    ) as h:
+        h.push(_user("show both"))
+        await h.seen(ModelIdle)
+    assert [
+        c.call_id
+        for entry in h.history()
+        if isinstance(entry, Response)
+        for c in calls(entry.records)
+    ] == ["b1_1", "b1", "b1_2"]
 
 
 @pytest.mark.asyncio

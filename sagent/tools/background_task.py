@@ -109,9 +109,24 @@ class BackgroundTask:
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
     ) -> ToolStreamingResult[BackgroundTaskResult, str, str]:
-        """Refuse: the jobs are the runtime's, which calls :meth:`manage` instead."""
+        """Refuse: the jobs are the runtime's, which calls :meth:`manage` instead.
+
+        Args:
+          context: The calling agent's state; not read.
+          arguments: What the model passed; not read.
+
+        Returns:
+          streaming_result: An error saying that ``BackgroundTask`` runs only
+            inside an agent's runtime.
+
+        """
         del context, arguments
-        return whole_output(_refused())
+        return whole_output(
+            ToolOutput(
+                stderr=("BackgroundTask runs only inside an agent's runtime.",),
+                result=BackgroundTaskResult(exit_code=1),
+            ),
+        )
 
     async def manage(
         self,
@@ -311,11 +326,3 @@ def _listing(jobs: Mapping[str, Job]) -> ToolResult[BackgroundTaskResult]:
 def _phase(job: Job) -> str:
     """Return ``sleeping`` until a job starts, then ``running``."""
     return "sleeping" if job.state == "sleeping" else "running"
-
-
-async def _refused() -> ToolOutput[BackgroundTaskResult, str, str]:
-    """Return the output of a call made outside a runtime: an error saying so."""
-    return ToolOutput(
-        stderr=("BackgroundTask runs only inside an agent's runtime.",),
-        result=BackgroundTaskResult(exit_code=1),
-    )

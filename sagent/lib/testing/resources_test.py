@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, cast, override
-from unittest.mock import patch
 
 import inspect
 import locale
@@ -697,12 +696,20 @@ def test_isolation_does_not_scan_prior_test_directories(
 ) -> None:
     # Allocation alone: deleting the previous test's root walks only that root.
     del request.config.stash[resources._LAST_ROOT]
-    with patch("os.scandir", wraps=os.scandir) as scandir:
+    scanned: list[object] = []
+    real = os.scandir
+
+    def scandir(path: str) -> Iterator[os.DirEntry[str]]:
+        scanned.append(path)
+        return real(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", scandir)
         root = _allocate(request, tmp_path_factory, monkeypatch)
 
     assert isinstance(root, Path)
     assert root.is_dir()
-    scandir.assert_not_called()
+    assert scanned == []
 
 
 def test_isolation_does_not_grow_pytests_numbered_directory_parent(

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from typing import NoReturn
 
 import os
 import shutil
@@ -12,15 +11,12 @@ import subprocess
 
 import pytest
 
+from sagent.lib.files import glob as files_glob
 from sagent.lib.files.glob import GlobError, fd_command, glob
 
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-
 @pytest.fixture(autouse=True)
-def backend(fd: bool) -> Iterator[None]:
+def backend(fd: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide ``fd`` unless the test runs against it."""
     found = shutil.which("fd") or shutil.which("fdfind")
     if fd and found is None:
@@ -32,8 +28,8 @@ def backend(fd: bool) -> Iterator[None]:
     # A test for the fd backend must reach it, whatever the entry cap says;
     # without this the in-process walk answers every small tree and the ``fd``
     # parameter tests nothing.
-    with patch("shutil.which", which), patch("sagent.lib.files.glob._FD_ENTRIES", -1):
-        yield
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", -1)
 
 
 @pytest.fixture
@@ -181,14 +177,25 @@ def test_a_prefix_is_not_satisfied_by_a_root_sharing_its_name(
     assert glob(root, "build/*") == []
 
 
-def test_an_entry_that_vanished_since_the_walk_stays_listed(tmp_path: Path) -> None:
+def test_an_entry_that_vanished_since_the_walk_stays_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A failed ``lstat`` is a race, not a directory, so the name is still named."""
     (tmp_path / "gone.py").write_text("")
-    with patch("pathlib.Path.lstat", side_effect=OSError):
+
+    def vanished(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", vanished)
         assert glob(tmp_path, "*.py") == [tmp_path / "gone.py"]
 
 
-def test_the_walk_hands_off_to_fd_only_past_the_entry_limit(tmp_path: Path) -> None:
+def test_the_walk_hands_off_to_fd_only_past_the_entry_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Up to ``_FD_ENTRIES`` entries below the root, the walk's answer stands."""
     for i in range(3):
         (tmp_path / f"{i}.py").write_text("")
@@ -196,16 +203,20 @@ def test_the_walk_hands_off_to_fd_only_past_the_entry_limit(tmp_path: Path) -> N
     def which(name: str) -> str:
         return f"/usr/bin/{name}"
 
-    with (
-        patch("shutil.which", which),
-        patch("sagent.lib.files.glob._FD_ENTRIES", 3),
-        patch("sagent.lib.files.glob._glob_fd", return_value=[]) as ran,
-    ):
-        assert glob(tmp_path, "**/*.py") == [tmp_path / f"{i}.py" for i in range(3)]
-        assert ran.call_count == 0
-        (tmp_path / "3.py").write_text("")
-        assert glob(tmp_path, "**/*.py") == []
-    assert ran.call_count == 1
+    ran_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def ran(*args: object, **kwargs: object) -> object:
+        ran_calls.append((args, kwargs))
+        return list[Path]()
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 3)
+    monkeypatch.setattr(files_glob, "_glob_fd", ran)
+    assert glob(tmp_path, "**/*.py") == [tmp_path / f"{i}.py" for i in range(3)]
+    assert ran_calls == []
+    (tmp_path / "3.py").write_text("")
+    assert glob(tmp_path, "**/*.py") == []
+    assert len(ran_calls) == 1
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
@@ -235,16 +246,19 @@ def test_a_parent_segment_does_not_opt_into_hidden_entries(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_either_side_of_the_entry_limit_answers_alike(tmp_path: Path) -> None:
+def test_either_side_of_the_entry_limit_answers_alike(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Over ``_FD_ENTRIES`` the in-process walk gives up and fd finishes instead."""
     for i in range(6):
         (tmp_path / f"pkg{i}").mkdir()
         (tmp_path / f"pkg{i}" / f"mod{i}.py").write_text("")
     expected = [tmp_path / f"pkg{i}" / f"mod{i}.py" for i in range(6)]
-    with patch("sagent.lib.files.glob._FD_ENTRIES", 2):
-        assert glob(tmp_path, "**/*.py") == expected
-    with patch("sagent.lib.files.glob._FD_ENTRIES", 10_000):
-        assert glob(tmp_path, "**/*.py") == expected
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 2)
+    assert glob(tmp_path, "**/*.py") == expected
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 10_000)
+    assert glob(tmp_path, "**/*.py") == expected
 
 
 @_BOTH
@@ -373,38 +387,56 @@ def test_paths_sort_by_component_not_as_plain_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_a_failed_fd_run_raises_rather_than_answering_empty(tmp_path: Path) -> None:
+def test_a_failed_fd_run_raises_rather_than_answering_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A non-zero exit is a fault to surface, not an empty answer to believe."""
     (tmp_path / "a.py").write_text("")
     argv = [shutil.which("fd") or "", "--not-a-real-flag"]
-    with (
-        patch("sagent.lib.files.glob.fd_command", return_value=argv),
-        pytest.raises(subprocess.CalledProcessError),
-    ):
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    with pytest.raises(subprocess.CalledProcessError):
         glob(tmp_path, "**/*.py")
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_the_default_fd_timeout_is_thirty_seconds(tmp_path: Path) -> None:
+def test_the_default_fd_timeout_is_thirty_seconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     (tmp_path / "a.py").write_text("")
-    with patch(
-        "sagent.lib.files.glob.subprocess.run",
-        return_value=subprocess.CompletedProcess([], 0, "", ""),
-    ) as run:
+    run_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def run(*args: object, **kwargs: object) -> object:
+        run_calls.append((args, kwargs))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", run)
         assert glob(tmp_path, "**/*.py") == []
-    assert run.call_args.kwargs["timeout"] == 30
+    (call,) = run_calls
+    assert call[1]["timeout"] == 30
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_an_fd_that_hangs_is_stopped_at_the_limit(tmp_path: Path) -> None:
+def test_an_fd_that_hangs_is_stopped_at_the_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A glob run in a thread cannot be cancelled, so only a limit bounds it."""
     (tmp_path / "a.py").write_text("")
     pid = tmp_path / "fd.pid"
     argv = ["/bin/sh", "-c", f'echo $$ > "{pid}"; exec sleep 60']
-    with (
-        patch("sagent.lib.files.glob.fd_command", return_value=argv),
-        pytest.raises(GlobError, match=r"^fd timed out after 0\.05s; narrow"),
-    ):
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    with pytest.raises(GlobError, match=r"^fd timed out after 0\.05s; narrow"):
         glob(tmp_path, "**/*.py", timeout_sec=0.05)
     assert not Path(f"/proc/{pid.read_text().strip()}").exists()
 
@@ -412,6 +444,7 @@ def test_an_fd_that_hangs_is_stopped_at_the_limit(tmp_path: Path) -> None:
 @pytest.mark.parametrize("name", ["fd", "fdfind"])
 def test_either_spelling_of_the_fd_executable_is_used(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
     """Debian ships fd as ``fdfind``, so a host with only one name still uses it."""
@@ -420,16 +453,20 @@ def test_either_spelling_of_the_fd_executable_is_used(
     def which(asked: str) -> str | None:
         return f"/usr/bin/{name}" if asked == name else None
 
-    with (
-        patch("shutil.which", which),
-        patch("sagent.lib.files.glob._FD_ENTRIES", -1),
-        patch("sagent.lib.files.glob._glob_fd", return_value=[]) as ran,
-    ):
-        assert glob(tmp_path, "**/*.py") == []
-        # A bounded pattern has no deep walk to hand off, so fd stays unused.
-        assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
-    assert ran.call_args.args[0] == f"/usr/bin/{name}"
-    assert ran.call_count == 1
+    ran_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def ran(*args: object, **kwargs: object) -> object:
+        ran_calls.append((args, kwargs))
+        return list[Path]()
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", -1)
+    monkeypatch.setattr(files_glob, "_glob_fd", ran)
+    assert glob(tmp_path, "**/*.py") == []
+    # A bounded pattern has no deep walk to hand off, so fd stays unused.
+    assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
+    (call,) = ran_calls
+    assert call[0][0] == f"/usr/bin/{name}"
 
 
 @_BOTH

@@ -2137,10 +2137,16 @@ class Runtime:
     # A leading ``cd`` to where the shell starts anyway is dropped, so the model
     # stops copying it; only until a call that may move the shell, since the
     # calls after it may start somewhere else.
+    #
+    # A provider may number its calls anew in each reply. The call's id names it
+    # in every registry here, and names the delivery of a detached result, so a
+    # call under an id an earlier call has would take that call's entries, and
+    # its own result would be dropped as delivered already. It gets ``<id>_<n>``.
     def _rewrite_calls(self, msg: Response) -> Response:
-        """Return ``msg`` with each Bash call that is other tools' job rewritten."""
+        """Return ``msg`` with repeated ids replaced and other tools' Bash calls rewritten."""
         records: list[AssistantMessage | Thinking | ToolCall] = []
-        used = {r.call_id for r in calls(msg.records)}
+        taken = {*self._calls, *self._parent_assistant_refs, *self._forwarded_call_ids}
+        used = taken | {r.call_id for r in calls(msg.records)}
         # The reply's calls run side by side and share the shell's directory: one
         # that moves it may land before any other, whatever its place in the reply.
         cwd = str(self.tool_context.cwd)
@@ -2151,21 +2157,41 @@ class Runtime:
             for c in calls(msg.records)
         )
         for given in msg.records:
-            bash = self.tools.get(given.name) if isinstance(given, ToolCall) else None
-            if not isinstance(given, ToolCall) or not isinstance(bash, Bash):
+            if not isinstance(given, ToolCall):
                 records.append(given)
                 continue
             record = given
-            command = given.arguments.get("command")
+            if given.call_id in taken:
+                # The first id ``_fresh_ids`` yields is the taken one itself.
+                record = dataclasses.replace(
+                    given,
+                    call_id=next(
+                        itertools.islice(
+                            _fresh_ids(given.call_id, used=used),
+                            1,
+                            None,
+                        ),
+                    ),
+                )
+                logger.debug(
+                    "runtime repeated call id replaced: %s -> %s",
+                    given.call_id,
+                    record.call_id,
+                )
+            bash = self.tools.get(record.name)
+            if not isinstance(bash, Bash):
+                records.append(record)
+                continue
+            command = record.arguments.get("command")
             # A call run later may start after the next reply moved the shell.
-            later = given.arguments.get("background") is True or bool(
-                given.arguments.get("delay"),
+            later = record.arguments.get("background") is True or bool(
+                record.arguments.get("delay"),
             )
             if isinstance(command, str) and settled and not later:
                 record = dataclasses.replace(
-                    given,
+                    record,
                     arguments={
-                        **given.arguments,
+                        **record.arguments,
                         "command": drop_cd(command, cwd=cwd),
                     },
                 )

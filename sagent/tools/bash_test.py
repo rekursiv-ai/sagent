@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Final
+from typing import IO, TYPE_CHECKING, Final, override
 
 import asyncio
 import contextlib
@@ -35,10 +35,12 @@ from sagent.tools.bash import (
     _drain,
     _early_chars,
     _EarlyWriter,
+    _ends,
     _final_text,
     _guard,
     _HeldPipe,
     _OutputPipe,
+    _read_lines,
     _read_output,
     _spill,
     _stop,
@@ -1530,6 +1532,40 @@ async def test_a_line_longer_than_the_readers_buffer_is_read_whole(
 
 
 @pytest.mark.asyncio
+async def test_bytes_that_are_no_text_are_read_as_replacement_characters() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"a\xff\nb\xff")
+    reader.feed_eof()
+    lines: list[str] = []
+
+    await _read_lines(reader, lines.append)
+
+    assert lines == ["a\ufffd", "b\ufffd"]
+
+
+@pytest.mark.asyncio
+async def test_one_read_of_the_output_asks_for_at_most_64_kib() -> None:
+    """The size asked for bounds what one read holds, however long a line is."""
+    asked: list[int] = []
+
+    class Reader(asyncio.StreamReader):
+        @override
+        async def read(self, n: int = -1) -> bytes:
+            asked.append(n)
+            return await super().read(n)
+
+    reader = Reader()
+    reader.feed_data(b"a\n")
+    reader.feed_eof()
+    lines: list[str] = []
+
+    await _read_lines(reader, lines.append)
+
+    assert asked == [1 << 16, 1 << 16]
+    assert lines == ["a", ""]
+
+
+@pytest.mark.asyncio
 async def test_arguments_that_do_not_fit_end_both_streams() -> None:
     """A call that never starts its command still ends what a reader waits on."""
     result = await settled(Bash().call(ToolContext(cwd=Path("/")), {}))
@@ -1605,6 +1641,20 @@ def test_a_long_output_is_written_early_only_as_far_as_truncation_keeps() -> Non
     assert final_text.startswith("".join(writer._written))
 
 
+# The line that counts the omitted lines takes 47 characters at its longest, so a
+# cap of 1,000 leaves 1,000 - (250 + 160) - 47 = 543 characters of room.
+@pytest.mark.parametrize(
+    ("cap", "expected"),
+    [(1_000, 217), (0, 0)],
+    ids=["two-fifths-of-the-room", "no-room"],
+)
+def test_the_start_always_keeps_two_fifths_of_the_room(
+    cap: int,
+    expected: int,
+) -> None:
+    assert _early_chars(cap, note="") == expected
+
+
 @given(
     lines=st.lists(st.text(alphabet=" \tab", max_size=40), max_size=200),
     cap=st.integers(min_value=600, max_value=3_000),
@@ -1636,6 +1686,54 @@ def test_the_final_text_always_starts_with_what_was_written_early(
     )
 
     assert final_text.startswith("".join(writer._written))
+
+
+# The line that counts the omitted lines takes 23 characters here, so a cap of 33
+# leaves 10: 6 for the end, and what the end does not use for the start.
+@pytest.mark.parametrize(
+    ("lines", "cap", "expected"),
+    [
+        (
+            ["a0\n", "a1\n", "a2\n", "a3\n", "a4\n"],
+            33,
+            "a0\n... (2 lines omitted)\na3\na4\n",
+        ),
+        (
+            ["x" * 20 + "\n", "b\n", "c\n"],
+            30,
+            "x\n... (20 chars omitted)\n... (0 lines omitted)\nb\nc\n",
+        ),
+        (["a\n", "b\n", "ccccc\n"], 33, "a\nb\n... (0 lines omitted)\nccccc\n"),
+        (["a\n", "b\n", "c\n"], 33, "a\n... (0 lines omitted)\nb\nc\n"),
+        (["aaa\n", "bb\n", "cc\n"], 33, "aaa\n... (0 lines omitted)\nbb\ncc\n"),
+        (
+            ["aaaa\n", "bb\n", "cc\n"],
+            33,
+            "a\n... (4 chars omitted)\n... (0 lines omitted)\nbb\ncc\n",
+        ),
+        (
+            ["a\n", "\n", "\n"],
+            25,
+            "a\n... (1 chars omitted)\n... (1 lines omitted)\n\n",
+        ),
+    ],
+    ids=[
+        "the-end-gets-three-fifths",
+        "the-end-is-all-but-the-first-line",
+        "a-last-line-that-fills-the-end-is-kept",
+        "no-line-is-in-both-ends",
+        "a-first-line-that-fills-the-start-is-kept",
+        "a-first-line-over-the-start-is-cut",
+        "an-end-of-one-character-holds-one-line",
+    ],
+)
+def test_a_cut_output_keeps_its_start_and_its_end(
+    lines: list[str],
+    cap: int,
+    expected: str,
+) -> None:
+    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
+    assert _ends(context, lines, reserve=0, cap=cap, note="") == expected
 
 
 def _arguments(command: str) -> dict[str, PlainTree]:
