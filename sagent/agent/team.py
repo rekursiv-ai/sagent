@@ -37,11 +37,17 @@ the relay, and one it sends arrives by ``receive``, each with its ``MessageKind`
 as the sending team booked it: a request made through the far team's own tool
 was booked there alone.
 
+An agent of another session is ``label#session``. A team given a default
+``relay`` sends each such label that no member or outside member holds through it,
+booked as an outside member's would be; no list of them is kept, so one that sent a
+message here is answered the same way. A team with none refuses such a label.
+
 Typical usage example:
 
   async with Team(catalog=catalog) as team, Agent(model=opus, tools=tools) as root:
       team.join(root, label="Agent")
       team.reach("worker", relay=endpoint)     # An agent on another machine.
+      team.relay = sessions                    # ``lead#412``, any other session's.
 """
 
 from __future__ import annotations
@@ -129,7 +135,7 @@ or news, owed nothing."""
 
 
 class Relay(Protocol):
-    """Carries a message to an outside member, on another machine."""
+    """Carries a message to an outside member, or to an agent of another session."""
 
     def send(
         self,
@@ -167,6 +173,10 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         self.stand_in: Callable[[], Agent] | None = None
         """Makes this machine's own agent, unopened, whose model, tools and prompt a
         child of an outside member takes after; ``None`` spawns no such child."""
+
+        self.relay: Relay | None = None
+        """Carries a message to ``label#session``, an agent of another session, that
+        no member or outside member is labelled; ``None`` refuses one as unknown."""
 
         self._members: dict[str, _Member] = {}
         self._outside: dict[str, Relay] = {}
@@ -611,6 +621,28 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         """
         self._deliver(sender, recipient, content, kind="tell")
 
+    # A note of the team's, never a message from ``recipient``: the agent it was for
+    # never saw it, so it must not read as that agent's answer.
+    def refuse(self, sender: str, recipient: str, why: str) -> None:
+        """Tell ``sender`` its message to ``recipient`` did not arrive, and why.
+
+        Args:
+          sender: The member that sent it; one no longer here is told nothing.
+          recipient: Whom it was for, through a link or the default relay.
+          why: Why it did not arrive.
+
+        """
+        member = self._members.get(sender)
+        if member is None:
+            return
+        # What it asked is not owed: it was never received.
+        self._owed.get(recipient, {}).pop(sender, None)
+        member.agent.runtime.push(
+            types.Nudge(
+                content=f"Your message to {recipient} was not delivered: {why}",
+            ),
+        )
+
     def wake(self, addressed: str) -> None:
         """Nudge each agent still owing, the first time the user says anything.
 
@@ -755,11 +787,22 @@ class Team(Mapping[str, "Agent"], AsyncResource):
 
     def _check(self, recipient: str) -> None:
         """Raise ``ValueError`` unless ``recipient`` can be reached."""
-        if recipient != "user" and not self._reachable(recipient):
+        if (
+            recipient != "user"
+            and recipient not in self._members
+            and self._relay(recipient) is None
+        ):
             active = sorted([*self, *self._outside])
             raise ValueError(f"Unknown agent {recipient!r}. Active: {active}")
         if recipient == "user" and self.to_user is None:
             raise ValueError("No user is watching; there is no one to tell.")
+
+    def _relay(self, label: str) -> Relay | None:
+        """Return what carries a message to ``label``: its own link, else the default."""
+        relay = self._outside.get(label)
+        if relay is None and "#" in label and label not in self._members:
+            return self.relay
+        return relay
 
     def _deliver(
         self,
@@ -774,13 +817,9 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             if self.to_user is not None:
                 self.to_user(sender, content)
             return
-        if recipient in self._outside:
-            self._outside[recipient].send(
-                sender=sender,
-                recipient=recipient,
-                content=content,
-                kind=kind,
-            )
+        relay = self._relay(recipient)
+        if relay is not None:
+            relay.send(sender=sender, recipient=recipient, content=content, kind=kind)
             return
         # Only members are owed or sent to: one that leaves is forgotten as it goes.
         self._members[recipient].agent.runtime.push(

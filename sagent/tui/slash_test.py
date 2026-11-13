@@ -51,7 +51,7 @@ from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
 from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.settings.screen import ScreenSettings
-from sagent.tui.slash import Commands, owners_without_agent
+from sagent.tui.slash import Allowed, Commands, owners_without_agent
 from sagent.tui.types import CommandOutput
 
 
@@ -260,6 +260,7 @@ class _Desk:
     panes: Panes = field(default_factory=Panes)
     provider: str = "scripted"
     team: Team | None = None
+    allowed: Allowed | None = None
     agent: Agent = field(init=False)
     commands: Commands = field(init=False)
 
@@ -275,16 +276,20 @@ class _Desk:
             screen=self.printer,
             panes=self.panes,
             team=self.team,
+            allowed=self.allowed,
         )
 
     def pushed(self, agent: Agent | None = None) -> list[types.RuntimeEvent]:
         return (agent or self.agent).runtime.inbox.drain_nowait()
 
 
-def _teamed(*labels: str) -> tuple[_Desk, dict[str, Agent]]:
+def _teamed(
+    *labels: str,
+    allowed: Allowed | None = None,
+) -> tuple[_Desk, dict[str, Agent]]:
     catalog = ModelCatalog(factories=_per_account)
     team = Team(catalog=catalog)
-    desk = _Desk(catalog=catalog, team=team)
+    desk = _Desk(catalog=catalog, team=team, allowed=allowed)
     team.join(desk.agent)
     members: dict[str, Agent] = {}
     for label in labels:
@@ -350,6 +355,72 @@ async def test_theme_edits_preserve_the_teams_independent_messaging_choice() -> 
     assert desk.team.choices == {"Agent": {"peer-messaging": "off"}, "kid": {}}
     assert not desk.team.peer_messaging("kid")
     await desk.commands.aclose()
+
+
+_ALLOWED = Allowed(
+    names=frozenset({"help", "send", "model.thinking.*"}),
+    refusal="is not available here",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_line_naming_what_is_not_allowed_is_refused_and_changes_nothing() -> (
+    None
+):
+    desk, _ = _teamed("kid", allowed=_ALLOWED)
+    await desk.commands("/screen.thinking show")
+    await desk.commands("/send kid /screen.thinking show")
+    await desk.commands("/kid.screen.thinking show")
+    await desk.commands("/thinking.effort none")
+    assert desk.printer.said == [
+        ("error", "/screen.thinking is not available here"),
+        ("error", "/screen.thinking is not available here"),
+        ("error", "/screen.thinking is not available here"),
+        ("note", "[/model.thinking.effort] none (default)"),
+    ]
+    assert not desk.printer.show_thinking
+    await desk.commands.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_is_not_allowed_runs_nothing_on_the_agent_it_names() -> None:
+    desk, _ = _teamed("kid", allowed=replace(_ALLOWED, names=frozenset({"help"})))
+    await desk.commands("/kid.help")
+    assert desk.printer.said == [("error", "/send is not available here")]
+    await desk.commands.aclose()
+
+
+def test_what_a_line_may_reach_is_only_what_is_allowed() -> None:
+    reached = [".".join(s.name) for s in _Desk(allowed=_ALLOWED).commands.reachable()]
+    assert reached == [
+        "help",
+        "send",
+        "model.thinking.effort",
+        "model.thinking.budget",
+        "model.thinking.output",
+    ]
+    every = _Desk().commands
+    assert [s.name for s in every.reachable()] == [
+        s.name for s in harvest(every.owners())
+    ]
+
+
+@pytest.mark.asyncio
+async def test_help_lists_only_what_a_line_may_reach() -> None:
+    desk = _Desk(allowed=_ALLOWED)
+    await desk.commands("/help")
+    listed = [
+        row.split()[0]
+        for row in desk.printer.said[-1][1].split("\n")
+        if row.startswith("  /")
+    ]
+    assert listed == [
+        "/help",
+        "/send",
+        "/model.thinking.effort",
+        "/model.thinking.budget",
+        "/model.thinking.output",
+    ]
 
 
 @pytest.fixture

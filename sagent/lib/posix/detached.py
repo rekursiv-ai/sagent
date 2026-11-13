@@ -32,7 +32,7 @@ from sagent.lib.posix.terminal import write_all
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
 
@@ -44,6 +44,10 @@ def spawn_detached(
     *,
     log: Path,
     pass_fds: Sequence[int] = (),
+    cwd: Path | None = None,
+    stdin: bytes = b"",
+    env: Mapping[str, str] | None = None,
+    exited: Callable[[int], None] | None = None,
 ) -> int:
     """Exec ``argv`` in a new session, its output appended to ``log``.
 
@@ -54,6 +58,12 @@ def spawn_detached(
       argv: The command; ``argv[0]`` is resolved on PATH.
       log: Receives the child's stdout and stderr; created private.
       pass_fds: Descriptors the child inherits, such as its readiness pipe.
+      cwd: The folder it starts in; ``None`` for this process's.
+      stdin: What it reads before the end of its input, through a pipe, so a secret
+        never lands on disk; empty reads nothing.
+      env: Its whole environment; ``None`` for this process's.
+      exited: Called with its exit code, from the thread that waits for it; a
+        signal's is negative, as ``subprocess`` reports it.
 
     Returns:
       pid: The child's, which leads its own session.
@@ -63,7 +73,9 @@ def spawn_detached(
     try:
         process = subprocess.Popen(  # noqa: S603 -- The caller's own command.
             argv,
-            stdin=subprocess.DEVNULL,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             stdout=out,
             stderr=out,
             start_new_session=True,
@@ -71,8 +83,17 @@ def spawn_detached(
         )
     finally:
         os.close(out)
-    # Reaped while the launcher lives, without making its exit wait for the child.
-    threading.Thread(target=process.wait, daemon=True).start()
+
+    # Fed and reaped on a thread while the launcher lives, without making its exit wait
+    # for the child: a child that reads nothing would hold a launcher writing more than
+    # a pipe holds. ``communicate`` writes the input, shrugs off a child gone before
+    # reading it, and waits.
+    def reap() -> None:
+        _ = process.communicate(stdin)
+        if exited is not None:
+            exited(process.wait())
+
+    threading.Thread(name=f"reaper-{process.pid}", target=reap, daemon=True).start()
     return process.pid
 
 

@@ -2292,6 +2292,91 @@ def test_the_user_s_first_word_nudges_no_outside_debtor(tmp_path: Path) -> None:
     assert team.owes("far") == {"Agent": "look"}
 
 
+def test_with_no_default_relay_another_session_s_label_is_unknown(
+    tmp_path: Path,
+) -> None:
+    team, _ = _reaching(tmp_path)
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown agent 'lead#412'\. Active: \['Agent'",
+    ):
+        team.send("Agent", recipient="lead#412", content="status?")
+    assert team.owes("lead#412") == {}
+
+
+def test_another_session_s_agent_goes_by_the_default_relay_with_its_books(
+    tmp_path: Path,
+) -> None:
+    team, relay = _reaching(tmp_path)
+    team.relay = relay
+    team.send("Agent", recipient="lead#412", content="status?")
+    assert team.owes("lead#412") == {"Agent": "status?"}
+    team.receive(sender="lead#412", recipient="Agent", content="green", kind="reply")
+    assert team.owes("lead#412") == {}
+    team.receive(sender="worker#415", recipient="Agent", content="help?", kind="ask")
+    assert team.owes("Agent") == {"worker#415": "help?"}
+    # One that sent a message is reached from then on: the reply settles the ask.
+    team.send("Agent", recipient="worker#415", content="here")
+    assert team.owes("Agent") == {}
+    team.tell("Agent", "worker#415", "[Agent is idle]")
+    assert relay.sent == [
+        ("Agent", "lead#412", "status?", "ask"),
+        ("Agent", "worker#415", "here", "reply"),
+        ("Agent", "worker#415", "[Agent is idle]", "tell"),
+    ]
+    assert team.outside == []
+
+
+def test_a_refused_send_is_the_team_s_note_to_its_sender_and_owed_nothing(
+    tmp_path: Path,
+) -> None:
+    """Never a message from the agent it was for, which never saw it."""
+    team, relay = _reaching(tmp_path)
+    team.relay = relay
+    team.send("Agent", recipient="lead#412", content="status?")
+    assert team.owes("lead#412") == {"Agent": "status?"}
+
+    team.refuse("Agent", "lead#412", "the server refused it")
+    team.refuse("gone", "lead#412", "no one is told")
+
+    assert team["Agent"].runtime.inbox.drain_nowait() == [
+        types.Nudge(
+            content="Your message to lead#412 was not delivered: the server refused it",
+        ),
+    ]
+    assert team.owes("lead#412") == {}
+
+
+def test_a_label_held_from_a_link_or_a_member_is_not_the_default_relay_s(
+    tmp_path: Path,
+) -> None:
+    team, link = _reaching(tmp_path, "lead#412")
+    default = team.relay = _Relayed()
+    _ = team.join(_agent(tmp_path, team), label="near#1", parent="Agent")
+    team.send("Agent", recipient="lead#412", content="by the link")
+    team.send("Agent", recipient="near#1", content="here")
+    assert link.sent == [("Agent", "lead#412", "by the link", "ask")]
+    assert default.sent == []
+    assert _told(team["near#1"]) == [("Agent", "here")]
+    with pytest.raises(ValueError, match="Unknown agent 'lead'"):
+        team.send("Agent", recipient="lead", content="no session named")
+
+
+@pytest.mark.parametrize("kind", ["ask", "reply", "tell"])
+def test_peer_messaging_off_refuses_the_default_relay_both_ways(
+    tmp_path: Path,
+    kind: MessageKind,
+) -> None:
+    team, relay = _reaching(tmp_path)
+    team.relay = relay
+    team.set_peer_messaging("Agent", False)
+    with pytest.raises(ValueError, match="disabled"):
+        team.send("Agent", recipient="lead#412", content="blocked")
+    with pytest.raises(ValueError, match="disabled"):
+        team.receive(sender="lead#412", recipient="Agent", content="late", kind=kind)
+    assert (relay.sent, _told(team["Agent"]), team.owes("lead#412")) == ([], [], {})
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

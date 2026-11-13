@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import fnmatch
 import logging
@@ -54,8 +54,10 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "TIERS",
     "AgentsMdConfig",
     "Directives",
+    "Tier",
     "directives",
     "frontmatter",
 ]
@@ -70,6 +72,9 @@ type Tier = Literal[
     "Project",
     "Local",
 ]
+
+TIERS: Final[frozenset[Tier]] = frozenset(literal_members(Tier))
+"""Every tier: what an agent reads unless told to read fewer."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -93,7 +98,7 @@ class AgentsMdConfig:
     additional_dirs: tuple[Path, ...] = ()
     """Project directories walked after the working directory's ancestors."""
 
-    tiers: frozenset[Tier] = frozenset(literal_members(Tier))
+    tiers: frozenset[Tier] = TIERS
     """The tiers read. An agent whose directory another account writes reads no
     ``Project`` or ``Local`` file, which would put in its prompt any file it
     ``@``-includes; one serving people the host's directives are not for reads none."""

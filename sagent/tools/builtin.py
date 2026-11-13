@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from sagent.agent.agents_md import TIERS
 from sagent.host.wire import ToolSpec
 from sagent.session.projects import (
     merge_legacy_memories,
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from sagent.agent.agents_md import Tier
     from sagent.agent.team import Team
     from sagent.tools.remote import RemoteSession
     from sagent.tools.types import Tool
@@ -89,6 +91,7 @@ def builders(
     cwd: Path,
     team: Team,
     remote: RemoteSession,
+    tiers: frozenset[Tier] = TIERS,
 ) -> dict[str, Callable[[], Tool]]:
     """Return how to build each built-in tool, by its name, in their default order.
 
@@ -96,6 +99,7 @@ def builders(
       cwd: The working directory; its repository's project keeps the memories.
       team: The agents the agent tools reach.
       remote: The servers ``RemoteTool`` reaches.
+      tiers: The tiers ``Skill`` finds skills in, as the agent reads AGENTS.md.
 
     Returns:
       builders: One per tool; Read, Edit, Grep, Glob, List and WebFetch are
@@ -125,7 +129,7 @@ def builders(
         "AgentSend": lambda: AgentSend(team=team),
         "AgentSelf": lambda: AgentSelf(team=team),
         "AgentSession": lambda: AgentSession(team=team),
-        "Skill": Skill,
+        "Skill": lambda: Skill(tiers=tiers),
         "BackgroundTask": BackgroundTask,
     }
     return {

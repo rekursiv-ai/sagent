@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, TypedDict
 
 import os
 import signal
 import stat
 import sys
 import threading
+
+from treekle import json_loads
 
 import pytest
 
@@ -22,7 +25,38 @@ from sagent.lib.posix.pids import gone_within
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Generator
+
+
+_SAYS_WHERE_AND_EXITS_3: Final = (
+    "import json, os, sys;"
+    "print(json.dumps({'cwd': os.getcwd(), 'stdin': sys.stdin.read(),"
+    " 'env': dict(os.environ)}));"
+    "raise SystemExit(3)"
+)
+"""A child that prints its folder, its input and its environment, then exits 3."""
+
+
+class _Said(TypedDict):
+    """What that child prints."""
+
+    cwd: str
+    stdin: str
+    env: dict[str, str]
+
+
+# Pytest says a thread's error as a warning, which this suite makes an error: one said
+# after the last test fails the whole session, a mutation run's among them.
+@pytest.fixture(autouse=True)
+def _reaped(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """End each test with its reapers gone, and fail it for what one of them raised."""
+    raised: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", raised.append)
+    yield
+    for thread in threading.enumerate():
+        if thread.name.startswith("reaper-"):
+            thread.join(10.0)
+    assert [hook.exc_value for hook in raised] == []
 
 
 def test_accept_answers_ready_once() -> None:
@@ -95,11 +129,11 @@ def test_a_child_that_dies_unready_reads_as_a_failure(tmp_path: Path) -> None:
 def test_a_spawned_child_reads_nothing_and_both_its_streams_are_logged(
     tmp_path: Path,
 ) -> None:
-    """Whatever this process's stdin holds, the child's reads empty."""
+    """Whatever this process's stdin holds, the child's is ``/dev/null``, as ever."""
     log = tmp_path / "child.log"
     script = (
-        "import sys;"
-        "print(repr(sys.stdin.read()), flush=True);"
+        "import os, stat, sys;"
+        "print(stat.S_ISCHR(os.fstat(0).st_mode), repr(sys.stdin.read()), flush=True);"
         "print('err', file=sys.stderr)"
     )
     saved = os.dup(0)
@@ -111,12 +145,71 @@ def test_a_spawned_child_reads_nothing_and_both_its_streams_are_logged(
     finally:
         _ = os.dup2(saved, 0)
         os.close(saved)
-    assert [thread.daemon for thread in reapers] == [True]
+    assert [(thread.name, thread.daemon) for thread in reapers] == [
+        (f"reaper-{pid}", True),
+    ]
     reapers[0].join(timeout=10.0)
     # Reaped by its own thread, so nothing is left for this one to reap.
     with pytest.raises(ChildProcessError):
         _ = os.waitpid(pid, os.WNOHANG)
-    assert log.read_text() == "''\nerr\n"
+    assert log.read_text() == "True ''\nerr\n"
+
+
+def test_a_child_starts_in_its_folder_with_its_input_and_only_its_environment(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    log = tmp_path / "child.log"
+    codes: list[int] = []
+    told = threading.Event()
+
+    def exited(code: int) -> None:
+        codes.append(code)
+        told.set()
+
+    _ = spawn_detached(
+        [sys.executable, "-I", "-S", "-c", _SAYS_WHERE_AND_EXITS_3],
+        log=log,
+        cwd=folder,
+        stdin=b'{"line": 1}\n',
+        env={"ONLY": "this"},
+        exited=exited,
+    )
+
+    assert told.wait(10.0)
+    assert codes == [3]
+    said = json_loads(log.read_text(), _Said)
+    assert (Path(said["cwd"]).resolve(), said["stdin"]) == (
+        folder.resolve(),
+        '{"line": 1}\n',
+    )
+    # Python sets the locale's own variable on macOS; nothing of this process's is passed.
+    assert set(said["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"} == {"ONLY"}
+
+
+def test_exited_hears_a_child_killed_by_a_signal_and_one_that_never_reads(
+    tmp_path: Path,
+) -> None:
+    """Its input is written after it started; a child gone first breaks nothing."""
+    codes: list[int] = []
+    told = threading.Event()
+
+    def exited(code: int) -> None:
+        codes.append(code)
+        told.set()
+
+    pid = spawn_detached(
+        [sys.executable, "-I", "-S", "-c", "import os; os.kill(os.getpid(), 9)"],
+        log=tmp_path / "child.log",
+        stdin=b"x" * 2**20,
+        exited=exited,
+    )
+
+    assert told.wait(10.0)
+    assert codes == [-signal.SIGKILL]
+    with pytest.raises(ChildProcessError):
+        _ = os.waitpid(pid, os.WNOHANG)
 
 
 def test_the_output_goes_to_its_log_and_its_input_is_empty(tmp_path: Path) -> None:

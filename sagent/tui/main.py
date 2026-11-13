@@ -33,6 +33,7 @@ last, so what the model's name says wins. Every action the shell may run,
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -55,7 +56,7 @@ from treekle import from_plain, json_dumps, json_loads
 from wesearch.fetch import FetchSession
 
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
-from sagent.agent.agents_md import AgentsMdConfig
+from sagent.agent.agents_md import TIERS, AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
@@ -102,7 +103,7 @@ from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.builtin import TOOLS, builders
 from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
-from sagent.tools.remote import RemoteSession, local_link, saved, tls_link
+from sagent.tools.remote import Link, RemoteSession, local_link, saved, tls_link
 from sagent.tools.types import ToolContext
 from sagent.tui.console import ConsolePrinter, Screen, terminal_console
 from sagent.tui.prompt import (
@@ -122,13 +123,20 @@ from sagent.tui.slash import (
 )
 from sagent.tui.theme import ThemeState
 from sagent.tui.tree import pick
-from sagent.tui.types import CommandOutput, Frame
+from sagent.tui.types import CommandOutput, Frame, ThinkingView
 from sagent.tui.views import Views
 from sagent.tui.welcome import print_welcome
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
+    from collections.abc import (
+        AsyncGenerator,
+        Awaitable,
+        Callable,
+        Generator,
+        Iterable,
+        Mapping,
+    )
 
     from prompt_toolkit import PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -138,6 +146,7 @@ if TYPE_CHECKING:
     from prompt_toolkit.styles import DynamicStyle
     from treekle import PlainTree
 
+    from sagent.agent.agents_md import Tier
     from sagent.agent.types import (
         Agent as AgentProtocol,
         Factory,
@@ -166,8 +175,14 @@ else:
 
 
 __all__ = [
+    "Flags",
+    "OpenAgent",
+    "StartError",
     "main",
+    "opened",
+    "parse_flags",
     "run",
+    "signals",
 ]
 
 
@@ -184,7 +199,7 @@ def main() -> int:
     argv = sys.argv[1:]
     try:
         return _run(argv)
-    # ``_signals`` answers the first SIGINT by cancelling the run, which
+    # ``signals`` answers the first SIGINT by cancelling the run, which
     # ``asyncio.run`` re-raises as ``CancelledError``: uncaught, a Ctrl+C
     # printed a traceback and exited 1.
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -214,12 +229,222 @@ class Flags(Protocol):
     resume_limit: int
     resume_persistent: bool
     add_dir: list[Path]
+    directives: frozenset[Tier]
     mcp_config: list[str]
     strict_mcp_config: bool
     history: Path | None
     output_format: str
     input_format: str
     log_level: str | None
+
+
+def parse_flags(argv: Sequence[str]) -> tuple[Flags, Sequence[tuple[str, str]]]:
+    """Parse ``argv`` as ``sagent`` does: its flags, and the settings given as flags.
+
+    Args:
+      argv: The command line, without the program.
+
+    Returns:
+      flags: The flags argparse knows.
+      given: Each setting given as ``--NAME VALUE``, its name and value, in order.
+
+    """
+    # No ``allow_abbrev``: ``flags`` takes every word argparse does not know as a
+    # setting, so an abbreviation never reaches argparse to be expanded.
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    static = _add_arguments(parser)
+    try:
+        rest, given = flags(argv, static=static)
+    except ValueError as e:
+        parser.error(str(e))
+    return cast("Flags", parser.parse_args(rest)), given
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class OpenAgent:
+    """An agent ``opened`` built and opened, and what its screen is built on."""
+
+    agent: Agent
+    catalog: ModelCatalog
+    team: Team
+    remote: RemoteSession
+    """The machines whose tools the agent reaches."""
+
+    links: Sequence[Link]
+    """The links sagent built ``remote`` with: each saved host's, then this machine's
+    daemon's, which is left out when opened with ``use_daemon=False``."""
+
+    screen: ThinkingView
+    """Whether reasoning shows, as ``--screen.thinking`` left it."""
+
+    theme: ThemeState
+
+
+class StartError(Exception):
+    """The agent could not be built; the text says why, as ``Error: ...`` prints it."""
+
+
+@contextlib.asynccontextmanager
+async def opened(
+    flags: Flags,
+    *,
+    given: Sequence[tuple[str, str]],
+    interactive: bool,
+    use_daemon: bool = True,
+    tools: Sequence[Tool] = (),
+) -> AsyncGenerator[OpenAgent]:
+    """Build the agent ``flags`` and the settings ``given`` describe, and open it.
+
+    Args:
+      flags: The parsed flags.
+      given: Each setting given as a flag, as :func:`parse_flags` returns it.
+      interactive: Whether a person watches at a terminal: the welcome prints, logs
+        go to the session's ``.log`` file, and a long rate limit is waited out.
+      use_daemon: Whether to start this machine's sagent daemon and link it, which
+        carries messages between the agents of the sessions on this machine. Without,
+        none is started and none is linked.
+      tools: Tools of the caller's own, such as ``tool(function, name=...)`` makes,
+        offered after sagent's and the MCP servers'. ``--tools`` chooses among them
+        as among the others. Each object is shared, not copied: the agent, its
+        children and its watcher all call it.
+
+    Yields:
+      opened: The agent, open, with its persistent children started again.
+
+    Raises:
+      StartError: A flag or a setting does not hold, a server would not start, or
+        two tools have one name.
+      JournalInUseError: Another process holds the journal.
+
+    """
+    cwd = Path.cwd()
+    screen = _Screen()
+    theme = ThemeState()
+    async with (
+        ModelCatalog() as catalog,
+        Team(catalog=catalog) as team,
+        FetchSession() as fetch,
+        contextlib.AsyncExitStack() as servers_stack,
+    ):
+        try:
+            name = _provider_name(catalog, flags.allow_providers)
+            model = catalog.model("default", current=name)
+            wanted = _wanted(
+                servers(cwd, flags=flags.mcp_config, strict=flags.strict_mcp_config),
+                tools=flags.tools,
+            )
+            remotes = saved()
+            # Checked before the journal is made, so a mistyped name leaves no
+            # session behind; a server's own tools are known only once it connects.
+            _chosen_tools(
+                flags,
+                known=[
+                    *_tool_names(built=TOOLS, given=[t.name for t in tools]),
+                    *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
+                ],
+            )
+        except (KeyError, OSError, ValueError) as e:
+            raise StartError(error_text(e)) from e
+        path = _session_path(flags, cwd=cwd, interactive=interactive)
+        serve = ServeDirs(
+            secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+            state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+        )
+        if use_daemon:
+            _ = await daemon.ensure(serve)
+        catalog.gate = fetch.gate = host_gate()
+        links = [tls_link(r) for r in remotes]
+        if use_daemon:
+            links.append(local_link(socket_address(serve.state / "daemon.sock")))
+        remote = RemoteSession(links, journal=path, team=team)
+        # Before the servers connect: at a terminal, what they log must reach the
+        # session's file, not overlay the screen.
+        _logging(flags.log_level, path=path, interactive=interactive)
+        # From here a start error first closes what is open, as returning did before
+        # this raised: an exit told of the error could swallow it, and a generator
+        # that neither yields nor raises fails as one that "didn't yield".
+        try:
+            mcp = await servers_stack.enter_async_context(McpSession(wanted))
+            _ = await servers_stack.enter_async_context(remote)
+            chosen = _tools(
+                flags,
+                cwd=cwd,
+                team=team,
+                remote=remote,
+                mcp=mcp.tools(),
+                tools=tools,
+            )
+        except ValueError as e:
+            await servers_stack.aclose()
+            raise StartError(error_text(e)) from e
+        journal = JsonlJournal(path) if path is not None else None
+        agent = _agent(
+            flags,
+            model=model,
+            tools=chosen,
+            journal=journal,
+            tool_context=ToolContext(cwd=cwd, fetch_session=fetch),
+            interactive=interactive,
+        )
+        async with contextlib.AsyncExitStack() as stack:
+            if journal is not None:
+                try:
+                    await stack.enter_async_context(journal)
+                except JournalInUseError:
+                    await servers_stack.aclose()
+                    raise
+            # What the session stood comes back first; the flags apply on top.
+            try:
+                await agent.recall(catalog)
+                # The team signs in as the session did, until a flag says otherwise.
+                catalog.use_account(agent.account)
+                system = _system(flags)
+                if system is not None:
+                    agent.system_prompt = system
+                label = team.join(agent, label=flags.name)
+                commands = Commands(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    say=_dropped,
+                    screen=screen,
+                    panes=Panes(),
+                    theme=theme,
+                )
+                await _configure(
+                    harvest(commands.owners()),
+                    catalog=catalog,
+                    given=given,
+                )
+            except ValueError as e:
+                await stack.aclose()
+                await servers_stack.aclose()
+                raise StartError(error_text(e)) from e
+            if interactive:
+                print_welcome(folder=cwd, theme=theme.current)
+                described = ModelTags.from_settings(
+                    agent.model.capability,
+                    agent.model.settings,
+                    provider=agent.model.provider.name,
+                    account=catalog.account,
+                )
+                sys.stderr.write(f"[/model] {described}\n")
+            await stack.enter_async_context(agent)
+            spawn = agent.tools.get("AgentSpawn")
+            if flags.resume_persistent and isinstance(spawn, AgentSpawn):
+                await spawn.resume(label)
+            yield OpenAgent(
+                agent=agent,
+                catalog=catalog,
+                team=team,
+                remote=remote,
+                links=links,
+                screen=screen,
+                theme=theme,
+            )
 
 
 async def run(
@@ -231,6 +456,7 @@ async def run(
     show_thinking: bool = False,
     print_batch_sec: float = 0.2,
     theme: ThemeState | None = None,
+    commands: Callable[..., Commands] | None = None,
 ) -> None:
     """Show ``agent``'s session and take what the user types, until they quit.
 
@@ -243,6 +469,9 @@ async def run(
       print_batch_sec: How long prints above the prompt gather into one repaint;
         quitting waits out the last one.
       theme: The screen's shared theme; terminal-native when omitted.
+      commands: Builds each view's commands, as ``Views`` takes it; ``Commands``
+        when omitted. Another front end on the same agent passes its own to run its
+        lines on the commands the screen runs what is typed on.
 
     """
     theme = theme if theme is not None else ThemeState()
@@ -284,7 +513,7 @@ async def run(
             team=team,
             printer=printer,
             catalog=catalog,
-            commands=Commands,
+            commands=commands if commands is not None else Commands,
             switched=lambda: setattr(source, "panes", views.current.panes),
             theme=theme,
         )
@@ -339,6 +568,38 @@ async def run(
         )
 
 
+# Public, so another front end on ``opened`` answers signals as this one does.
+@contextlib.contextmanager
+def signals() -> Generator[None]:
+    """Cancel the running task on the first SIGINT or SIGTERM; exit on the second.
+
+    Yields:
+      None: While the block runs, the two signals are answered here.
+
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert isinstance(task, asyncio.Task)
+    hits = 0
+
+    def handle() -> None:
+        nonlocal hits
+        hits += 1
+        if hits > 1:
+            os._exit(1)
+        task.cancel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, handle)
+    try:
+        yield
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+
+
 def _prompt_session(views: Views, *, entry: Input, history: Path) -> PromptSession[str]:
     """Return the prompt: what waits over ``> ``, status under, for the agent shown."""
     return PromptSession(
@@ -378,18 +639,7 @@ def _run(argv: list[str]) -> int:
         return daemon.main(argv[1:])
     if argv and not argv[0].startswith("-"):
         return asyncio.run(_action(argv))
-    # No ``allow_abbrev``: ``flags`` takes every word argparse does not know as a
-    # setting, so an abbreviation never reaches argparse to be expanded.
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    static = _add_arguments(parser)
-    try:
-        rest, given = flags(argv, static=static)
-    except ValueError as e:
-        parser.error(str(e))
-    parsed = cast("Flags", parser.parse_args(rest))
+    parsed, given = parse_flags(argv)
     journal = _hosted_journal(parsed)
     if journal is None:
         return asyncio.run(_main(parsed, given=given))
@@ -576,6 +826,15 @@ def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
             metavar="DIR",
             help="More directories whose AGENTS.md files extend the prompt.",
         ),
+        parser.add_argument(
+            "--directives",
+            type=_tiers,
+            default=TIERS,
+            metavar="TIERS",
+            help="The tiers of AGENTS.md files and skills read, comma separated:"
+            " Managed, User, Project, Local. Default: every one. An agent whose"
+            " folders another account writes reads Managed alone.",
+        ),
         *add_config_arguments(parser),
     ]
 
@@ -727,128 +986,24 @@ def _ask(question: str) -> str:
 
 async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
     """Build the agent from ``flags`` and the settings ``given``; run it until done."""
-    cwd = Path.cwd()
     interactive = sys.stdin.isatty()
-    screen = _Screen()
-    theme = ThemeState()
-    async with (
-        ModelCatalog() as catalog,
-        Team(catalog=catalog) as team,
-        FetchSession() as fetch,
-        contextlib.AsyncExitStack() as servers_stack,
-    ):
-        try:
-            name = _provider_name(catalog, flags.allow_providers)
-            model = catalog.model("default", current=name)
-            wanted = _wanted(
-                servers(cwd, flags=flags.mcp_config, strict=flags.strict_mcp_config),
-                tools=flags.tools,
-            )
-            remotes = saved()
-            # Checked before the journal is made, so a mistyped name leaves no
-            # session behind; a server's own tools are known only once it connects.
-            _chosen_tools(
-                flags,
-                known=[
-                    *TOOLS,
-                    *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
-                ],
-            )
-        except (KeyError, OSError, ValueError) as e:
-            sys.stderr.write(f"Error: {error_text(e)}\n")
-            return 1
-        path = _session_path(flags, cwd=cwd, interactive=interactive)
-        serve = ServeDirs(
-            secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
-            state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
-        )
-        _ = await daemon.ensure(serve)
-        catalog.gate = fetch.gate = host_gate()
-        remote = RemoteSession(
-            [
-                *(tls_link(r) for r in remotes),
-                local_link(socket_address(serve.state / "daemon.sock")),
-            ],
-            journal=path,
-            team=team,
-        )
-        # Before the servers connect: at a terminal, what they log must reach the
-        # session's file, not overlay the screen.
-        _logging(flags.log_level, path=path, interactive=interactive)
-        try:
-            mcp = await servers_stack.enter_async_context(McpSession(wanted))
-            _ = await servers_stack.enter_async_context(remote)
-            tools = _tools(flags, cwd=cwd, team=team, remote=remote, mcp=mcp.tools())
-        except ValueError as e:
-            sys.stderr.write(f"Error: {error_text(e)}\n")
-            return 1
-        journal = JsonlJournal(path) if path is not None else None
-        agent = _agent(
-            flags,
-            model=model,
-            tools=tools,
-            journal=journal,
-            tool_context=ToolContext(cwd=cwd, fetch_session=fetch),
-            interactive=interactive,
-        )
-        async with contextlib.AsyncExitStack() as stack:
-            if journal is not None:
-                try:
-                    await stack.enter_async_context(journal)
-                except JournalInUseError as e:
-                    sys.stderr.write(f"Error: {e}\n")
-                    return 1
-            # What the session stood comes back first; the flags apply on top.
-            try:
-                await agent.recall(catalog)
-                # The team signs in as the session did, until a flag says otherwise.
-                catalog.use_account(agent.account)
-                system = _system(flags)
-                if system is not None:
-                    agent.system_prompt = system
-                label = team.join(agent, label=flags.name)
-                commands = Commands(
-                    agent,
-                    catalog=catalog,
-                    team=team,
-                    say=_dropped,
-                    screen=screen,
-                    panes=Panes(),
-                    theme=theme,
-                )
-                await _configure(
-                    harvest(commands.owners()),
-                    catalog=catalog,
-                    given=given,
-                )
-            except ValueError as e:
-                sys.stderr.write(f"Error: {error_text(e)}\n")
-                return 1
-            if interactive:
-                print_welcome(folder=cwd, theme=theme.current)
-                described = ModelTags.from_settings(
-                    agent.model.capability,
-                    agent.model.settings,
-                    provider=agent.model.provider.name,
-                    account=catalog.account,
-                )
-                sys.stderr.write(f"[/model] {described}\n")
-            await stack.enter_async_context(agent)
-            spawn = agent.tools.get("AgentSpawn")
-            if flags.resume_persistent and isinstance(spawn, AgentSpawn):
-                await spawn.resume(label)
-            with _signals():
+    try:
+        async with opened(flags, given=given, interactive=interactive) as o:
+            with signals():
                 if interactive:
                     await run(
-                        agent,
-                        catalog=catalog,
-                        team=team,
+                        o.agent,
+                        catalog=o.catalog,
+                        team=o.team,
                         history=flags.history,
-                        show_thinking=screen.show_thinking,
-                        theme=theme,
+                        show_thinking=o.screen.show_thinking,
+                        theme=o.theme,
                     )
                     return 0
-                return await _headless(agent, flags)
+                return await _headless(o.agent, flags)
+    except (StartError, JournalInUseError) as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
 
 
 # The allow list bounds the team too: a spawned agent finds its models in the same
@@ -1043,7 +1198,10 @@ def _agent(
         max_rounds=flags.max_tool_call_rounds,
         max_spend_usd=flags.max_budget_usd,
         persistent_retry=interactive,
-        agents_md=AgentsMdConfig(additional_dirs=tuple(flags.add_dir)),
+        agents_md=AgentsMdConfig(
+            additional_dirs=tuple(flags.add_dir),
+            tiers=flags.directives,
+        ),
     )
 
 
@@ -1125,13 +1283,45 @@ def _tools(
     team: Team,
     remote: RemoteSession,
     mcp: Sequence[Tool] = (),
+    tools: Sequence[Tool] = (),
 ) -> list[Tool]:
-    """Return the tools ``--tools`` names, MCP servers' among them."""
-    built = builders(cwd=cwd, team=team, remote=remote)
-    served = {t.name: t for t in mcp}
-    names = _chosen_tools(flags, known=[*built, *served])
-    tools = {name: served[name] if name in served else built[name]() for name in names}
-    return list(tools.values())
+    """Return the tools ``--tools`` names: sagent's, the MCP servers', ``tools``."""
+    built = builders(cwd=cwd, team=team, remote=remote, tiers=flags.directives)
+    names = _chosen_tools(
+        flags,
+        known=_tool_names(
+            built=built,
+            served=[t.name for t in mcp],
+            given=[t.name for t in tools],
+        ),
+    )
+    made = {t.name: t for t in (*mcp, *tools)}
+    chosen = {name: made[name] if name in made else built[name]() for name in names}
+    return list(chosen.values())
+
+
+# A name is the model's only way to say which tool it calls, so of two with one
+# name, one would never be called.
+def _tool_names(
+    *,
+    built: Iterable[str],
+    served: Iterable[str] = (),
+    given: Iterable[str] = (),
+) -> list[str]:
+    """Return sagent's tool names, the MCP servers', then ``given``; raise on a twin."""
+    known: dict[str, str] = {}
+    for source, names in (
+        ("sagent's built-ins", built),
+        ("an MCP server", served),
+        ("opened(tools=...)", given),
+    ):
+        for name in names:
+            if name in known:
+                raise ValueError(
+                    f"tool {name} is given twice: by {known[name]} and by {source}",
+                )
+            known[name] = source
+    return list(known)
 
 
 def _chosen_tools(flags: Flags, *, known: Sequence[str]) -> list[str]:
@@ -1298,32 +1488,6 @@ def _logging(level: str | None, *, path: Path | None, interactive: bool) -> None
     logging.getLogger("sagent").setLevel(level or "DEBUG")
 
 
-@contextlib.contextmanager
-def _signals() -> Generator[None]:
-    """Cancel the running task on the first SIGINT or SIGTERM; exit on the second."""
-    loop = asyncio.get_running_loop()
-    task = asyncio.current_task()
-    assert isinstance(task, asyncio.Task)
-    hits = 0
-
-    def handle() -> None:
-        nonlocal hits
-        hits += 1
-        if hits > 1:
-            os._exit(1)
-        task.cancel()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, handle)
-    try:
-        yield
-    finally:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError, RuntimeError):
-                loop.remove_signal_handler(sig)
-
-
 async def _headless(agent: AgentProtocol, flags: Flags) -> int:
     """Answer stdin as one prompt; print the reply as ``--output-format`` says."""
     raw = await asyncio.to_thread(sys.stdin.read)
@@ -1435,6 +1599,17 @@ def _records(
 def _calls(response: Response) -> list[ToolCall]:
     """Return the tool calls of a model turn."""
     return [r for r in response.records if isinstance(r, ToolCall)]
+
+
+def _tiers(raw: str) -> frozenset[Tier]:
+    """Parse ``--directives``: tiers of AGENTS.md files, comma separated."""
+    named = [word.strip() for word in raw.split(",") if word.strip()]
+    unknown = sorted(set(named) - TIERS)
+    if unknown or not named:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} names no tiers of: {', '.join(sorted(TIERS))}",
+        )
+    return frozenset(tier for tier in TIERS if tier in named)
 
 
 def _positive_int(raw: str) -> int:

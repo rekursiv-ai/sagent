@@ -39,6 +39,7 @@ from sagent.host.wire import (
 )
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
+from sagent.runtime.types import Nudge
 from sagent.session.types import (
     AgentToAgentMessage,
     ToolResult,
@@ -654,13 +655,12 @@ async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
         )
         assert (await _result(reader)).id == "barrier"
         assert team.owes("caller#s") == {}
-        notices = [
-            (m.sender, m.content)
-            for m in kid.runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
-        ]
-        assert notices == (
-            [("caller#s", "[message refused] withdrawn")] if sender_present else []
+        told = kid.runtime.inbox.drain_nowait()
+        assert not [m for m in told if isinstance(m, AgentToAgentMessage)]
+        assert [m for m in told if isinstance(m, Nudge)] == (
+            [Nudge(content="Your message to caller#s was not delivered: withdrawn")]
+            if sender_present
+            else []
         )
 
 

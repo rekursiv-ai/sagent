@@ -10,6 +10,32 @@ All notable sagent changes are documented here. This project follows
 - Models: Claude Fable 5.2 (`fable-5.2`), at $8 / $40 per MTok with
   $0.20 cache reads, and fast mode (`service_tier: priority`) at $16 / $80.
   `best` and `fable` now resolve to it.
+- `Team.relay`: one default `Relay` for `label#session`, an agent of another
+  session that no member or outside member holds. AgentSend books and sends
+  such a label through it, delayed sends included, where a team with none
+  refuses it as unknown. A label held from a link still goes by its link, and
+  peer messaging off still refuses `#` labels both ways.
+- `opened(..., use_daemon=False)` opens an agent without starting or linking this
+  machine's sagent daemon, for a caller that runs many agents on one machine and
+  carries their messages itself. A caller that does not pass it sees no change.
+- `opened(..., tools=[...])` gives the agent tools of the caller's own, such as
+  `tool(function, name=...)` makes, after sagent's and the MCP servers'. `--tools`
+  chooses among them as among the others, and a child or watcher gets one as it
+  gets any tool of its parent's: the same object. A tool whose name another
+  already has is refused as the agent opens, the message naming both sources. A
+  caller that does not pass it sees no change.
+- `Commands(..., allowed=Allowed(names=..., refusal=...))` runs only the settings
+  and actions the patterns name, on its agent and on each it sends a line to;
+  any other line is refused with one line, and `/help` and `Commands.reachable()`
+  list only what runs. A caller that does not pass it sees no change.
+- `--directives TIERS` names the tiers of AGENTS.md files and skills an agent
+  reads (Managed, User, Project, Local; default every one); `Skill(tiers=...)`
+  reads a project's skills with the Project tier and the user's with the User
+  tier, and sagent's own always. A watcher started for an agent with no Skill
+  tool reads that agent's tiers. An agent whose folders another account writes
+  runs with `--directives Managed`.
+- `Team.refuse(sender, recipient, why)`: tells a member that its message did not
+  arrive, as the team's note (`Nudge`), and drops what the message asked.
 - An environment variable moves the endpoint of every API provider that had
   none: `ANTHROPIC_BASE_URL` (the origin, as for Claude Code), `OPENAI_BASE_URL`,
   `OPENAI_SUB_BASE_URL`, `GOOGLE_GEMINI_BASE_URL` (through `/v1beta`),
@@ -18,6 +44,11 @@ All notable sagent changes are documented here. This project follows
   Unset, each reaches its vendor as before.
 
 ### Fixed
+
+- A message a link or relay refused reads as the team's note, "Your message to X
+  was not delivered: why", never as a message from X, which never saw it; and
+  AgentSend to an agent on another machine or session says it was sent, not
+  delivered.
 
 - A rate limit one agent meets holds back every agent on the host calling the
   same model on the same account, until the server's advised time; another

@@ -200,8 +200,15 @@ class AgentSend:
                 ),
                 result=AgentSendResult(to=a.to),
             )
+        # One here is in its inbox now; one on another machine or session is handed to
+        # its link, which tells the sender later should it not arrive.
+        sent = (
+            f"Delivered to {a.to}."
+            if a.to in self.team or a.to == "user"
+            else f"Sent to {a.to}; you are told if it does not arrive."
+        )
         return ToolOutput(
-            stdout=(f"{started}Delivered to {a.to}.",),
+            stdout=(f"{started}{sent}",),
             result=AgentSendResult(to=a.to),
         )
 

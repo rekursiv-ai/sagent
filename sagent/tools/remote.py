@@ -592,12 +592,7 @@ class Endpoint:
                         else note.sender.removesuffix(f"@{self._client}")
                     )
                     self._team.unreach(recipient)
-                    if sender in self._team:
-                        self._team.tell(
-                            recipient,
-                            recipient=sender,
-                            content=f"[message refused] {message.reason}",
-                        )
+                    self._team.refuse(sender, recipient, message.reason)
                 await self._note()
             elif isinstance(message, Note):
                 if message.id not in self._seen_notes:

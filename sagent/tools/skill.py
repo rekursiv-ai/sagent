@@ -2,8 +2,10 @@
 
 A skill is ``<name>/SKILL.md`` under a skills directory: ``.sagent/skills`` in
 the directory the agent started in and each parent, the nearest first, then the
-user's ``data_dir() / "rekursiv-ai" / "sagent" / "skills"``. A name found twice
-is the first one found. The file's YAML frontmatter gives its ``name`` and the
+user's ``data_dir() / "rekursiv-ai" / "sagent" / "skills"``, then sagent's own. A
+name found twice is the first one found. A project's skills are read with its
+``Project`` tier of AGENTS.md files, the user's with its ``User`` tier
+(``agents_md.Tier``); sagent's own always. The file's YAML frontmatter gives its ``name`` and the
 ``description`` saying when to use it; a skill's directory may hold more skills.
 
 The skills visible from where the agent started ride in this tool's reminder, so
@@ -32,7 +34,7 @@ from treekle import ReadError, from_plain
 
 import yaml
 
-from sagent.agent.agents_md import frontmatter
+from sagent.agent.agents_md import TIERS, Tier, frontmatter
 from sagent.lib.userdirs import data_dir
 from sagent.session.types import SkillResult
 from sagent.tools.display import ToolDisplay
@@ -138,6 +140,10 @@ class Skill:
 
     display: ToolDisplay = field(default=ToolDisplay())
 
+    tiers: frozenset[Tier] = TIERS
+    """The tiers read, as ``AgentsMdConfig.tiers`` names them: ``Project`` for the
+    working directory's and its parents', ``User`` for the user's."""
+
     _scans: dict[Path, _Scan] = field(
         default_factory=dict[Path, "_Scan"],
         init=False,
@@ -165,12 +171,16 @@ class Skill:
         scan = self._scans.get(resolved)
         if scan is not None and all(_stamp(p) == s for p, s in scan.stamps):
             return list(scan.skills)
+        user: list[tuple[Path, Source]] = (
+            [(self.user_dir, "user")] if "User" in self.tiers else []
+        )
         roots: list[tuple[Path, Source]] = [
             *(
                 (d / ".sagent" / "skills", "project")
                 for d in (resolved, *resolved.parents)
+                if "Project" in self.tiers
             ),
-            (self.user_dir, "user"),
+            *user,
             (self.builtin_dir, "builtin"),
         ]
         visited: set[Path] = set()

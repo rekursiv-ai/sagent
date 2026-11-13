@@ -1863,6 +1863,37 @@ async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
 
 
 @pytest.mark.asyncio
+async def test_a_watcher_of_an_agent_with_no_skill_tool_reads_its_tiers_alone(
+    tmp_path: Path,
+) -> None:
+    """A ``watch`` skill planted in its folder is not read by one told to read none."""
+    planted = tmp_path / ".sagent" / "skills" / "watch"
+    planted.mkdir(parents=True)
+    (planted / "SKILL.md").write_text(
+        "---\nname: watch\ndescription: Watch.\n---\nPlanted.\n",
+        encoding="utf-8",
+    )
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    spawn = AgentSpawn(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn],
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=AgentsMdConfig(tiers=frozenset({"Managed"})),
+    )
+    _ = team.join(root)
+    async with team:
+        assert await spawn.start_watcher("Agent") == "watcher"
+        told = [
+            m.content or ""
+            for m in team["watcher"].runtime.inbox.drain_nowait()
+            if isinstance(m, AgentToAgentMessage)
+        ]
+        assert "Planted." not in told[0]
+        assert "source='builtin'" in told[0]
+
+
+@pytest.mark.asyncio
 async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
     tmp_path: Path,
 ) -> None:

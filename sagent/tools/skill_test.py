@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.agent.agents_md import Tier
     from sagent.tools.skill import Source
 
 
@@ -151,6 +152,29 @@ def test_discover_reads_a_project_skill(tmp_path: Path) -> None:
             path=path.resolve(),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("tiers", "found"),
+    [
+        (frozenset({"Managed"}), []),
+        (frozenset({"Project"}), ["alpha"]),
+        (frozenset({"User"}), ["beta"]),
+    ],
+)
+def test_a_project_s_or_the_user_s_skills_are_read_with_their_tier_alone(
+    tmp_path: Path,
+    tiers: frozenset[Tier],
+    found: list[str],
+) -> None:
+    """As AGENTS.md files are: an agent reads the tiers it is told, sagent's own always."""
+    _ = _write(tmp_path / "project", "alpha", name="alpha")
+    _ = _write(tmp_path / "home", "beta", name="beta")
+    user_dir = tmp_path / "home" / ".sagent" / "skills"
+
+    discovered = Skill(user_dir=user_dir, tiers=tiers).discover(tmp_path / "project")
+
+    assert [s.name for s in discovered] == found
 
 
 def test_default_user_dir_is_sagent_skills_under_data_dir() -> None:
