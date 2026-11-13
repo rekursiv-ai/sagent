@@ -91,6 +91,18 @@ def test_the_subscription_serves_its_sections_clamped_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_endpoint_is_openai_sub_base_url_else_codexs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The API's variable names another endpoint, which this one never follows.
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://api-gateway/v1")
+    monkeypatch.delenv("OPENAI_SUB_BASE_URL", raising=False)
+    assert await OpenAISub().endpoint() == "https://chatgpt.com/backend-api/codex"
+    monkeypatch.setenv("OPENAI_SUB_BASE_URL", "http://gateway/codex")
+    assert await OpenAISub().endpoint() == "http://gateway/codex"
+
+
+@pytest.mark.asyncio
 async def test_stream_reaches_the_codex_endpoint_as_codex_does(auth: Path) -> None:
     server = _Server(replies=[_ok()])
     async with _Served(server) as shared:

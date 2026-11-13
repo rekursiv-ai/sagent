@@ -74,12 +74,17 @@ class Anthropic(HasModels, AsyncResource):
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
+      base_url: The endpoint's origin, ``/v1/messages`` added to it; empty
+        reads ``base_url_variable``, then uses Anthropic's.
 
     """
 
     section: ClassVar[str] = "anthropic"
     aliases: ClassVar[tuple[str, ...]] = ("anthropic-api", "aapi")
     package: ClassVar[ModuleType] = anthropic
+
+    base_url_variable: ClassVar[str] = "ANTHROPIC_BASE_URL"
+    """The environment variable overriding the endpoint's origin, as in Claude Code."""
 
     betas: ClassVar[tuple[str, ...]] = ()
     """Beta features every request names, whatever it asks for."""
@@ -89,10 +94,12 @@ class Anthropic(HasModels, AsyncResource):
         *,
         name: str = "",
         resources: ProviderResources | None = None,
+        base_url: str = "",
     ) -> None:
         self._name = name or self.section
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
+        self._base_url = base_url
         self._usage: tuple[UsageWindow, ...] = ()
         self._identity: WorkloadIdentity | None = None
 
@@ -280,11 +287,16 @@ class Anthropic(HasModels, AsyncResource):
     ) -> AsyncGenerator[httpx2.Response]:
         """Open the reply to ``body``, renewing the login once on a 401."""
         renewable = True
+        base = (
+            self._base_url
+            or os.environ.get(self.base_url_variable)
+            or "https://api.anthropic.com"
+        )
         try:
             while True:
                 async with self.resources.http.stream(
                     "POST",
-                    f"https://api.anthropic.com{path}",
+                    f"{base.rstrip('/')}{path}",
                     content=json_dumps(body),
                     headers={
                         **await self.credentials(),

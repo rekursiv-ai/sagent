@@ -36,7 +36,8 @@ class MiniMax(OpenAICompatible):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The key; empty reads ``MINIMAX_API_KEY``.
-      base_url: The endpoint; empty uses ``api.minimax.io``.
+      base_url: The endpoint, up to and including ``/v1``; empty reads
+        ``MINIMAX_BASE_URL``, then uses ``api.minimax.io``.
 
     """
 
@@ -45,6 +46,7 @@ class MiniMax(OpenAICompatible):
     package: ClassVar[ModuleType] = minimax
     url: ClassVar[str] = "https://api.minimax.io/v1"
     key_variable: ClassVar[str] = "MINIMAX_API_KEY"
+    base_url_variable: ClassVar[str] = "MINIMAX_BASE_URL"
     reasoning_field: ClassVar[str] = "reasoning_content"
 
     @override

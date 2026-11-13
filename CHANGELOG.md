@@ -10,6 +10,12 @@ All notable sagent changes are documented here. This project follows
 - Models: Claude Fable 5.2 (`fable-5.2`), at $8 / $40 per MTok with
   $0.20 cache reads, and fast mode (`service_tier: priority`) at $16 / $80.
   `best` and `fable` now resolve to it.
+- An environment variable moves the endpoint of every API provider that had
+  none: `ANTHROPIC_BASE_URL` (the origin, as for Claude Code), `OPENAI_BASE_URL`,
+  `OPENAI_SUB_BASE_URL`, `GOOGLE_GEMINI_BASE_URL` (through `/v1beta`),
+  `MOONSHOT_BASE_URL`, `DASHSCOPE_COMPATIBLE_BASE_URL` and `MINIMAX_BASE_URL`.
+  `Anthropic` now takes `base_url=` too; a `base_url=` wins over the variable.
+  Unset, each reaches its vendor as before.
 
 ### Fixed
 

@@ -33,13 +33,19 @@ def _knobs(body: dict[str, object]) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_the_provider_is_dashscopes_international_endpoint() -> None:
+async def test_the_provider_is_dashscopes_international_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHSCOPE_COMPATIBLE_BASE_URL", raising=False)
     dashscope = DashScope()
     assert dashscope.name == "dashscope"
     assert (
         await dashscope.endpoint()
         == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     )
+    monkeypatch.setenv("DASHSCOPE_COMPATIBLE_BASE_URL", "http://gateway/v1")
+    assert await dashscope.endpoint() == "http://gateway/v1"
+    assert await DashScope(base_url="http://box/v1").endpoint() == "http://box/v1"
     assert dashscope.key_variable == "DASHSCOPE_API_KEY"
     assert dashscope.reasoning_field == "reasoning_content"
     assert dashscope["default"].capability.model_id == "qwen-plus-3.7"

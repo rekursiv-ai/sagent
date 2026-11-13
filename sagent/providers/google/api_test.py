@@ -44,6 +44,7 @@ _BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_GEMINI_BASE_URL", raising=False)
 
 
 @pytest.fixture
@@ -83,6 +84,22 @@ def test_each_key_and_endpoint_of_each_model_is_paced_apart(
     monkeypatch.delenv("GOOGLE_API_KEY")
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-test")
     assert Google().gate_key("gemini-pro") == key
+
+
+def test_the_endpoint_is_the_base_url_given_else_google_gemini_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Google().endpoint("countTokens", model="m") == f"{_BASE}/m:countTokens"
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", "http://gateway/v1beta")
+    assert (
+        Google().endpoint("countTokens", model="m")
+        == "http://gateway/v1beta/models/m:countTokens"
+    )
+    # Only the trailing slash is dropped, never a path's last letter.
+    assert (
+        Google(base_url="https://gateway.test/X/").endpoint("countTokens", model="m")
+        == "https://gateway.test/X/models/m:countTokens"
+    )
 
 
 @pytest.mark.asyncio

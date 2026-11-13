@@ -1,6 +1,7 @@
 """Vertex AI using native Gemini wire records, including thought signatures.
 
-Set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION (default ``global``).
+Set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION (default ``global``), or
+VERTEX_BASE_URL to the endpoint up to and including ``/publishers/google``.
 An explicit ``api_key`` or VERTEX_ACCESS_TOKEN supplies an OAuth access token,
 not a Gemini API key. Otherwise ``gcloud auth application-default
 print-access-token`` reads ADC through the installed Cloud SDK; override the
@@ -40,6 +41,7 @@ class Vertex(Google):
     section: ClassVar[str] = "vertex"
     aliases: ClassVar[tuple[str, ...]] = ("vertex-ai",)
     package: ClassVar[ModuleType] = vertex
+    base_url_variable: ClassVar[str] = "VERTEX_BASE_URL"
 
     @override
     def __getitem__(self, model: str) -> GoogleModel:
@@ -54,7 +56,7 @@ class Vertex(Google):
 
     @override
     def endpoint(self, method: str, *, model: str) -> str:
-        base = self._base_url or os.environ.get("VERTEX_BASE_URL", "")
+        base = self._base_url or os.environ.get(self.base_url_variable) or ""
         if not base:
             project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
             location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")

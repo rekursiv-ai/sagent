@@ -40,8 +40,10 @@ class DashScope(OpenAICompatible):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The key; empty reads ``DASHSCOPE_API_KEY``.
-      base_url: The endpoint; empty uses the international one. Mainland China
-        is ``https://dashscope.aliyuncs.com/compatible-mode/v1``.
+      base_url: The endpoint, up to and including ``/compatible-mode/v1``; empty
+        reads ``DASHSCOPE_COMPATIBLE_BASE_URL``, as DashScope's SDK does, then
+        uses the international one. Mainland China is
+        ``https://dashscope.aliyuncs.com/compatible-mode/v1``.
 
     """
 
@@ -50,6 +52,7 @@ class DashScope(OpenAICompatible):
     package: ClassVar[ModuleType] = dashscope
     url: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     key_variable: ClassVar[str] = "DASHSCOPE_API_KEY"
+    base_url_variable: ClassVar[str] = "DASHSCOPE_COMPATIBLE_BASE_URL"
     reasoning_field: ClassVar[str] = "reasoning_content"
 
     completion_cap: ClassVar[frozenset[str]] = frozenset(

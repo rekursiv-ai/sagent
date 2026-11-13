@@ -22,6 +22,22 @@ that prints an identity token, with `OPENAI_IDENTITY_PROVIDER_ID` and
 `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
 `ANTHROPIC_WORKSPACE_ID`. A key wins when both are set.
 
+An environment variable moves each provider's endpoint, to a proxy or a
+gateway; `base_url=` wins over it:
+
+| Provider class | Endpoint variable | Holds |
+| --- | --- | --- |
+| `Anthropic` | `ANTHROPIC_BASE_URL` | the origin, as for Claude Code: `https://api.anthropic.com` |
+| `OpenAI` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` |
+| `OpenAISub` | `OPENAI_SUB_BASE_URL` | `https://chatgpt.com/backend-api/codex` |
+| `Google` | `GOOGLE_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta`, its version included |
+| `Moonshot` | `MOONSHOT_BASE_URL` | `https://api.moonshot.ai/v1` |
+| `DashScope` | `DASHSCOPE_COMPATIBLE_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| `MiniMax` | `MINIMAX_BASE_URL` | `https://api.minimax.io/v1` |
+
+Each other API provider names its own in its class's `base_url_variable`, such
+as `GROQ_BASE_URL` or `VERTEX_BASE_URL`.
+
 ## Basic usage
 
 A `ModelCatalog` offers every provider by name, sharing one HTTP client and process pool:
@@ -118,6 +134,7 @@ async with Kimi() as kimi:
 ```
 
 `Kimi(api_key=..., base_url=...)` overrides the key and the class `url` at construction time.
+Set `base_url_variable` to name an environment variable read between the two.
 
 ## Self-hosted HuggingFace models
 

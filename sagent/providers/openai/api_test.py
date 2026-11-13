@@ -33,6 +33,7 @@ _REQUEST = Request(
 @pytest.fixture(autouse=True)
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
 
 def _sse(*events: dict[str, object]) -> bytes:
@@ -49,6 +50,16 @@ def test_the_provider_serves_openais_models_by_any_name() -> None:
     # The API offers every window and tier the model has.
     assert openai["sol-6.0+smallcontext"].settings.context_size.tokens == 272_000
     assert "flex" in openai["sol-6.0"].capability.service_tier
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_is_the_base_url_given_else_openai_base_url_else_openais(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert await OpenAI().endpoint() == "https://api.openai.com/v1"
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway/v1")
+    assert await OpenAI().endpoint() == "http://gateway/v1"
+    assert await OpenAI(base_url="http://box/v1").endpoint() == "http://box/v1"
 
 
 def test_a_model_that_cannot_reason_is_sent_the_sampling_temperature() -> None:
