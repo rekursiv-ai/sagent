@@ -587,16 +587,35 @@ repos:
           - --fixer
           - codedoctor.assert_isinstance
 
-  # TypeScript, JavaScript and CSS formatting; settings and exclusions live in
-  # biome.json. `files` narrows upstream's list, which also formats JSON goldens
-  # and OpenAPI schemas that drift tests compare byte for byte. HTML stays out:
-  # Biome cannot parse the Liquid and Python templates most of it holds. An
-  # export's `biome_format` transform re-wraps what its rewrites changed.
+  # TypeScript, JavaScript and CSS: `biome check --write` formats, applies the
+  # safe lint fixes, and fails on any lint error left. Settings and exclusions
+  # live in biome.json. `files` narrows upstream's list, which also covers JSON
+  # goldens and OpenAPI schemas that drift tests compare byte for byte. HTML
+  # stays out: Biome cannot parse the Liquid and Python templates most of it
+  # holds. An export's `biome_format` transform re-wraps what its rewrites
+  # changed.
+  #
+  # Rules biome.json turns off, each wrong for this code:
+  #   noDescendingSpecificity  stylesheets group rules by component; a later,
+  #                            more specific rule is a deliberate override.
+  #   useOptionalChain         `x && x.y` keeps x's falsy value (0, "", false),
+  #                            which `x?.y` turns into undefined.
+  #   noImportantStyles        `!important` beats the inline styles libraries
+  #                            (xterm, d3, resizable panels) set.
+  #   useSemanticElements      the native twin cannot hold the content: an
+  #                            <option> holds only text, an <hr> no children.
+  # A package's own settings live in a nested biome.json beside it, which its
+  # export ships: the React packages' react domain, and where these are off:
+  #   noRedundantUseStrict     classic scripts, where "use strict" is not implied.
+  #   useDomNodeTextContent    e2e specs read innerText: the text a reader sees.
+  #   noComponentHookFactories tests and router/lazy.ts build components on purpose.
+  # useExhaustiveDependencies keeps a listed dependency it finds unneeded: such
+  # a dependency re-runs the effect when it changes, by design.
   - repo: https://github.com/biomejs/pre-commit
     rev: v2.6.7
     hooks:
-      - id: biome-format
-        name: biome-format
+      - id: biome-check
+        name: biome-check
         stages: [pre-commit]
         files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
 
