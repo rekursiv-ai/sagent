@@ -28,6 +28,7 @@ from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.providers.acp.provider import Acp
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
+from sagent.providers.custom.api import Custom
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
@@ -111,6 +112,7 @@ def listings() -> tuple[Listed, ...]:
         LlamaCpp,
         SelfHosted,
         Acp,
+        Custom,
     )
 
 

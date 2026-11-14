@@ -14,6 +14,7 @@ Typical usage example:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -35,7 +36,7 @@ from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResul
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
     from sagent.model.types import Request
@@ -136,10 +137,13 @@ class StreamReader:
         capability: ModelCapability,
         settings: ModelSettings,
         reasoning_field: str,
+        reasoning_fields: Sequence[str] = (),
     ) -> None:
         self._capability = capability
         self._settings = settings
-        self._reasoning_field = reasoning_field
+        self._reasoning_fields = tuple(
+            dict.fromkeys((reasoning_field, *reasoning_fields))
+        )
         self._text: list[str] = []
         self._thinking: list[str] = []
         self._calls: dict[int, _Call] = {}
@@ -176,9 +180,7 @@ class StreamReader:
             self._call(call)
         text = str(delta.get("content") or "")
         refusal = str(delta.get("refusal") or "")
-        thinking = (
-            str(delta.get(self._reasoning_field) or "") if self._reasoning_field else ""
-        )
+        thinking = _reasoning_text(delta, fields=self._reasoning_fields)
         self._refused = self._refused or bool(refusal)
         self._text.extend(part for part in (text, refusal) if part)
         if thinking:
@@ -295,6 +297,32 @@ def _messages(
     # assistant message is rejected.
     empty = {"role": "assistant", "content": None}
     return [message for message in messages if message != empty]
+
+
+def _reasoning_text(
+    delta: Mapping[str, object],
+    *,
+    fields: Sequence[str],
+) -> str:
+    """Read textual reasoning from configured compatible wire fields."""
+    for field_name in fields:
+        if field_name and (text := _reasoning_value(delta.get(field_name))):
+            return text
+    return ""
+
+
+def _reasoning_value(value: object) -> str:
+    """Return displayable reasoning from common gateway response shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        for key in ("text", "content", "summary"):
+            if isinstance(text := value.get(key), str):
+                return text
+        return ""
+    if isinstance(value, list):
+        return "".join(text for item in value if (text := _reasoning_value(item)))
+    return ""
 
 
 class _Turn:

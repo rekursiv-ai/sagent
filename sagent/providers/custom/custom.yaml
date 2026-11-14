@@ -1,0 +1,8 @@
+sources: {}
+reference: {}
+models: []
+
+providers:
+  custom:
+    sends: []
+    models: {}

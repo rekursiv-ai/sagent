@@ -97,6 +97,9 @@ class OpenAICompatible(HasModels, AsyncResource):
     reasoning_field: ClassVar[str] = ""
     """The message field reasoning streams in and is replayed in; empty for none."""
 
+    reasoning_fields: ClassVar[tuple[str, ...]] = ()
+    """Additional response fields accepted when reading reasoning."""
+
     temperature: ClassVar[float | None] = 1.0
     """The sampling temperature every request sends; ``None`` sends none."""
 
@@ -205,6 +208,7 @@ class OpenAICompatible(HasModels, AsyncResource):
             capability=model.capability,
             settings=model.settings,
             reasoning_field=self.reasoning_field,
+            reasoning_fields=self.reasoning_fields,
         )
 
     async def count(self, request: Request, *, model: OpenAIModel) -> int:

@@ -242,6 +242,24 @@ def test_provider_selection_uses_sagents_native_default_model_role() -> None:
     ) == {"provider": "google-cli", "model": "default"}
 
 
+def test_custom_provider_configuration_requires_an_exact_model() -> None:
+    assert _model_settings_arguments(
+        {
+            "type": "configure-custom-provider",
+            "baseUrl": "https://api.experientiallabs.ai/v1",
+            "model": "gpt-6-luna",
+        },
+    ) == {"provider": "custom", "model": "gpt-6-luna"}
+
+    with pytest.raises(ValueError, match="Model is required"):
+        _model_settings_arguments(
+            {
+                "type": "configure-custom-provider",
+                "baseUrl": "https://api.experientiallabs.ai/v1",
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_unknown_method_is_returned_as_a_protocol_error(tmp_path: Path) -> None:
     incoming = StringIO('{"id":"bad","method":"not-a-method"}\n')

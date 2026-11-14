@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "HasConfiguration",
     "HasLogin",
     "Model",
     "ModelCatalog",
@@ -270,4 +271,19 @@ class HasLogin(Protocol):
     @property
     def logins(self) -> Logins:
         """Return every account kept beside this provider's default login."""
+        ...
+
+
+@runtime_checkable
+class HasConfiguration(Protocol):
+    """A provider that accepts frontend-supplied configuration."""
+
+    def configure(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Persist provider configuration using the provider's own rules."""
         ...

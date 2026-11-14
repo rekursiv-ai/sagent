@@ -268,9 +268,11 @@ def _custom_provider_settings(
     base_url = str(action.get("baseUrl") or action.get("base_url") or "").strip()
     api_key = action.get("apiKey")
     api_key_str = str(api_key).strip() if api_key is not None else None
-    model = str(action.get("model") or "").strip() or "default"
+    model = str(action.get("model") or "").strip()
     if not base_url:
         raise ValueError("Base URL is required to configure custom provider")
+    if not model:
+        raise ValueError("Model is required to configure custom provider")
     return base_url, api_key_str, model
 
 
