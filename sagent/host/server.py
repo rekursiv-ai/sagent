@@ -213,7 +213,7 @@ class Server(AsyncResource):
     """
 
     replacement_python: str = ""
-    """The interpreter a requested replacement runs; empty runs this one's."""
+    """The interpreter a requested replacement runs: the asking client's."""
 
     def __init__(
         self,
@@ -506,13 +506,10 @@ class Server(AsyncResource):
             self.stopping.set()
         elif request.listen is not None:
             opened = self._opened[-1]
-            from_listen = dict(
-                zip(
-                    self._config.listen,
-                    opened.listeners[: len(self._config.listen)],
-                    strict=True,
-                ),
-            )
+            from_listen = {
+                address: opened.listeners[index]
+                for index, address in enumerate(self._config.listen)
+            }
             listeners: list[asyncio.Server] = []
             addresses: list[Address] = []
             with contextlib.ExitStack() as undo:

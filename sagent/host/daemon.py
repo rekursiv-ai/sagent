@@ -200,8 +200,7 @@ async def _serve(dirs: ServeDirs, *, version: str, handoff: str = "") -> None:
                 except Exception:
                     logger.exception("Daemon replacement failed")
                     continue
-                # Clients older than `DaemonControl.python` name no interpreter.
-                python = server.replacement_python or sys.executable
+                python = server.replacement_python
                 try:
                     with tempfile.TemporaryFile(dir=dirs.state) as snapshot:
                         _ = snapshot.write(state.encode())
