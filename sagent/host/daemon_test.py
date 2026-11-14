@@ -407,7 +407,10 @@ async def test_default_startup_version_comes_from_the_source_fingerprint(
 
     async def checked(dirs: ServeDirs, request: DaemonControl) -> DaemonStatus:
         del dirs
-        assert request == DaemonControl(source_version="from-disk")
+        assert request == DaemonControl(
+            source_version="from-disk",
+            python=sys.executable,
+        )
         return ready
 
     monkeypatch.setattr(daemon, "fingerprint", lambda: "from-disk")
@@ -421,7 +424,8 @@ async def _control_answers(
     *,
     answers: list[DaemonStatus | OSError],
 ) -> DaemonStatus:
-    del dirs, request
+    del dirs
+    assert request.python == sys.executable
     answer = answers.pop(0)
     if isinstance(answer, OSError):
         raise answer
@@ -858,11 +862,14 @@ async def test_daemon_serves_controls_and_hands_state_to_exec(
         writer.write(encoded(Peers(labels=("registered",))))
         assert await received(reader) == Peers(labels=())
         writer.close()
-        assert (await control(dirs, DaemonControl(source_version="new"))).restarting
+        python = "/checkout/.venv/bin/python"
+        assert (
+            await control(dirs, DaemonControl(source_version="new", python=python))
+        ).restarting
         with pytest.raises(ReplacedError):
             await serving
         ((executable, argv, state),) = captured
-        assert executable == sys.executable
+        assert executable == python
         assert argv[:5] == [executable, "-P", "-m", "sagent", "daemon"]
         assert argv[-2] == "--handoff-fd"
         assert argv[5:-2] == [
