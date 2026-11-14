@@ -273,6 +273,10 @@ class DaemonControl:
     """An owner-only request to inspect, configure, or replace the daemon."""
 
     source_version: str = ""
+    python: str = ""
+    """The requesting client's interpreter, which a replacement runs: the daemon's own
+    may belong to another checkout, or one since deleted."""
+
     listen: tuple[str, ...] | None = None
     tools: tuple[str, ...] | None = None
     ttl_sec: float | None = None

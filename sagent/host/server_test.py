@@ -1755,7 +1755,9 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
     )
     closed.assert_called_once_with()
     assert opened.listeners == [local]
-    assert await server._control(DaemonControl(source_version="new")) == DaemonStatus(
+    assert await server._control(
+        DaemonControl(source_version="new", python="/checkout/.venv/bin/python"),
+    ) == DaemonStatus(
         pid=os.getpid(),
         source_version="old",
         listen=(),
@@ -1763,6 +1765,11 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
     )
     assert server.stopping.is_set()
     assert server.replacement == "new"
+    assert server.replacement_python == "/checkout/.venv/bin/python"
+    assert (
+        await server._control(DaemonControl(source_version="newer", stop=True))
+    ).restarting
+    assert server.replacement == ""
 
 
 @pytest.mark.asyncio

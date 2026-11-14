@@ -110,7 +110,10 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
         process = None
         while time.monotonic() < deadline:
             try:
-                status = await control(dirs, DaemonControl(source_version=version))
+                status = await control(
+                    dirs,
+                    DaemonControl(source_version=version, python=sys.executable),
+                )
             except (FileNotFoundError, ConnectionRefusedError):
                 if process is not None and (code := process.poll()) is not None:
                     raise RuntimeError(
@@ -197,16 +200,18 @@ async def _serve(dirs: ServeDirs, *, version: str, handoff: str = "") -> None:
                 except Exception:
                     logger.exception("Daemon replacement failed")
                     continue
+                # Clients older than `DaemonControl.python` name no interpreter.
+                python = server.replacement_python or sys.executable
                 try:
                     with tempfile.TemporaryFile(dir=dirs.state) as snapshot:
                         _ = snapshot.write(state.encode())
                         snapshot.flush()
                         snapshot.seek(0)
                         os.set_inheritable(snapshot.fileno(), True)
-                        os.execv(  # noqa: S606 -- Replace this interpreter with the same fixed module.
-                            sys.executable,
+                        os.execv(  # noqa: S606 -- The owner's own interpreter, a fixed module.
+                            python,
                             [
-                                sys.executable,
+                                python,
                                 "-P",
                                 "-m",
                                 "sagent",

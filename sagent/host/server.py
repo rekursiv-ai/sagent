@@ -212,6 +212,9 @@ class Server(AsyncResource):
 
     """
 
+    replacement_python: str = ""
+    """The interpreter a requested replacement runs; empty runs this one's."""
+
     def __init__(
         self,
         dirs: ServeDirs,
@@ -499,6 +502,7 @@ class Server(AsyncResource):
             self.replacement = (
                 request.source_version if stale and not request.stop else ""
             )
+            self.replacement_python = request.python
             self.stopping.set()
         elif request.listen is not None:
             opened = self._opened[-1]
