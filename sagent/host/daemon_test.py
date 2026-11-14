@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from treekle import json_loads
 
@@ -142,8 +143,16 @@ async def local_daemon(
         await opening(server)
         servers.append(server)
 
+    # `ensure`'s waits pass on a virtual clock, so a client that never sees a
+    # ready daemon reaches its deadline in moments, not 30 real seconds.
+    ticked = 0.0
+
+    def monotonic() -> float:
+        return time.monotonic() + ticked
+
     async def tick(seconds: float) -> None:
-        del seconds
+        nonlocal ticked
+        ticked += seconds
         await asyncio.sleep(0)
 
     async def run(dirs: ServeDirs, *, version: str) -> None:
@@ -190,6 +199,7 @@ async def local_daemon(
             run=asyncio.run,
         ),
     )
+    monkeypatch.setattr(daemon, "time", SimpleNamespace(monotonic=monotonic))
     monkeypatch.setattr(daemon, "fingerprint", lambda: "fixture-version")
     try:
         yield workers
@@ -867,7 +877,7 @@ async def test_daemon_serves_controls_and_hands_state_to_exec(
             await control(dirs, DaemonControl(source_version="new", python=python))
         ).restarting
         with pytest.raises(ReplacedError):
-            await serving
+            await asyncio.wait_for(serving, 5)
         ((executable, argv, state),) = captured
         assert executable == python
         assert argv[:5] == [executable, "-P", "-m", "sagent", "daemon"]

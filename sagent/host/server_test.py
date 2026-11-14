@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import asyncio
 import contextlib
 import errno
+import json
 import logging
 import os
 import shlex
@@ -1718,12 +1719,14 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
     server._opened.append(opened)
     starting = AsyncMock(return_value=listener)
     context = Mock()
+    contexts = Mock(return_value=context)
     monkeypatch.setattr(asyncio, "start_server", starting)
-    monkeypatch.setattr(host_server, "server_context", Mock(return_value=context))
+    monkeypatch.setattr(host_server, "server_context", contexts)
 
     assert await server._control(
         DaemonControl(listen=("127.0.0.1:0",), tools=("Read",), ttl_sec=17),
     ) == DaemonStatus(pid=os.getpid(), source_version="old", listen=("127.0.0.1:1234",))
+    contexts.assert_called_once_with(dirs.secrets)
     starting.assert_awaited_once_with(
         server._connected,
         "127.0.0.1",
@@ -1736,10 +1739,11 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
     assert server._config.tools == ("Read",)
     assert server._ttl_sec == 17
     assert server.ports == [1234]
-    assert (
-        json_loads((dirs.state / "server.json").read_text(), strings.ServerConfig)
-        == server._config
-    )
+    # Plain JSON, with no `py/object` tag naming a Python class.
+    assert json.loads((dirs.state / "server.json").read_text()) == {
+        "listen": [{"host": "127.0.0.1", "port": 1234}],
+        "tools": ["Read"],
+    }
 
     await server._control(DaemonControl(listen=("127.0.0.1:1234",)))
 
@@ -1770,6 +1774,48 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
         await server._control(DaemonControl(source_version="newer", stop=True))
     ).restarting
     assert server.replacement == ""
+
+
+@pytest.mark.asyncio
+async def test_a_listen_that_fails_to_bind_closes_the_listeners_it_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    server = Server(dirs, listen=[], source_version="old")
+    closed = Mock()
+    listener = cast(
+        asyncio.Server,
+        Mock(
+            close=closed,
+            sockets=[Mock(getsockname=Mock(return_value=("127.0.0.1", 1234)))],
+        ),
+    )
+    local = cast(asyncio.Server, Mock())
+    opened = host_server._Opened(
+        pid_fd=-1,
+        listeners=[local],
+        watching=cast(asyncio.Task[None], Mock()),
+    )
+    server._opened.append(opened)
+    in_use = OSError(errno.EADDRINUSE, "Address already in use")
+    monkeypatch.setattr(
+        asyncio,
+        "start_server",
+        AsyncMock(side_effect=[listener, in_use]),
+    )
+    monkeypatch.setattr(host_server, "server_context", Mock())
+
+    with pytest.raises(OSError, match="Address already in use") as raised:
+        _ = await server._control(
+            DaemonControl(listen=("127.0.0.1:0", "127.0.0.1:2345")),
+        )
+
+    assert raised.value is in_use
+    closed.assert_called_once_with()
+    assert opened.listeners == [local]
+    assert server._config.listen == ()
+    assert not (dirs.state / "server.json").exists()
 
 
 @pytest.mark.asyncio
