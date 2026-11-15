@@ -55,8 +55,6 @@ from sagent.session.types import (
     WriteResult,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.diff import splice_diff, write_diff
-from sagent.tui.markdown import stable_boundary
 from sagent.tui.status import count, elapsed
 from sagent.tui.types import CommandOutput, Header, Printed
 
@@ -68,7 +66,17 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.tools.types import Tool
+    from sagent.tui.diff import splice_diff, write_diff
+    from sagent.tui.markdown import stable_boundary
     from sagent.tui.types import Printer, Record, Shown, Stream
+else:
+    from wrapt import lazy_import
+
+    # A headless agent reads ``error_text`` here and draws no scrollback: these bring
+    # ``markdown_it``, ``rich`` and ``pygments``, ~45 ms it would load for nothing.
+    splice_diff = lazy_import("sagent.tui.diff", "splice_diff")
+    write_diff = lazy_import("sagent.tui.diff", "write_diff")
+    stable_boundary = lazy_import("sagent.tui.markdown", "stable_boundary")
 
 
 __all__ = [

@@ -105,7 +105,6 @@ from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
 from sagent.tools.remote import Link, RemoteSession, local_link, saved, tls_link
 from sagent.tools.types import ToolContext
-from sagent.tui.console import ConsolePrinter, Screen, terminal_console
 from sagent.tui.prompt import (
     OPEN_TREE,
     Input,
@@ -122,10 +121,7 @@ from sagent.tui.slash import (
     owners_without_agent,
 )
 from sagent.tui.theme import ThemeState
-from sagent.tui.tree import pick
 from sagent.tui.types import CommandOutput, Frame, ThinkingView
-from sagent.tui.views import Views
-from sagent.tui.welcome import print_welcome
 
 
 if TYPE_CHECKING:
@@ -160,9 +156,21 @@ if TYPE_CHECKING:
     from sagent.session.projects import SessionInfo
     from sagent.settings.types import Setting
     from sagent.tools.types import Tool
+    from sagent.tui.console import ConsolePrinter, Screen, terminal_console
+    from sagent.tui.tree import pick
+    from sagent.tui.views import Views
+    from sagent.tui.welcome import print_welcome
 else:
     from wrapt import lazy_import
 
+    # The screen: ``opened`` builds a headless agent too, for a caller that never
+    # draws. These bring ``markdown_it``, ``rich`` and ``prompt_toolkit``.
+    ConsolePrinter = lazy_import("sagent.tui.console", "ConsolePrinter")
+    Screen = lazy_import("sagent.tui.console", "Screen")
+    terminal_console = lazy_import("sagent.tui.console", "terminal_console")
+    pick = lazy_import("sagent.tui.tree", "pick")
+    Views = lazy_import("sagent.tui.views", "Views")
+    print_welcome = lazy_import("sagent.tui.welcome", "print_welcome")
     PromptSession = lazy_import("prompt_toolkit", "PromptSession")  # 80 ms cold.
     AutoSuggestFromHistory = lazy_import(
         "prompt_toolkit.auto_suggest",
