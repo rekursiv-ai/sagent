@@ -37,7 +37,6 @@ import os
 import platform
 import re
 
-from markdown_it import MarkdownIt
 from treekle import ReadError, from_plain
 
 import yaml
@@ -50,7 +49,14 @@ from sagent.model.capability import literal_members
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable
 
+    from markdown_it import MarkdownIt
     from markdown_it.token import Token
+else:
+    from wrapt import lazy_import
+
+    # Parses only a file found: an agent whose folders hold no AGENTS.md would load
+    # it, ~13 ms, at every start for nothing.
+    MarkdownIt = lazy_import("markdown_it", "MarkdownIt")
 
 
 __all__ = [

@@ -150,20 +150,9 @@ class Theme(SyntaxTheme):
         self._syntax = Syntax.get_theme(syntax) if syntax else None
         self._styles = MappingProxyType(dict(styles))
         self._rich = RichTheme(self._markdown_styles())
-        self._prompt = PromptStyle.from_dict(
-            {
-                "": _prompt(self.style("text")),
-                "text": _prompt(self.style("text")),
-                "background": _prompt(self.style("text")),
-                "bottom-toolbar": _prompt(self.style("status")),
-                "queued_input_pane": _prompt(self.style("status")),
-                "input_pane": _prompt(self.style("text") + Style(bold=True)),
-                "selected-text": _prompt(self.style("selected")),
-                "auto-suggestion": _prompt(self.style("suggestion")),
-                "tree.selected": _prompt(self.style("selected")),
-                "tree.help": _prompt(self.style("status")),
-            },
-        )
+        # Built on the first draw: an agent with no screen builds a theme too, and
+        # would import ``prompt_toolkit`` here for nothing.
+        self._prompt: PromptStyle | None = None
 
     @property
     def styles(self) -> Mapping[str, Style]:
@@ -238,7 +227,27 @@ class Theme(SyntaxTheme):
         return self._rich
 
     def prompt_style(self) -> PromptStyle:
-        """Return the stable live-pane palette."""
+        """Return the stable live-pane palette, built the first time it is asked for.
+
+        Returns:
+          style: The same prompt-toolkit style at every call.
+
+        """
+        if self._prompt is None:
+            self._prompt = PromptStyle.from_dict(
+                {
+                    "": _prompt(self.style("text")),
+                    "text": _prompt(self.style("text")),
+                    "background": _prompt(self.style("text")),
+                    "bottom-toolbar": _prompt(self.style("status")),
+                    "queued_input_pane": _prompt(self.style("status")),
+                    "input_pane": _prompt(self.style("text") + Style(bold=True)),
+                    "selected-text": _prompt(self.style("selected")),
+                    "auto-suggestion": _prompt(self.style("suggestion")),
+                    "tree.selected": _prompt(self.style("selected")),
+                    "tree.help": _prompt(self.style("status")),
+                },
+            )
         return self._prompt
 
     def _markdown_styles(self) -> dict[str, Style]:

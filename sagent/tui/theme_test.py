@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import patch
 
@@ -110,6 +111,28 @@ def test_terminal_preserves_terminal_palette_and_is_cached() -> None:
     assert theme.prompt_style() is theme.prompt_style()
     with pytest.raises(KeyError):
         theme.style("typo")
+
+
+def test_a_theme_builds_its_prompt_style_only_once_one_is_drawn() -> None:
+    """An agent with no screen builds a theme too, and never needs prompt-toolkit's."""
+    built: list[Mapping[str, str]] = []
+
+    def from_dict(rules: Mapping[str, str]) -> PromptStyle:
+        built.append(rules)
+        return PromptStyle.from_dict(dict(rules))
+
+    with patch.object(
+        theme_module,
+        "PromptStyle",
+        SimpleNamespace(from_dict=from_dict),
+    ):
+        theme = Theme("headless", load_theme().styles)
+        assert built == []
+        style = theme.prompt_style()
+        assert theme.prompt_style() is style
+
+    assert len(built) == 1
+    assert style.get_attrs_for_style_str("class:input_pane").bold is True
 
 
 def test_terminal_status_keeps_its_previous_gray_without_reverse_or_dimming() -> None:

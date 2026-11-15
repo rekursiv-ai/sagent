@@ -36,14 +36,6 @@ from typing import TYPE_CHECKING, Final, Literal
 import asyncio
 import functools
 
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.enums import DEFAULT_BUFFER
-from prompt_toolkit.filters import has_focus, is_done
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-
 from sagent.runtime import types
 from sagent.session.types import Attachment, UserMessage
 
@@ -52,11 +44,33 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.key_binding import KeyPressEvent
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.enums import DEFAULT_BUFFER
+    from prompt_toolkit.filters import has_focus, is_done
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+    from prompt_toolkit.keys import Keys
 
     from sagent.model.types import Response
     from sagent.runtime.runtime import Runtime
     from sagent.tui.types import DeferredPane, Fragments, InputPane
+else:
+    from wrapt import lazy_import
+
+    # ``Panes`` is a headless agent's too (``Commands`` holds one), which never draws
+    # a prompt: ``prompt_toolkit`` is ~36 ms it would load for nothing.
+    Buffer = lazy_import("prompt_toolkit.buffer", "Buffer")
+    DEFAULT_BUFFER = lazy_import("prompt_toolkit.enums", "DEFAULT_BUFFER")
+    has_focus = lazy_import("prompt_toolkit.filters", "has_focus")
+    is_done = lazy_import("prompt_toolkit.filters", "is_done")
+    FormattedText = lazy_import("prompt_toolkit.formatted_text", "FormattedText")
+    ANSI_SEQUENCES = lazy_import(
+        "prompt_toolkit.input.ansi_escape_sequences",
+        "ANSI_SEQUENCES",
+    )
+    KeyBindings = lazy_import("prompt_toolkit.key_binding", "KeyBindings")
+    Keys = lazy_import("prompt_toolkit.keys", "Keys")
 
 
 __all__ = [
