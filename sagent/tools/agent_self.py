@@ -64,7 +64,7 @@ class AgentSelf:
         )
         peer_messaging: Annotated[
             bool | None,
-            "Participate in cross-session discovery and messaging.",
+            "Participate in cross-session discovery and messaging; on by default.",
         ] = None
         provider: Annotated[str | None, "Catalog provider to switch to."] = None
         model: Annotated[

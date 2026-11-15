@@ -130,6 +130,22 @@ async def test_an_agent_on_another_machine_is_listed_and_sent_to(
     assert relay.sent == [("Agent", "worker", "go", "ask")]
 
 
+def test_another_session_s_linked_agent_is_listed_with_peer_messaging_on(
+    tmp_path: Path,
+) -> None:
+    team, relay = _team(tmp_path), _Relayed()
+    team.reach("worker", relay=relay)
+    team.reach("lead#412", relay=relay)
+    send = AgentSend(team=team)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: lead#412, worker."
+    )
+    team.set_peer_messaging("Agent", False)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: worker."
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_delayed_reply_crosses_to_another_machine_as_a_reply(
     tmp_path: Path,
@@ -184,6 +200,11 @@ async def test_another_session_s_agent_is_sent_to_now_or_later_and_never_listed(
     ((deliver, args),) = scheduled
     deliver(*args)
     assert now.text() == "Sent to lead#412; you are told if it does not arrive."
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Another session's agent is LABEL#SESSION: its"
+        " label, then its session, as Agent#412."
+    )
+    team.set_peer_messaging("Agent", False)
     assert send.reminder(_context(tmp_path)) == "Your agent label is 'Agent'."
     assert relay.sent == [
         ("Agent", "lead#412", "status?", "ask"),

@@ -40,7 +40,8 @@ was booked there alone.
 An agent of another session is ``label#session``. A team given a default
 ``relay`` sends each such label that no member or outside member holds through it,
 booked as an outside member's would be; no list of them is kept, so one that sent a
-message here is answered the same way. A team with none refuses such a label.
+message here is answered the same way, and AgentSend's reminder and an unknown
+label's error tell the model how to name one. A team with none refuses such a label.
 
 Typical usage example:
 
@@ -793,7 +794,13 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             and self._relay(recipient) is None
         ):
             active = sorted([*self, *self._outside])
-            raise ValueError(f"Unknown agent {recipient!r}. Active: {active}")
+            # A ``#`` label goes by the relay, so one that reaches here names no session.
+            guess = (
+                ""
+                if self.relay is None
+                else f". Did you mean '{recipient}#N', the agent of session N?"
+            )
+            raise ValueError(f"Unknown agent {recipient!r}. Active: {active}{guess}")
         if recipient == "user" and self.to_user is None:
             raise ValueError("No user is watching; there is no one to tell.")
 
