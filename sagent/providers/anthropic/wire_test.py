@@ -452,11 +452,12 @@ def test_signed_thinking_returns_with_its_signature_and_sealed_stays_sealed() ->
         Thinking(content="unsigned"),
         Thinking(summary="summary only"),
         # OpenAI's Responses API seals its reasoning beside its reasoning id.
-        Thinking(encrypted="gAAAA-openai", extra={"reasoning_id": "rs_1"}),
+        Thinking(encrypted="gAAAA-openai", reasoning_id="rs_1"),
+        Thinking(encrypted="gAAAA-codex", reasoning_id=""),
         Thinking(
             content="visible",
             encrypted="gAAAA-openai",
-            extra={"reasoning_id": "rs_2"},
+            reasoning_id="rs_2",
         ),
     ],
 )

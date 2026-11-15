@@ -14,6 +14,7 @@ from typing import Literal, Self, override
 import asyncio
 import contextlib
 import logging
+import os
 import shlex
 import time
 
@@ -404,6 +405,9 @@ class Harness:
                 )
             if loop.time() > deadline:
                 pytest.fail("condition never held")
+            # A spin starves a tool's worker thread of the GIL: under the coverage
+            # gate's tracer, a Read taking 1 ms took 1.9 s.
+            os.sched_yield()
             await asyncio.sleep(0)
 
     def requests(self) -> list[Request]:

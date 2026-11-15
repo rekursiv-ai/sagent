@@ -1201,7 +1201,11 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
         if isinstance(record, (AssistantMessage, Thinking, ToolCall)):
             turn.append(record)
             continue
-        if turn:
+        in_history = isinstance(
+            record,
+            (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext, ToolResult),
+        )
+        if turn and (in_history or isinstance(record, TokenUsage)):
             entries.append(
                 _response(
                     turn,
@@ -1209,10 +1213,7 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
                 ),
             )
             turn = []
-        if isinstance(
-            record,
-            (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext, ToolResult),
-        ):
+        if in_history:
             entries.append(record)
     if turn:
         entries.append(_response(turn))

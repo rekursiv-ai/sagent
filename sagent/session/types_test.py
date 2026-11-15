@@ -802,6 +802,97 @@ def test_a_former_record_converts_to_exactly_the_fields_it_had() -> None:
     }
 
 
+def test_plain_data_under_py_dict_is_never_read_as_a_record() -> None:
+    held = {"py/object": "ShellCommandResult", "k": [{"py/object": "FunctionResult"}]}
+
+    assert current_plain({"py/object": "ToolCall", "arguments": {"py/dict": held}}) == {
+        "py/object": "ToolCall",
+        "arguments": {"py/dict": held},
+    }
+
+
+@pytest.mark.parametrize("held", ["rs_1", ""])
+def test_a_reasoning_id_once_kept_in_extra_reads_as_its_field(held: str) -> None:
+    """Journals and stored rows written before the field name OpenAI's seal so."""
+    plain = {
+        "py/object": "Thinking",
+        "encrypted": "gAAA",
+        "extra": {"reasoning_id": held, "kept": 1},
+    }
+
+    assert stored_record(plain) == Thinking(
+        encrypted="gAAA",
+        reasoning_id=held,
+        extra={"kept": 1},
+    )
+    assert stored_record(stored_plain(stored_record(plain))) == stored_record(plain)
+
+
+def test_a_reasoning_id_stated_both_ways_keeps_the_field() -> None:
+    plain = {
+        "py/object": "Thinking",
+        "reasoning_id": "rs_new",
+        "extra": {"reasoning_id": "rs_old"},
+    }
+
+    assert stored_record(plain) == Thinking(reasoning_id="rs_new")
+
+
+@pytest.mark.parametrize(
+    ("held", "reasoning_id", "extra"),
+    [
+        (
+            {"type": "reasoning", "id": "rs_1", "k": 1},
+            "rs_1",
+            {"type": "reasoning", "k": 1},
+        ),
+        ({"type": "reasoning"}, "", {"type": "reasoning", "$id_absent": True}),
+        ({"type": "reasoning", "id": 7}, None, {"type": "reasoning", "id": 7}),
+        ({"type": "thinking", "id": "x"}, None, {"type": "thinking", "id": "x"}),
+    ],
+    ids=["id", "no-id", "malformed-id", "not-reasoning"],
+)
+def test_a_reasoning_item_the_codex_reader_once_kept_whole_names_its_sealer(
+    held: dict[str, PlainTree],
+    reasoning_id: str | None,
+    extra: dict[str, PlainTree],
+) -> None:
+    """The codex reader once kept a reasoning item's ``id`` in ``extra``."""
+    plain = {"py/object": "Thinking", "encrypted": "gAAA", "extra": held}
+
+    assert stored_record(plain) == Thinking(
+        encrypted="gAAA",
+        reasoning_id=reasoning_id,
+        extra=extra,
+    )
+
+
+def test_only_reasoning_moves_an_id_out_of_extra() -> None:
+    plain = {
+        "py/object": "UserMessage",
+        "content": "hi",
+        "extra": {"type": "reasoning", "id": "x"},
+    }
+
+    assert stored_record(plain) == UserMessage(
+        content="hi",
+        extra={"type": "reasoning", "id": "x"},
+    )
+
+
+def test_a_reasoning_item_read_now_is_left_as_stored() -> None:
+    plain = {
+        "py/object": "Thinking",
+        "reasoning_id": "",
+        "extra": {"type": "reasoning", "$id_absent": True},
+    }
+
+    assert stored_record(plain) == Thinking(
+        reasoning_id="",
+        extra={"type": "reasoning", "$id_absent": True},
+    )
+
+
 def test_a_former_field_the_record_lacks_is_kept_in_extra_as_json() -> None:
     read = _formerly(
         "WebFetchResult",

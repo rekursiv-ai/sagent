@@ -123,14 +123,22 @@ def kill_and_reap(pids: list[int]) -> None:
 
 # ``/proc/locks`` lines read ``1: FLOCK  ADVISORY  WRITE <pid> <maj>:<min>:<inode> 0 EOF``,
 # the device numbers in hex; a waiter blocked behind the holder repeats its number with
-# ``->`` before the type.
-def lock_holder(path: Path, *, proc: Path = Path("/proc")) -> int | None:
+# ``->`` before the type. Each page of it walks the kernel's list afresh, so a lock
+# released before the cursor shifts the rest back a line: measured, one read missed a
+# held lock 18 times in 10,000 beside 8 processes locking, and three reads none.
+def lock_holder(
+    path: Path,
+    *,
+    proc: Path = Path("/proc"),
+    reads: int = 3,
+) -> int | None:
     """Return the pid holding an ``flock`` on ``path``.
 
     Args:
       path: The locked file.
       proc: Where the kernel lists locks, as Linux does; without it, as on
         macOS, no holder is known.
+      reads: How many times the table is read before no holder is concluded.
 
     Returns:
       pid: The process that took the lock; None when none holds it or the
@@ -139,14 +147,15 @@ def lock_holder(path: Path, *, proc: Path = Path("/proc")) -> int | None:
     """
     info = path.stat()
     file = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
-    try:
-        lines = (proc / "locks").read_text().splitlines()
-    except FileNotFoundError:
-        return None
-    for line in lines:
-        fields = line.split()
-        if fields[1:2] == ["FLOCK"] and fields[5] == file:
-            return int(fields[4])
+    for _ in range(reads):
+        try:
+            lines = (proc / "locks").read_text().splitlines()
+        except FileNotFoundError:
+            return None
+        for line in lines:
+            fields = line.split()
+            if fields[1:2] == ["FLOCK"] and fields[5] == file:
+                return int(fields[4])
     return None
 
 

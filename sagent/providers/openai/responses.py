@@ -232,13 +232,13 @@ class StreamReader:
                     content=text or None,
                     summary=summary or None,
                     encrypted=sealed if isinstance(sealed, str) else None,
-                    extra={"reasoning_id": str(item.get("id") or "")},
+                    reasoning_id=str(item.get("id") or ""),
                 )
         elif kind == "function_call":
             self._records[index] = ToolCall(
                 call_id=str(item.get("call_id") or ""),
                 name=str(item.get("name") or ""),
-                arguments=immutable(_arguments(str(item.get("arguments") or ""))),
+                arguments=immutable(_arguments(item.get("arguments"))),
             )
 
     # The server's tier names grow without notice, and the reply is already
@@ -278,7 +278,7 @@ def _input(
             # vendor's thinking has no reasoning id and is left out.
             case Thinking(
                 encrypted=str() as sealed,
-                extra={"reasoning_id": str() as reasoning_id},
+                reasoning_id=str() as reasoning_id,
             ) if reasoning_id:
                 summary = record.summary or ""
                 items.append(
@@ -410,7 +410,9 @@ def _served(reported: str | None) -> ServiceTier | None:
 
 # A call whose arguments do not parse is kept with none, so the tool reports the
 # bad call to the model rather than the reply failing whole.
-def _arguments(text: str) -> dict[str, object]:
+def _arguments(text: object) -> dict[str, object]:
+    if not isinstance(text, str):
+        return {}
     try:
         return json_loads(text, dict[str, object])
     except ValueError:
