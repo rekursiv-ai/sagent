@@ -1156,6 +1156,24 @@ def test_a_value_of_the_wrong_type_reads_as_none_given() -> None:
     assert result.is_error is False
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "thinking", "thinking": "t"},
+        {"type": "redacted_thinking", "data": "r"},
+        {"type": "reasoning", "id": "rs_1"},
+    ],
+    ids=["thinking", "redacted", "reasoning"],
+)
+def test_each_kind_of_thinking_keeps_its_turns_time(
+    block: dict[str, PlainTree],
+) -> None:
+    thinking = legacy_journal._thinking(block, "2026-01-01T00:00:00Z")
+
+    assert thinking is not None
+    assert thinking.timestamp == "2026-01-01T00:00:00Z"
+
+
 def test_a_turn_splits_into_thinking_text_and_calls_each_sealed() -> None:
     records = _read(
         _entry(
@@ -1193,7 +1211,7 @@ def test_a_turn_splits_into_thinking_text_and_calls_each_sealed() -> None:
             content="why not",
             summary="summed",
             encrypted="e1",
-            extra={"reasoning_id": "rs_1"},
+            reasoning_id="rs_1",
         ),
         Thinking(content="plain"),
         AssistantMessage(content="a", extra={"thoughtSignature": "g1"}),

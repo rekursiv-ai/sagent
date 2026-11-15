@@ -62,6 +62,7 @@ from sagent.runtime.tape import (
 from sagent.session.jsonl import record_line
 from sagent.session.projects import is_session, legacy_log
 from sagent.session.types import (
+    FORMER_TAPE_KINDS,
     AgentSpawnResult,
     AgentToAgentMessage,
     AssistantMessage,
@@ -145,15 +146,7 @@ def convert(path: Path) -> tuple[SessionRecord, ...]:
             entry = _history(record)
             if entry is not None:
                 tape.append(entry)
-        elif kind in (
-            "history",
-            "context_splice",
-            "context_override",
-            "context_clear",
-            "clear",
-            "update",
-            "persistent_agent",
-        ):
+        elif kind in FORMER_TAPE_KINDS:
             tape.append(record)
     tape_records = _tape(tape, _str(meta.get("session_id")))
     seen = splice_safe_repair(resolve_context(tape_records).messages)
@@ -686,9 +679,7 @@ def _thinking(block: _Record, timestamp: str | None) -> Thinking | None:
         content=content or _str(block.get("text")) or None,
         summary=summary or None,
         encrypted=_str(block.get("encrypted_content")) or None,
-        extra={"reasoning_id": reasoning_id}
-        if (reasoning_id := _str(block.get("id")))
-        else {},
+        reasoning_id=_str(block.get("id")) or None,
     )
 
 

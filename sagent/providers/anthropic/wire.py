@@ -540,7 +540,7 @@ def _blocks(
         # Anthropic accepts thinking back only with its own signature, and
         # rejects the request over any other. Gemini's reasoning has no seal;
         # OpenAI seals its own beside its reasoning id. Both are left out.
-        case Thinking(extra=extra) if "reasoning_id" in extra:
+        case Thinking(reasoning_id=str()):
             return []
         case Thinking(content=str() as text, encrypted=str() as signature):
             return [

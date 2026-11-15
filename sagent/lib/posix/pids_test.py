@@ -296,6 +296,49 @@ def test_a_waiter_is_not_the_holder_and_another_file_is_not_this_one(
     assert lock_holder(path, proc=proc) == 22
 
 
+def test_a_holder_a_page_boundary_skipped_is_found_on_the_next_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock released ahead of the reader shifts the table back a line mid-read."""
+    path = tmp_path / "held"
+    path.touch()
+    info = path.stat()
+    held = (
+        f"1: FLOCK  ADVISORY  WRITE 22 {os.major(info.st_dev):02x}:"
+        f"{os.minor(info.st_dev):02x}:{info.st_ino} 0 EOF\n"
+    )
+    table = _LockTable("", "", held)
+    monkeypatch.setattr(Path, "read_text", table.read_text)
+
+    assert lock_holder(path, proc=tmp_path) == 22
+
+
+def test_a_lock_absent_from_every_read_has_no_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "held"
+    path.touch()
+    table = _LockTable("", "", "", "")
+    monkeypatch.setattr(Path, "read_text", table.read_text)
+
+    assert lock_holder(path, proc=tmp_path) is None
+    assert table.served == 3
+
+
+class _LockTable:
+    """Stands in for ``Path.read_text``: each read returns the next of ``reads``."""
+
+    def __init__(self, *reads: str) -> None:
+        self._reads = list(reads)
+        self.served = 0
+
+    def read_text(self) -> str:
+        self.served += 1
+        return self._reads.pop(0)
+
+
 _SLEEP = "import time; time.sleep(60)"
 
 _LINUX = pytest.mark.skipif(

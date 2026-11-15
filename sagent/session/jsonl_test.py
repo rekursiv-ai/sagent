@@ -28,6 +28,7 @@ from sagent.session.types import (
     ContextClear,
     IncompleteRecord,
     ReadResult,
+    Thinking,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -71,6 +72,14 @@ def test_a_line_written_with_every_field_reads_the_same() -> None:
         b' "content": "hi", "attachments": [], "extra": {}}'
     )
     assert read_record(line) == UserMessage(timestamp="t", content="hi")
+
+
+def test_a_line_naming_openai_s_reasoning_in_extra_reads_its_sealer() -> None:
+    """A journal from before the field still keeps OpenAI's seal from Anthropic."""
+    line = (
+        b'{"py/object": "Thinking", "encrypted": "g", "extra": {"reasoning_id": "r"}}'
+    )
+    assert read_record(line) == Thinking(encrypted="g", reasoning_id="r")
 
 
 @pytest.mark.asyncio

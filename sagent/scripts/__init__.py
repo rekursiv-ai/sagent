@@ -1,1 +1,1 @@
-"""Scripts that drive sagent from outside: benchmarks, and session conversion."""
+"""Scripts that run beside sagent: a benchmark, a wheel check, and session conversion."""

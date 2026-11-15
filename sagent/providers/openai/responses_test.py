@@ -108,12 +108,12 @@ def test_encode_renders_each_record_as_its_input_item() -> None:
         ),
         UserMessage(attachments=(image,)),
         TokenUsage(),
-        Thinking(summary="Plan.", encrypted="sealed-1", extra={"reasoning_id": "rs_1"}),
-        Thinking(encrypted="sealed-2", extra={"reasoning_id": "rs_2"}),
+        Thinking(summary="Plan.", encrypted="sealed-1", reasoning_id="rs_1"),
+        Thinking(encrypted="sealed-2", reasoning_id="rs_2"),
         # Another vendor's thinking, and thinking that was never sealed.
         Thinking(content="Claude's", encrypted="signature"),
-        Thinking(summary="unsealed", extra={"reasoning_id": "rs_3"}),
-        Thinking(encrypted="sealed-3", extra={"reasoning_id": ""}),
+        Thinking(summary="unsealed", reasoning_id="rs_3"),
+        Thinking(encrypted="sealed-3", reasoning_id=""),
         AssistantMessage(content="Reading."),
         AssistantMessage(content=""),
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
@@ -407,7 +407,7 @@ def test_the_response_holds_each_finished_item_in_output_order() -> None:
             content="raw",
             summary="First.\n\nThen.",
             encrypted="sealed",
-            extra={"reasoning_id": "rs_7"},
+            reasoning_id="rs_7",
         ),
         AssistantMessage(content="Reading a."),
         ToolCall(call_id="call_9", name="Read", arguments={"file_path": "a"}),
@@ -422,7 +422,7 @@ def test_the_response_holds_each_finished_item_in_output_order() -> None:
     )
     sealed_only.feed(_completed())
     assert sealed_only.response().records == (
-        Thinking(encrypted="s", extra={"reasoning_id": "rs_9"}),
+        Thinking(encrypted="s", reasoning_id="rs_9"),
     )
 
 
@@ -611,11 +611,13 @@ def test_parts_that_say_nothing_add_nothing() -> None:
         ),
     )
     reader.feed(_done(2, {"type": "function_call", "arguments": "[1]"}))
+    reader.feed(_done(3, {"type": "function_call", "arguments": {"a": 1}}))
     reader.feed(_completed())
 
     assert reader.response().records == (
-        Thinking(content="ab", summary=None, extra={"reasoning_id": ""}),
+        Thinking(content="ab", summary=None, reasoning_id=""),
         AssistantMessage(content="x"),
+        ToolCall(call_id="", name="", arguments={}),
         ToolCall(call_id="", name="", arguments={}),
     )
 
@@ -627,9 +629,7 @@ def test_reasoning_with_a_summary_alone_is_kept() -> None:
     )
     reader.feed(_completed())
 
-    assert reader.response().records == (
-        Thinking(summary="Why.", extra={"reasoning_id": "rs"}),
-    )
+    assert reader.response().records == (Thinking(summary="Why.", reasoning_id="rs"),)
 
 
 def test_a_reply_that_reports_no_usage_used_nothing() -> None:

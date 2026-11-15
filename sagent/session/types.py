@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CONCRETE_TYPES",
     "FORMER_RESULT_KINDS",
+    "FORMER_TAPE_KINDS",
     "RENAMED",
     "RENAMED_KINDS",
     "AgentSelfResult",
@@ -246,6 +247,9 @@ class Thinking:
     content: str | None = None
     encrypted: str | None = None
     summary: str | None = None
+    reasoning_id: str | None = None
+    """OpenAI's id for its reasoning (``""`` if unstated); ``None`` if not OpenAI's."""
+
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
 
     def __post_init__(self) -> None:
@@ -1018,6 +1022,19 @@ RENAMED_KINDS: Final = MappingProxyType[str, str](
 )
 """Maps each former record kind to its kind now, which is always ``ToolResult``."""
 
+FORMER_TAPE_KINDS: Final = frozenset(
+    {
+        "history",
+        "context_splice",
+        "context_override",
+        "context_clear",
+        "clear",
+        "update",
+        "persistent_agent",
+    },
+)
+"""Each ``kind`` of an old sagent log's records that built its tape."""
+
 
 def former_kind(result: ToolResult) -> str:
     """Return the legacy record class name for ``result``.
@@ -1190,12 +1207,43 @@ def current_plain(plain: object, names: Mapping[str, str] = RENAMED) -> object:
                 "py/object": "UncategorizedToolResult",
                 "exit_code": exit_code,
             }
+        held = current.get("extra")
+        if tag == "Thinking" and isinstance(held, Mapping):
+            current |= _reasoning_id_moved_out_of_extra(
+                cast("Mapping[str, object]", held),
+                stated="reasoning_id" in current,
+            )
         return current
     # A store returns its rows frozen, so a list may arrive as a tuple.
     if isinstance(plain, (list, tuple)):
         items = cast("Sequence[object]", plain)
         return [current_plain(value, names) for value in items]
     return plain
+
+
+# Two writers once kept OpenAI's reasoning id in ``extra``: sagent's OpenAI provider as
+# ``reasoning_id``, and the codex reader as the reasoning item's own ``id``.
+def _reasoning_id_moved_out_of_extra(
+    held: Mapping[str, object],
+    *,
+    stated: bool,
+) -> dict[str, object]:
+    """Return the ``Thinking`` fields that move a stored ``extra``'s reasoning id out."""
+    residual = dict(held)
+    if "reasoning_id" in residual:
+        moved = residual.pop("reasoning_id")
+        return (
+            {"extra": residual}
+            if stated
+            else {"reasoning_id": moved, "extra": residual}
+        )
+    if stated or residual.get("type") != "reasoning":
+        return {}
+    if "id" not in residual:
+        return {"reasoning_id": "", "extra": residual | {"$id_absent": True}}
+    if not isinstance(residual["id"], str):
+        return {}
+    return {"reasoning_id": residual.pop("id"), "extra": residual}
 
 
 # ``ToolResult.text()`` of the converted record must equal the text the model read

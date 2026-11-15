@@ -56,6 +56,7 @@ from sagent.session.types import (
     RequestMeasurement,
     SessionRecord,
     SystemMessage,
+    Thinking,
     TokenUsage,
     ToolCall,
     ToolResult,
@@ -1240,6 +1241,26 @@ def test_appended_records_are_turns_and_what_no_turn_holds_is_dropped(
         spend=TokenCost(),
         stop_reason="",
     )
+
+
+@pytest.mark.parametrize("kind", ["event_msg/item_completed", "restated"])
+def test_a_record_the_model_never_reads_does_not_split_its_turn(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    _, agent = _agent(tmp_path)
+    turn = (Thinking(content="plan"), AssistantMessage(content="reading"))
+
+    agent.session.append(
+        UserMessage(content="go"),
+        turn[0],
+        UncategorizedRecord(kind=kind),
+        turn[1],
+    )
+
+    (_, response) = agent.runtime.context().messages
+    assert isinstance(response, Response)
+    assert response.records == turn
 
 
 @pytest.mark.asyncio
