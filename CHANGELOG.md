@@ -7,6 +7,10 @@ All notable sagent changes are documented here. This project follows
 
 ### Added
 
+- With `Team.relay` set, AgentSend's reminder says how to name another session's
+  agent (`LABEL#SESSION`), and an unknown label's error asks "Did you mean
+  'lead#N', the agent of session N?", so an agent learns it can reach one; with
+  peer messaging off the reminder leaves it out.
 - Models: Claude Fable 5.2 (`fable-5.2`), at $8 / $40 per MTok with
   $0.20 cache reads, and fast mode (`service_tier: priority`) at $16 / $80.
   `best` and `fable` now resolve to it.

@@ -2298,10 +2298,28 @@ def test_with_no_default_relay_another_session_s_label_is_unknown(
     team, _ = _reaching(tmp_path)
     with pytest.raises(
         ValueError,
-        match=r"Unknown agent 'lead#412'\. Active: \['Agent'",
+        match=r"^Unknown agent 'lead#412'\. Active: \['Agent'\]$",
     ):
         team.send("Agent", recipient="lead#412", content="status?")
     assert team.owes("lead#412") == {}
+
+
+def test_an_unknown_label_asks_if_it_meant_another_session_s_agent(
+    tmp_path: Path,
+) -> None:
+    team, relay = _reaching(tmp_path)
+    team.relay = relay
+    with pytest.raises(
+        ValueError,
+        match=r"^Unknown agent 'lead'\. Active: \['Agent'\]\. Did you mean 'lead#N',"
+        r" the agent of session N\?$",
+    ):
+        team.send("Agent", recipient="lead", content="status?")
+
+
+def test_a_new_team_has_no_stand_in_and_no_default_relay() -> None:
+    team = _team()
+    assert (team.stand_in, team.relay, team.to_user) == (None, None, None)
 
 
 def test_another_session_s_agent_goes_by_the_default_relay_with_its_books(

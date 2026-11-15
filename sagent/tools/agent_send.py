@@ -2,9 +2,10 @@
 
 A message to an agent that is owed nothing is a request, and it owes a reply;
 one to an agent the sender owes is that reply. ``to`` takes a label, ``parent``,
-or ``user``, whose screen shows it. A root with no parent that may call
-``AgentSpawn`` sends to ``parent`` by starting its watcher first, as the TUI's
-``/send parent`` does: the message is the first thing it is asked.
+or ``user``, whose screen shows it; with the team's default relay, also another
+session's agent, which the reminder says how to name. A root with no parent that
+may call ``AgentSpawn`` sends to ``parent`` by starting its watcher first, as the
+TUI's ``/send parent`` does: the message is the first thing it is asked.
 
 Typical usage example:
 
@@ -107,17 +108,16 @@ class AgentSend:
 
         Returns:
           text: Such as ``Your agent label is 'Agent'. Active agents you can
-            message: reviewer``; ``""`` outside a team.
+            message: reviewer``, then how to name another session's agent when
+            the team has a default relay; ``""`` outside a team.
 
         """
         me = context.label
+        peers = me not in self.team or self.team.peer_messaging(me)
         others = sorted(
             label
             for label in (*self.team, *self.team.outside)
-            if label != me
-            and (
-                "#" not in label or me not in self.team or self.team.peer_messaging(me)
-            )
+            if label != me and ("#" not in label or peers)
         )
         parent = self.team.above(me) if me in self.team else None
         owed = self.team.owes(me)
@@ -125,6 +125,10 @@ class AgentSend:
             f"Your agent label is {me!r}." if me else "",
             f"Your parent is {parent!r}." if parent is not None else "",
             f"Active agents you can message: {', '.join(others)}." if others else "",
+            "Another session's agent is LABEL#SESSION: its label, then its session,"
+            " as Agent#412."
+            if self.team.relay is not None and peers
+            else "",
             "You owe a reply, by AgentSend, to: "
             + ", ".join(f"{c} ({what!r})" for c, what in owed.items())
             + "."
