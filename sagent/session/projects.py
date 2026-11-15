@@ -60,6 +60,8 @@ __all__ = [
     "repo_root",
     "scope_dir",
     "session_file",
+    "session_id",
+    "spawner_journal",
     "unused_session_path",
 ]
 
@@ -364,6 +366,47 @@ def child_journal(journal: Path) -> Path:
 
     """
     return journal.parent / str(uuid.uuid4()) / "session.jsonl"
+
+
+# A child's folder sits in its spawner's, so a session's folder in a project folder
+# that holds an old sagent's log is no child: ``is_session`` says so.
+def spawner_journal(journal: Path) -> Path | None:
+    """Return the journal of the agent that spawned ``journal``'s; ``None`` for a root.
+
+    The inverse of :func:`child_journal`.
+
+    Args:
+      journal: A journal.
+
+    Returns:
+      spawner: ``session.jsonl`` in the folder above, when it is there and
+        ``journal`` is a child's; else ``None``.
+
+    """
+    up = journal.parent.parent / "session.jsonl"
+    return up if up.is_file() and not is_session(journal) else None
+
+
+# Its folders from the root's down: a child's folder is a uuid today but was its label,
+# and two sessions each spawn a ``watcher``, so its own folder names it nowhere else.
+def session_id(journal: Path) -> str:
+    """Return the id of the session ``journal`` holds: its folders from the root's down.
+
+    A root's id is its folder's name, as :attr:`SessionInfo.id` says; a child's is
+    its spawner's id, a ``/``, then its own folder's name.
+
+    Args:
+      journal: A journal.
+
+    Returns:
+      id: Such as ``abcdef012345/<uuid>/<uuid>`` for a grandchild.
+
+    """
+    folders = [journal.parent.name]
+    while (up := spawner_journal(journal)) is not None:
+        folders.append(up.parent.name)
+        journal = up
+    return "/".join(reversed(folders))
 
 
 def session_file(directory: Path) -> Path:
