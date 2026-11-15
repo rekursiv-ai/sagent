@@ -27,6 +27,8 @@ from sagent.session.projects import (
     project_dir,
     repo_root,
     scope_dir,
+    session_id,
+    spawner_journal,
     unused_session_path,
 )
 from sagent.session.types import (
@@ -139,6 +141,31 @@ def test_a_childs_uuid_folder_never_lists_as_a_session(tmp_path: Path) -> None:
     _ = _journal(child_journal(parent).parent, UserMessage(content="the helper's"))
 
     assert [info.path for info in list_sessions(tmp_path)] == [parent]
+
+
+def test_a_child_names_its_spawner_and_its_folders_from_the_root_down(
+    tmp_path: Path,
+) -> None:
+    root = _journal(tmp_path / "abcdef012345", UserMessage(content="mine"))
+    child = _journal(child_journal(root).parent, UserMessage(content="a"))
+    grandchild = _journal(child_journal(child).parent, UserMessage(content="b"))
+
+    assert [spawner_journal(j) for j in (root, child, grandchild)] == [
+        None,
+        root,
+        child,
+    ]
+    assert session_id(root) == "abcdef012345"
+    assert session_id(grandchild) == "/".join(
+        ["abcdef012345", child.parent.name, grandchild.parent.name],
+    )
+
+
+def test_a_child_whose_spawner_wrote_no_journal_is_a_root(tmp_path: Path) -> None:
+    child = child_journal(tmp_path / "abcdef012345" / "session.jsonl")
+
+    assert spawner_journal(child) is None
+    assert session_id(child) == child.parent.name
 
 
 def test_a_new_session_is_a_private_directory_holding_an_empty_journal(
