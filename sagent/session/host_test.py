@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -13,6 +14,7 @@ import pytest
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
+from sagent.session.controller import AgentSessionController
 from sagent.session.host import AgentSession
 from sagent.session.types import AssistantMessage, UserMessage
 
@@ -46,6 +48,35 @@ async def test_attach_reuses_native_agent_without_taking_resource_ownership() ->
 
     await session.close()
     assert agent.runtime.observers == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_releases_native_resources_once() -> None:
+    resources = AsyncExitStack()
+    await resources.__aenter__()
+    closed = 0
+
+    async def record_close() -> None:
+        nonlocal closed
+        await asyncio.sleep(0)
+        closed += 1
+
+    resources.push_async_callback(record_close)
+    agent = _agent()
+    team = {"Agent": agent}
+    session = AgentSession(
+        resources=resources,
+        catalog=MagicMock(),
+        team=team,  # type: ignore[arg-type]
+        agent=agent,
+        path=None,
+        controller=AgentSessionController(team),
+        owns_resources=True,
+    )
+
+    await asyncio.gather(session.close(), session.close())
+
+    assert closed == 1
 
 
 def test_agent_messages_use_native_team_bookkeeping() -> None:

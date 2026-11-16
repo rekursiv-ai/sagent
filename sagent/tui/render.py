@@ -237,6 +237,8 @@ class Scrollback:
                 for index, record in enumerate(response.records):
                     self._record(record, index=index)
                 self._end()
+            case types.ToolCallStarted(call=call):
+                self._record(call)
             case types.DetachedResult(result=result):
                 self._record(result)
             case types.ModelResponseCancelled():

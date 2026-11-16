@@ -78,6 +78,27 @@ def test_subscription_forwards_native_events_and_removes_cleanly() -> None:
     assert child.runtime.observers == []
 
 
+def test_subscription_cleanup_survives_agent_removal_and_label_reuse() -> None:
+    original = _agent()
+    agents = {"reviewer": original}
+    controller = AgentSessionController(agents)
+    observer = MagicMock()
+
+    controller.subscribe(observer, agent_label="reviewer")
+    agents.pop("reviewer")
+    controller.subscribe(observer)
+    assert original.runtime.observers == []
+
+    agents["reviewer"] = original
+    controller.subscribe(observer, agent_label="reviewer")
+    replacement = _agent()
+    agents["reviewer"] = replacement
+    controller.subscribe(observer, agent_label="reviewer")
+
+    assert original.runtime.observers == []
+    assert len(replacement.runtime.observers) == 1
+
+
 def test_invalid_submission_is_rejected_before_runtime_dispatch() -> None:
     agent = _agent()
     controller = AgentSessionController({"Agent": agent})

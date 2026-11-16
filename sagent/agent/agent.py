@@ -1011,7 +1011,9 @@ class RuntimeSession:
             )
             if agent.environment
             else None,
+            provider=model.provider.name,
             model=ModelTags.from_settings(model.capability, settings).name,
+            model_id=model.capability.model_id,
             tools=_gate(agent.allowed, offered=offered),
         )
         now = _now()
@@ -1023,7 +1025,13 @@ class RuntimeSession:
                 environment=current.environment
                 if current.environment != last.environment
                 else None,
+                provider=current.provider
+                if current.provider != last.provider
+                else None,
                 model=current.model if current.model != last.model else None,
+                model_id=current.model_id
+                if current.model_id != last.model_id
+                else None,
                 # A gate lifted names every tool: ``None`` would say nothing.
                 tools=(
                     current.tools
@@ -1039,7 +1047,9 @@ class RuntimeSession:
             timestamp=now,
             cwd=delta.cwd,
             environment=delta.environment,
+            provider=delta.provider,
             model=delta.model,
+            model_id=delta.model_id,
             tools=delta.tools,
         )
 
@@ -1086,7 +1096,9 @@ class _Stated:
 
     cwd: str | None = None
     environment: str | None = None
+    provider: str | None = None
     model: str | None = None
+    model_id: str | None = None
     tools: tuple[str, ...] | None = None
     """The tools the model may call; ``None`` for every one offered."""
 
@@ -1115,7 +1127,9 @@ def _last_stated(
             environment=turn.environment
             if turn.environment is not None
             else last.environment,
+            provider=turn.provider if turn.provider is not None else last.provider,
             model=turn.model if turn.model is not None else last.model,
+            model_id=turn.model_id if turn.model_id is not None else last.model_id,
             tools=_gate(turn.tools, offered=offered)
             if turn.tools is not None
             else last.tools,

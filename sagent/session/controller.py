@@ -58,7 +58,7 @@ class AgentSessionController:
             str,
             dict[
                 Callable[[types.RuntimeEvent], None],
-                Callable[[types.RuntimeEvent], None],
+                tuple[Agent, Callable[[types.RuntimeEvent], None]],
             ],
         ] = {}
 
@@ -120,28 +120,52 @@ class AgentSessionController:
     ) -> Callable[[], None]:
         """Subscribe to native runtime events and return an idempotent remover."""
         labels = (agent_label,) if agent_label is not None else tuple(self._agents)
-        entries: list[tuple[str, Callable[[types.RuntimeEvent], None]]] = []
+        entries: list[tuple[str, Agent, Callable[[types.RuntimeEvent], None]]] = []
+        if agent_label is None:
+            current_labels = set(labels)
+            for old_label, subscriptions in tuple(self._subscriptions.items()):
+                existing = subscriptions.get(observer)
+                if old_label in current_labels or existing is None:
+                    continue
+                old_agent, old_forward = existing
+                if old_forward in old_agent.runtime.observers:
+                    old_agent.runtime.observers.remove(old_forward)
+                subscriptions.pop(observer, None)
+                if not subscriptions:
+                    self._subscriptions.pop(old_label, None)
         for label in labels:
             agent = self._agent(label)
 
-            existing_forward = self._subscriptions.get(label, {}).get(observer)
-            if existing_forward is not None:
-                continue
+            existing = self._subscriptions.get(label, {}).get(observer)
+            if existing is not None:
+                existing_agent, existing_forward = existing
+                if existing_agent is agent:
+                    continue
+                if existing_forward in existing_agent.runtime.observers:
+                    existing_agent.runtime.observers.remove(existing_forward)
 
             def forward(event: types.RuntimeEvent, label: str = label) -> None:
                 observer(label, event)
 
             agent.runtime.observers.append(forward)
-            self._subscriptions.setdefault(label, {})[observer] = forward
-            entries.append((label, forward))
+            self._subscriptions.setdefault(label, {})[observer] = (agent, forward)
+            entries.append((label, agent, forward))
 
         def remove() -> None:
-            for label, forward in entries:
-                agent = self._agent(label)
+            for label, agent, forward in entries:
                 if forward in agent.runtime.observers:
                     agent.runtime.observers.remove(forward)
                 subscriptions = self._subscriptions.get(label)
-                if subscriptions is not None and subscriptions.get(observer) is forward:
+                current = (
+                    subscriptions.get(observer)
+                    if subscriptions is not None
+                    else None
+                )
+                if (
+                    current is not None
+                    and current[0] is agent
+                    and current[1] is forward
+                ):
                     subscriptions.pop(observer, None)
                     if not subscriptions:
                         self._subscriptions.pop(label, None)
@@ -151,8 +175,7 @@ class AgentSessionController:
     def unsubscribe_all(self) -> None:
         """Remove every runtime observer registered through this controller."""
         for label, subscriptions in tuple(self._subscriptions.items()):
-            agent = self._agent(label)
-            for forward in tuple(subscriptions.values()):
+            for agent, forward in tuple(subscriptions.values()):
                 if forward in agent.runtime.observers:
                     agent.runtime.observers.remove(forward)
             subscriptions.clear()

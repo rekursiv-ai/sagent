@@ -32,7 +32,7 @@ def _imports(path: Path) -> set[str]:
 
 
 def _outside_the_frontend() -> list[Path]:
-    """Return the package's modules but the frontend's and the entry point."""
+    """Return the package's modules but the frontends' and the entry point."""
     return [
         path
         for path in sorted(_ROOT.rglob("*.py"))

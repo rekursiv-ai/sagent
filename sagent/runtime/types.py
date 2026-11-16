@@ -280,6 +280,12 @@ class Detach:
 class ModelCallStarted:
     """Model streaming call has been spawned."""
 
+    provider: str = ""
+    """The provider serving this call."""
+
+    model: str = ""
+    """The provider-independent model identifier used for this call."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolCallStarted:

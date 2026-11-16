@@ -102,7 +102,15 @@ class TurnContext:
     """The AGENTS.md text in force; ``None`` when unchanged since the last one."""
 
     permission: str | None = None
+    provider: str | None = None
+    """The provider serving ``model_id``; ``None`` when unchanged."""
+
     model: str | None = None
+    """The restorable model configuration name; ``None`` when unchanged."""
+
+    model_id: str | None = None
+    """The provider-independent model identifier; ``None`` when unchanged."""
+
     effort: ThinkingEffort | None = None
     tools: tuple[str, ...] | None = None
     """The tools the model may call, by name; ``None`` for every one offered."""

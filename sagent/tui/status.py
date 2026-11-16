@@ -178,7 +178,7 @@ class Status:
             return f"retrying in {elapsed(until - time.time())}."
         if self._compact is not None:
             return "compacting."
-        if rt.inbox.gate_armed:
+        if rt.waiting_for_input:
             return "waiting for input."
         if self._call is None:
             if self._tools is None or now - self._tools < self.wait_after_sec:

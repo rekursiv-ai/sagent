@@ -1137,7 +1137,9 @@ def test_a_new_session_restates_where_and_as_what_it_runs(tmp_path: Path) -> Non
 
     assert isinstance(turn, TurnContext)
     assert turn.cwd == str(tmp_path)
+    assert turn.provider == "scripted"
     assert turn.model == "scripted+fullcontext"
+    assert turn.model_id == "scripted"
     # The root's AGENTS.md is the window's prompt, never a restated setting.
     assert turn.agents_md is None
     assert "be terse" in agent.runtime.system[-1]
@@ -1165,7 +1167,9 @@ def test_an_agent_without_the_environment_is_told_only_its_model(
 
     assert isinstance(turn, TurnContext)
     assert (turn.cwd, turn.environment, turn.agents_md) == (None, None, None)
+    assert turn.provider == "scripted"
     assert turn.model == "scripted+fullcontext"
+    assert turn.model_id == "scripted"
     assert str(tmp_path) not in turn.text()
     assert session.updates() == []
 

@@ -652,6 +652,20 @@ class Runtime:
         )
 
     @property
+    def is_busy(self) -> bool:
+        """True while foreground model, compaction, or tool work is active."""
+        return (
+            self.model_call is not None
+            or self.compact_task is not None
+            or bool(self.cohort)
+        )
+
+    @property
+    def waiting_for_input(self) -> bool:
+        """True while the runtime's gate is explicitly waiting for input."""
+        return self.inbox.gate_armed
+
+    @property
     def accepts_user_dispatch(self) -> bool:
         """True iff a user message pushed now makes progress, rather than being staged.
 
@@ -1874,7 +1888,12 @@ class Runtime:
                         model_call.add_done_callback(
                             log_task_exception(logger, "model-call task crashed"),
                         )
-                        self.publish(ModelCallStarted())
+                        self.publish(
+                            ModelCallStarted(
+                                provider=self._called_model.provider.name,
+                                model=self._called_model.capability.model_id,
+                            ),
+                        )
 
                 self.publish(SaveSession())
             except Exception as exc:  # noqa: BLE001 -- The loop must outlive one pass's failure.

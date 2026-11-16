@@ -49,7 +49,14 @@ from sagent.session.types import (
 
 def _every_record() -> list[SessionRecord]:
     return [
-        TurnContext(cwd="/w", model="m", effort="high", encoding={"crlf": True}),
+        TurnContext(
+            cwd="/w",
+            provider="provider",
+            model="m",
+            model_id="model-id",
+            effort="high",
+            encoding={"crlf": True},
+        ),
         UserMessage(
             content="hi",
             attachments=(Attachment(mime_descriptor="image/png", data=b"\x89PNG"),),

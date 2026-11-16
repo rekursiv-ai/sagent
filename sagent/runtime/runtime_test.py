@@ -525,6 +525,8 @@ async def test_a_text_reply_ends_the_round() -> None:
         ModelResponseComplete,
         ModelIdle,
     ]
+    started = next(e for e in h.events if isinstance(e, ModelCallStarted))
+    assert (started.provider, started.model) == ("scripted", "scripted")
     partial = next(e for e in h.events if isinstance(e, ModelResponsePartial))
     assert partial.text == "hello back"
 
@@ -2236,6 +2238,8 @@ async def test_a_model_error_waits_for_the_user_and_stays_out_of_context() -> No
         await h.seen(ModelResponseError)
         await spin()
         assert h.runtime.inbox.gate_armed
+        assert h.runtime.waiting_for_input
+        assert not h.runtime.is_busy
         assert h.texts() == ["go"]
         h.push(_user("retry"))
         await h.seen(ModelIdle)
@@ -3098,6 +3102,8 @@ async def test_dispatch_predicates_by_state() -> None:
             True,
             True,
         )
+        assert not rt.is_busy
+        assert not rt.waiting_for_input
         h.push(_user("go"))
         await until(lambda: bool(tool.started))
         assert (rt.is_idle, rt.accepts_user_dispatch, rt.accepts_deferred_dispatch) == (
@@ -3105,6 +3111,8 @@ async def test_dispatch_predicates_by_state() -> None:
             True,
             False,
         )
+        assert rt.is_busy
+        assert not rt.waiting_for_input
         stream = asyncio.create_task(_forever())
         rt.model_call = stream
         assert not rt.accepts_user_dispatch

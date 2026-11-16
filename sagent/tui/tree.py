@@ -321,5 +321,4 @@ def _walk(
 
 def _busy(agent: Agent) -> bool:
     """Return whether ``agent`` is calling its model, compacting, or running tools."""
-    rt = agent.runtime
-    return rt.model_call is not None or rt.compact_task is not None or bool(rt.cohort)
+    return agent.runtime.is_busy

@@ -1,1 +1,1 @@
-"""Session records, and the files that store them."""
+"""Session records and journals."""

@@ -56,12 +56,12 @@ from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
 from sagent.settings.harvest import harvest
 from sagent.settings.match import match
+from sagent.settings.model import AgentModel
 from sagent.settings.types import Setting
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.mcp_settings import McpSettings
 from sagent.tui.prompt import Panes
 from sagent.tui.render import error_text
-from sagent.tui.settings.model import AgentModel
 from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.settings.screen import ScreenSettings
 from sagent.tui.settings.tool import ToolDisplaySettings

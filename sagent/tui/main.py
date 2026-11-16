@@ -66,6 +66,7 @@ from sagent.lib.userdirs import data_dir, state_dir
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
+from sagent.session.host import AgentSession
 from sagent.session.jsonl import JournalInUseError, JsonlJournal
 from sagent.session.legacy_journal import (
     find_old,
@@ -278,6 +279,7 @@ async def run(
     *,
     catalog: Catalog,
     team: Team | None = None,
+    session: AgentSession | None = None,
     history: Path | None = None,
     show_thinking: bool = False,
     print_batch_sec: float = 0.2,
@@ -288,12 +290,18 @@ async def run(
       agent: An open agent.
       catalog: Where the model's settings find models.
       team: The agents ``/send``, ``/halt`` and ``/kill`` may reach by label.
+      session: Optional shared native session handle for configured frontends.
       history: The input history; the per-user one when omitted.
       show_thinking: Whether reasoning shows; ``/screen.thinking`` flips it.
       print_batch_sec: How long prints above the prompt gather into one repaint;
         quitting waits out the last one.
 
     """
+    if session is not None:
+        agent = session.agent
+        catalog = session.catalog
+        team = session.team
+
     path = (
         history
         if history is not None
@@ -686,13 +694,23 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 await spawn.resume(label)
             with _signals():
                 if interactive:
-                    await run(
-                        agent,
+                    session = AgentSession.attach(
                         catalog=catalog,
                         team=team,
-                        history=flags.history,
-                        show_thinking=screen.show_thinking,
+                        agent=agent,
+                        path=path,
                     )
+                    try:
+                        await run(
+                            agent,
+                            catalog=catalog,
+                            team=team,
+                            session=session,
+                            history=flags.history,
+                            show_thinking=screen.show_thinking,
+                        )
+                    finally:
+                        await session.close()
                     return 0
                 return await _headless(agent, flags)
 

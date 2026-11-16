@@ -59,6 +59,7 @@ if TYPE_CHECKING:
         ModelResponseThinking,
         Skipped,
         StatusChanged,
+        ToolCallStarted,
     )
     from sagent.session.types import (
         AgentToAgentMessage,
@@ -143,6 +144,7 @@ type Live = (
     | ChildDoneEvent
     | CommandOutput
     | Skipped
+    | ToolCallStarted
 )
 """What only a live session feeds.
 

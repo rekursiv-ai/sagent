@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Self, cast
 
+import asyncio
+
 from wesearch.fetch import FetchSession
 
 from sagent.agent.agent import Agent, default_system_prompt
@@ -59,6 +61,7 @@ class AgentSession:
         self.path = path
         self.controller = controller
         self._owns_resources = owns_resources
+        self._close_lock = asyncio.Lock()
         self._closed = False
 
     @classmethod
@@ -127,12 +130,13 @@ class AgentSession:
 
     async def close(self) -> None:
         """Release native resources and remove controller observers."""
-        if self._closed:
-            return
-        self._closed = True
-        self.controller.unsubscribe_all()
-        if self._owns_resources:
-            await self._resources.aclose()
+        async with self._close_lock:
+            if self._closed:
+                return
+            self.controller.unsubscribe_all()
+            if self._owns_resources:
+                await self._resources.aclose()
+            self._closed = True
 
     async def __aenter__(self) -> Self:
         """Return this already-open native session."""
