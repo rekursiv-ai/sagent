@@ -479,29 +479,22 @@ def _run_rg(
     runs: contextlib.ExitStack,
 ) -> Generator[Row, None, None]:
     """Start ``rg`` over ``batch``, stopped when ``runs`` closes; return its rows."""
-    process, timer = _started(rg_command(rg, batch, query), timeout_sec)
-    runs.callback(_stopped, process, timer)
-    return _read(process, timer, query=query, timeout_sec=timeout_sec)
-
-
-def _started(
-    cmd: list[str],
-    timeout_sec: float,
-) -> tuple[subprocess.Popen[bytes], threading.Timer]:
-    """Start one ``rg`` argv, and the timer that kills it at ``timeout_sec``."""
     process = subprocess.Popen(  # noqa: S603 -- Fixed ripgrep argv, no shell.
-        cmd,
+        rg_command(rg, batch, query),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    timer = threading.Timer(timeout_sec, process.kill)
-    timer.start()
-    return process, timer
+    runs.callback(_stopped, process)
+    return _read(process, query=query, timeout_sec=timeout_sec)
 
 
-def _stopped(process: subprocess.Popen[bytes], timer: threading.Timer) -> None:
+def _stopped(
+    process: subprocess.Popen[bytes],
+    timer: threading.Timer | None = None,
+) -> None:
     """Cancel ``timer``, kill ``process`` if it still runs, and close its pipes."""
-    timer.cancel()
+    if timer is not None:
+        timer.cancel()
     if process.poll() is None:
         process.kill()
         _ = process.wait()
@@ -510,15 +503,18 @@ def _stopped(process: subprocess.Popen[bytes], timer: threading.Timer) -> None:
     cast(IO[bytes], process.stderr).close()
 
 
+# The clock starts as the reading does: a run started ahead waits on its full pipe for
+# the caller, and that wait is not the search being slow.
 def _read(
     process: subprocess.Popen[bytes],
-    timer: threading.Timer,
     *,
     query: Query,
     timeout_sec: float,
 ) -> Generator[Row, None, None]:
     """Yield the rows a ``rg`` run prints as it prints them; raise if it failed."""
     out, errors = cast(IO[bytes], process.stdout), cast(IO[bytes], process.stderr)
+    timer = threading.Timer(timeout_sec, process.kill)
+    timer.start()
     try:
         # Bytes, split on ``\n`` alone: a ``\r`` inside a matched line is part of
         # it, and text-mode decoding would turn it into a line break.

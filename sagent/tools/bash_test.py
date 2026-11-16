@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import functools
 import gc
+import io
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ from sagent.tools.bash import (
     _guard,
     _HeldPipe,
     _OutputPipe,
+    _Printed,
     _read_lines,
     _read_output,
     _spill,
@@ -40,7 +42,7 @@ from sagent.tools.command_analyzer import Rewrite
 from sagent.tools.grep import Grep
 from sagent.tools.list import List
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext, parse, settled
+from sagent.tools.types import Stream, ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -597,12 +599,12 @@ async def test_output_past_the_record_s_cap_is_held_in_no_memory(
         cwd=tmp_path,
         spill_dir=tmp_path / "session" if spills else None,
     )
-    tool = Bash(max_result_chars=200, max_record_chars=100)
+    tool = Bash(max_result_chars=200, max_record_chars=200)
     result = await settled(tool.call(context, _arguments("seq 1 1000; echo oops >&2")))
     recorded = "".join(result.stdout)
     assert recorded.startswith("1\n2\n")
-    assert len(recorded) <= 100 + 200
-    assert re.search(r"\[output past 100 chars is not recorded", recorded)
+    assert len(recorded) <= 200 + 200
+    assert re.search(r"\[output past 200 chars is not recorded", recorded)
     assert _view(result).endswith("1000\noops")
     assert len(_view(result)) <= 200
     assert re.search(r"\d+ lines omitted, \d{3} not recorded", _view(result))
@@ -611,6 +613,133 @@ async def test_output_past_the_record_s_cap_is_held_in_no_memory(
     if spilled is not None:
         whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
         assert whole.splitlines() == [str(i) for i in range(1, 1001)]
+
+
+class _Spill(io.StringIO):
+    """A spill file that fails at ``fails``: a later write, or its close."""
+
+    def __init__(self, fails: str) -> None:
+        super().__init__()
+        self.fails = fails
+        self.writes = 0
+
+    @override
+    def write(self, s: str, /) -> int:
+        self.writes += 1
+        if self.fails == "write" and self.writes > 1:
+            raise OSError(28, "No space left on device")
+        return super().write(s)
+
+    @override
+    def close(self) -> None:
+        if self.fails == "close":
+            raise OSError(28, "No space left on device")
+        super().close()
+
+
+@pytest.mark.parametrize("fails", ["write", "close"])
+def test_a_spill_that_fails_partway_is_given_up_and_said_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fails: str,
+) -> None:
+    spill = tmp_path / "s.txt"
+    opened = _Spill(fails)
+
+    def spill_open(*_args: object, **_kwargs: object) -> _Spill:
+        return opened
+
+    monkeypatch.setattr(Path, "open", spill_open)
+    printed = _Printed(stream=Stream[str](), limit=2, tail_chars=10, spill=spill)
+    with caplog.at_level(logging.WARNING, logger=bash.__name__):
+        for line in ("a", "b", "c"):
+            printed.add_line(line)
+        printed.close()
+    assert (printed.spill, printed.spilled) == (None, False)
+    assert printed.ends() == (["a\n", "b\n", "c\n"], 0)
+    assert [(r.getMessage(), r.exc_info is not None) for r in caplog.records] == [
+        (f"bash spill not written: {spill}", True),
+    ]
+
+
+def test_a_spill_that_cannot_open_is_said_so(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.write_text("x")
+    with caplog.at_level(logging.WARNING, logger=bash.__name__):
+        assert _spill(blocked / "a.txt", ["x\n"]) is False
+    assert [r.name for r in caplog.records] == [bash.__name__]
+    assert [r.getMessage() for r in caplog.records] == [
+        f"bash spill not written: {blocked / 'a.txt'}",
+    ]
+    assert caplog.records[0].exc_info is not None
+
+
+def test_the_record_holds_at_least_what_the_model_reads() -> None:
+    """Cut below the view, a record's start and end would read as if nothing lay between."""
+    with pytest.raises(
+        ValueError,
+        match=r"^max_record_chars \(99\) must be at least max_result_chars \(100\)\.$",
+    ):
+        _ = Bash(max_result_chars=100, max_record_chars=99)
+    assert Bash(max_result_chars=100, max_record_chars=100).max_record_chars == 100
+
+
+@pytest.mark.asyncio
+async def test_a_spill_that_cannot_be_written_still_answers_the_call(
+    tmp_path: Path,
+) -> None:
+    """A full disk mid-run must not fail the call, nor leave the command running."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file where the spill directory would go")
+    context = ToolContext(cwd=tmp_path, spill_dir=blocked / "session")
+    tool = Bash(max_result_chars=200, max_record_chars=300)
+    result = await settled(tool.call(context, _arguments("seq 1 1000")))
+    assert result.state == "done"
+    assert _code(result) == 0
+    assert _view(result).endswith("1000\n")
+    assert "full output:" not in _view(result)
+    assert "[output past 300 chars is not recorded]\n" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_stderr_past_the_record_s_cap_still_ends_with_why_it_stopped(
+    tmp_path: Path,
+) -> None:
+    """The model is told stderr lines went unrecorded, and the record keeps the timeout."""
+    tool = Bash(max_result_chars=400, max_record_chars=400)
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path),
+            {**_arguments("seq 1 1000 >&2; sleep 60"), "timeout": 300},
+        ),
+    )
+    assert "".join(result.stderr).endswith("]\n")
+    assert re.search(r"\[timeout after \d+\.\ds\]\n$", "".join(result.stderr))
+    assert re.search(
+        r"\d+ lines omitted, \d+ not recorded\)\n.*\n1000\n\[timeout",
+        _view(result),
+        re.DOTALL,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cut_output_that_cannot_be_spilled_names_no_file(
+    tmp_path: Path,
+) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file where the spill directory would go")
+    context = ToolContext(cwd=tmp_path, spill_dir=blocked / "session")
+    result = await settled(
+        Bash(max_result_chars=200).call(context, _arguments("seq 1 1000")),
+    )
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", _view(result))
+    assert "full output:" not in _view(result)
+    assert _spill(blocked / "a.txt", ["x\n"]) is False
+    assert _spill(tmp_path / "a.txt", ["x\n"]) is True
 
 
 def test_a_spill_makes_its_directories_and_shares_them_with_the_next(
