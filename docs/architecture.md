@@ -49,7 +49,7 @@ Tool calls run in one of two registries:
 
 A call is detached when the model asks for `background` or `delay`, when its first wake finds it running, or when the user interrupts its cohort.
 
-A long call wakes the model on its tool's schedule (`/runtime.detach`): first after 15 s, then each time the call has run twice as long, at most every 5 minutes and before the prompt cache lapses. The first wake detaches the cohort, each stub showing what its call wrote so far; each later one tells an idle model what the call wrote since it last looked. The result shows only what the model has not read, and the journal keeps all of it.
+A long call wakes the model on its tool's schedule (`/runtime.detach`): first after 15 s, then each time the call has run twice as long, at most every 5 minutes and before the prompt cache lapses. The first wake detaches each call of the cohort that wakes the model, each stub showing what its call wrote so far, and a call whose tool wakes no one is waited for; each later one tells an idle model what the call wrote since it last looked. The result shows only what the model has not read, and the journal keeps all of it.
 
 ## Agent coordination triad
 

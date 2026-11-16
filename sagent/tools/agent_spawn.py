@@ -643,8 +643,8 @@ class AgentSpawn:
         return ToolOutput(
             # A reply the child said last is written already.
             stdout=() if says.last == f"{reply}\n" else (reply,),
+            shown=reply,
             result=AgentSpawnResult(
-                shown=reply,
                 agent_id=label,
                 agent_kind="persistent",
                 prompt=a.prompt,

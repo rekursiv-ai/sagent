@@ -4,7 +4,7 @@ A ``cd`` in the command moves the agent's ``cwd`` for later tools. A command
 that times out, or whose call is cancelled, is stopped with its process group.
 Each line the command prints is written to its stream as it arrives, so the
 record keeps every line. A long output is cut in the middle for the model,
-which then reads the result's ``shown``: known only when the command ends.
+which then reads the call's ``shown``: known only when the command ends.
 
 Typical usage example:
 
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Self
 
 import asyncio
+import collections
 import contextlib
 import io
 import logging
@@ -46,9 +47,11 @@ from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import (
     Arg,
     Stream,
+    ToolOutput,
     ToolStreamingResult,
     json_schema,
     parse,
+    whole_output,
 )
 
 
@@ -116,6 +119,10 @@ class Bash:
 
     max_result_chars: int = 30_000
     """How much text one result may hold, if below the context's."""
+
+    max_record_chars: int = 4_000_000
+    """How much of each stream the record keeps; past it, output goes to the spill
+    file alone, so a command that prints without end holds no more in memory."""
 
     nice: int | None = 10
     """How far below this program's CPU priority commands run, so a build defers to
@@ -192,14 +199,15 @@ class Bash:
           arguments: What the model passed, as ``Bash.Arguments``.
 
         Returns:
-          streaming_result: Each line on its stream as it is printed, and a
+          streaming_result: Each line on its stream as it is printed, a
             ``BashResult`` with the exit code, ``None`` when the shell did not
-            stop, and, when the output had to be cut, what the model reads.
+            stop, and, when the output had to be cut, what the model reads as
+            its ``shown``.
 
         """
         stdout, stderr = Stream[str](), Stream[str]()
-        return ToolStreamingResult(
-            result=asyncio.ensure_future(self._run(context, arguments, stdout, stderr)),
+        return whole_output(
+            self._run(context, arguments, stdout, stderr),
             stdout=stdout,
             stderr=stderr,
         )
@@ -210,19 +218,14 @@ class Bash:
         arguments: Mapping[str, PlainTree],
         stdout: Stream[str],
         stderr: Stream[str],
-    ) -> BashResult:
-        """Run the command and return its result; close both streams on any exit."""
-        try:
-            a = parse(arguments, Bash.Arguments)
-            code, shown = await self._run_command(context, a, stdout, stderr)
-            return BashResult(
-                command=("bash", "-c", a.command),
-                exit_code=code,
-                shown=shown,
-            )
-        finally:
-            stdout.close()
-            stderr.close()
+    ) -> ToolOutput[BashResult, str, str]:
+        """Run the command; its result, and when the output was cut, its view."""
+        a = parse(arguments, Bash.Arguments)
+        code, shown = await self._run_command(context, a, stdout, stderr)
+        return ToolOutput(
+            result=BashResult(command=("bash", "-c", a.command), exit_code=code),
+            shown=shown,
+        )
 
     async def _run_command(
         self,
@@ -261,13 +264,22 @@ class Bash:
             else None
         )
         note = f"; full output: {spill}" if spill is not None else ""
-        stdout_lines = _StdoutLines(
-            printed=_Printed(stream=stdout),
-            report_prefix=f"{sentinel}=",
-        )
-        stderr_printed = _Printed(stream=stderr)
         # Stderr gets its own quarter, so floods of stdout cannot hide the error.
         stderr_cap = cap // 4
+        stdout_lines = _StdoutLines(
+            printed=_Printed(
+                stream=stdout,
+                limit=self.max_record_chars,
+                tail_chars=cap,
+                spill=spill,
+            ),
+            report_prefix=f"{sentinel}=",
+        )
+        stderr_printed = _Printed(
+            stream=stderr,
+            limit=self.max_record_chars,
+            tail_chars=stderr_cap,
+        )
         started = time.monotonic()
         reason: str | None = None
         pipes: list[_OutputPipe] = []
@@ -325,6 +337,7 @@ class Bash:
                 pipe.close()
             if held is not None:
                 held.close()
+            stdout_lines.printed.close()
         stdout_lines.finish()
         # The script reports the directory before the command, then after it. Commands
         # run side by side, so one that stayed put must not undo another's ``cd``.
@@ -340,44 +353,117 @@ class Bash:
                 and (held is not None or await asyncio.to_thread(end_cwd.is_dir))
             ):
                 context.cwd = end_cwd
-        diagnostics, _ = context.fit(
-            [f"{line}\n" for line in "".join(stderr_printed.lines).strip().split("\n")],
-            cap=stderr_cap,
-        )
+        errors = [
+            f"{line}\n" for line in "".join(stderr_printed.lines).strip().split("\n")
+        ]
+        diagnostics, _ = context.fit(errors, cap=stderr_cap)
         diagnostics = diagnostics.strip()
         if reason is not None:
             diagnostics += f"\n[{reason}]"
             stderr_printed.add_line(f"[{reason}]")
-        lines = stdout_lines.printed.lines
+        printed = stdout_lines.printed
+        lines, unheld = printed.ends()
         final_text, truncated = context.view(
             lines,
             reserve=len(diagnostics),
             cap=cap,
-            note=note,
+            note=(f", {unheld:,} not recorded" if unheld else "") + note,
         )
-        if truncated and spill is not None:
+        if truncated and spill is not None and not printed.spilled:
             await asyncio.to_thread(_spill, spill, lines)
         code = child.process.returncode
-        # The record keeps every line; only what the model reads is cut, and then
-        # it reads the view, which says the exit code as ``text`` would.
+        # The record keeps every line up to its cap; only what the model reads is
+        # cut, and then it reads the view, which says the exit code as ``text``
+        # would. A view that differs only in the blank lines around it is no view.
         view = final_text + diagnostics.strip()
-        if view == "".join((*lines, *stderr_printed.lines)):
+        if (
+            not printed.unrecorded
+            and view.strip()
+            == "".join(
+                (*lines, *stderr_printed.lines),
+            ).strip()
+        ):
             return code, None
         return code, view + (f"\n[exit {code}]" if code not in (None, 0) else "")
 
 
 @dataclass(slots=True, kw_only=True)
 class _Printed:
-    """One stream's lines, each written to its stream as it comes and kept."""
+    """One stream's lines, each written to its stream as it comes and kept.
+
+    A command with no timeout may print without end, so past ``limit`` chars a
+    line is no longer written or kept: it goes to ``spill`` alone, and the last
+    ``tail_chars`` of them are held for the model's view of the end.
+    """
 
     stream: Stream[str]
+    limit: int
+    tail_chars: int
+    spill: Path | None = None
     lines: list[str] = field(default_factory=list[str])
-    """Every line added, each with its newline."""
+    """Every line written, each with its newline."""
+
+    tail: collections.deque[str] = field(default_factory=collections.deque[str])
+    """The last lines past ``limit``, at most ``tail_chars`` of them."""
+
+    unrecorded: int = 0
+    """How many lines came past ``limit``."""
+
+    _chars: int = 0
+    _tail_held: int = 0
+    _spilled: io.TextIOWrapper | None = None
 
     def add_line(self, line: str) -> None:
-        """Write the next line, given without its newline, and keep it."""
-        self.lines.append(f"{line}\n")
-        self.stream.write(f"{line}\n")
+        """Write the next line and keep it; past ``limit``, spill and hold its end.
+
+        Args:
+          line: The line, without its newline.
+
+        """
+        text = f"{line}\n"
+        if not self.unrecorded and self._chars + len(text) <= self.limit:
+            self._chars += len(text)
+            self.lines.append(text)
+            self.stream.write(text)
+            return
+        if not self.unrecorded:
+            self._overflow()
+        self.unrecorded += 1
+        if self._spilled is not None:
+            _ = self._spilled.write(text)
+        self.tail.append(text)
+        self._tail_held += len(text)
+        while (
+            len(self.tail) > 1
+            and self._tail_held - len(self.tail[0]) >= self.tail_chars
+        ):
+            self._tail_held -= len(self.tail.popleft())
+
+    def _overflow(self) -> None:
+        """Say the rest goes unrecorded, and start the spill with what was kept."""
+        where = ""
+        if self.spill is not None:
+            self.spill.parent.mkdir(parents=True, exist_ok=True)
+            self._spilled = self.spill.open("w", encoding="utf-8")
+            _ = self._spilled.write("".join(self.lines))
+            where = f"; all of it is in {self.spill}"
+        self.stream.write(
+            f"[output past {self.limit:,} chars is not recorded{where}]\n",
+        )
+
+    def close(self) -> None:
+        """Finish the spill, if one was started."""
+        if self._spilled is not None:
+            self._spilled.close()
+
+    @property
+    def spilled(self) -> bool:
+        """Whether the spill holds every line already."""
+        return self._spilled is not None
+
+    def ends(self) -> tuple[list[str], int]:
+        """Return the lines kept for the model's view, and how many lie unheld between."""
+        return [*self.lines, *self.tail], self.unrecorded - len(self.tail)
 
 
 @dataclass(slots=True, kw_only=True)

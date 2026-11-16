@@ -442,6 +442,9 @@ def test_a_duplicate_ref_is_refused() -> None:
             SystemMessage(content="later"),
             reply("done"),
         ],
+        # Every provider sends a note on the user side, so one parts two replies.
+        [reply("a"), SystemMessage(content="n", subtype="wake"), reply("b")],
+        [reply("a"), TurnContext(cwd="/x"), reply("b")],
     ],
 )
 def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
@@ -453,7 +456,7 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
     [
         ([reply("a"), reply("b")], "^provider context violates role alternation$"),
         (
-            [reply("a"), SystemMessage(content="n"), reply("b")],
+            [reply("a"), SystemMessage(), TurnContext(), reply("b")],
             "^provider context violates role alternation$",
         ),
         (

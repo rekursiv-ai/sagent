@@ -11,13 +11,13 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
 import asyncio
-import itertools
 
-from sagent.lib.files.glob import GlobError, glob, streamed_paths
+from sagent.lib.files.glob import GlobError, glob, in_path_order, streamed_paths
 from sagent.session.types import GlobResult
 from sagent.tools.command_analyzer import (
     Invocation,
@@ -30,7 +30,6 @@ from sagent.tools.display import ToolDisplay
 from sagent.tools.list import Sort, ls_row, sort_paths
 from sagent.tools.types import (
     Arg,
-    Counted,
     Stream,
     ThreadWriter,
     ToolOutput,
@@ -38,11 +37,12 @@ from sagent.tools.types import (
     json_schema,
     parse,
     whole_output,
+    write_fitting,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from treekle import PlainTree
@@ -191,66 +191,82 @@ class Glob:
     ) -> ToolOutput[GlobResult, str, str]:
         a = parse(arguments, Glob.Arguments)
         result = GlobResult(pattern=a.pattern, path=a.path)
+        root = context.path(a.path or ".")
         try:
-            kept, total = await asyncio.to_thread(
-                _write_matches,
+            if a.sort != "none":
+                page = await asyncio.to_thread(_sorted_page, context, a, root)
+                return ToolOutput(stdout=tuple(page), result=result)
+            found, whole = await asyncio.to_thread(
+                _stream,
                 context,
                 a,
+                root,
                 ThreadWriter(stdout, asyncio.get_running_loop()),
             )
         except GlobError as e:
             return ToolOutput(stderr=(str(e),), result=replace(result, exit_code=1))
-        if not kept:
-            # Past the last match, saying none matched would be false.
-            content = "(no matches in this window)" if total else "(no matches)"
-            return ToolOutput(stdout=(content,), result=result)
-        if a.offset + kept < total:
-            stdout.write(_more(total - a.offset - kept, offset=a.offset + kept))
-        return ToolOutput(result=result)
+        if not found:
+            return ToolOutput(stdout=("(no matches)",), result=result)
+        # Every path written, as found, is the answer when nothing is left to page.
+        if (
+            whole
+            and not a.offset
+            and (not a.max_results or len(found) <= a.max_results)
+        ):
+            return ToolOutput(result=result)
+        # A page is of one order every walk shares, so ``offset`` resumes it.
+        page = await asyncio.to_thread(_page, context, a, in_path_order(found))
+        return ToolOutput(result=result, shown="".join(page))
 
 
-def _write_matches(
+def _sorted_page(context: ToolContext, a: Glob.Arguments, root: Path) -> list[str]:
+    """Return the page of matches ``a`` asks for, sorted as it says."""
+    found = glob(root, a.pattern)
+    # ``glob`` sorts by path, which is ``name`` here.
+    if a.sort == "name_desc":
+        found.reverse()
+    elif a.sort != "name":
+        sort_paths(found, a.sort)
+    return _page(context, a, found)
+
+
+def _stream(
     context: ToolContext,
     a: Glob.Arguments,
+    root: Path,
     writer: ThreadWriter[str],
-) -> tuple[int, int]:
-    """Write the window of matches ``a`` asks for; return how many, and of how many."""
-    root = context.path(a.path or ".")
-    if a.sort == "none":
-        matches: Iterator[Path] = streamed_paths(root, a.pattern)
-        # How many follow is not known as each is written: room is left for
-        # the longest note there could be.
-        reserve = len(_more(10**12, offset=10**12))
-    else:
-        found = glob(root, a.pattern)
-        # ``glob`` sorts by path, which is ``name`` here.
-        if a.sort == "name_desc":
-            found.reverse()
-        elif a.sort != "name":
-            sort_paths(found, a.sort)
-        matches = iter(found)
-        reserve = len(_more(len(found), offset=len(found)))
-    every = Counted(matches)
-    end = a.offset + a.max_results if a.max_results else None
-    # ``absolute``, not ``resolve``: a link is listed under its own path.
-    rows = (
-        ls_row(p, name=str(p.absolute())) if a.long else str(p.absolute())
-        for p in itertools.islice(every, a.offset, end)
+) -> tuple[list[Path], bool]:
+    """Write each match as found while it fits; return them all, and whether all fit."""
+    return write_fitting(
+        context,
+        streamed_paths(root, a.pattern),
+        partial(_row, a=a),
+        writer,
     )
+
+
+def _page(context: ToolContext, a: Glob.Arguments, matches: list[Path]) -> list[str]:
+    """Return the window of ``matches`` ``a`` asks for that fits, a unit a path, and the note."""
+    end = a.offset + a.max_results if a.max_results else None
+    window = matches[a.offset : end]
+    if not window:
+        # Past the last match, saying none matched would be false.
+        return ["(no matches in this window)" if matches else "(no matches)"]
+    total = len(matches)
     # Each row after the first brings the newline before it, so the text ends on
-    # none.
-    units = (row if i == 0 else f"\n{row}" for i, row in enumerate(rows))
-    kept = 0
-    try:
-        for unit in context.fitting(units, reserve=reserve):
-            writer.write(unit)
-            kept += 1
-        # Past the cut, the rest are counted, not written.
-        for _ in every:
-            pass
-    finally:
-        writer.landed()
-    return kept, every.seen
+    # none; room is left for the longest note the cut could need.
+    units = (_row(p, a) if i == 0 else f"\n{_row(p, a)}" for i, p in enumerate(window))
+    page = list(context.fitting(units, reserve=len(_more(total, offset=total))))
+    if a.offset + len(page) < total:
+        page.append(_more(total - a.offset - len(page), offset=a.offset + len(page)))
+    return page
+
+
+def _row(path: Path, a: Glob.Arguments) -> str:
+    """Return ``path`` as a row: absolute, with its size and time under ``long``."""
+    # ``absolute``, not ``resolve``: a link is listed under its own path.
+    name = str(path.absolute())
+    return ls_row(path, name=name) if a.long else name
 
 
 def _more(entries: int, *, offset: int) -> str:

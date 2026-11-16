@@ -38,6 +38,7 @@ from sagent.session.types import (
     EditResult,
     McpResult,
     Splice,
+    SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
@@ -399,6 +400,31 @@ def test_a_skipped_file_is_an_error_the_user_sees() -> None:
     render, printer = _renderer()
     render.show(types.Skipped(text="Skipping a.md: line 3."))
     assert printer.said == [("error", "Skipping a.md: line 3.")]
+
+
+@pytest.mark.parametrize("subtype", ["wake", "nudge"])
+def test_a_note_that_drives_the_model_is_shown_as_the_model_read_it(
+    subtype: str,
+) -> None:
+    render, printer = _renderer()
+    render(types.ModelResponsePartial(text="held"))
+    render(
+        SystemMessage(
+            content="[talk t1 still running after 15s]\none",
+            subtype=subtype,
+        ),
+    )
+    assert printer.said == [
+        ("markdown", "held"),
+        ("note", "[talk t1 still running after 15s]\none"),
+    ]
+
+
+@pytest.mark.parametrize("subtype", ["rules", "reminder", None])
+def test_a_note_that_only_informs_the_model_is_not_shown(subtype: str | None) -> None:
+    render, printer = _renderer()
+    render.show(SystemMessage(content="cwd: /x", subtype=subtype))
+    assert printer.said == []
 
 
 def test_a_skipped_file_is_drawn_when_it_arrives() -> None:

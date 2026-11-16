@@ -582,6 +582,37 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
     assert re.fullmatch(r"bash-[0-9a-f]{8}\.txt", Path(spilled[1]).name)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spills", [True, False], ids=["spilled", "nowhere"])
+async def test_output_past_the_record_s_cap_is_held_in_no_memory(
+    tmp_path: Path,
+    *,
+    spills: bool,
+) -> None:
+    """A command with no timeout may print without end: past the cap, its lines go
+    to the spill file alone, and the model reads its start, its end, and how much
+    the record left out.
+    """
+    context = ToolContext(
+        cwd=tmp_path,
+        spill_dir=tmp_path / "session" if spills else None,
+    )
+    tool = Bash(max_result_chars=200, max_record_chars=100)
+    result = await settled(tool.call(context, _arguments("seq 1 1000; echo oops >&2")))
+    recorded = "".join(result.stdout)
+    assert recorded.startswith("1\n2\n")
+    assert len(recorded) <= 100 + 200
+    assert re.search(r"\[output past 100 chars is not recorded", recorded)
+    assert _view(result).endswith("1000\noops")
+    assert len(_view(result)) <= 200
+    assert re.search(r"\d+ lines omitted, \d{3} not recorded", _view(result))
+    spilled = re.search(r"; full output: (\S+)\)", _view(result))
+    assert (spilled is not None) is spills
+    if spilled is not None:
+        whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
+        assert whole.splitlines() == [str(i) for i in range(1, 1001)]
+
+
 def test_a_spill_makes_its_directories_and_shares_them_with_the_next(
     tmp_path: Path,
 ) -> None:
@@ -1503,12 +1534,13 @@ async def test_each_line_is_written_to_its_stream_the_moment_it_is_printed(
 
     assert [line async for line in streaming_result.stdout] == ["end\n"]
     assert [line async for line in streaming_result.stderr] == []
-    # The model reads each stream's text stripped, so stderr ends without a newline.
     assert await streaming_result.result == BashResult(
         command=("bash", "-c", command),
         exit_code=0,
-        shown="one\nthree\nend\ntwo",
     )
+    # Nothing was cut, so the model reads the lines themselves.
+    assert streaming_result.shown is not None
+    assert streaming_result.shown.result() is None
 
 
 @pytest.mark.asyncio
@@ -1543,6 +1575,17 @@ async def test_neither_the_shells_reports_nor_its_final_blank_are_written(
     result = await _run(tmp_path, "echo a; echo; echo b")
 
     assert result.stdout == ("a\n", "\n", "b\n")
+    assert result.shown is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["echo a; echo w >&2", "echo; echo a; exit 2"])
+async def test_output_that_fits_has_no_view_of_its_own(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """Nothing was cut, so the model reads the lines themselves."""
+    result = await _run(tmp_path, command)
     assert result.shown is None
 
 
@@ -1610,20 +1653,19 @@ def _code(result: ToolResult[BashResult, str, str]) -> int | None:
     return tool_result.exit_code
 
 
+# The model passes no ``timeout`` unless it wants one; neither does this.
 async def _run(
     cwd: Path,
     command: str,
     *,
-    limit_ms: float = 10_000,
+    limit_ms: float | None = None,
     tool: Bash | None = None,
 ) -> ToolResult[BashResult, str, str]:
-    """Run ``command`` with ``tool`` in a fresh context at ``cwd``."""
-    return await settled(
-        (tool or Bash()).call(
-            ToolContext(cwd=cwd),
-            {**_arguments(command), "timeout": limit_ms},
-        ),
-    )
+    """Run ``command`` with ``tool`` in a fresh context at ``cwd``, as the model would."""
+    arguments = _arguments(command)
+    if limit_ms is not None:
+        arguments["timeout"] = limit_ms
+    return await settled((tool or Bash()).call(ToolContext(cwd=cwd), arguments))
 
 
 # The wrapper writes its working directory and the arguments after its words,

@@ -25,7 +25,7 @@ import rignore
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
 
 # Raising this is not the free win it looks like: the walk that reaches the cap
@@ -58,13 +58,26 @@ def glob(root: Path, pattern: str, /, *, timeout_sec: float = 30) -> list[Path]:
         time.
 
     """
-    # Sorting relative names split per component is the ``Path`` order without
-    # the cost of comparing, or even spelling out, ``Path`` objects.
+    # Sorting relative names split per component is ``in_path_order``'s order,
+    # as every path shares one start, without spelling out each ``Path``.
     found = sorted(
         _found(root, pattern, timeout_sec=timeout_sec),
         key=lambda entry: entry[0].split("/"),
     )
     return [path for _, path in found]
+
+
+def in_path_order(paths: Iterable[Path]) -> list[Path]:
+    """Return ``paths``, as :func:`streamed_paths` found them, in :func:`glob`'s order.
+
+    Args:
+      paths: Paths of one walk, in any order.
+
+    Returns:
+      paths: Sorted by component, so ``a/z`` comes before ``a-b/z``.
+
+    """
+    return sorted(paths, key=lambda path: str(path).split("/"))
 
 
 def streamed_paths(
@@ -95,55 +108,6 @@ def streamed_paths(
     with contextlib.closing(found):
         for _, path in found:
             yield path
-
-
-def _found(
-    root: Path,
-    pattern: str,
-    *,
-    timeout_sec: float,
-) -> Generator[tuple[str, Path], None, None]:
-    """Yield each file ``pattern`` names, with its name relative to where the walk began."""
-    parts = [part for part in pattern.split("/") if part != "."]
-    hidden = any(part.startswith(".") and part != ".." for part in parts)
-    fixed = next(
-        (
-            i
-            for i, part in enumerate(parts[:-1])
-            if "*" in part or "?" in part or "[" in part or "{" in part
-        ),
-        len(parts) - 1,
-    )
-    # Judging each named directory would list every sibling: all of ``/tmp`` to
-    # find one entry in it.
-    if pattern.startswith("/"):
-        root, parts, fixed = Path("/", *parts[:fixed]), parts[fixed:], 0
-    if not root.is_dir():
-        return
-    start = _kept_directory(root, parts[:fixed], hidden=hidden)
-    if start is None:
-        return
-    rest = "/".join(parts[fixed:])
-    unbounded = "**" in rest
-    depth = None if unbounded else len(parts) - fixed
-    # Debian ships fd as ``fdfind``.
-    fd = (shutil.which("fd") or shutil.which("fdfind")) if unbounded else None
-    entries = _glob_rignore(start, rest, hidden=hidden, depth=depth)
-    # Uncapped without fd: there is no faster backend to hand off to, so giving
-    # up partway would mean returning no answer at all.
-    if fd is None:
-        yield from (entry for entry in entries if entry is not None)
-        return
-    # Held until the walk ends below the cap: past it, fd answers in its place.
-    found: list[tuple[str, Path]] = []
-    for seen, entry in enumerate(entries):
-        if seen > _FD_ENTRIES:
-            entries.close()
-            yield from _glob_fd(fd, start, rest, hidden=hidden, timeout_sec=timeout_sec)
-            return
-        if entry is not None:
-            found.append(entry)
-    yield from found
 
 
 def fd_command(fd: str, root: Path, pattern: str, *, hidden: bool) -> list[str]:
@@ -356,3 +320,52 @@ def _listed(path: Path) -> bool:
         return not S_ISDIR(path.lstat().st_mode)
     except OSError:
         return True
+
+
+def _found(
+    root: Path,
+    pattern: str,
+    *,
+    timeout_sec: float,
+) -> Generator[tuple[str, Path], None, None]:
+    """Yield each file ``pattern`` names, with its name relative to where the walk began."""
+    parts = [part for part in pattern.split("/") if part != "."]
+    hidden = any(part.startswith(".") and part != ".." for part in parts)
+    fixed = next(
+        (
+            i
+            for i, part in enumerate(parts[:-1])
+            if "*" in part or "?" in part or "[" in part or "{" in part
+        ),
+        len(parts) - 1,
+    )
+    # Judging each named directory would list every sibling: all of ``/tmp`` to
+    # find one entry in it.
+    if pattern.startswith("/"):
+        root, parts, fixed = Path("/", *parts[:fixed]), parts[fixed:], 0
+    if not root.is_dir():
+        return
+    start = _kept_directory(root, parts[:fixed], hidden=hidden)
+    if start is None:
+        return
+    rest = "/".join(parts[fixed:])
+    unbounded = "**" in rest
+    depth = None if unbounded else len(parts) - fixed
+    # Debian ships fd as ``fdfind``.
+    fd = (shutil.which("fd") or shutil.which("fdfind")) if unbounded else None
+    entries = _glob_rignore(start, rest, hidden=hidden, depth=depth)
+    # Uncapped without fd: there is no faster backend to hand off to, so giving
+    # up partway would mean returning no answer at all.
+    if fd is None:
+        yield from (entry for entry in entries if entry is not None)
+        return
+    # Held until the walk ends below the cap: past it, fd answers in its place.
+    found: list[tuple[str, Path]] = []
+    for seen, entry in enumerate(entries):
+        if seen > _FD_ENTRIES:
+            entries.close()
+            yield from _glob_fd(fd, start, rest, hidden=hidden, timeout_sec=timeout_sec)
+            return
+        if entry is not None:
+            found.append(entry)
+    yield from found

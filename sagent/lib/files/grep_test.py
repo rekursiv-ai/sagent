@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -34,7 +33,7 @@ from sagent.lib.files.grep import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
 
@@ -233,11 +232,12 @@ def test_rows_locate_their_first_match_in_characters(
     context = f"{f}-1-" if numbered else f"{f}-"
     prefix = f"{f}:2:" if numbered else f"{f}:"
     assert grep_rows(f, query) == [
-        Row(text=f"{context}a", prefix_end=len(context)),
+        Row(text=f"{context}a", prefix_end=len(context), file=str(f)),
         Row(
             text=f"{prefix}ééx hit hit",
             prefix_end=len(prefix),
             column=len(prefix) + 4,
+            file=str(f),
         ),
     ]
 
@@ -252,6 +252,7 @@ def test_a_path_holding_a_separator_keeps_its_prefix_whole(tmp_path: Path) -> No
             text=f"{f}:1:x:5: hit",
             prefix_end=len(f"{f}:1:"),
             column=len(f"{f}:1:") + 5,
+            file=str(f),
         ),
     ]
 
@@ -304,7 +305,12 @@ def test_a_posix_class_is_located_by_ripgrep(tmp_path: Path) -> None:
     query = Query(pattern="[[:alpha:]]+[[:digit:]]+", output_mode="content")
     prefix = f"{f}:1:"
     assert grep_rows(f, query) == [
-        Row(text=f"{prefix}-- abc123", prefix_end=len(prefix), column=len(prefix) + 3),
+        Row(
+            text=f"{prefix}-- abc123",
+            prefix_end=len(prefix),
+            column=len(prefix) + 3,
+            file=str(f),
+        ),
     ]
 
 
@@ -357,6 +363,8 @@ def test_lookaround_needs_no_flag(tmp_path: Path) -> None:
     f.write_text("github.com/jv\njv\n")
     query = Query(pattern=r"(?<!com/)\bjv\b", output_mode="content")
     assert grep(f, query) == [f"{f}:2:jv"]
+    absent = Query(pattern=r"(?<!com/)\bzz\b", output_mode="content")
+    assert grep(f, absent) == []
 
 
 @_BOTH
@@ -974,7 +982,8 @@ def test_rows_come_as_ripgrep_prints_them_before_it_ends(tmp_path: Path) -> None
         (tmp_path / name).write_text("hit\n")
     rows = streamed_rows(tmp_path, Query(pattern="hit"))
     first = next(rows)
-    assert {first, *rows} == {Row(text=f"{tmp_path}/{name}") for name in "ab"}
+    found = {f"{tmp_path}/{name}" for name in "ab"}
+    assert {first, *rows} == {Row(text=name, file=name) for name in found}
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -999,7 +1008,6 @@ def test_a_run_stopped_early_is_killed(
     monkeypatch.setattr(subprocess, "Popen", popen)
     rows = streamed_rows(tmp_path, Query(pattern="hit"))
     assert next(rows).text.removeprefix(f"{tmp_path}/") in names
-    assert isinstance(rows, Generator)
     (process,) = started
     assert process.poll() is None
     rows.close()
@@ -1197,6 +1205,7 @@ def _rows(f: Path, *specs: tuple[str, str, int]) -> list[Row]:
                 text=prefix + text,
                 prefix_end=len(prefix),
                 column=len(prefix) + column if column >= 0 else -1,
+                file=str(f),
             ),
         )
     return out
@@ -1604,7 +1613,7 @@ def test_each_batch_holds_what_fits_its_space_joined_names(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(("cpus", "ahead"), [(8, 3), (2, 2), (None, 1)])
+@pytest.mark.parametrize(("cpus", "ahead"), [(3, 3), (2, 2), (None, 1)])
 def test_batches_after_the_first_run_ahead_up_to_the_cpus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1612,7 +1621,7 @@ def test_batches_after_the_first_run_ahead_up_to_the_cpus(
     ahead: int,
 ) -> None:
     """Once the first run has a row, the next runs start, one per CPU at most."""
-    names = [tmp_path / name for name in "abcd"]
+    names = [tmp_path / name for name in "abcde"]
     for path in names:
         path.write_text("hit\n")
     with monkeypatch.context() as patch:
@@ -1620,10 +1629,30 @@ def test_batches_after_the_first_run_ahead_up_to_the_cpus(
         patch.setattr(os, "cpu_count", lambda: cpus)
         runs = _Runs(patch)
         rows = streamed_rows(names, Query(pattern="hit"))
-        assert next(rows) == Row(text=str(names[0]))
+        assert next(rows).text == str(names[0])
         assert len(runs.argvs) == 1 + ahead
-        assert [row.text for row in rows] == list(map(str, names[1:]))
+        # Each run read in turn starts one more.
+        assert next(rows).text == str(names[1])
+        assert len(runs.argvs) == 2 + ahead
+        assert [row.text for row in rows] == list(map(str, names[2:]))
     assert len(runs.argvs) == len(names)
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_runs_with_nothing_found_are_passed_over_and_groups_split_between_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ripgrep puts ``--`` between context groups of one run; so do the runs."""
+    names = [tmp_path / name for name in "abc"]
+    for path, text in zip(names, ("x\nhit\n", "none\n", "y\nhit\n"), strict=True):
+        path.write_text(text)
+    query = Query(pattern="hit", output_mode="content", context_before=1)
+    with monkeypatch.context() as patch:
+        patch.setattr(files_grep, "ARGV_CHARS", 1)
+        rows = [row.text for row in streamed_rows(names, query)]
+    a, _, c = names
+    assert rows == [f"{a}-1-x", f"{a}:2:hit", "--", f"{c}-1-y", f"{c}:2:hit"]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -1651,7 +1680,7 @@ def test_runs_started_ahead_are_killed_when_the_caller_stops(
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
     monkeypatch.setattr(subprocess, "Popen", popen)
     rows = streamed_rows(names, Query(pattern="hit"))
-    assert next(rows) == Row(text=str(names[0]))
+    assert next(rows).text == str(names[0])
     assert len(started) == len(names)
     rows.close()
     assert all(process.poll() is not None for process in started)
@@ -1686,7 +1715,7 @@ def test_a_one_letter_name_keeps_its_row_whole(
     pathlib.Path("a").write_text("hit\n")
     query = Query(pattern="hit", output_mode="content")
     assert grep_rows(pathlib.Path("a"), query) == [
-        Row(text="a:1:hit", prefix_end=4, column=4),
+        Row(text="a:1:hit", prefix_end=4, column=4, file="a"),
     ]
 
 

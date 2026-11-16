@@ -374,7 +374,11 @@ async def test_an_unpriced_estimate_says_only_the_tokens(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("which", ["not-a-result", "cancelled", "pending"])
 @pytest.mark.asyncio
-async def test_only_a_real_result_can_be_pruned(tmp_path: Path, which: str) -> None:
+async def test_only_output_a_drop_would_shrink_can_be_pruned(
+    tmp_path: Path,
+    which: str,
+) -> None:
+    """A bare stub would only grow: it keeps its first line, then the drop's note."""
     agent, tool = _setup(tmp_path)
     agent.session.append(
         ToolCall(call_id="c2", name="Grep"),
@@ -387,9 +391,40 @@ async def test_only_a_real_result_can_be_pruned(tmp_path: Path, which: str) -> N
     }[which]
     with pytest.raises(
         ValueError,
-        match=rf"^#{at} is no tool result that can be pruned\.$",
+        match=rf"^#{at} is no tool output that can be pruned\.$",
     ):
         _ = await _ask(tool, tmp_path, {"action": "prune", "ids": [at], "reason": "x"})
+
+
+@pytest.mark.asyncio
+async def test_a_long_call_s_stub_and_news_can_be_pruned(tmp_path: Path) -> None:
+    agent, tool = _setup(tmp_path)
+    news = SystemMessage(
+        content="[talk c2 running after 15s]\n" + "y" * 400,
+        subtype="wake",
+    )
+    agent.session.append(
+        ToolCall(call_id="c2", name="Bash"),
+        ToolResult(call_id="c2", state="pending", shown="[detached]\n" + "x" * 400),
+        AssistantMessage(content="waiting"),
+        news,
+        AssistantMessage(content="still"),
+    )
+    entries = agent.runtime.context().messages
+    picked = [i for i, e in enumerate(entries) if e in (news, entries[-4])]
+    text = await _ask(tool, tmp_path, {"action": "prune", "ids": picked, "reason": "x"})
+    assert text.startswith("Prune queued: x")
+    (queued,) = agent.runtime.inbox.drain_nowait()
+    assert isinstance(queued, types.Scheduled)
+    await queued.work()
+    stub = "[pruned: old tool output removed to keep the context small]"
+    stubbed, noted = (agent.runtime.context().messages[i] for i in picked)
+    assert isinstance(stubbed, ToolResult)
+    assert isinstance(noted, SystemMessage)
+    assert (stubbed.text(), noted.content) == (
+        f"[detached]\n{stub}",
+        f"[talk c2 running after 15s]\n{stub}",
+    )
 
 
 @pytest.mark.asyncio

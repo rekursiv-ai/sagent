@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from sagent.session.types import (
         AgentToAgentMessage,
         AssistantMessage,
+        SystemMessage,
         Thinking,
         ToolCall,
         ToolResult,
@@ -99,6 +100,7 @@ __all__ = [
 type Record = (
     UserMessage
     | AgentToAgentMessage
+    | SystemMessage
     | AssistantMessage
     | Thinking
     | ToolCall

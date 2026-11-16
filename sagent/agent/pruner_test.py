@@ -26,6 +26,7 @@ from sagent.agent.pruner import (
     left_in,
     limit_tokens,
     prices,
+    prunable,
     reads,
     requests_left,
     saving,
@@ -49,6 +50,7 @@ from sagent.session.types import (
     EditResult,
     LineSpan,
     ReadResult,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UncategorizedToolResult,
@@ -850,6 +852,62 @@ async def test_a_small_result_or_a_stub_is_never_dropped(tmp_path: Path) -> None
     assert (results["c2"].text(), results["c2"].is_error) == ("[gone]", True)
 
 
+@pytest.mark.parametrize(
+    ("entry", "can"),
+    [
+        (UserMessage(content="x" * 400), False),
+        (SystemMessage(content="x" * 400, subtype="reminder"), False),
+        (SystemMessage(content="[talk c1]\n" + "x" * 400, subtype="wake"), True),
+        (ToolResult(call_id="c", state="cancelled", shown=Markers().cancelled), False),
+        (ToolResult(call_id="c", state="done", stdout=("x" * 400,)), True),
+    ],
+    ids=["user", "reminder", "wake", "killed", "result"],
+)
+def test_only_a_tool_s_output_that_a_drop_shrinks_is_prunable(
+    entry: ModelContextEvent,
+    *,
+    can: bool,
+) -> None:
+    assert prunable(entry, stub="[gone]") is can
+
+
+@pytest.mark.asyncio
+async def test_a_long_call_s_news_goes_as_its_output_would(tmp_path: Path) -> None:
+    """A stub holding what a detached call wrote, and a wake's news, are output too."""
+    agent, pruner, _ = _agent(tmp_path, stub="[gone]")
+    news = "[talk c1 still running after 15s]\n" + "y" * 400
+    async with agent:
+        agent.session.append(
+            UserMessage(content="go"),
+            ToolCall(call_id="c1", name="Bash"),
+            ToolResult(
+                call_id="c1",
+                state="pending",
+                shown=f"{Markers().detached}\n" + "x" * 400,
+            ),
+            AssistantMessage(content="waiting"),
+            SystemMessage(content=news, subtype="wake"),
+            SystemMessage(content="z" * 400, subtype="reminder"),
+            AssistantMessage(content="still waiting"),
+        )
+
+        await pruner.run()
+
+    results = {r.call_id: r for r in agent.session if isinstance(r, ToolResult)}
+    notes = [
+        r for r in agent.runtime.context().messages if isinstance(r, SystemMessage)
+    ]
+    # Each keeps its first line: which call it is, and what became of it.
+    assert (results["c1"].text(), results["c1"].state) == (
+        f"{Markers().detached}\n[gone]",
+        "pending",
+    )
+    assert [(n.subtype, n.content) for n in notes] == [
+        ("wake", "[talk c1 still running after 15s]\n[gone]"),
+        ("reminder", "z" * 400),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_a_forced_prune_forgets_the_files_read_and_runs_once(
     tmp_path: Path,
@@ -1031,7 +1089,7 @@ def test_a_saving_needs_a_result_to_drop() -> None:
 def test_only_a_tool_result_may_be_dropped(tmp_path: Path) -> None:
     agent, _, _ = _agent(tmp_path)
     agent.session.append(*_turns("x" * 400))
-    with pytest.raises(ValueError, match="Entry 0 is no tool result"):
+    with pytest.raises(ValueError, match="Entry 0 is no tool output"):
         drop(agent.runtime, [0], stub="gone")
     drop(agent.runtime, [], stub="gone")
     drop(agent.runtime, [2], stub="gone")

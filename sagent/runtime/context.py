@@ -28,6 +28,7 @@ from sagent.runtime.tape import (
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    parts_model_turns,
 )
 from sagent.runtime.types import (
     CompactComplete,
@@ -189,7 +190,10 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     3. Two model turns have a user-side turn or a result between; user-side
        turns may follow one another, as the request merges them.
 
-    A ``SystemMessage`` or ``TurnContext`` is no one's turn: every rule skips it.
+    A ``SystemMessage`` or ``TurnContext`` is a harness note. Among a turn's
+    calls and results it is no one's turn, and every rule skips it; between two
+    model turns, one that ``parts_model_turns`` parts them, as a user-side turn
+    does.
 
     Args:
       messages: What the model would be sent.
@@ -203,7 +207,9 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     # Whether the last turn was the model's.
     after_model = False
     for entry in messages:
-        if isinstance(entry, (SystemMessage, TurnContext)):
+        if isinstance(entry, SystemMessage | TurnContext):
+            if not pending and parts_model_turns(entry):
+                after_model = False
             continue
         if isinstance(entry, Response):
             if pending:

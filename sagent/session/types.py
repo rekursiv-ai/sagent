@@ -410,15 +410,14 @@ class ToolResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
         if self.shown is not None:
             return self.shown
         result = self.result
-        exit_note = (
-            f"\n[exit {result.exit_code}]"
-            if isinstance(result, BashResult) and result.exit_code not in (None, 0)
-            else ""
-        )
         output = "".join(
             item for item in (*self.stdout, *self.stderr) if isinstance(item, str)
         )
-        return f"{output}{exit_note}"
+        if not isinstance(result, BashResult) or result.exit_code in (None, 0):
+            return output
+        # The note is a line of its own, after the output's last.
+        line = "" if not output or output.endswith("\n") else "\n"
+        return f"{output}{line}[exit {result.exit_code}]"
 
     def restated(self, text: str) -> Self:
         """Return this result reading ``text``, as a prune or compaction leaves it.
@@ -539,9 +538,6 @@ class AgentSpawnResult:
     """The child's journal, when it keeps one."""
 
     exit_code: int = 0
-    shown: str | None = None
-    """What the model reads instead of all the child said: its reply. ``settled``
-    moves it to the record, so a stored one is ``None``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -550,9 +546,6 @@ class BashResult:
 
     command: tuple[str, ...] | None = None
     exit_code: int | None = None
-    shown: str | None = None
-    """What the model reads instead of every line printed: the output cut to its
-    head and tail. ``settled`` moves it to the record, so a stored one is ``None``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

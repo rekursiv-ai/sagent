@@ -31,6 +31,7 @@ from sagent.agent.pruner import (
     left_in,
     limit_tokens,
     prices,
+    prunable,
     saving,
     sizes,
 )
@@ -236,16 +237,11 @@ class AgentSession:
         entries: Sequence[ModelContextEvent],
         a: AgentSession.Arguments,
     ) -> ToolOutput[SessionResult, str, str]:
-        """Weigh dropping the results ``a.ids``; for ``prune``, queue the drop."""
+        """Weigh dropping the tool outputs ``a.ids``; for ``prune``, queue the drop."""
         picked = _picked(entries, a.ids)
-        kept = [
-            i
-            for i in picked
-            if not isinstance(result := entries[i], ToolResult)
-            or result.state in ("pending", "cancelled")
-        ]
+        kept = [i for i in picked if not prunable(entries[i], stub=self.stub)]
         if kept:
-            raise ValueError(f"#{kept[0]} is no tool result that can be pruned.")
+            raise ValueError(f"#{kept[0]} is no tool output that can be pruned.")
         if a.action == "prune" and not a.reason.strip():
             raise ValueError("Say why in 'reason'.")
         model = agent.model
@@ -275,19 +271,15 @@ class AgentSession:
                 stdout=("\n".join(lines),),
                 result=SessionResult(action=a.action),
             )
-        # By call id, since positions may move before the drop runs.
-        ids = {r.call_id for i in picked if isinstance(r := entries[i], ToolResult)}
+        # By what they are, since positions may move before the drop runs.
+        chosen = [entries[i] for i in picked]
         runtime = agent.runtime
 
         async def work() -> None:
             now = runtime.context().messages
             drop(
                 runtime,
-                [
-                    i
-                    for i, e in enumerate(now)
-                    if isinstance(e, ToolResult) and e.call_id in ids
-                ],
+                [i for i, e in enumerate(now) if e in chosen],
                 stub=self.stub,
             )
 

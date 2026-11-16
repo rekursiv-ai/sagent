@@ -164,7 +164,8 @@ async def test_session_mutation_queues_on_the_target_only(
         ToolResult(
             call_id="old",
             state="done",
-            stdout=("old output",),
+            # Longer than the stub a prune leaves, so pruning it saves something.
+            stdout=("old output " * 10,),
             result=UncategorizedToolResult(),
         ),
     )

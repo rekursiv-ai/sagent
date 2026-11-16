@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -48,15 +49,19 @@ def test_ripgreps_own_flags_are_the_argument_names() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tail", [{}, {"keep_last": 1}], ids=["streamed", "tail"])
 async def test_each_argument_reaches_the_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    tail: dict[str, PlainTree],
 ) -> None:
+    """Whether rows stream or a tail waits for all of them, the search is the same."""
     seen = _capture(monkeypatch, rows=[Row(text="hit")])
     result = await settled(
         Grep().call(
             ToolContext(cwd=tmp_path),
             {
+                **tail,
                 "pattern": "p",
                 "path": "src",
                 "glob": "*.py",
@@ -83,6 +88,7 @@ async def test_each_argument_reaches_the_query(
         ),
     )
     assert result.text() == "hit"
+    assert result.result == GrepResult(pattern="p")
     assert seen == [
         (
             [tmp_path / "src"],
@@ -230,6 +236,7 @@ async def test_a_search_that_cannot_run_is_an_error(
     assert result.is_error is True
     assert result.call_id == ""
     assert result.text() == f"no such file or directory: {tmp_path / 'missing'}"
+    assert result.result == GrepResult(pattern="x", exit_code=1)
 
     def refuse(paths: Sequence[Path], query: Query) -> Iterator[Row]:
         del paths, query
@@ -325,6 +332,80 @@ async def test_a_window_pages_the_entries(
         Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", **window}),
     )
     assert result.text() == "\n".join(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_whole_result_reads_as_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every row fits, so no page follows: the order found is the answer."""
+    _capture(monkeypatch, rows=[Row(text=f"{name}:1:x") for name in "bac"])
+    windows: list[dict[str, PlainTree]] = [{}, {"keep_first": 3}]
+    for window in windows:
+        result = await settled(
+            Grep().call(ToolContext(cwd=tmp_path), {"pattern": "x", **window}),
+        )
+        assert result.stdout == ("b:1:x", "\na:1:x", "\nc:1:x")
+        assert result.shown is None
+        assert result.result == GrepResult(pattern="x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("window", "shown"),
+    [
+        ({"keep_first": 2}, "a:1:x\nb:1:x"),
+        ({"offset": 2}, "c:1:x"),
+        ({"offset": 1, "keep_first": 1}, "b:1:x"),
+    ],
+)
+async def test_a_page_of_a_result_reads_in_path_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: dict[str, PlainTree],
+    shown: str,
+) -> None:
+    """Ripgrep finds in no set order; ``offset`` pages one that every search shares."""
+    _capture(monkeypatch, rows=[Row(text=f"{name}:1:x") for name in "bac"])
+    result = await settled(
+        Grep().call(ToolContext(cwd=tmp_path), {"pattern": "x", **window}),
+    )
+    assert result.stdout == ("b:1:x", "\na:1:x", "\nc:1:x")
+    assert result.shown == shown
+    assert result.result == GrepResult(pattern="x")
+
+
+@pytest.mark.asyncio
+async def test_a_result_cut_to_fit_reads_its_first_rows_in_path_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows long enough that two and the note fit, where all three do not."""
+    x = "x" * 60
+    _capture(monkeypatch, rows=[Row(text=f"{name}:1:{x}") for name in "cba"])
+    note = "\n... (1 more entries; pass offset=2 to continue)"
+    cap = len(f"a:1:{x}\nb:1:{x}") + len(note)
+    result = await settled(
+        Grep(max_result_chars=cap).call(ToolContext(cwd=tmp_path), {"pattern": "x"}),
+    )
+    assert result.stdout == (f"c:1:{x}", f"\nb:1:{x}")
+    assert result.shown == f"a:1:{x}\nb:1:{x}{note}"
+
+
+@pytest.mark.asyncio
+async def test_a_lone_row_too_long_to_fit_is_not_the_whole_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Written cut mid-way as found, the model reads the page that says so."""
+    _capture(monkeypatch, rows=[Row(text="a:1:" + "x" * 100)])
+    result = await settled(
+        Grep(max_result_chars=60).call(ToolContext(cwd=tmp_path), {"pattern": "x"}),
+    )
+    assert result.stdout == ("a:1:" + "x" * 56 + "\n... (44 chars omitted)",)
+    # The page leaves room for a note, so keeps less of the row.
+    assert result.shown == "a:1:" + "x" * 9 + "\n... (92 chars omitted)"
 
 
 @pytest.mark.asyncio
@@ -942,13 +1023,9 @@ async def test_a_cut_result_never_passes_its_cap(
     # The resume offset gains a digit while the remaining count loses one.
     _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(10_101)])
     lines = [f"row{i:05d}\n" for i in range(9_999, 10_101)]
-    # Rows are written before how many follow is known: room is left for the
-    # longest note there could be.
-    reserve = len(
-        "\n... (1,000,000,000,000 more entries; pass offset=1000000000000 to continue)",
-    )
+    reserve = len("... (102 more entries; pass offset=10101 to continue)")
     caps = {
-        reserve + len("".join(lines[:kept])) - 1 + delta
+        reserve + len("".join(lines[:kept])) + delta
         for kept in (2, 3, 11)
         for delta in (-1, 0, 1)
     }
@@ -966,7 +1043,7 @@ async def test_a_cut_result_never_passes_its_cap(
             f" pass offset={9_999 + kept} to continue)"
         )
         assert len(text) <= cap, cap
-        assert kept == (cap - reserve + 1) // len(lines[0]), cap
+        assert kept == (cap - reserve) // len(lines[0]), cap
 
 
 def test_rg_reading_its_input_by_dash_is_not_greps_job() -> None:
@@ -1007,7 +1084,8 @@ def _capture(
 
     def fake_rows(paths: Sequence[Path], query: Query) -> list[Row]:
         seen.append((list(paths), query))
-        return list(rows)
+        # A row with no file of its own is one: its text up to the first ``:``.
+        return [replace(r, file=r.file or r.text.split(":")[0]) for r in rows]
 
     def streamed(paths: Sequence[Path], query: Query) -> Iterator[Row]:
         return iter(fake_rows(paths, query))

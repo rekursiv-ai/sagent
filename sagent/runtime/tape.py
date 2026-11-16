@@ -301,14 +301,31 @@ def splice_safe_repair(
     return repaired
 
 
+def parts_model_turns(entry: SystemMessage | TurnContext) -> bool:
+    """Return whether a harness note keeps the model turns either side of it apart.
+
+    Every provider sends a note with text on the user side, as it sends a wake
+    or a nudge; one with none it sends not at all.
+
+    Args:
+      entry: The note.
+
+    Returns:
+      parts: Whether it has text.
+
+    """
+    return bool(entry.text() if isinstance(entry, TurnContext) else entry.content)
+
+
 def coalesce_roles(
     payload: Sequence[ModelContextEvent],
 ) -> tuple[ModelContextEvent, ...]:
     """Merge each user-side or model turn into the same side's turn just before it.
 
-    Notes between them do not keep them apart; a tool result does. Messages
-    from different senders merge into a ``UserMessage`` labelling each part.
-    It pairs no calls; it never raises, and merging again changes nothing.
+    Notes between two user-side turns do not keep them apart; a tool result
+    does, and so does a note between two model turns that ``parts_model_turns``.
+    Messages from different senders merge into a ``UserMessage`` labelling each
+    part. It pairs no calls; it never raises, and merging again changes nothing.
 
     Args:
       payload: The entries.
@@ -341,6 +358,11 @@ def coalesce_roles(
             at is not None
             and isinstance(entry, Response)
             and isinstance(prior, Response)
+            and not any(
+                parts_model_turns(note)
+                for note in out[at + 1 :]
+                if isinstance(note, SystemMessage | TurnContext)
+            )
         ):
             out[at] = _merge_assistant(prior, entry)
         else:
@@ -411,7 +433,8 @@ def _validate_mask_disjoint(mask: tuple[MaskRange, ...]) -> None:
 # A result answers a call before it in the payload, or is named in
 # ``paired_externally``; a call is answered before the next turn, or is named there; an
 # id named there has no partner in the payload. No call id or result repeats, and two
-# model turns have a user-side turn or a local result between. Notes are skipped.
+# model turns have a user-side turn, a note that parts them, or a local result between.
+# Otherwise notes are skipped.
 def _validate_payload(
     payload: tuple[ModelContextEvent, ...],
     paired_externally: frozenset[str],
@@ -426,7 +449,9 @@ def _validate_payload(
     # Whether the last turn was the model's.
     after_model = False
     for entry in payload:
-        if isinstance(entry, (SystemMessage, TurnContext)):
+        if isinstance(entry, SystemMessage | TurnContext):
+            if not pending and parts_model_turns(entry):
+                after_model = False
             continue
         if isinstance(entry, Response):
             if pending:

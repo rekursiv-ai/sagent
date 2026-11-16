@@ -612,6 +612,7 @@ async def test_a_spawn_says_what_its_child_says_and_calls_as_it_works(
             on_item=lambda _stream, item: seen.append(item),
         )
 
+    # The reply the child said last is written once, as it said it.
     assert result.stdout == ("looking\n", "Read\n", "three TODOs\n")
     assert seen == list(result.stdout)
     assert result.text() == "three TODOs"
@@ -628,6 +629,8 @@ async def test_a_child_that_fails_says_why_and_stays(tmp_path: Path) -> None:
         "failed",
         "ValueError: model down",
     )
+    # The child never said why, so the record keeps it as the spawn's own output.
+    assert result.stdout[-1] == "ValueError: model down"
     assert _spawn_result(result).exit_code == 1
     assert list(setup.team) == ["Agent", "worker"]
     assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
