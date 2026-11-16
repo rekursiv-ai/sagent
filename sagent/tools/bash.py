@@ -122,11 +122,20 @@ class Bash:
 
     max_record_chars: int = 4_000_000
     """How much of each stream the record keeps; past it, output goes to the spill
-    file alone, so a command that prints without end holds no more in memory."""
+    file alone, so a command that prints without end holds no more in memory. At
+    least ``max_result_chars``: a view of a record cut below it would join its
+    start and end as if nothing lay between."""
 
     nice: int | None = 10
     """How far below this program's CPU priority commands run, so a build defers to
     the desktop; ``None`` runs them at its own."""
+
+    def __post_init__(self) -> None:
+        if self.max_record_chars < self.max_result_chars:
+            raise ValueError(
+                f"max_record_chars ({self.max_record_chars}) must be at least"
+                f" max_result_chars ({self.max_result_chars}).",
+            )
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``Bash <description>``, then the command's lines."""
@@ -263,7 +272,6 @@ class Bash:
             if context.spill_dir is not None
             else None
         )
-        note = f"; full output: {spill}" if spill is not None else ""
         # Stderr gets its own quarter, so floods of stdout cannot hide the error.
         stderr_cap = cap // 4
         stdout_lines = _StdoutLines(
@@ -353,24 +361,35 @@ class Bash:
                 and (held is not None or await asyncio.to_thread(end_cwd.is_dir))
             ):
                 context.cwd = end_cwd
-        errors = [
-            f"{line}\n" for line in "".join(stderr_printed.lines).strip().split("\n")
-        ]
-        diagnostics, _ = context.fit(errors, cap=stderr_cap)
+        # Cut as stdout is, to its ends: a failing command's error is often last.
+        error_lines, errors_unheld = stderr_printed.ends()
+        errors = [f"{line}\n" for line in "".join(error_lines).strip().split("\n")]
+        diagnostics, _ = context.view(
+            errors,
+            cap=stderr_cap,
+            note=f", {errors_unheld:,} not recorded" if errors_unheld else "",
+        )
         diagnostics = diagnostics.strip()
         if reason is not None:
             diagnostics += f"\n[{reason}]"
-            stderr_printed.add_line(f"[{reason}]")
+            stderr_printed.note(f"[{reason}]")
         printed = stdout_lines.printed
         lines, unheld = printed.ends()
-        final_text, truncated = context.view(
+        # Written before the view names it, so a spill that fails is never named.
+        if (
+            printed.spill is not None
+            and not printed.spilled
+            and context.view(lines, reserve=len(diagnostics), cap=cap)[1]
+            and not await asyncio.to_thread(_spill, printed.spill, lines)
+        ):
+            printed.spill = None
+        note = f"; full output: {printed.spill}" if printed.spill is not None else ""
+        final_text, _ = context.view(
             lines,
             reserve=len(diagnostics),
             cap=cap,
             note=(f", {unheld:,} not recorded" if unheld else "") + note,
         )
-        if truncated and spill is not None and not printed.spilled:
-            await asyncio.to_thread(_spill, spill, lines)
         code = child.process.returncode
         # The record keeps every line up to its cap; only what the model reads is
         # cut, and then it reads the view, which says the exit code as ``text``
@@ -378,6 +397,7 @@ class Bash:
         view = final_text + diagnostics.strip()
         if (
             not printed.unrecorded
+            and not stderr_printed.unrecorded
             and view.strip()
             == "".join(
                 (*lines, *stderr_printed.lines),
@@ -412,6 +432,7 @@ class _Printed:
     _chars: int = 0
     _tail_held: int = 0
     _spilled: io.TextIOWrapper | None = None
+    _done: bool = False
 
     def add_line(self, line: str) -> None:
         """Write the next line and keep it; past ``limit``, spill and hold its end.
@@ -430,7 +451,10 @@ class _Printed:
             self._overflow()
         self.unrecorded += 1
         if self._spilled is not None:
-            _ = self._spilled.write(text)
+            try:
+                _ = self._spilled.write(text)
+            except OSError as error:
+                self._give_up(error)
         self.tail.append(text)
         self._tail_held += len(text)
         while (
@@ -439,27 +463,57 @@ class _Printed:
         ):
             self._tail_held -= len(self.tail.popleft())
 
+    def note(self, text: str) -> None:
+        """Write and keep the harness's own line, such as a timeout's, past any cap."""
+        self.lines.append(f"{text}\n")
+        self.stream.write(f"{text}\n")
+
     def _overflow(self) -> None:
         """Say the rest goes unrecorded, and start the spill with what was kept."""
         where = ""
         if self.spill is not None:
-            self.spill.parent.mkdir(parents=True, exist_ok=True)
-            self._spilled = self.spill.open("w", encoding="utf-8")
-            _ = self._spilled.write("".join(self.lines))
-            where = f"; all of it is in {self.spill}"
+            # A spill that cannot be written, as on a full disk, is given up: the
+            # command runs on, and the model still reads the output's ends.
+            try:
+                self.spill.parent.mkdir(parents=True, exist_ok=True)
+                self._spilled = self.spill.open("w", encoding="utf-8")
+                _ = self._spilled.write("".join(self.lines))
+            except OSError as error:
+                self._give_up(error)
+            else:
+                where = f"; all of it is in {self.spill}"
         self.stream.write(
             f"[output past {self.limit:,} chars is not recorded{where}]\n",
         )
 
     def close(self) -> None:
-        """Finish the spill, if one was started."""
-        if self._spilled is not None:
-            self._spilled.close()
+        """Finish the spill, if one was started; one that fails to flush is given up."""
+        spilled, self._spilled = self._spilled, None
+        if spilled is None:
+            return
+        try:
+            spilled.close()
+        except OSError as error:
+            self._give_up(error)
+        else:
+            self._done = True
+
+    def _give_up(self, error: OSError) -> None:
+        """Drop a spill that could not be written; the model is told of none."""
+        logging.getLogger(__name__).warning(
+            "bash spill not written: %s",
+            self.spill,
+            exc_info=error,
+        )
+        spilled, self._spilled, self.spill = self._spilled, None, None
+        if spilled is not None:
+            with contextlib.suppress(OSError):
+                spilled.close()
 
     @property
     def spilled(self) -> bool:
         """Whether the spill holds every line already."""
-        return self._spilled is not None
+        return self._done
 
     def ends(self) -> tuple[list[str], int]:
         """Return the lines kept for the model's view, and how many lie unheld between."""
@@ -647,10 +701,19 @@ def _script(sentinel: str) -> str:
     )
 
 
-def _spill(path: Path, stdout: Sequence[str]) -> None:
-    """Write the whole of ``stdout`` to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes("".join(stdout).encode())
+def _spill(path: Path, stdout: Sequence[str]) -> bool:
+    """Write the whole of ``stdout`` to ``path``; return whether it could be."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes("".join(stdout).encode())
+    except OSError as error:
+        logging.getLogger(__name__).warning(
+            "bash spill not written: %s",
+            path,
+            exc_info=error,
+        )
+        return False
+    return True
 
 
 def _environment(

@@ -909,6 +909,40 @@ async def test_a_long_call_s_news_goes_as_its_output_would(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_wakes_after_a_result_do_not_push_it_out_of_the_newest_kept(
+    tmp_path: Path,
+) -> None:
+    """``keep_recent`` counts tool results; a long call's news is not one."""
+    agent, pruner, _ = _agent(tmp_path, stub="[gone]")
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=1, expiry=0.0),
+    )
+    wakes = [
+        SystemMessage(
+            content=f"[talk c9 still running after {s}s]\n" + "y" * 400,
+            subtype="wake",
+        )
+        for s in (15, 30)
+    ]
+    async with agent:
+        agent.session.append(
+            UserMessage(content="go"),
+            ToolCall(call_id="c0", name="Read"),
+            ToolResult(call_id="c0", state="done", stdout=("x" * 400,)),
+            AssistantMessage(content="read it"),
+            wakes[0],
+            AssistantMessage(content="waiting"),
+            wakes[1],
+            AssistantMessage(content="still"),
+        )
+
+        await pruner.run()
+
+    assert _results(agent) == {"c0": "x" * 400}
+
+
+@pytest.mark.asyncio
 async def test_a_forced_prune_forgets_the_files_read_and_runs_once(
     tmp_path: Path,
 ) -> None:

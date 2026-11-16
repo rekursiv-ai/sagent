@@ -186,9 +186,11 @@ class Pruner:
         }
         seen = reads(context)
         outputs = [i for i, e in enumerate(context) if _output_text(e) is not None]
-        # Clamped: a negative start counts from the end, so keeping more than
-        # there are would keep only the last few and stub the rest.
-        recent = set(outputs[max(0, len(outputs) - policy.keep_recent) :])
+        results = [i for i in outputs if isinstance(context[i], ToolResult)]
+        # The newest results are kept, however many wakes came since: a long
+        # call's news is no result. Clamped: a negative start counts from the
+        # end, so keeping more than there are would keep only the last few.
+        recent = set(results[max(0, len(results) - policy.keep_recent) :])
         return [
             i
             for i in outputs

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import contextlib
 import io
@@ -1653,6 +1653,45 @@ def test_runs_with_nothing_found_are_passed_over_and_groups_split_between_runs(
         rows = [row.text for row in streamed_rows(names, query)]
     a, _, c = names
     assert rows == [f"{a}-1-x", f"{a}:2:hit", "--", f"{c}-1-y", f"{c}:2:hit"]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_run_started_ahead_is_timed_from_when_it_is_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One waiting on a full pipe while the caller reads another is not slow itself."""
+    names = [tmp_path / name for name in "ab"]
+    for path in names:
+        path.write_text("hit\n")
+    timed: list[float] = []
+    kills: list[Callable[..., object]] = []
+    stopped: list[float] = []
+    real_timer = threading.Timer
+
+    class Timer(real_timer):
+        @override
+        def start(self) -> None:
+            timed.append(self.interval)
+            kills.append(self.function)
+            super().start()
+
+        @override
+        def cancel(self) -> None:
+            stopped.append(self.interval)
+            super().cancel()
+
+    monkeypatch.setattr(files_grep, "ARGV_CHARS", 1)
+    monkeypatch.setattr(threading, "Timer", Timer)
+    rows = streamed_rows(names, Query(pattern="hit"), timeout_sec=7)
+    assert next(rows).text == str(names[0])
+    # Both runs started; only the one being read is on the clock.
+    assert timed == [7]
+    assert [row.text for row in rows] == [str(names[1])]
+    assert timed == [7, 7]
+    # Each clock kills its own run when it runs out, and stops when the run ends.
+    assert all(getattr(kill, "__name__", "") == "kill" for kill in kills)
+    assert stopped == [7, 7]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
