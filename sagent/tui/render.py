@@ -48,6 +48,7 @@ from sagent.session.types import (
     AssistantMessage,
     EditResult,
     Splice,
+    SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
@@ -165,6 +166,7 @@ class Scrollback:
                 case (
                     UserMessage()
                     | AgentToAgentMessage()
+                    | SystemMessage()
                     | ToolResult()
                     | types.ModelResponsePartial()
                     | types.ModelResponseThinking()
@@ -276,6 +278,7 @@ class Scrollback:
             case (
                 UserMessage()
                 | AgentToAgentMessage()
+                | SystemMessage()
                 | AssistantMessage()
                 | Thinking()
                 | ToolCall()
@@ -308,6 +311,13 @@ class Scrollback:
                 self._flush()
                 p.agent(sender or "agent", recipient=None, text=content or "")
                 self.shown += 1
+            # A note that drives the model shows, so the user sees why it spoke;
+            # one that only informs it, as a reminder does, stays out of the way.
+            case SystemMessage(subtype="wake" | "nudge", content=str() as content):
+                self._flush()
+                p.note(content)
+            case SystemMessage():
+                pass
             # A streamed record printed as it streamed; what it still holds prints
             # before the next row or at the turn's end, as anything held does.
             case Thinking(content=content):

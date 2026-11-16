@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from bisect import bisect
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from itertools import accumulate, takewhile
 from pathlib import PurePosixPath
@@ -37,6 +37,7 @@ from sagent.session.types import (
     EditResult,
     LineSpan,
     ReadResult,
+    SystemMessage,
     ToolCall,
     ToolResult,
     WriteResult,
@@ -65,6 +66,7 @@ __all__ = [
     "left_in",
     "limit_tokens",
     "prices",
+    "prunable",
     "reads",
     "requests_left",
     "saving",
@@ -168,8 +170,10 @@ class Pruner:
             cold=self._cold(),
         )
 
+    # An output is a tool's result, a detached call's stub holding what it wrote, or a
+    # wake's news of a long call.
     def _eligible(self, context: Sequence[ModelContextEvent]) -> list[int]:
-        """Return the indices of the results the policy lets go, oldest first."""
+        """Return the indices of the outputs the policy lets go, oldest first."""
         policy = self._policy()
         if policy is None:
             return []
@@ -181,22 +185,21 @@ class Pruner:
             if isinstance(record, ToolCall)
         }
         seen = reads(context)
-        results = [i for i, e in enumerate(context) if isinstance(e, ToolResult)]
+        outputs = [i for i, e in enumerate(context) if _output_text(e) is not None]
         # Clamped: a negative start counts from the end, so keeping more than
         # there are would keep only the last few and stub the rest.
-        recent = set(results[max(0, len(results) - policy.keep_recent) :])
-        stub = len(self._stub)
+        recent = set(outputs[max(0, len(outputs) - policy.keep_recent) :])
         return [
             i
-            for i in results
+            for i in outputs
             if i not in recent
             # No reply has followed it: the model has not seen it yet.
             and seen[i] > 0
-            and isinstance(result := context[i], ToolResult)
-            and names.get(result.call_id) not in policy.keep_tools
-            # A pending or cancelled call's record holds only a short note.
-            and result.state not in ("pending", "cancelled")
-            and len(result.text()) > stub
+            and not (
+                isinstance(entry := context[i], ToolResult)
+                and names.get(entry.call_id) in policy.keep_tools
+            )
+            and prunable(entry, stub=self._stub)
         ]
 
     def _cold(self) -> bool:
@@ -463,27 +466,50 @@ def prices(model: Model, *, prompt: int) -> tuple[float, float] | None:
     return rate.cache_read / unit, max(written, rate.request) / unit
 
 
+def prunable(entry: ModelContextEvent, *, stub: str) -> bool:
+    """Return whether ``entry`` is a tool's output that :func:`drop` makes shorter.
+
+    Args:
+      entry: A context entry.
+      stub: What a dropped output reads.
+
+    Returns:
+      prunable: Whether dropping it saves anything.
+
+    """
+    before = _output_text(entry)
+    if before is None or not isinstance(entry, ToolResult | SystemMessage):
+        return False
+    return len(_output_text(_pruned(entry, stub=stub)) or "") < len(before)
+
+
 def drop(runtime: Runtime, indices: Sequence[int], *, stub: str) -> None:
-    """Replace the context's results at ``indices`` with ``stub``, in one splice.
+    """Replace the context's tool outputs at ``indices`` with ``stub``, in one splice.
+
+    A detached call's stub, a killed call's, and a wake's news keep their first
+    line, which says which call it is and what became of it.
 
     Args:
       runtime: Whose context.
-      indices: Positions in ``runtime.context().messages``, each a tool result.
-      stub: What a dropped result reads.
+      indices: Positions in ``runtime.context().messages``, each a tool's result
+        or a wake's news.
+      stub: What a dropped output reads.
 
     Raises:
-      ValueError: An index is not a tool result.
+      ValueError: An index is no tool output.
 
     """
     if not indices:
         return
     context = list(runtime.context().messages)
     for i in indices:
-        result = context[i]
-        stubbed = isinstance(result, ToolResult)
-        if not stubbed:
-            raise ValueError(f"Entry {i} is no tool result.")
-        context[i] = result.restated(stub)
+        entry = context[i]
+        if _output_text(entry) is None or not isinstance(
+            entry,
+            ToolResult | SystemMessage,
+        ):
+            raise ValueError(f"Entry {i} is no tool output.")
+        context[i] = _pruned(entry, stub=stub)
     runtime.append_splice(
         mask=full_tape_mask(runtime.tape),
         payload=tuple(context),
@@ -718,3 +744,31 @@ def _strings(tree: PlainTree) -> Iterator[str]:
     elif isinstance(tree, Sequence):
         for value in tree:
             yield from _strings(value)
+
+
+# An output is a tool's result, a detached call's stub holding what it wrote so far, or
+# a wake's news of a long call.
+def _output_text(entry: ModelContextEvent) -> str | None:
+    """Return what the model reads of a tool's output; ``None`` for anything else."""
+    if isinstance(entry, ToolResult):
+        return entry.text()
+    if isinstance(entry, SystemMessage) and entry.subtype == "wake":
+        return entry.content or ""
+    return None
+
+
+# A stub's first line says the call runs on or was killed, and a wake's which call
+# it is and how long it has run; dropping the rest keeps that.
+def _pruned(
+    entry: ToolResult | SystemMessage,
+    *,
+    stub: str,
+) -> ToolResult | SystemMessage:
+    """Return ``entry`` reading ``stub`` in place of its output, its heading kept."""
+    if isinstance(entry, ToolResult):
+        if entry.state not in ("pending", "cancelled"):
+            return entry.restated(stub)
+        head = entry.text().partition("\n")[0]
+        return entry.restated(f"{head}\n{stub}")
+    head = (entry.content or "").partition("\n")[0]
+    return replace(entry, content=f"{head}\n{stub}")

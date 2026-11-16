@@ -17,6 +17,7 @@ an error. The Python backend walks with ``rignore``, which binds the Rust
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from stat import S_ISREG
 from typing import IO, TYPE_CHECKING, Final, Literal, cast
@@ -163,18 +164,18 @@ class Row:
         ``-1`` when no match begins there: context, ``--``, a count, a file
         name, a binary-file note, an inverted line, or a line a multiline match
         continues onto.
+      file: The name of the file the row is from, as ripgrep prints it; ``""``
+        for a ``--`` group separator, which is no file's.
 
     """
 
     text: str
     prefix_end: int = 0
     column: int = -1
+    file: str = ""
 
 
-# Each row comes with the name of the file it is from, which the listing sorts by;
-# a ``--`` between two files' context groups is no file's, so it comes with "".
-type _Named = tuple[str, Row]
-_GAP: Final[_Named] = ("", Row(text="--"))
+_GAP: Final = Row(text="--")
 
 
 def grep(
@@ -211,17 +212,38 @@ def grep_rows(
         invalid, two options cannot combine, or the search could not finish.
 
     """
+    found = streamed_rows(paths, query, timeout_sec=timeout_sec)
+    return in_path_order(found, paths, query)
+
+
+def in_path_order(
+    rows: Iterable[Row],
+    paths: Path | Sequence[Path],
+    query: Query,
+) -> list[Row]:
+    """Return the rows :func:`streamed_rows` found, in :func:`grep_rows`'s order.
+
+    Args:
+      rows: Every row of one search, as found.
+      paths: The paths it searched.
+      query: What it asked.
+
+    Returns:
+      rows: Named files in the order given, a walk's files by path, each
+        file's rows as found; ``--`` between files' context groups.
+
+    """
     targets = _targets(paths)
     order = {str(path): i for i, path in enumerate(targets)}
-    blocks = _grouped(_search(targets, query, timeout_sec=timeout_sec))
+    blocks = _grouped(rows)
     blocks.sort(key=lambda block: _sort_key(block[0], targets, order))
-    rows: list[Row] = []
+    ordered: list[Row] = []
     for _, block in blocks:
         # Ripgrep separates context groups of different files with ``--``.
-        if rows and _has_context(query):
-            rows.append(Row(text="--"))
-        rows.extend(block)
-    return rows
+        if ordered and _has_context(query):
+            ordered.append(_GAP)
+        ordered.extend(block)
+    return ordered
 
 
 def streamed_rows(
@@ -251,8 +273,7 @@ def streamed_rows(
         after rows were yielded.
 
     """
-    named = _search(_targets(paths), query, timeout_sec=timeout_sec)
-    return _unnamed(named)
+    return _search(_targets(paths), query, timeout_sec=timeout_sec)
 
 
 def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
@@ -349,16 +370,11 @@ def _grep_rg(
     query: Query,
     *,
     timeout_sec: float,
-) -> Generator[_Named, None, None]:
+) -> Generator[Row, None, None]:
     """Answer ``query`` with ripgrep, one run per argv-sized batch, as rows come."""
     batches = _batches(paths)
     with contextlib.ExitStack() as runs:
-
-        def run(batch: list[Path]) -> Generator[_Named, None, None]:
-            process, timer = _started(rg_command(rg, batch, query), timeout_sec)
-            runs.callback(_stopped, process, timer)
-            return _read(process, timer, query=query, timeout_sec=timeout_sec)
-
+        run = partial(_run_rg, rg, query=query, timeout_sec=timeout_sec, runs=runs)
         first_batch = next(batches)
         rows = run(first_batch)
         try:
@@ -369,12 +385,13 @@ def _grep_rg(
             if query.pcre or not any(why in str(error) for why in _NEEDS_PCRE2):
                 raise
             query = dataclasses.replace(query, pcre=True)
+            run = partial(_run_rg, rg, query=query, timeout_sec=timeout_sec, runs=runs)
             rows = run(first_batch)
             first = next(rows, None)
         ahead = collections.deque(
             run(batch) for batch in itertools.islice(batches, os.cpu_count() or 1)
         )
-        found = False
+        found = False  # pragma: no mutate[truthiness]
         while True:
             if first is not None:
                 # Ripgrep separates context groups with ``--``, but only within
@@ -395,35 +412,33 @@ def _grep_rg(
 # with ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first
 # one ends the name. ``-c`` rows and binary-file notes split at their last
 # ``:``, which preserves colons in the file name.
-def _rows(lines: Iterable[bytes], *, query: Query) -> Iterator[_Named]:
+def _rows(lines: Iterable[bytes], *, query: Query) -> Iterator[Row]:
     """Yield the row each line of ripgrep's output is, as it reads them."""
     if query.output_mode in {"files_with_matches", "files_without_match"}:
         for line in lines:
             name = line.decode(errors="replace")
-            yield name, Row(text=name)
+            yield Row(text=name, file=name)
         return
     previous: tuple[str, int] | None = None  # pragma: no mutate -- "" is no row.
     for line in lines:
-        if line == b"--":
-            yield _GAP
-            continue
         cut = min(
             (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i != -1),
             default=None,
         )
         if cut is None:
             text = line.decode(errors="replace")
-            # Neither the count nor the note's text after its ``:`` holds a ``:``.
-            yield text.rpartition(":")[0], Row(text=text)
+            # Neither the count nor the note's text after its ``:`` holds a ``:``;
+            # a ``--`` group separator holds none, so it is no file's: a gap.
+            yield Row(text=text, file=text.rpartition(":")[0])
             continue
         name, number, row = _content_row(line, cut=cut, query=query)
         matched = row.column != -1
         # ``-U`` prints a run of matched lines as one block that repeats its
         # first column on every line, so only the run's first line is located.
         if query.multiline and previous == (name, number - 1):
-            row = Row(text=row.text, prefix_end=row.prefix_end)
+            row = Row(text=row.text, prefix_end=row.prefix_end, file=name)
         previous = (name, number) if matched else None
-        yield name, row
+        yield row
 
 
 # ``--column`` implies ``-n`` and counts 1-based bytes of the printed UTF-8 line.
@@ -451,7 +466,22 @@ def _content_row(
             else len(rest[: int(byte_column) - 1].decode(errors="replace"))
         )
     text = prefix + rest.decode(errors="replace")
-    return name, int(number), Row(text=text, prefix_end=len(prefix), column=column)
+    row = Row(text=text, prefix_end=len(prefix), column=column, file=name)
+    return name, int(number), row
+
+
+def _run_rg(
+    rg: str,
+    batch: list[Path],
+    *,
+    query: Query,
+    timeout_sec: float,
+    runs: contextlib.ExitStack,
+) -> Generator[Row, None, None]:
+    """Start ``rg`` over ``batch``, stopped when ``runs`` closes; return its rows."""
+    process, timer = _started(rg_command(rg, batch, query), timeout_sec)
+    runs.callback(_stopped, process, timer)
+    return _read(process, timer, query=query, timeout_sec=timeout_sec)
 
 
 def _started(
@@ -486,7 +516,7 @@ def _read(
     *,
     query: Query,
     timeout_sec: float,
-) -> Generator[_Named, None, None]:
+) -> Generator[Row, None, None]:
     """Yield the rows a ``rg`` run prints as it prints them; raise if it failed."""
     out, errors = cast(IO[bytes], process.stdout), cast(IO[bytes], process.stderr)
     try:
@@ -596,7 +626,7 @@ def _grep_python(
     query: Query,
     *,
     pattern: re.Pattern[str],
-) -> Generator[_Named, None, None]:
+) -> Generator[Row, None, None]:
     """Answer ``query`` in Python, matching ripgrep's output line for line, file by file."""
     found = False
     for path in paths:
@@ -606,7 +636,7 @@ def _grep_python(
                 yield _GAP
             found = found or bool(rows)
             for row in rows:
-                yield name, row
+                yield row if row is _GAP else dataclasses.replace(row, file=name)
 
 
 # Each comes with the name ripgrep prints for it and whether a walk found it.
@@ -965,19 +995,12 @@ def _targets(paths: Path | Sequence[Path]) -> list[Path]:
     return [paths] if isinstance(paths, Path) else list(paths)
 
 
-def _unnamed(named: Generator[_Named, None, None]) -> Generator[Row, None, None]:
-    """Yield each row of ``named`` without its file's name."""
-    with contextlib.closing(named):
-        for _, row in named:
-            yield row
-
-
 def _search(
     targets: list[Path],
     query: Query,
     *,
     timeout_sec: float,
-) -> Generator[_Named, None, None]:
+) -> Generator[Row, None, None]:
     """Check ``query`` and ``targets``, then return the search's rows as they come."""
     # Checked once, before dispatch, so both backends agree: ``rg`` exits 2 on
     # either while a walk finds nothing and would report "no matches".
@@ -1007,16 +1030,17 @@ def _search(
     return _grep_python(targets, query, pattern=_compile(query))
 
 
-def _found_nothing() -> Generator[_Named, None, None]:
+def _found_nothing() -> Generator[Row, None, None]:
     yield from ()
 
 
 # ``--`` lines separate context groups and are re-added after sorting.
-def _grouped(named: Iterable[_Named]) -> list[tuple[str, list[Row]]]:
-    """Group ``named`` rows into ``(file, rows)`` blocks, one per file in turn."""
+def _grouped(rows: Iterable[Row]) -> list[tuple[str, list[Row]]]:
+    """Group ``rows`` into ``(file, rows)`` blocks, one per file in turn."""
     blocks: list[tuple[str, list[Row]]] = []
     gap = False
-    for name, row in named:
+    for row in rows:
+        name = row.file
         if not name:
             gap = True
             continue
@@ -1025,7 +1049,7 @@ def _grouped(named: Iterable[_Named]) -> list[tuple[str, list[Row]]]:
         elif gap:
             # A gap between groups of one file stays; between files it is
             # re-added after sorting.
-            blocks[-1][1].append(Row(text="--"))
+            blocks[-1][1].append(_GAP)
         gap = False
         blocks[-1][1].append(row)
     return blocks

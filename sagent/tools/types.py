@@ -115,10 +115,8 @@ if TYPE_CHECKING:
 __all__ = [
     "Arg",
     "Briefing",
-    "Counted",
     "FileTracker",
     "Reminding",
-    "Shows",
     "Skipping",
     "Stream",
     "ThreadWriter",
@@ -131,6 +129,7 @@ __all__ = [
     "parse",
     "settled",
     "whole_output",
+    "write_fitting",
 ]
 
 
@@ -165,6 +164,11 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
     stderr: AsyncIterator[StreamErr_co]
     """The tool's standard error, item by item as the tool writes it."""
 
+    shown: Future[str | None] | None = None
+    """What the model reads instead of the items, such as a long output cut to
+    its head and tail; set by the time ``result`` is. ``None``, or a ``None``
+    view, shows the items themselves."""
+
     def __post_init__(self) -> None:
         self.result.add_done_callback(self._end_streams)
 
@@ -175,17 +179,6 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
         for stream in (self.stdout, self.stderr):
             if isinstance(stream, Stream):
                 stream.close()
-
-
-@runtime_checkable
-class Shows(Protocol):
-    """A tool's result that says what the model reads instead of the streams' items.
-
-    The items stay in the record whole; ``shown`` is the view, such as a long
-    output cut to its head and tail. ``None`` shows the items themselves.
-    """
-
-    shown: str | None
 
 
 class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
@@ -251,8 +244,8 @@ class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
 
         A tool writes each item when it has it, such as a line its process
         printed, a match, or a path. A tool that has nothing until it finishes
-        writes everything then. A result that ``Shows`` says what the model
-        reads when every item would be too much.
+        writes everything then. Its ``shown`` says what the model reads when
+        every item would be too much.
 
         Args:
           context: The calling agent's state.
@@ -287,11 +280,15 @@ class ToolOutput(Generic[Result_co, StreamOut_co, StreamErr_co]):
     result: Result_co
     """The tool's result: its own class or an ``UncategorizedToolResult``."""
 
+    shown: str | None = None
+    """What the model reads instead of the items; ``None`` shows the items."""
+
 
 def whole_output[R, O, E](
     output: Coroutine[object, object, ToolOutput[R, O, E]] | ToolOutput[R, O, E],
     *,
     stdout: Stream[O] | None = None,
+    stderr: Stream[E] | None = None,
 ) -> ToolStreamingResult[R, O, E]:
     """Return a ``ToolOutput``, or the one a coroutine returns, as a ``ToolStreamingResult``.
 
@@ -300,18 +297,23 @@ def whole_output[R, O, E](
         coroutine starts now, on the running loop.
       stdout: Standard output, if the work writes to it as it goes; ``None``
         for work that has nothing until it returns.
+      stderr: Standard error, likewise.
 
     Returns:
       streaming_result: Its streams get the output's items when the work
         returns, after any the work wrote, and nothing more when it raises or
-        is cancelled. Its ``result`` raises what the work raised.
+        is cancelled. Its ``result`` raises what the work raised; its
+        ``shown`` is the output's.
 
     """
-    out, stderr = stdout if stdout is not None else Stream[O](), Stream[E]()
+    out = stdout if stdout is not None else Stream[O]()
+    err = stderr if stderr is not None else Stream[E]()
+    shown = asyncio.get_running_loop().create_future()
     return ToolStreamingResult(
-        result=asyncio.ensure_future(_write_output(output, out, stderr)),
+        result=asyncio.ensure_future(_write_output(output, out, err, shown)),
         stdout=out,
-        stderr=stderr,
+        stderr=err,
+        shown=shown,
     )
 
 
@@ -347,25 +349,6 @@ class Stream[T]:
         return item
 
 
-class Counted[T]:
-    """An iterator that counts what it has passed on, as a tool counts what it cut."""
-
-    def __init__(self, items: Iterable[T]) -> None:
-        self._items = iter(items)
-        self.seen = 0
-        """How many items it has passed on."""
-
-    def __iter__(self) -> Counted[T]:
-        """Return the iterator itself; it can be iterated once."""
-        return self
-
-    def __next__(self) -> T:
-        """Return the next item, counting it."""
-        item = next(self._items)
-        self.seen += 1
-        return item
-
-
 class ThreadWriter[T]:
     """Writes to a ``Stream`` from a worker thread, as a tool searching in one does.
 
@@ -392,6 +375,51 @@ class ThreadWriter[T]:
         written = threading.Event()
         self._loop.call_soon_threadsafe(written.set)
         _ = written.wait()
+
+
+def write_fitting[T](
+    context: ToolContext,
+    items: Iterator[T],
+    render: Callable[[T], str],
+    writer: ThreadWriter[str],
+    *,
+    cap: int = 0,
+) -> tuple[list[T], bool]:
+    """Write each item, rendered as a line of one text, while it fits; keep every item.
+
+    A search does so as it finds, from its worker thread: the model sees each
+    line at once, and the caller pages what did not fit from the items kept.
+
+    Args:
+      context: Whose ``fitting`` says what fits.
+      items: What was found, as it is found.
+      render: Each item's line, without its newline.
+      writer: Where each line goes; each after the first brings the newline
+        before it, so the text ends on none.
+      cap: The tool's own limit, as ``fitting`` takes it.
+
+    Returns:
+      items: Every item, in the order found.
+      whole: Whether every line was written uncut.
+
+    """
+    found: list[T] = []
+    units: list[str] = []
+    written: list[str] = []
+    lines = (render(item) for item in _kept(items, found))
+    try:
+        for unit in context.fitting(
+            _kept((f"\n{line}" if i else line for i, line in enumerate(lines)), units),
+            cap=cap,
+        ):
+            writer.write(unit)
+            written.append(unit)
+        # Past the cut, the rest are kept to page, not written.
+        found.extend(items)
+    finally:
+        writer.landed()
+    # A first line too long alone is written cut: then it is not whole.
+    return found, written == units and len(units) == len(found)
 
 
 @overload
@@ -435,8 +463,8 @@ async def settled(
         ``done`` with the tool's result; ``failed`` when the tool raised, with
         the error as the last item of ``stderr``; or ``cancelled``. A tool
         that relays a call run elsewhere returns that call's record as its
-        result, and that record is returned with ``call_id`` set. A result that
-        ``Shows`` gives the record its ``shown``.
+        result, and that record is returned with ``call_id`` set. The call's
+        ``shown`` is the record's.
 
     """
     stdout: list[object] = []
@@ -472,10 +500,8 @@ async def settled(
     else:
         if isinstance(result, ToolResult):
             return replace(result, call_id=call_id)
-        # The view moves to the record, which keeps it once, beside the items.
-        shown = result.shown if isinstance(result, Shows) else None
-        if shown is not None and is_dataclass(result) and not isinstance(result, type):
-            result = replace(result, shown=None)
+        view = streaming_result.shown
+        shown = None if view is None else view.result()
         return ToolResult(
             call_id=call_id,
             state="done",
@@ -839,8 +865,8 @@ class ToolContext:
           cap: The tool's own limit, if below ``max_result_chars``; ``0`` for none.
 
         Yields:
-          unit: Each kept unit; the first cut mid-way, and the last, if it alone
-            is too large.
+          unit: Each kept unit; the first cut mid-way if it alone is too large,
+            and then no other.
 
         """
         limit = min(cap, self.max_result_chars) if cap else self.max_result_chars
@@ -1270,8 +1296,9 @@ async def _write_output[R, O, E](
     output: Coroutine[object, object, ToolOutput[R, O, E]] | ToolOutput[R, O, E],
     stdout: Stream[O],
     stderr: Stream[E],
+    shown: Future[str | None],
 ) -> R:
-    """Write ``output`` to the streams, awaiting it first if need be; return its result."""
+    """Write ``output`` to the streams and set ``shown``, awaiting it first if need be."""
     # Closed here, not left to the result's end: the call's record is then made
     # in the loop turn the tool ends in, with whatever the tool queued for its
     # agent, and not a turn after it.
@@ -1284,4 +1311,12 @@ async def _write_output[R, O, E](
     finally:
         stdout.close()
         stderr.close()
+    shown.set_result(whole.shown)
     return whole.result
+
+
+def _kept[T](items: Iterable[T], kept: list[T]) -> Iterator[T]:
+    """Yield each of ``items``, appending it to ``kept`` as it passes."""
+    for item in items:
+        kept.append(item)
+        yield item

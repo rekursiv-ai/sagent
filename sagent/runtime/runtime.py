@@ -17,10 +17,11 @@ its cohort: a message, ``Compact``, or ``Clear``. ``Kill`` cancels calls in
 either.
 
 A call the model waits on wakes it on the schedule ``detach_schedule`` gives its
-tool: the first wake detaches the cohort, each stub showing what its call wrote
-so far; each later one tells an idle model what the call wrote since it last
-looked; the call's result, when it comes, shows only what the model has not
-read. The record keeps everything the call wrote.
+tool: the first wake detaches each call of the cohort that wakes the model,
+each stub showing what its call wrote so far; each later one tells an idle model
+what the call wrote since it last looked; the call's result, when it comes,
+shows only what the model has not read. A call whose tool wakes no one, or that
+cannot run apart, is waited for. The record keeps everything the call wrote.
 
 A reply's calls run as a shell line. Calls sharing a ``serialize_key`` run as
 ``a ; b``, a group; other calls run beside them, as ``&``. A ``"*"`` call, whose
@@ -619,8 +620,8 @@ class Runtime:
         self.allow_background = True
         # Callers waiting on a background call's result instead of its delivery.
         self._foreground_waiters: dict[str, list[asyncio.Future[ToolResult]]] = {}
-        # When each tool's long calls wake the model; the first wake answers the
-        # cohort with stubs, and the calls run on, their results delivered later.
+        # When each tool's long calls wake the model; the first wake answers each
+        # waking call with a stub, and it runs on, its result delivered later.
         self.detach_schedule = DetachSchedule()
         # What each running call wrote, and what of it the model has read; kept until
         # its result is taken in.
@@ -654,6 +655,9 @@ class Runtime:
     @model.setter
     def model(self, model: Model) -> None:
         changed = model is not self._model
+        # Each model has its own prompt cache: another starts with it cold.
+        if _cache_key(model) != _cache_key(self._model):
+            self._last_request = None
         self._model = model
         if changed:
             self.retry()
@@ -1449,7 +1453,7 @@ class Runtime:
                         # idle if it still owes.
                         case SystemMessage():
                             if self.model_call is None:
-                                self.append_history(item)
+                                self._note(item)
                             self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         # Input that ends the wait for the user is the user
@@ -1778,13 +1782,13 @@ class Runtime:
         if forced or watch.fresh:
             if cid in self.cohort:
                 logger.debug("runtime wake detaches the cohort: call_id=%s", cid)
-                self._stop_all_tools(mode="detach")
+                self._detach_waking()
             elif (
                 self.model_call is None
                 and self.compact_task is None
                 and not self.cohort
             ):
-                self.append_history(
+                self._note(
                     SystemMessage(
                         timestamp=now_timestamp(),
                         content=self._progress(cid, watch),
@@ -1792,6 +1796,19 @@ class Runtime:
                     ),
                 )
         self._arm(cid, watch)
+
+    # A call whose tool wakes no one, or that can never run apart, was never armed
+    # (``_run_tool_and_post``), and is waited for.
+    def _detach_waking(self) -> None:
+        """Detach each cohort call armed to wake the model."""
+        for cid in [c for c in self.running_tools if c in self.cohort]:
+            watch = self._watches.get(cid)
+            if watch is None or watch.timer is None:
+                continue
+            self._stop_tool(cid, self.running_tools.pop(cid), mode="detach")
+            self.cohort.discard(cid)
+        if not self.cohort:
+            self._cohort_seen = False  # pragma: no mutate[truthiness]
 
     def _arm(self, cid: str, watch: _Watch) -> None:
         """Set the next wake of the call ``cid``, if its tool's schedule has one."""
@@ -1833,11 +1850,17 @@ class Runtime:
         news = self._look(watch) or "(no new output)"
         return f"[{watch.name} {cid} still running after {elapsed:.0f}s]\n{news}"
 
-    # The model read the rest at its wakes, and the record keeps all of it.
+    # The model read the rest at its wakes, and the record keeps all of it. A view
+    # the tool gave, such as a child's reply, is the tool's to say, and stays.
     def _unseen(self, result: ToolResult) -> ToolResult:
         """Return a detached call's result reading what the model has not seen of it."""
         watch = self._watches.pop(result.call_id, None)
-        if watch is None or not watch.seen or result.state != "done":
+        if (
+            watch is None
+            or not watch.seen
+            or result.state != "done"
+            or result.shown is not None
+        ):
             return result
         tail = self._look(watch) or "(no new output)"
         shown = dataclasses.replace(result, shown=None, stdout=(tail,), stderr=())
@@ -2166,6 +2189,11 @@ class Runtime:
                 strategy="orphan_tool_result_repair",
             )
 
+    def _note(self, note: SystemMessage) -> None:
+        """Append a note that drives the model to history, and publish it."""
+        self.append_history(note)
+        self.publish(note)
+
     # Each message stays its own record, as it was sent and shown; the request merges
     # adjacent ones, as providers need.
     def _commit_user(self, message: UserMessage | AgentToAgentMessage) -> None:
@@ -2178,7 +2206,7 @@ class Runtime:
 
     # The call is answered now, by a stub, and its task registered as detached, so
     # its own result, if it comes, is delivered forward.
-    # Or answer it ``[cancelled]`` and cancel it.
+    # A detached call's stub holds what it wrote so far.
     def _stop_tool(
         self,
         cid: str,
@@ -2186,7 +2214,7 @@ class Runtime:
         *,
         mode: Literal["detach", "kill"],
     ) -> None:
-        """Answer a cohort call ``[detached]``, with what it wrote so far, and let it run."""
+        """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
         match mode:
             case "kill":
                 state, shown = "cancelled", self.markers.cancelled
@@ -3088,6 +3116,11 @@ class _Watch:
         self.ended = True
         if self.timer is not None:
             self.timer.cancel()
+
+
+def _cache_key(model: Model) -> tuple[str, str]:
+    """Return what a prompt cache belongs to: the provider and the model."""
+    return model.provider.name, model.capability.model_id
 
 
 def _stamped(response: Response) -> Response:

@@ -11,13 +11,12 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
 import asyncio
-import itertools
 import re
 
 from treekle import PlainTree
@@ -28,6 +27,7 @@ from sagent.lib.files.grep import (
     Query,
     Row,
     grep_rows,
+    in_path_order,
     streamed_rows,
 )
 from sagent.session.types import GrepResult
@@ -42,7 +42,6 @@ from sagent.tools.command_analyzer import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
-    Counted,
     Stream,
     ThreadWriter,
     ToolOutput,
@@ -50,11 +49,12 @@ from sagent.tools.types import (
     json_schema,
     parse,
     whole_output,
+    write_fitting,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from sagent.tools.types import ToolContext
 
@@ -379,84 +379,76 @@ class Grep:
             max_depth=a.max_depth,
         )
         paths = [context.path(p or ".") for p in named]
-        loop = asyncio.get_running_loop()
+        result = GrepResult(pattern=a.pattern)
         try:
             # ``keep_last`` starts the window at the tail, so it waits for every row.
             if a.keep_last:
                 rows = await asyncio.to_thread(grep_rows, paths, query)
                 start = max(0, len(rows) - a.keep_last)
-                entries = [self._clip(row) for row in rows[start:]]
-                kept = self._write(context, entries, write=stdout.write)
-                window, total = len(entries), len(rows)
-            else:
-                start = a.offset
-                kept, window, total = await asyncio.to_thread(
-                    self._stream,
-                    context,
-                    partial(streamed_rows, paths, query),
-                    a,
-                    ThreadWriter(stdout, loop),
-                )
-        except GrepError as e:
-            return ToolOutput(
-                stderr=(str(e),),
-                result=GrepResult(pattern=a.pattern, exit_code=1),
+                text = self._page(context, rows, start=start, end=None)
+                return ToolOutput(stdout=(text,), result=result)
+            rows, whole = await asyncio.to_thread(
+                self._stream,
+                context,
+                partial(streamed_rows, paths, query),
+                ThreadWriter(stdout, asyncio.get_running_loop()),
             )
-        if not kept:
-            # Past the last entry, saying none matched would be false.
-            content = "(no matches in this window)" if total else "(no matches)"
-            return ToolOutput(stdout=(content,), result=GrepResult(pattern=a.pattern))
-        if kept < window:
-            stdout.write(_more(window - kept, offset=start + kept))
-        return ToolOutput(result=GrepResult(pattern=a.pattern))
+        except GrepError as e:
+            return ToolOutput(stderr=(str(e),), result=replace(result, exit_code=1))
+        if not rows:
+            return ToolOutput(stdout=("(no matches)",), result=result)
+        # Every row written, as found, is the answer when nothing is left to page.
+        if whole and not a.offset and (not a.keep_first or len(rows) <= a.keep_first):
+            return ToolOutput(result=result)
+        # A page is of one order every search shares, so ``offset`` resumes it.
+        end = a.offset + a.keep_first if a.keep_first else None
+        ordered = in_path_order(rows, paths, query)
+        return ToolOutput(
+            result=result,
+            shown=self._page(context, ordered, start=a.offset, end=end),
+        )
 
     def _stream(
         self,
         context: ToolContext,
         search: Callable[[], Iterator[Row]],
-        a: Grep.Arguments,
         writer: ThreadWriter[str],
-    ) -> tuple[int, int, int]:
-        """Write the window ``a`` asks for as rows come; return kept, window, and total."""
-        # Started here, in the worker thread: it checks each path before a row.
-        every = Counted(search())
-        end = a.offset + a.keep_first if a.keep_first else None
-        window = Counted(itertools.islice(every, a.offset, end))
-        try:
-            kept = self._write(
-                context,
-                (self._clip(row) for row in window),
-                write=writer.write,
-            )
-            # Past the cut, the window's rows and then the rest are counted, not written.
-            for _ in window:
-                pass
-            for _ in every:
-                pass
-        finally:
-            writer.landed()
-        return kept, window.seen, every.seen
+    ) -> tuple[list[Row], bool]:
+        """Write each row as found while it fits; return them all, and whether all fit."""
+        return write_fitting(
+            context,
+            # Started here, in the worker thread: it checks each path before a row.
+            search(),
+            self._clip,
+            writer,
+            cap=self.max_result_chars,
+        )
 
-    def _write(
+    def _page(
         self,
         context: ToolContext,
-        entries: Iterable[str],
+        rows: Sequence[Row],
         *,
-        write: Callable[[str], object],
-    ) -> int:
-        """Write each entry that fits, a line each; return how many were written."""
-        # Room for the longest note there could be; each entry after the first
-        # brings the newline before it, so the text ends on no newline.
-        units = (entry if i == 0 else f"\n{entry}" for i, entry in enumerate(entries))
-        kept = 0
-        for unit in context.fitting(
-            units,
-            reserve=len(_more(10**12, offset=10**12)),
+        start: int,
+        end: int | None,
+    ) -> str:
+        """Return ``rows[start:end]`` as the model reads them, cut to fit, and where to resume."""
+        window = [self._clip(row) + "\n" for row in rows[start:end]]
+        if not window:
+            # Past the last entry, saying none matched would be false.
+            return "(no matches in this window)" if rows else "(no matches)"
+        # Room for the longest note, one naming every entry and the last offset,
+        # less the newline the body ends with, which the note stands in for.
+        note = _more(len(window), offset=start + len(window))
+        body, kept = context.fit(
+            window,
+            reserve=len(note) - 1,
             cap=self.max_result_chars,
-        ):
-            write(unit)
-            kept += 1
-        return kept
+        )
+        body = body.removesuffix("\n")
+        if kept < len(window):
+            body += _more(len(window) - kept, offset=start + kept)
+        return body
 
     # The ``path:line:`` prefix is kept whole: it is how the row is found.
     def _clip(self, row: Row) -> str:

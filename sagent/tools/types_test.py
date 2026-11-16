@@ -29,7 +29,6 @@ from sagent.session.types import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
-    Counted,
     FileTracker,
     Stream,
     ThreadWriter,
@@ -43,6 +42,7 @@ from sagent.tools.types import (
     parse,
     settled,
     whole_output,
+    write_fitting,
 )
 
 
@@ -256,13 +256,35 @@ async def test_a_stream_gives_an_item_written_while_it_is_read() -> None:
     assert await reading == 7
 
 
-def test_a_counted_iterator_counts_what_it_passed_on() -> None:
-    counted = Counted("abc")
-    assert iter(counted) is counted
-    assert next(counted) == "a"
-    assert counted.seen == 1
-    assert list(counted) == ["b", "c"]
-    assert counted.seen == 3
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cap", "written", "whole"),
+    [
+        (100, ["AA", "\nBBB", "\nC"], True),
+        (7, ["AA", "\nBBB"], False),
+        (1, ["A\n... (1 chars omitted)"], False),
+    ],
+    ids=["all-fit", "cut-between", "first-cut-midway"],
+)
+async def test_lines_are_written_while_they_fit_and_every_item_is_kept(
+    cap: int,
+    written: list[str],
+    *,
+    whole: bool,
+) -> None:
+    stream = Stream[str]()
+    writer = ThreadWriter(stream, asyncio.get_running_loop())
+    items = iter(["aa", "bbb", "c"])
+    kept, all_written = await asyncio.to_thread(
+        write_fitting,
+        ToolContext(cwd=Path(), max_result_chars=cap),
+        items,
+        str.upper,
+        writer,
+    )
+    stream.close()
+    assert [unit async for unit in stream] == written
+    assert (kept, all_written) == (["aa", "bbb", "c"], whole)
 
 
 @pytest.mark.asyncio
@@ -509,35 +531,42 @@ async def test_each_item_is_seen_as_it_is_read_while_the_tool_runs() -> None:
     assert seen[-1] == ("stdout", "done\n")
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _ShownResult:
-    """A result that says what the model reads instead of its items."""
-
-    shown: str | None = None
-    exit_code: int = 0
-
-
 @pytest.mark.parametrize("shown", [None, "a\n... (1 lines omitted)\nc\n"])
 @pytest.mark.asyncio
-async def test_a_result_s_view_is_moved_to_the_record_beside_every_item(
+async def test_a_view_goes_to_the_record_beside_every_item(
     shown: str | None,
 ) -> None:
     out, err = Stream[str](), Stream[str]()
     for line in ("a\n", "b\n", "c\n"):
         out.write(line)
-    done = asyncio.Future[_ShownResult]()
-    done.set_result(_ShownResult(shown=shown))
+    done = asyncio.Future[UncategorizedToolResult]()
+    done.set_result(UncategorizedToolResult())
+    view = asyncio.Future[str | None]()
+    view.set_result(shown)
 
-    result = await settled(ToolStreamingResult(result=done, stdout=out, stderr=err))
+    result = await settled(
+        ToolStreamingResult(result=done, stdout=out, stderr=err, shown=view),
+    )
 
     assert result == ToolResult(
         call_id="",
         state="done",
         stdout=("a\n", "b\n", "c\n"),
-        result=_ShownResult(),
+        result=UncategorizedToolResult(),
         shown=shown,
     )
     assert result.text() == (shown if shown is not None else "a\nb\nc\n")
+
+
+@pytest.mark.asyncio
+async def test_whole_output_passes_its_view_to_the_record() -> None:
+    output = ToolOutput(
+        stdout=("a\n", "b\n"),
+        result=UncategorizedToolResult(),
+        shown="b\n",
+    )
+    result = await settled(whole_output(output))
+    assert (result.stdout, result.shown) == (("a\n", "b\n"), "b\n")
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])

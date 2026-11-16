@@ -200,21 +200,64 @@ async def test_by_default_each_path_is_written_as_the_walk_finds_it(
 
 
 @pytest.mark.asyncio
-async def test_a_streamed_result_never_passes_its_cap(
+async def test_every_path_written_as_found_is_the_whole_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """How many paths follow is not known as each is written: room is left for any."""
-    found = [tmp_path / f"f{i}" for i in range(3)]
+    found = [tmp_path / name for name in "bac"]
     monkeypatch.setattr(glob_tool, "streamed_paths", Mock(return_value=iter(found)))
-    cap = len(str(found[0])) + len(f"\n{found[1]}") + 50
+    result = await settled(Glob().call(ToolContext(cwd=tmp_path), {"pattern": "?"}))
+    assert result.stdout == (str(found[0]), f"\n{found[1]}", f"\n{found[2]}")
+    assert result.shown is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("window", "names", "note"),
+    [
+        ({"max_results": 2}, "ab", "\n... (1 more; pass offset=2 to continue)"),
+        ({"offset": 2}, "c", ""),
+        (
+            {"offset": 1, "max_results": 1},
+            "b",
+            "\n... (1 more; pass offset=2 to continue)",
+        ),
+    ],
+)
+async def test_a_page_of_paths_found_in_no_order_reads_in_path_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: dict[str, PlainTree],
+    names: str,
+    note: str,
+) -> None:
+    """``offset`` pages one order that every walk shares, whatever order fd found."""
+    found = [tmp_path / name for name in "bac"]
+    monkeypatch.setattr(glob_tool, "streamed_paths", Mock(return_value=iter(found)))
+    result = await settled(
+        Glob().call(ToolContext(cwd=tmp_path), {"pattern": "?", **window}),
+    )
+    assert result.stdout == (str(found[0]), f"\n{found[1]}", f"\n{found[2]}")
+    assert result.shown == "\n".join(str(tmp_path / n) for n in names) + note
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_result_cut_to_fit_reads_its_first_paths_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    found = [tmp_path / f"f{i}" for i in (2, 1, 0)]
+    monkeypatch.setattr(glob_tool, "streamed_paths", Mock(return_value=iter(found)))
+    note = "\n... (2 more; pass offset=1 to continue)"
+    cap = len(str(found[0])) + len(note)
     result = await settled(
         Glob().call(
             ToolContext(cwd=tmp_path, max_result_chars=cap),
             {"pattern": "f*"},
         ),
     )
-    assert result.text() == f"{found[0]}\n... (2 more; pass offset=1 to continue)"
+    assert result.stdout == (str(found[0]),)
+    assert result.shown == f"{tmp_path / 'f0'}{note}"
     assert len(result.text()) <= cap
 
 

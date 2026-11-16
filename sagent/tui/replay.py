@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
+    SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
@@ -49,6 +50,7 @@ def replay(agent: Agent, scrollback: Scrollback) -> None:
             case (
                 UserMessage()
                 | AgentToAgentMessage()
+                | SystemMessage()
                 | AssistantMessage()
                 | Thinking()
                 | ToolCall()

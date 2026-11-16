@@ -132,6 +132,18 @@ def test_what_only_the_model_reads_is_not_redrawn() -> None:
     assert said == [("user", "hi"), _FOOTER]
 
 
+def test_a_note_that_drove_the_model_redraws_as_it_drew_live() -> None:
+    said = _replayed(
+        UserMessage(content="hi"),
+        SystemMessage(content="[talk t1 still running after 15s]", subtype="wake"),
+    )
+    assert said == [
+        ("user", "hi"),
+        ("note", "[talk t1 still running after 15s]"),
+        _FOOTER,
+    ]
+
+
 def test_the_reply_redraws_as_markdown_unless_blank() -> None:
     said = _replayed(
         UserMessage(content="hi"),

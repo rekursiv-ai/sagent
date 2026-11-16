@@ -478,7 +478,15 @@ def test_notes_are_neutral_to_alternation_and_pairing() -> None:
     )
     assert _splice(payload=payload).payload == payload
     with pytest.raises(InvalidPayloadError, match=_ALTERNATION):
-        _ = _splice(payload=(reply("a"), SystemMessage(content="n"), reply("b")))
+        _ = _splice(payload=(reply("a"), SystemMessage(), TurnContext(), reply("b")))
+
+
+def test_a_note_with_text_parts_two_model_turns() -> None:
+    """Every provider sends it on the user side, as a wake or a nudge is."""
+    payload = (reply("a"), SystemMessage(content="n", subtype="wake"), reply("b"))
+    assert _splice(payload=payload).payload == payload
+    assert coalesce_roles(payload) == payload
+    assert splice_safe_repair(payload) == payload
 
 
 def test_disjoint_or_touching_mask_ranges_construct() -> None:
@@ -689,11 +697,13 @@ def test_repair_is_idempotent() -> None:
     assert tape._pair_and_dedup_tool_calls(once) == once
 
 
-def test_splice_safe_repair_of_a_turn_merged_across_a_note_is_a_fixed_point() -> None:
+def test_splice_safe_repair_of_a_turn_merged_across_an_empty_note_is_a_fixed_point() -> (
+    None
+):
     """The merge carries the call to before the note; its answer follows the call."""
     history = [
         reply("a"),
-        SystemMessage(content="n"),
+        TurnContext(),
         reply(calls=[call("Bash", "u0")]),
     ]
     once = splice_safe_repair(history)
@@ -701,7 +711,7 @@ def test_splice_safe_repair_of_a_turn_merged_across_a_note_is_a_fixed_point() ->
     assert [type(e).__name__ for e in once] == [
         "Response",
         "ToolResult",
-        "SystemMessage",
+        "TurnContext",
     ]
 
 

@@ -13,7 +13,13 @@ import threading
 import pytest
 
 from sagent.lib.files import glob as files_glob
-from sagent.lib.files.glob import GlobError, fd_command, glob, streamed_paths
+from sagent.lib.files.glob import (
+    GlobError,
+    fd_command,
+    glob,
+    in_path_order,
+    streamed_paths,
+)
 
 
 if TYPE_CHECKING:
@@ -447,6 +453,11 @@ def test_paths_stream_as_fd_finds_them_and_list_sorted(
     assert glob(tmp_path, "**/*.py") == [tmp_path / "a.py", tmp_path / "b.py"]
 
 
+def test_paths_found_in_any_order_sort_as_glob_lists_them(tmp_path: Path) -> None:
+    found = [tmp_path / "a-b" / "z", tmp_path / "b", tmp_path / "a" / "z"]
+    assert in_path_order(found) == [found[2], found[0], found[1]]
+
+
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
 def test_a_caller_that_stops_reading_leaves_no_fd_behind(
     tmp_path: Path,
@@ -524,13 +535,15 @@ def test_dot_git_is_excluded_from_the_walk_itself(tmp_path: Path) -> None:
 
 
 @_BOTH
+@pytest.mark.parametrize("middle", ["*", "?", "[b]", "{b,x}"])
 def test_a_literal_prefix_ends_at_the_first_wildcard_segment(
     tmp_path: Path,
+    middle: str,
 ) -> None:
-    """``a/*/c.py`` walks from ``a``; taking only the first segment would not."""
+    """``a/?/c.py`` walks from ``a``; reading ``?`` as a name would find nothing."""
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "c.py").write_text("")
-    assert glob(tmp_path, "a/*/c.py") == [tmp_path / "a" / "b" / "c.py"]
+    assert glob(tmp_path, f"a/{middle}/c.py") == [tmp_path / "a" / "b" / "c.py"]
 
 
 @pytest.mark.parametrize(("hidden", "flag"), [(False, []), (True, ["--hidden"])])

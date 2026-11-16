@@ -690,7 +690,7 @@ def test_a_former_shell_result_reads_its_streams_and_a_failing_exit(
     )
     assert former_kind(marked) == "BashResult"
     silent = _formerly("ShellCommandResult", exit_code=3)
-    assert (silent.stdout, silent.stderr, silent.text()) == ((), (), "\n[exit 3]")
+    assert (silent.stdout, silent.stderr, silent.text()) == ((), (), "[exit 3]")
     empty = _formerly("BashResult", stdout="", stderr="")
     assert (empty.stdout, empty.stderr) == ((), ())
     # Only a shell record had an exit code; one on another record is no result's.
@@ -717,6 +717,9 @@ def test_a_failing_command_s_exit_is_read_after_its_streams_and_held_in_neither(
 
     assert ran.text() == f"out\nerr{note}"
     assert (ran.stdout, ran.stderr) == (("out\n",), ("err",))
+    # Output that ends its last line is not given a blank line before the note.
+    ended = replace(ran, stderr=("err\n",))
+    assert ended.text() == f"out\nerr\n{note.removeprefix(chr(10))}"
     # What a prune or a compaction left is read as it is.
     assert ran.restated("[pruned]").text() == "[pruned]"
 

@@ -14,6 +14,7 @@ from typing import Literal, Self, override
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import shlex
 import time
@@ -34,7 +35,13 @@ from sagent.model.exceptions import (
     OverloadedError,
     RateLimitedError,
 )
-from sagent.model.scripted import Reply, ScriptedProvider, call, reply
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
+)
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.openai import wire
 from sagent.providers.types import Model
@@ -199,6 +206,8 @@ class Talking:
     display: ToolDisplay = field(default_factory=ToolDisplay)
     lines: asyncio.Queue[str | None] = field(default_factory=asyncio.Queue)
     started: asyncio.Event = field(default_factory=asyncio.Event)
+    shown: str | None = None
+    """What it says the model reads at its end instead of what it wrote."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         del arguments
@@ -225,7 +234,7 @@ class Talking:
         self.started.set()
         while (line := await self.lines.get()) is not None:
             stdout.write(line)
-        return ToolOutput(result=BashResult(exit_code=3))
+        return ToolOutput(result=BashResult(exit_code=3), shown=self.shown)
 
     def say(self, *lines: str) -> None:
         for line in lines:
@@ -5164,17 +5173,25 @@ async def test_a_pass_that_fails_after_its_events_is_logged_and_the_next_goes_on
 async def test_a_nudge_drives_a_round_for_an_idle_agent_and_none_for_a_busy_one() -> (
     None
 ):
-    async with Harness(reply("paid")) as h:
+    async with Harness(reply("first"), reply("paid"), reply("next")) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
         h.runtime.model_call = asyncio.create_task(_forever())
         h.push(SystemMessage(content="busy", subtype="nudge"))
         await spin()
         h.runtime.model_call.cancel()
         h.runtime.model_call = None
         h.push(SystemMessage(content="you owe a reply", subtype="nudge"))
-        await h.seen(ModelIdle)
+        await h.seen(ModelIdle, 2)
+        h.push(_user("then"))
+        await h.seen(ModelIdle, 3)
     nudges = [m for m in h.history() if isinstance(m, SystemMessage)]
     assert [(m.content, m.subtype) for m in nudges] == [("you owe a reply", "nudge")]
-    assert h.answers() == ["paid"]
+    # Shown as the model reads it, so the user sees why it spoke.
+    assert [e for e in h.events if isinstance(e, SystemMessage)] == nudges
+    # The nudge parts the two replies, so the context needed no rebuilding.
+    assert h.answers() == ["first", "paid", "next"]
+    assert not _rescued(h)
 
 
 @pytest.mark.asyncio
@@ -8251,7 +8268,7 @@ def _woken(h: Harness) -> list[str]:
 
 
 _SOON = DetachSchedule(default=WakeSchedule(first_sec=0.01, max_gap_sec=0.01))
-"""Wake at once, whatever the call wrote: the first wake detaches the cohort."""
+"""Wake at once, whatever the call wrote: the first wake detaches each waking call."""
 
 
 @pytest.mark.asyncio
@@ -8290,6 +8307,32 @@ async def test_a_first_wake_detaches_the_cohort_with_what_each_call_wrote(
 
 
 @pytest.mark.asyncio
+async def test_a_detached_call_s_own_view_is_what_the_model_reads_at_its_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's reply, or where a cut output was kept, is the tool's to say."""
+    armed = _wakes(monkeypatch)
+    talk = Talking(shown="the reply; full output: /spill/a.txt")
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(3),
+        tools=[talk],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        talk.say("one\n")
+        await h.until(lambda: bool(h.runtime._watches["t1"].items))
+        h.push(Wake(call_id="t1", forced=False))
+        await h.seen(ModelIdle)
+        talk.say("two\n")
+        talk.end()
+        await h.until(lambda: bool(_arrival(h, "t1")))
+    (arrived,) = _arrival(h, "t1")
+    assert arrived.text() == "the reply; full output: /spill/a.txt"
+    assert arrived.stdout == ("one\n", "two\n")
+
+
+@pytest.mark.asyncio
 async def test_a_later_wake_tells_the_model_only_what_is_new(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8322,6 +8365,11 @@ async def test_a_later_wake_tells_the_model_only_what_is_new(
         await h.until(lambda: bool(_arrival(h, "t1")))
     assert [w.splitlines()[1:] for w in _woken(h)] == [["two"], ["(no new output)"]]
     assert all(w.startswith("[talk t1 still running after ") for w in _woken(h))
+    # Each wake parts the replies either side of it: nothing had to be rebuilt.
+    assert not _rescued(h)
+    published = [e.content for e in h.events if isinstance(e, SystemMessage)]
+    assert published == _woken(h)
+    assert len(h.answers()) == len(h.requests())
     assert all(
         e.timestamp is not None
         for e in h.history()
@@ -8434,6 +8482,66 @@ async def test_a_cache_that_is_cold_does_not_bound_the_wait(
 
 
 @pytest.mark.asyncio
+async def test_a_wake_detaches_only_the_calls_that_may_run_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call whose tool wakes no one is waited for, beside one woken and detached."""
+    armed = _wakes(monkeypatch)
+    talk, quiet = Talking(), Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("talk", "t1"), call("echo", "e1")]),
+        *_replies(3),
+        tools=[talk, quiet],
+    ) as h:
+        h.runtime.detach_schedule = DetachSchedule(tools={"echo": None})
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        talk.say("one\n")
+        await h.until(lambda: bool(h.runtime._watches["t1"].items))
+        h.push(Wake(call_id="t1", forced=False))
+        await spin()
+        assert [r.state for r in h.results("t1")] == ["pending"]
+        assert h.results("e1") == []
+        assert h.runtime.cohort == {"e1"}
+        assert len(h.requests()) == 1
+        quiet.release.set()
+        await h.seen(ModelIdle)
+        assert [r.text() for r in h.results("e1")] == ["ok"]
+        talk.end()
+        await h.until(lambda: bool(_arrival(h, "t1")))
+
+
+@pytest.mark.parametrize(
+    ("model_id", "warm"),
+    [("scripted", True), ("other", False)],
+    ids=["the-same-model-again", "another-model"],
+)
+@pytest.mark.asyncio
+async def test_only_the_model_that_warmed_the_cache_keeps_it(
+    model_id: str,
+    *,
+    warm: bool,
+) -> None:
+    """Each model has its own cache: another starts cold, whatever the last one sent."""
+    h = Harness()
+    h.provider.capability = replace(
+        h.provider.capability,
+        cache_ttl_sec=frozenset({0.0, 300.0}),
+    )
+    model = h.provider["scripted"]
+    model.settings = replace(model.settings, cache_ttl_sec=300.0)
+    h.runtime.model = model
+    h.runtime._last_request = time.monotonic()
+    switched = ScriptedModel(
+        provider=h.provider,
+        capability=replace(model.capability, model_id=model_id),
+        settings=model.settings,
+    )
+    h.runtime.model = switched
+    assert math.isfinite(h.runtime._cache_left(time.monotonic())) is warm
+
+
+@pytest.mark.asyncio
 async def test_a_call_whose_tool_wakes_no_one_is_waited_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8453,7 +8561,7 @@ async def test_a_call_whose_tool_wakes_no_one_is_waited_for(
         await h.until(lambda: bool(h.results("e1")))
     # Only ``echo`` has a schedule; ``talk`` ran to its end, waited on.
     assert [w.call_id for _, w in armed] == ["e1"]
-    assert [r.text() for r in h.results("t1")] == ["one\n\n[exit 3]"]
+    assert [r.text() for r in h.results("t1")] == ["one\n[exit 3]"]
 
 
 @pytest.mark.asyncio
@@ -8474,7 +8582,7 @@ async def test_a_wake_for_a_call_that_ended_is_dropped(
         await h.seen(ModelIdle)
         h.push(armed[0][1], Wake(call_id="nope", forced=True))
         await spin()
-    assert [r.text() for r in h.results("t1")] == ["one\n\n[exit 3]"]
+    assert [r.text() for r in h.results("t1")] == ["one\n[exit 3]"]
     assert _woken(h) == []
     assert h.runtime._watches == {}
 
@@ -8527,7 +8635,7 @@ async def test_foreground_waits_to_the_end_for_a_tool_that_wakes_no_one() -> Non
         assert h.results("f1") == []
         talk.end()
         await h.until(lambda: bool(h.results("f1")))
-    assert [r.text() for r in h.results("f1")] == ["one\n\n[exit 3]"]
+    assert [r.text() for r in h.results("f1")] == ["one\n[exit 3]"]
 
 
 @pytest.mark.asyncio
