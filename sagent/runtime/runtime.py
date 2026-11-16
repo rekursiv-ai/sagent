@@ -12,9 +12,15 @@ Tool calls run in one of two registries:
   read is rewritten.
 
 A call goes to ``detached`` when the model asks for ``background`` or
-``delay``, when it runs past ``detach_after_sec``, or when the user interrupts
+``delay``, when the first wake finds it running, or when the user interrupts
 its cohort: a message, ``Compact``, or ``Clear``. ``Kill`` cancels calls in
 either.
+
+A call the model waits on wakes it on the schedule ``detach_schedule`` gives its
+tool: the first wake detaches the cohort, each stub showing what its call wrote
+so far; each later one tells an idle model what the call wrote since it last
+looked; the call's result, when it comes, shows only what the model has not
+read. The record keeps everything the call wrote.
 
 A reply's calls run as a shell line. Calls sharing a ``serialize_key`` run as
 ``a ; b``, a group; other calls run beside them, as ``&``. A ``"*"`` call, whose
@@ -55,6 +61,7 @@ import asyncio
 import dataclasses
 import itertools
 import logging
+import math
 import time
 
 from sagent.model.cost import TokenCost, TokenCount
@@ -106,6 +113,7 @@ from sagent.runtime.types import (
     CompactStarted,
     Detach,
     DetachedResult,
+    DetachSchedule,
     Halt,
     Job,
     Kill,
@@ -120,7 +128,6 @@ from sagent.runtime.types import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
-    Nudge,
     Quit,
     Retry,
     RuntimeEvent,
@@ -128,16 +135,19 @@ from sagent.runtime.types import (
     Scheduled,
     UserDeferredMessage,
     UserQueuedMessage,
+    Wake,
 )
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
+    BackgroundTaskResult,
     SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
     TurnContext,
     UserMessage,
+    now_timestamp,
 )
 from sagent.tools.background_task import (
     BackgroundTask,
@@ -170,6 +180,12 @@ logger = logging.getLogger(__name__)
 
 # How long ``Quit`` waits for the tools it cancelled to stop.
 _QUIT_WAIT_SEC: Final = 10.0
+
+# How long before the prompt cache lapses a wake comes, to reach the model in time.
+_CACHE_MARGIN_SEC: Final = 30.0
+
+# The notes that wake an idle model: a reply owed, and a long call's news.
+_WAKING: Final = frozenset({"nudge", "wake"})
 
 
 def widen_barrier_mask(
@@ -223,7 +239,7 @@ class Await:
                 AgentToAgentMessage,
                 AgentSendQueuedMessage,
                 AgentSendDeferredMessage,
-                Nudge,
+                SystemMessage,
                 Quit,
             ),
             passes=(Halt, Kill, Clear, Compact, CompactComplete, CompactFailed),
@@ -603,9 +619,15 @@ class Runtime:
         self.allow_background = True
         # Callers waiting on a background call's result instead of its delivery.
         self._foreground_waiters: dict[str, list[asyncio.Future[ToolResult]]] = {}
-        # How long a call the model waits on may run before it is answered by a stub
-        # and left to finish, its result delivered later; ``None`` waits for each.
-        self.detach_after_sec: float | None = None
+        # When each tool's long calls wake the model; the first wake answers the
+        # cohort with stubs, and the calls run on, their results delivered later.
+        self.detach_schedule = DetachSchedule()
+        # What each running call wrote, and what of it the model has read; kept until
+        # its result is taken in.
+        self._watches: dict[str, _Watch] = {}
+        # When the last model call was sent, by ``time.monotonic``: the prompt cache
+        # stays warm from then.
+        self._last_request: float | None = None
         # Each killed call still stopping, and its key: its process may still be
         # writing, so a later reply's call contending with it waits.
         self._stopping: dict[asyncio.Task[None], str | None] = {}
@@ -767,13 +789,18 @@ class Runtime:
         }
 
     async def foreground(self, call_id: str) -> ToolResult | None:
-        """Wait for a detached call's result, and take it instead of its delivery.
+        """Wait for a detached call's result, or its next wake, whichever comes first.
+
+        Waiting no longer than a wake keeps the cache warm, and shows the model a
+        long call as it goes; the call runs on.
 
         Args:
           call_id: The call, as ``jobs`` names it.
 
         Returns:
-          result: Its result, once it has one; ``None`` for no such call.
+          result: Its result, taken instead of its delivery; else, at its next
+            wake, what it wrote since the model last looked; ``None`` for no
+            such call.
 
         """
         for commit in self._pending_commits:
@@ -791,16 +818,43 @@ class Runtime:
         waiters = self._foreground_waiters.setdefault(call_id, [])
         waiters.append(waiter)
         try:
-            return await waiter
+            return await self._result_or_wake(call_id, waiter)
         finally:
             waiters.remove(waiter)
             if not waiters and self._foreground_waiters.get(call_id) is waiters:
                 del self._foreground_waiters[call_id]
 
+    async def _result_or_wake(
+        self,
+        call_id: str,
+        waiter: asyncio.Future[ToolResult],
+    ) -> ToolResult:
+        """Return ``waiter``'s result, or at a wake what the call wrote since last looked."""
+        watch = self._watches.get(call_id)
+        schedule = None if watch is None else self.detach_schedule.of(watch.name)
+        if watch is None or schedule is None:
+            return await waiter
+        while True:
+            now = time.monotonic()
+            gap, forced = schedule.gap(
+                now - watch.started,
+                cache_left_sec=self._cache_left(now),
+            )
+            done, _ = await asyncio.wait((waiter,), timeout=gap)
+            if done:
+                return waiter.result()
+            if forced or watch.fresh:
+                return ToolResult(
+                    call_id=call_id,
+                    state="done",
+                    stdout=(self._progress(call_id, watch),),
+                    result=BackgroundTaskResult(operation="foreground", job_id=call_id),
+                )
+
     def detach[T](self, task: asyncio.Future[T] | None) -> None:
         """Answer the waited-on call ``task`` runs with a stub, and let it run on.
 
-        As when it outlives ``detach_after_sec``: its real result arrives later.
+        As when a wake finds it running: its real result arrives later.
         Nothing happens when background runs are off, or no waited call runs there.
 
         Args:
@@ -859,6 +913,7 @@ class Runtime:
             self._append_detached_arrival(
                 ToolResult(
                     call_id=cid,
+                    timestamp=now_timestamp(),
                     state="cancelled",
                     shown=self.markers.cancelled,
                 ),
@@ -1160,6 +1215,7 @@ class Runtime:
     # it forward as well would tell the model twice.
     def _deliver_detached(self, result: ToolResult) -> None:
         """Hand a detached call's result to whoever waits for it, else deliver it."""
+        result = self._unseen(result)
         waiting = [
             w for w in self._foreground_waiters.get(result.call_id, ()) if not w.done()
         ]
@@ -1348,6 +1404,9 @@ class Runtime:
                         ):
                             self._on_detach(item)
 
+                        case Wake():
+                            self._on_wake(item)
+
                         case Compact():
                             await self._on_compact(item)
 
@@ -1385,13 +1444,12 @@ class Runtime:
                                 self._commit_user(item)
                             self._awaiting_user = False  # pragma: no mutate[truthiness]
 
-                        # A nudge to a busy agent is moot: it is nudged again
-                        # at its next idle if it still owes.
-                        case Nudge(content=content):
+                        # The harness's note, as a nudge for a reply owed. To a
+                        # busy agent it is moot: it is told again at its next
+                        # idle if it still owes.
+                        case SystemMessage():
                             if self.model_call is None:
-                                self.append_history(
-                                    SystemMessage(content=content, subtype="nudge"),
-                                )
+                                self.append_history(item)
                             self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         # Input that ends the wait for the user is the user
@@ -1429,6 +1487,8 @@ class Runtime:
                             cid = item.call_id
                             self.cohort.discard(cid)
                             del self.running_tools[cid]
+                            # Waited on, the model reads it whole.
+                            self._watches.pop(cid, None)
                             self.append_history(item)
                             self.publish(item)
 
@@ -1555,6 +1615,7 @@ class Runtime:
         self._stop_all_tools(mode="detach")
         # With no call registered, a late result matches nothing and is dropped.
         self._cancel_detached()
+        self._watches.clear()
         self._pending_commits.clear()
         self._forwarded_call_ids.clear()
         self._queued.clear()
@@ -1698,15 +1759,89 @@ class Runtime:
             mid = member.call_id
             if mid not in self.cohort:
                 continue
-            logger.debug(
-                "runtime tool detached after %ss: call_id=%s",
-                self.detach_after_sec,
-                mid,
-            )
+            logger.debug("runtime tool detached: call_id=%s", mid)
             self._stop_tool(mid, self.running_tools.pop(mid), mode="detach")
             self.cohort.discard(mid)
         if not self.cohort:
             self._cohort_seen = False  # pragma: no mutate[truthiness]
+
+    # A wake while the model works, or while calls it waits on run, is dropped: what
+    # the call wrote waits for the next wake, which shows it as well.
+    def _on_wake(self, item: Wake) -> None:
+        """Show the model what a long call wrote, as its schedule says; arm the next wake."""
+        cid = item.call_id
+        watch = self._watches.get(cid)
+        if watch is None or watch.ended:
+            return
+        # A model call since this wake was armed warmed the cache again.
+        forced = item.forced and watch.cached in (None, self._last_request)
+        if forced or watch.fresh:
+            if cid in self.cohort:
+                logger.debug("runtime wake detaches the cohort: call_id=%s", cid)
+                self._stop_all_tools(mode="detach")
+            elif (
+                self.model_call is None
+                and self.compact_task is None
+                and not self.cohort
+            ):
+                self.append_history(
+                    SystemMessage(
+                        timestamp=now_timestamp(),
+                        content=self._progress(cid, watch),
+                        subtype="wake",
+                    ),
+                )
+        self._arm(cid, watch)
+
+    def _arm(self, cid: str, watch: _Watch) -> None:
+        """Set the next wake of the call ``cid``, if its tool's schedule has one."""
+        schedule = self.detach_schedule.of(watch.name)
+        if schedule is None:
+            return
+        now = time.monotonic()
+        cache_left = self._cache_left(now)
+        gap, forced = schedule.gap(now - watch.started, cache_left_sec=cache_left)
+        watch.cached = (
+            self._last_request if forced and cache_left < schedule.max_gap_sec else None
+        )
+        watch.timer = asyncio.get_running_loop().call_later(
+            gap,
+            self.push,
+            Wake(call_id=cid, forced=forced),
+        )
+
+    # Past its lifetime the cache is cold already, and no wake can keep it.
+    def _cache_left(self, now: float) -> float:
+        """Return how long until a wake must come to keep the prompt cache warm."""
+        ttl = self.model.settings.cache_ttl_sec
+        if not ttl or self._last_request is None:
+            return math.inf
+        left = self._last_request + ttl - _CACHE_MARGIN_SEC - now
+        return left if left > 0 else math.inf
+
+    def _look(self, watch: _Watch) -> str:
+        """Return what the call wrote that the model has not read, its ends if long."""
+        unseen = watch.items[watch.seen :]
+        watch.seen = len(watch.items)
+        text = "".join(item for item in unseen if isinstance(item, str))
+        view, _ = self.tool_context.view(text.splitlines(keepends=True))
+        return view.rstrip("\n")
+
+    def _progress(self, cid: str, watch: _Watch) -> str:
+        """Return a long call's news: how long it has run, and what it wrote since."""
+        elapsed = time.monotonic() - watch.started
+        news = self._look(watch) or "(no new output)"
+        return f"[{watch.name} {cid} still running after {elapsed:.0f}s]\n{news}"
+
+    # The model read the rest at its wakes, and the record keeps all of it.
+    def _unseen(self, result: ToolResult) -> ToolResult:
+        """Return a detached call's result reading what the model has not seen of it."""
+        watch = self._watches.pop(result.call_id, None)
+        if watch is None or not watch.seen or result.state != "done":
+            return result
+        tail = self._look(watch) or "(no new output)"
+        shown = dataclasses.replace(result, shown=None, stdout=(tail,), stderr=())
+        return dataclasses.replace(result, shown=shown.text())
 
     async def _on_compact(self, item: Compact) -> None:
         """Start a compaction, unless one runs; what the user typed goes into it."""
@@ -1752,7 +1887,9 @@ class Runtime:
         self._auto_compactions = 0
         self._retries = 0
         self.model_call = None
-        msg = self._rewrite_calls(self._sanitize_forged_arrivals(item.response))
+        msg = _stamped(
+            self._rewrite_calls(self._sanitize_forged_arrivals(item.response)),
+        )
         self._gate_calls(msg)
         cut_in = (
             self.before_tool_spawn(msg) if self.before_tool_spawn is not None else None
@@ -1923,13 +2060,14 @@ class Runtime:
         return tuple(self._mid_stream_queue)
 
     # A note rides a round that real content drives and drives none itself, so the entry
-    # that decides is the last turn before any trailing notes; a nudge alone drives one.
+    # that decides is the last turn before any trailing notes; a nudge or a wake alone
+    # drives one.
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""
         messages = self.context().messages
         at = _last_turn(messages)
         trailing = messages[0 if at is None else at + 1 :]
-        if any(isinstance(m, SystemMessage) and m.subtype == "nudge" for m in trailing):
+        if any(isinstance(m, SystemMessage) and m.subtype in _WAKING for m in trailing):
             return True
         return at is not None and isinstance(
             messages[at],
@@ -2040,6 +2178,7 @@ class Runtime:
 
     # The call is answered now, by a stub, and its task registered as detached, so
     # its own result, if it comes, is delivered forward.
+    # Or answer it ``[cancelled]`` and cancel it.
     def _stop_tool(
         self,
         cid: str,
@@ -2047,13 +2186,25 @@ class Runtime:
         *,
         mode: Literal["detach", "kill"],
     ) -> None:
-        """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
+        """Answer a cohort call ``[detached]``, with what it wrote so far, and let it run."""
         match mode:
             case "kill":
                 state, shown = "cancelled", self.markers.cancelled
             case "detach":
-                state, shown = "pending", self.markers.detached
-        stub = ToolResult(call_id=cid, state=state, shown=shown)
+                watch = self._watches.get(cid)
+                wrote = "" if watch is None else self._look(watch)
+                state = "pending"
+                shown = (
+                    f"{self.markers.detached}\n{wrote}"
+                    if wrote
+                    else self.markers.detached
+                )
+        stub = ToolResult(
+            call_id=cid,
+            timestamp=now_timestamp(),
+            state=state,
+            shown=shown,
+        )
         self.append_history(stub)
         self.publish(stub)
         self.detached[cid] = task
@@ -2290,7 +2441,12 @@ class Runtime:
                 ),
             )
             task.add_done_callback(lambda _, cid=cid: self._forget(cid))
-            self._calls[cid] = _Call(call=tc, started=now, key=key)
+            self._calls[cid] = _Call(
+                call=tc,
+                started=now,
+                key=key,
+                background=delay is not None,
+            )
             tasks[cid] = task
             if delay is not None:
                 self._start_background(tc, task)
@@ -2323,7 +2479,6 @@ class Runtime:
             self._groups[tc.call_id] = group
         done = asyncio.gather(*tasks, return_exceptions=True)
         done.add_done_callback(lambda _: self._end_group(group))
-        self._detach_later(group, done)
 
     def _end_group(self, group: tuple[ToolCall, ...]) -> None:
         """Forget ``group``, once every call in it has stopped."""
@@ -2331,27 +2486,6 @@ class Runtime:
             # A later reply may reuse the id while this group runs on, detached.
             if self._groups.get(tc.call_id) is group:
                 del self._groups[tc.call_id]
-
-    # A tool that manages jobs, such as waiting for one, is waited on to its end.
-    def _detach_later(
-        self,
-        group: tuple[ToolCall, ...],
-        done: asyncio.Future[list[BaseException | None]],
-    ) -> None:
-        """Detach ``group`` if it outlives ``detach_after_sec``."""
-        tools = [self.tools.get(tc.name) for tc in group]
-        if (
-            self.detach_after_sec is None
-            or not self.allow_background
-            or not all(t is None or backgroundable(t) for t in tools)
-        ):
-            return
-        timer = asyncio.get_running_loop().call_later(
-            self.detach_after_sec,
-            self.push,
-            Detach(call_id=group[0].call_id),
-        )
-        done.add_done_callback(lambda _: timer.cancel())
 
     def _background_delay(self, call: ToolCall) -> float | None:
         """Return the delay ``call`` asks to run in the background after, or ``None``."""
@@ -2368,6 +2502,7 @@ class Runtime:
         """Answer ``call``, which ``task`` runs apart, with a stub."""
         stub = ToolResult(
             call_id=call.call_id,
+            timestamp=now_timestamp(),
             state="pending",
             shown=f"{self.markers.running}{call.name} as job {call.call_id}]",
         )
@@ -2407,7 +2542,12 @@ class Runtime:
             return
         self._stop(cid, task)
         self._deliver_detached(
-            ToolResult(call_id=cid, state="cancelled", shown=self.markers.cancelled),
+            ToolResult(
+                call_id=cid,
+                timestamp=now_timestamp(),
+                state="cancelled",
+                shown=self.markers.cancelled,
+            ),
         )
 
     # A finished task removes itself; one cancelled before it ran a step does not.
@@ -2535,6 +2675,7 @@ class Runtime:
             dataclasses.replace(self.request(), recheck_quota=self.recheck_quota),
         )
         self.recheck_quota = False
+        self._last_request = time.monotonic()
         snapshot = self.token_accounting.capture(request, model=self._called_model)
         # Only the first call after a compaction is told of it.
         self._compaction = ""
@@ -2610,6 +2751,7 @@ class Runtime:
                 LazyEvent(
                     payload=ToolResult(
                         call_id=call.call_id,
+                        timestamp=now_timestamp(),
                         state="failed",
                         stderr=(
                             (
@@ -2633,6 +2775,7 @@ class Runtime:
             self.inbox.push_back(
                 ToolResult(
                     call_id=call.call_id,
+                    timestamp=now_timestamp(),
                     state="failed",
                     stderr=(
                         refused
@@ -2661,9 +2804,28 @@ class Runtime:
                 )
             else:
                 streaming_result = tool.call(self.tool_context, arguments)
-                self._calls[call.call_id].result_future = streaming_result.result
-                # A cancel here stops the tool; ``settled`` still returns its output.
-                result = await settled(streaming_result, call_id=call.call_id)
+                running = self._calls[call.call_id]
+                running.result_future = streaming_result.result
+                watch = _Watch(name=call.name, started=time.monotonic())
+                self._watches[call.call_id] = watch
+                # A job the model asked for apart, and a tool that manages jobs,
+                # never wake it.
+                if (
+                    not running.background
+                    and self.allow_background
+                    and backgroundable(tool)
+                ):
+                    self._arm(call.call_id, watch)
+                try:
+                    # A cancel here stops the tool; ``settled`` still returns its
+                    # output.
+                    result = await settled(
+                        streaming_result,
+                        call_id=call.call_id,
+                        on_item=watch.add,
+                    )
+                finally:
+                    watch.end()
         except asyncio.CancelledError:
             result = ToolResult(call_id=call.call_id, state="cancelled")
         except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
@@ -2689,6 +2851,7 @@ class Runtime:
                 call.name,
             )
             result = dataclasses.replace(result, shown=self.markers.cancelled)
+        result = dataclasses.replace(result, timestamp=now_timestamp())
         if call.call_id in self.detached:
             logger.debug(
                 "runtime tool complete detached: call_id=%s tool=%s is_error=%s",
@@ -2872,6 +3035,9 @@ class _Call:
     key: str | None
     """What it touches, its ``serialize_key``."""
 
+    background: bool = False
+    """Whether the model asked to run it apart, with ``background`` or ``delay``."""
+
     waiting: bool = True
     """Whether it still waits for the calls before it, or for its delay."""
 
@@ -2883,6 +3049,59 @@ class _Call:
         default_factory=list[RuntimeEvent],
     )
     """Events to queue right after the call's result; see ``Runtime.push_after``."""
+
+
+@dataclass(slots=True, kw_only=True)
+class _Watch:
+    """What a running call wrote, how much of it the model has read, and its next wake."""
+
+    name: str
+    """The call's tool."""
+
+    started: float
+    """When the tool started, by ``time.monotonic``."""
+
+    items: list[object] = dataclasses.field(default_factory=list[object])
+    """Every item the call wrote, both streams in the order written."""
+
+    seen: int = 0
+    """How many of ``items`` the model has read."""
+
+    timer: asyncio.TimerHandle | None = None
+    cached: float | None = None
+    """The model call whose cache deadline set the armed wake; ``None`` if none did."""
+
+    ended: bool = False
+
+    @property
+    def fresh(self) -> bool:
+        """Whether the call wrote something the model has not read."""
+        return len(self.items) > self.seen
+
+    def add(self, stream: Literal["stdout", "stderr"], item: object) -> None:
+        """Keep ``item``, which the call wrote on ``stream``."""
+        del stream
+        self.items.append(item)
+
+    def end(self) -> None:
+        """Note that the tool ended; its next wake never comes."""
+        self.ended = True
+        if self.timer is not None:
+            self.timer.cancel()
+
+
+def _stamped(response: Response) -> Response:
+    """Return ``response`` with each call it makes stamped now."""
+    when = now_timestamp()
+    return dataclasses.replace(
+        response,
+        records=tuple(
+            dataclasses.replace(r, timestamp=when)
+            if isinstance(r, ToolCall) and r.timestamp is None
+            else r
+            for r in response.records
+        ),
+    )
 
 
 # ``"*"`` is a call whose resources are unknown: it waits for every keyed call before

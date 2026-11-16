@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import os
 import shutil
 import subprocess
+import threading
 
 import pytest
 
 from sagent.lib.files import glob as files_glob
-from sagent.lib.files.glob import GlobError, fd_command, glob
+from sagent.lib.files.glob import GlobError, fd_command, glob, streamed_paths
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture(autouse=True)
@@ -409,17 +414,58 @@ def test_the_default_fd_timeout_is_thirty_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "a.py").write_text("")
-    run_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    intervals: list[float] = []
+    real_timer = threading.Timer
 
-    def run(*args: object, **kwargs: object) -> object:
-        run_calls.append((args, kwargs))
-        return subprocess.CompletedProcess([], 0, "", "")
+    def timer(interval: float, function: Callable[[], object]) -> threading.Timer:
+        intervals.append(interval)
+        return real_timer(interval, function)
 
     with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", run)
-        assert glob(tmp_path, "**/*.py") == []
-    (call,) = run_calls
-    assert call[1]["timeout"] == 30
+        patch.setattr(threading, "Timer", timer)
+        assert glob(tmp_path, "**/*.py") == [tmp_path / "a.py"]
+    assert intervals == [30]
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_paths_stream_as_fd_finds_them_and_list_sorted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fd walks in parallel, so it prints in no set order."""
+    found = [tmp_path.resolve() / name for name in ("b.py", "a.py")]
+    argv = ["/bin/sh", "-c", "".join(f"echo '{path}'; " for path in found)]
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    assert list(streamed_paths(tmp_path, "**/*.py")) == [
+        tmp_path / "b.py",
+        tmp_path / "a.py",
+    ]
+    assert glob(tmp_path, "**/*.py") == [tmp_path / "a.py", tmp_path / "b.py"]
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_a_caller_that_stops_reading_leaves_no_fd_behind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid = tmp_path / "fd.pid"
+    first = tmp_path.resolve() / "a.py"
+    argv = ["/bin/sh", "-c", f"echo $$ > '{pid}'; echo '{first}'; exec sleep 60"]
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    paths = streamed_paths(tmp_path, "**/*.py")
+    assert next(paths) == tmp_path / "a.py"
+    alive = Path(f"/proc/{pid.read_text().strip()}")
+    assert alive.exists()
+    paths.close()
+    assert not alive.exists()
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])

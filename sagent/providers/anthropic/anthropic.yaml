@@ -366,6 +366,9 @@ providers:
     sends: [thinking_effort, thinking_output]
     # ``claude`` holds the conversation; what it compacts or prunes is its own.
     manage_context_server_side: [true]
+    # ``claude`` picks the cache lifetime, not sagent: on the subscription it wrote
+    # every token of a measured call to the one-hour bucket (2.1.309, 2026-11-16).
+    cache_ttl_sec: [3600.0]
     # ``--thinking-display summarized`` shows the summary; ``claude`` has no
     # sealed-only display to match the API's redaction.
     thinking:

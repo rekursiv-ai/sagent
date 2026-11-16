@@ -596,6 +596,9 @@ class _CapabilityProfile:
     """The size a bare id starts at: ``fullcontext`` and the other names, or a count."""
 
     cache_ttl_sec: frozenset[float] = frozenset({0.0})
+    cache_ttl_sec_default: float | None = None
+    """The cache lifetime a bare id starts at; ``None`` is the shortest offered."""
+
     manage_context_server_side: frozenset[bool] = frozenset({False, True})
     retries_internally: bool = False
     account_auth: bool = False
@@ -632,9 +635,6 @@ def _model(
     _check_limits(row)
     if (
         not row.prices
-        or not row.thinking.effort
-        or not row.thinking.budget
-        or not row.thinking.output
         or row.approx_chars_per_token <= 0
         or not math.isfinite(row.approx_chars_per_token)
     ):
@@ -707,7 +707,10 @@ def _model(
             cache_ttl_sec=_lowest(
                 "cache_ttl_sec",
                 row.cache_ttl_sec,
-                sorted(row.cache_ttl_sec),
+                _default_first(
+                    row.cache_ttl_sec_default,
+                    tuple(sorted(row.cache_ttl_sec)),
+                ),
             ),
             manage_context_server_side=_lowest(
                 "manage_context_server_side",

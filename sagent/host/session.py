@@ -7,10 +7,11 @@ One client session's tools, run as sagent on this machine runs them.
 
 A tool server starts one per client session, as ``python -m`` of this module,
 and speaks to it on a socket the host inherits as ``--fd``: ``Call``,
-``Cancel`` and ``Note`` in; ``Tools``, then each ``Result``, ``Note`` and
-``Peers``, out. What a tool prints goes to stdout and stderr, never into the
-lines. Each client agent has its own working directory and seen files, as an
-agent here does; a new context window of it starts afresh. The socket's end
+``Cancel`` and ``Note`` in; ``Tools``, then each ``Progress``, ``Result``,
+``Note`` and ``Peers``, out. What a tool prints goes to stdout and stderr, never
+into the lines; each text item a call writes goes out as ``Progress``. Each
+client agent has its own working directory and seen files, as an agent here
+does; a new context window of it starts afresh. The socket's end
 cancels every call, each cleaning up as it would here.
 
 The agents a call spawns here join this host's team. The calling agent's team,
@@ -31,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import argparse
 import asyncio
@@ -54,6 +55,7 @@ from sagent.host.wire import (
     Pause,
     Paused,
     Peers,
+    Progress,
     Refused,
     Result,
     Resume,
@@ -354,9 +356,20 @@ class _Calls:
             self._tools.get(call.tool),
             self._context(call),
             call=call,
+            on_item=partial(self._wrote, call.id),
         )
         self._wire.peers()
         self._writer.write(encoded(Result(id=call.id, record=record)))
+
+    # Only text: the record still carries every item, typed ones included.
+    def _wrote(
+        self,
+        call_id: str,
+        stream: Literal["stdout", "stderr"],
+        item: object,
+    ) -> None:
+        if isinstance(item, str):
+            self._writer.write(encoded(Progress(id=call_id, text=item, stream=stream)))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -367,11 +380,17 @@ class _Agent:
     context: ToolContext
 
 
+# ``on_item`` is shown each item read while the tool still runs; the rest reach the
+# caller in the record alone, so a tool that writes only at its end, as most do, sends
+# each item once.
 async def _result(
     tool: Tool | None,
     context: ToolContext,
     *,
     call: Call,
+    on_item: Callable[[Literal["stdout", "stderr"], object], object] = (
+        lambda _stream, _item: None
+    ),
 ) -> ToolResult:
     """Return what ``tool`` did, a failure or a cancel as the runtime records it."""
     if tool is None:
@@ -384,7 +403,11 @@ async def _result(
         streaming_result = tool.call(context, call.arguments)
     except Exception as exc:  # noqa: BLE001 -- A tool's failure is its call's result, as the runtime records it.
         return ToolResult(call_id="", state="failed", stderr=(describe(exc),))
-    result = await settled(streaming_result)
+    running = streaming_result.result
+    result = await settled(
+        streaming_result,
+        on_item=lambda stream, item: None if running.done() else on_item(stream, item),
+    )
     if result.state == "cancelled":
         return replace(result, shown=Markers().cancelled)
     return result

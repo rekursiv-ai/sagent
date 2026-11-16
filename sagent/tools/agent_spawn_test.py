@@ -37,7 +37,7 @@ from sagent.providers.catalog import CachedModel, ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
-from sagent.runtime.types import RuntimeEvent
+from sagent.runtime.types import DetachSchedule, RuntimeEvent
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
     AgentSpawnResult,
@@ -540,7 +540,8 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
     assert result == ToolResult(
         call_id="",
         state="done",
-        stdout=("three TODOs",),
+        stdout=("looking\n", "Read\n", "three TODOs\n"),
+        shown="three TODOs",
         result=AgentSpawnResult(
             agent_id="Agent_0",
             agent_kind="persistent",
@@ -590,6 +591,30 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
     # Messaging is present even when the parent did not carry it.
     assert [t.name for t in first.tools] == ["AgentSend", "Grep", "Read"]
     assert first.allowed is None
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_says_what_its_child_says_and_calls_as_it_works(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("looking", calls=[call("Read", "c1")]),
+        reply("three TODOs"),
+    )
+    seen: list[object] = []
+    async with setup.team:
+        result = await settled(
+            setup.spawn.call(
+                ToolContext(cwd=tmp_path, label="Agent"),
+                {"prompt": "count the TODOs"},
+            ),
+            on_item=lambda _stream, item: seen.append(item),
+        )
+
+    assert result.stdout == ("looking\n", "Read\n", "three TODOs\n")
+    assert seen == list(result.stdout)
+    assert result.text() == "three TODOs"
 
 
 @pytest.mark.asyncio
@@ -915,6 +940,7 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
     _ = read.write_text("x")
     mine.files.saw(read)
     parent.runtime.persistent_retry = True
+    parent.runtime.detach_schedule = DetachSchedule(tools={"Bash": None})
     parent.environment = False
     parent.allowed = frozenset({"Grep"})
     parent.account = "work"
@@ -939,6 +965,7 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
             assert not context.files.recent()
             assert context.label == label
             assert heir.runtime.persistent_retry is True
+            assert heir.runtime.detach_schedule == DetachSchedule(tools={"Bash": None})
             assert heir.environment is False
             assert heir.agents_md is parent.agents_md
             assert isinstance(heir.session.compactor, SummaryCompactor)

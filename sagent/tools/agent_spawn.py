@@ -26,6 +26,7 @@ Typical usage example:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -50,6 +51,7 @@ from sagent.session.projects import child_journal, session_file
 from sagent.session.types import (
     AgentSpawnResult,
     AgentToAgentMessage,
+    AssistantMessage,
     ToolCall,
     ToolResult,
 )
@@ -59,6 +61,8 @@ from sagent.tools.skill import Skill
 from sagent.tools.types import (
     Arg,
     FileTracker,
+    Stream,
+    Tool,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -70,7 +74,7 @@ from sagent.tools.watch import Feed
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection
 
     from treekle import PlainTree
 
@@ -229,7 +233,8 @@ class AgentSpawn:
         Returns:
           streaming_result: The child's last text, or why it failed; with ``watch``, the
             caller's new watcher, sent ``prompt`` as a request after the
-            ``watch`` skill.
+            ``watch`` skill. What the child says, and each call it makes, is
+            written as it works; the model reads only the reply.
 
         Raises:
           ValueError: The caller is in no team or may not spawn, a tool or
@@ -238,12 +243,14 @@ class AgentSpawn:
             root.
 
         """
-        return whole_output(self._spawn(context, arguments))
+        stdout = Stream[str]()
+        return whole_output(self._spawn(context, arguments, stdout), stdout=stdout)
 
     async def _spawn(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
     ) -> ToolOutput[AgentSpawnResult, str, str]:
         a = parse(arguments, AgentSpawn.Arguments)
         parent_label = context.label
@@ -316,7 +323,7 @@ class AgentSpawn:
             max_depth=a.max_depth,
             spec=spec,
         )
-        return await self._run(child, label=label, parent=parent, a=a)
+        return await self._run(child, label=label, parent=parent, a=a, stdout=stdout)
 
     async def watch(
         self,
@@ -603,12 +610,14 @@ class AgentSpawn:
         label: str,
         parent: Agent,
         a: AgentSpawn.Arguments,
+        stdout: Stream[str],
     ) -> ToolOutput[AgentSpawnResult, str, str]:
         """Run ``child`` on the prompt to idle; it stays, its inbox open."""
         started = time.monotonic()
         tally = _Tally()
         waits = _DetachOnWait(parent=parent, task=asyncio.current_task())
-        child.runtime.observers.extend((tally, waits))
+        says = _Say(stdout=stdout, tools=child.tools)
+        child.runtime.observers.extend((tally, waits, says))
         self.team.awaited.add(label)
         try:
             reply, state = await _answer(child, a.prompt)
@@ -619,7 +628,7 @@ class AgentSpawn:
             raise
         finally:
             self.team.awaited.discard(label)
-            for observer in (tally, waits):
+            for observer in (tally, waits, says):
                 if observer in child.runtime.observers:
                     child.runtime.observers.remove(observer)
             parent.runtime.publish(
@@ -632,8 +641,10 @@ class AgentSpawn:
             )
         kept = child.session.journal.path
         return ToolOutput(
-            stdout=(reply,),
+            # A reply the child said last is written already.
+            stdout=() if says.last == f"{reply}\n" else (reply,),
             result=AgentSpawnResult(
+                shown=reply,
                 agent_id=label,
                 agent_kind="persistent",
                 prompt=a.prompt,
@@ -762,6 +773,7 @@ def _agent_from_parent(
         account=account,
         persistent_retry=parent.runtime.persistent_retry,
     )
+    agent.runtime.detach_schedule = parent.runtime.detach_schedule
     agent.model_cache = dict(parent.model_cache)
     return agent
 
@@ -791,6 +803,35 @@ class _Tally:
             self.tokens += event.response.tokens.total
             self.cost += event.response.spend.total
             self.calls += sum(isinstance(r, ToolCall) for r in event.response.records)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Say:
+    """Writes what a child says, and the first line of each call it makes, as it works."""
+
+    stdout: Stream[str]
+    tools: Mapping[str, Tool]
+    last: str = ""
+    """The last line written."""
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Write each text and call of a finished model call."""
+        if not isinstance(event, types.ModelResponseComplete):
+            return
+        for record in event.response.records:
+            if isinstance(record, AssistantMessage) and record.content not in {
+                None,
+                "",
+            }:
+                self._write(f"{record.content}\n")
+            elif isinstance(record, ToolCall):
+                tool = self.tools.get(record.name)
+                named = tool.summary(record.arguments) if tool else record.name
+                self._write(f"{named.partition('\n')[0]}\n")
+
+    def _write(self, line: str) -> None:
+        self.stdout.write(line)
+        self.last = line
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

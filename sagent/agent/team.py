@@ -74,6 +74,7 @@ from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
+    SystemMessage,
     ToolCall,
     UncategorizedRecord,
     UserMessage,
@@ -639,8 +640,9 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         # What it asked is not owed: it was never received.
         self._owed.get(recipient, {}).pop(sender, None)
         member.agent.runtime.push(
-            types.Nudge(
+            SystemMessage(
                 content=f"Your message to {recipient} was not delivered: {why}",
+                subtype="nudge",
             ),
         )
 
@@ -903,9 +905,10 @@ class _Dun:
             return
         asked = "; ".join(f"{c} ({what!r})" for c, what in owed.items())
         agent.runtime.push(
-            types.Nudge(
+            SystemMessage(
                 content=f"You owe a reply to: {asked}. Answer each message"
                 " with AgentSend. Do not acknowledge this note.",
+                subtype="nudge",
             ),
         )
 

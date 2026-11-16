@@ -761,6 +761,25 @@ def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("default", "ttl"),
+    [(None, 300.0), (3600.0, 3600.0), (60.0, 300.0)],
+    ids=["unset", "offered", "unoffered"],
+)
+def test_a_default_cache_lifetime_is_what_a_bare_id_starts_at(
+    tmp_path: Path,
+    default: float | None,
+    ttl: float,
+) -> None:
+    given = {} if default is None else {"cache_ttl_sec_default": default}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"cache_ttl_sec": [300.0, 3600.0], **given},
+    )
+    assert _load(path)["example"].default.cache_ttl_sec == ttl
+
+
+@pytest.mark.parametrize(
     ("output", "default"),
     [
         (["none", "text", "redacted"], "text"),
@@ -865,9 +884,21 @@ def test_a_card_starts_on_its_effective_date(tmp_path: Path, quoted: bool) -> No
         ([_model("Opus-5.0")], {}, "is not family-major.minor"),
         ([_model("opus-5.0.1")], {}, "is not family-major.minor"),
         ([_model(prices=[])], {}, "missing a price or setting"),
-        ([_model(thinking=_THINKING | {"effort": []})], {}, "missing a price"),
-        ([_model(thinking=_THINKING | {"budget": []})], {}, "missing a price"),
-        ([_model(thinking=_THINKING | {"output": []})], {}, "missing a price"),
+        (
+            [_model(thinking=_THINKING | {"effort": []})],
+            {},
+            "^thinking_effort offers nothing selectable",
+        ),
+        (
+            [_model(thinking=_THINKING | {"budget": []})],
+            {},
+            "^thinking_budget offers nothing selectable",
+        ),
+        (
+            [_model(thinking=_THINKING | {"output": []})],
+            {},
+            "^thinking_output offers nothing selectable",
+        ),
         ([_model(approx_chars_per_token=0.0)], {}, "missing a price"),
         ([_model(approx_chars_per_token=float("nan"))], {}, "missing a price"),
         ([_model(approx_chars_per_token=float("inf"))], {}, "missing a price"),

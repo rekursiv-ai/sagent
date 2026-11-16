@@ -27,6 +27,7 @@ from sagent.session.types import PaperFetchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
 from sagent.tools.types import (
+    Stream,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -109,18 +110,21 @@ class PaperFetch:
           arguments: What the model passed, as ``PaperFetch.Arguments``.
 
         Returns:
-          streaming_result: One line per id: where its PDF is, or why it is not.
+          streaming_result: One line per id, in the order given: where its PDF
+            is, or why it is not; each written once it and those before it are had.
 
         Raises:
           ValueError: ``ids`` is empty, or names something that is no paper id.
 
         """
-        return whole_output(self._run(context, arguments))
+        stdout = Stream[str]()
+        return whole_output(self._run(context, arguments, stdout), stdout=stdout)
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
     ) -> ToolOutput[PaperFetchResult, str, str]:
         session = context.fetch_session
         ids = paper_ids(parse(arguments, PaperFetch.Arguments).ids)
@@ -141,28 +145,33 @@ class PaperFetch:
             if len(parsed) > 1
             else None
         )
-        lines = await asyncio.gather(
-            *(
+        # All start at once; each is written in turn, once those before it are.
+        fetches = [
+            asyncio.ensure_future(
                 self._fetch(
                     kind,
                     canonical,
                     url=url,
                     looked_up=urls is not None,
                     session=session,
-                )
-                for (kind, canonical), url in zip(
-                    parsed,
-                    urls if urls is not None else [None] * len(parsed),
-                    strict=True,
-                )
-            ),
-        )
-        return ToolOutput(
-            stdout=("\n".join(text for text, _ in lines),),
-            result=PaperFetchResult(
-                exit_code=int(any(failed for _, failed in lines)),
-            ),
-        )
+                ),
+            )
+            for (kind, canonical), url in zip(
+                parsed,
+                urls if urls is not None else [None] * len(parsed),
+                strict=True,
+            )
+        ]
+        failures = 0
+        try:
+            for i, fetch in enumerate(fetches):
+                text, failed = await fetch
+                stdout.write(text if i == len(fetches) - 1 else f"{text}\n")
+                failures += failed
+        finally:
+            for fetch in fetches:
+                _ = fetch.cancel()
+        return ToolOutput(result=PaperFetchResult(exit_code=int(failures > 0)))
 
     async def _fetch(
         self,

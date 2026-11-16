@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Generator
 from functools import partial
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 import contextlib
+import io
 import itertools
 import os
 import pathlib
 import shutil
 import subprocess
+import threading
 
 import pytest
 
@@ -27,11 +29,12 @@ from sagent.lib.files.grep import (
     grep,
     grep_rows,
     rg_command,
+    streamed_rows,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -68,6 +71,55 @@ def rg() -> bool:
 
 
 _BOTH = pytest.mark.parametrize("rg", [True, False], ids=["rg", "python"])
+
+
+class _Answered:
+    """A ripgrep run that prints ``out`` and ``err`` and exits ``code``."""
+
+    def __init__(self, argv: list[str], *, out: bytes, err: bytes, code: int) -> None:
+        self.args = argv
+        self.stdout = io.BytesIO(out)
+        self.stderr = io.BytesIO(err)
+        self.returncode = code
+
+    def wait(self) -> int:
+        return self.returncode
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        """Answered already: nothing runs to kill."""
+
+
+class _Runs:
+    """Records each ripgrep run and its timeout; answers it, or runs it for real."""
+
+    def __init__(
+        self,
+        patch: pytest.MonkeyPatch,
+        *,
+        answer: tuple[bytes, bytes, int] | None = None,
+    ) -> None:
+        self.argvs: list[list[str]] = []
+        self.timeouts: list[float] = []
+        self._answer = answer
+        real_timer = threading.Timer
+        real_popen = subprocess.Popen
+
+        def timer(interval: float, function: Callable[[], object]) -> object:
+            self.timeouts.append(interval)
+            return real_timer(interval, function)
+
+        def popen(argv: list[str], *, stdout: int, stderr: int) -> object:
+            self.argvs.append(argv)
+            if self._answer is None:
+                return real_popen(argv, stdout=stdout, stderr=stderr)
+            out, err, code = self._answer
+            return _Answered(argv, out=out, err=err, code=code)
+
+        patch.setattr(threading, "Timer", timer)
+        patch.setattr(subprocess, "Popen", popen)
 
 
 def _batch_paths(root: Path) -> list[Path]:
@@ -523,29 +575,16 @@ def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("hit\n")
-    argvs: list[list[str]] = []
-    timeouts: list[float] = []
-    real = subprocess.run
-
-    def run(
-        argv: list[str],
-        *,
-        capture_output: bool,
-        timeout: float,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        argvs.append(argv)
-        timeouts.append(timeout)
-        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
-
     with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", run)
+        runs = _Runs(patch)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    batches = [[arg for arg in argv if arg.startswith(str(tmp_path))] for argv in argvs]
+    batches = [
+        [arg for arg in argv if arg.startswith(str(tmp_path))] for argv in runs.argvs
+    ]
     assert [name for batch in batches for name in batch] == list(map(str, names))
     assert len(batches) > 1
     # Every batch, not just the first, is bounded by the caller's timeout.
-    assert timeouts == [30] * len(batches)
+    assert runs.timeouts == [30] * len(batches)
     for batch, after in itertools.pairwise(batches):
         assert len(" ".join(batch)) <= ARGV_CHARS
         assert len(" ".join([*batch, after[0]])) > ARGV_CHARS
@@ -558,26 +597,11 @@ def test_each_rg_run_gets_the_timeout(
 ) -> None:
     f = tmp_path / "f.txt"
     f.write_text("ab\n")
-    argvs: list[list[str]] = []
-    options: list[tuple[bool, float, bool]] = []
-    real = subprocess.run
-
-    def run(
-        argv: list[str],
-        *,
-        capture_output: bool,
-        timeout: float,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        argvs.append(argv)
-        options.append((capture_output, timeout, check))
-        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
-
     with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", run)
+        runs = _Runs(patch)
         assert grep(f, Query(pattern="(?<=a)b"), timeout_sec=7) == [str(f)]
-    assert options == [(True, 7, False)] * 2
-    assert "-P" in argvs[1]
+    assert runs.timeouts == [7] * 2
+    assert "-P" in runs.argvs[1]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -603,23 +627,10 @@ def test_rg_answers_every_search_when_installed(
     """
     f = tmp_path / "f.py"
     f.write_text("value = 1\n")
-    argvs: list[list[str]] = []
-    real = subprocess.run
-
-    def run(
-        argv: list[str],
-        *,
-        capture_output: bool,
-        timeout: float,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        argvs.append(argv)
-        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
-
     with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", run)
+        runs = _Runs(patch)
         grep(f, query)
-    assert argvs
+    assert runs.argvs
 
 
 def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
@@ -663,31 +674,19 @@ def test_the_default_rg_timeout_is_thirty_seconds(
     f = tmp_path / "f.txt"
     f.write_text("x\n")
     looked_up: list[str] = []
-    runs: list[tuple[list[str], float]] = []
 
     def which(name: str) -> str:
         looked_up.append(name)
         return "/rg"
 
-    def run(
-        argv: list[str],
-        *,
-        capture_output: bool,
-        timeout: float,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        del capture_output, check
-        runs.append((argv, timeout))
-        return subprocess.CompletedProcess(argv, 1, b"", b"")
-
     with monkeypatch.context() as patch:
         patch.setattr(shutil, "which", which)
-        patch.setattr(subprocess, "run", run)
+        runs = _Runs(patch, answer=(b"", b"", 1))
         assert search(f, Query(pattern="x")) == []
     assert looked_up == ["rg"]
-    ((argv, timeout),) = runs
+    ((argv,),) = (runs.argvs,)
     assert argv[0] == "/rg"
-    assert timeout == 30
+    assert runs.timeouts == [30]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -704,14 +703,7 @@ def test_a_rg_failure_names_its_exit_and_stderr(
 
         patch.setattr(shutil, "which", which)
 
-        def run(*_args: object, **_kwargs: object) -> object:
-            return subprocess.CompletedProcess([], 2, b"", b"bad\xff\n")
-
-        patch.setattr(
-            subprocess,
-            "run",
-            run,
-        )
+        _ = _Runs(patch, answer=(b"", b"bad\xff\n", 2))
         with pytest.raises(GrepError) as raised:
             grep(f, Query(pattern="x"))
     assert str(raised.value) == "ripgrep error (exit 2): bad\ufffd"
@@ -733,14 +725,7 @@ def test_a_rg_exit_without_a_message_keeps_what_it_found(
 
         patch.setattr(shutil, "which", which)
 
-        def run(*_args: object, **_kwargs: object) -> object:
-            return subprocess.CompletedProcess([], 2, out, b" \n")
-
-        patch.setattr(
-            subprocess,
-            "run",
-            run,
-        )
+        _ = _Runs(patch, answer=(out, b" \n", 2))
         assert grep(f, Query(pattern="x")) == [str(f)]
 
 
@@ -926,23 +911,10 @@ def test_a_batch_may_fill_the_argv_limit_exactly(
     for path in names:
         path.write_text("hit\n")
     assert len(" ".join(map(str, names[:fit]))) == ARGV_CHARS
-    argvs: list[list[str]] = []
-    real = subprocess.run
-
-    def run(
-        argv: list[str],
-        *,
-        capture_output: bool,
-        timeout: float,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        argvs.append(argv)
-        return real(argv, capture_output=capture_output, timeout=timeout, check=check)
-
     with monkeypatch.context() as patch:
-        patch.setattr(subprocess, "run", run)
+        runs = _Runs(patch)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    first = [arg for arg in argvs[0] if arg.startswith(str(tmp_path))]
+    first = [arg for arg in runs.argvs[0] if arg.startswith(str(tmp_path))]
     assert len(first) == fit
 
 
@@ -979,22 +951,59 @@ def test_pcre_without_rg_is_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_rg_timeout_is_a_grep_error(
+def test_a_rg_run_killed_at_its_timeout_is_a_grep_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def timeout(*_args: object, **_kwargs: object) -> NoReturn:
-        raise subprocess.TimeoutExpired(cmd="rg", timeout=1)
-
+    """The timer kills the run, which then ends by a signal: a negative code."""
     with monkeypatch.context() as patch:
 
         def which(*_args: object, **_kwargs: object) -> object:
             return "/rg"
 
         patch.setattr(shutil, "which", which)
-        patch.setattr(subprocess, "run", timeout)
+        _ = _Runs(patch, answer=(b"", b"", -9))
         with pytest.raises(GrepError, match=r"^ripgrep timed out after 1s"):
             grep(tmp_path, Query(pattern="x"), timeout_sec=1)
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_rows_come_as_ripgrep_prints_them_before_it_ends(tmp_path: Path) -> None:
+    """The first row is had while the search still runs."""
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("hit\n")
+    rows = streamed_rows(tmp_path, Query(pattern="hit"))
+    first = next(rows)
+    assert {first, *rows} == {Row(text=f"{tmp_path}/{name}") for name in "ab"}
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_run_stopped_early_is_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that stops reading leaves no ripgrep behind."""
+    # More output than a pipe holds, so ripgrep is still writing when the
+    # caller stops.
+    names = [f"{i:03}{'x' * 200}" for i in range(400)]
+    for name in names:
+        (tmp_path / name).write_text("hit\n")
+    started: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(argv: list[str], *, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
+        process = real_popen(argv, stdout=stdout, stderr=stderr)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    rows = streamed_rows(tmp_path, Query(pattern="hit"))
+    assert next(rows).text.removeprefix(f"{tmp_path}/") in names
+    assert isinstance(rows, Generator)
+    (process,) = started
+    assert process.poll() is None
+    rows.close()
+    assert process.poll() is not None
 
 
 def test_rg_command_with_every_knob_off(tmp_path: Path) -> None:
@@ -1574,20 +1583,6 @@ def test_an_inverted_named_binary_file_splits_at_each_nul(tmp_path: Path) -> Non
     ]
 
 
-def test_a_name_outside_every_path_sorts_last() -> None:
-    paths = [pathlib.Path("a"), pathlib.Path("b/")]
-    order = {"a": 0}
-    keys = [_sort_key(name, paths, order) for name in ("z", "b/c", "a")]
-    assert keys == [(2, ("z",)), (1, ("c",)), (0, ())]
-
-
-def test_a_walked_name_sorts_under_the_directory_holding_it() -> None:
-    """The root's own ``/`` is no extra component, and a name keeps its letters."""
-    paths = [pathlib.Path("dX"), pathlib.Path("/")]
-    keys = [_sort_key(name, paths, {}) for name in ("dX/e", "/r/s")]
-    assert keys == [(0, ("e",)), (1, ("r", "s"))]
-
-
 @pytest.mark.parametrize(
     ("widths", "batches"),
     [
@@ -1609,28 +1604,57 @@ def test_each_batch_holds_what_fits_its_space_joined_names(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(("cpus", "workers"), [(8, 2), (None, 1)])
-def test_batches_run_on_one_thread_each_up_to_the_cpus(
+@pytest.mark.parametrize(("cpus", "ahead"), [(8, 3), (2, 2), (None, 1)])
+def test_batches_after_the_first_run_ahead_up_to_the_cpus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cpus: int | None,
-    workers: int,
+    ahead: int,
 ) -> None:
-    names = [tmp_path / name for name in ("a", "b")]
+    """Once the first run has a row, the next runs start, one per CPU at most."""
+    names = [tmp_path / name for name in "abcd"]
     for path in names:
         path.write_text("hit\n")
-    sizes: list[int] = []
-
-    def pool(*, max_workers: int) -> ThreadPoolExecutor:
-        sizes.append(max_workers)
-        return ThreadPoolExecutor(max_workers=max_workers)
-
     with monkeypatch.context() as patch:
         patch.setattr(files_grep, "ARGV_CHARS", 1)
         patch.setattr(os, "cpu_count", lambda: cpus)
-        patch.setattr(files_grep, "ThreadPoolExecutor", pool)
-        assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    assert sizes == [workers]
+        runs = _Runs(patch)
+        rows = streamed_rows(names, Query(pattern="hit"))
+        assert next(rows) == Row(text=str(names[0]))
+        assert len(runs.argvs) == 1 + ahead
+        assert [row.text for row in rows] == list(map(str, names[1:]))
+    assert len(runs.argvs) == len(names)
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_runs_started_ahead_are_killed_when_the_caller_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = [tmp_path / name for name in "abc"]
+    for path in names:
+        path.write_text("hit\n")
+    started: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(argv: list[str], *, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
+        # Each run waits on the test, so none ends on its own.
+        process = real_popen(
+            ["sleep", "60"] if started else argv,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(files_grep, "ARGV_CHARS", 1)
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    rows = streamed_rows(names, Query(pattern="hit"))
+    assert next(rows) == Row(text=str(names[0]))
+    assert len(started) == len(names)
+    rows.close()
+    assert all(process.poll() is not None for process in started)
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -1667,7 +1691,7 @@ def test_a_one_letter_name_keeps_its_row_whole(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_counts_ripgrep_prints_out_of_order_sort_by_file(
+def test_rows_ripgrep_prints_out_of_order_stream_so_and_list_sorted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1675,18 +1699,63 @@ def test_counts_ripgrep_prints_out_of_order_sort_by_file(
     for name in ("a", "b"):
         (tmp_path / name).write_text("hit\n")
     out = f"{tmp_path}/b:1\n{tmp_path}/a:1\n".encode()
+    query = Query(pattern="hit", output_mode="count")
     with monkeypatch.context() as patch:
+        _ = _Runs(patch, answer=(out, b"", 0))
+        streamed = [row.text for row in streamed_rows(tmp_path, query)]
+        listed = grep(tmp_path, query)
+    assert streamed == [f"{tmp_path}/b:1", f"{tmp_path}/a:1"]
+    assert listed == [f"{tmp_path}/a:1", f"{tmp_path}/b:1"]
 
-        def run(*_args: object, **_kwargs: object) -> object:
-            return subprocess.CompletedProcess([], 0, out, b"")
 
-        patch.setattr(
-            subprocess,
-            "run",
-            run,
-        )
-        found = grep(tmp_path, Query(pattern="hit", output_mode="count"))
-    assert found == [f"{tmp_path}/a:1", f"{tmp_path}/b:1"]
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_context_groups_out_of_order_regroup_by_file_when_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``--`` between files is ripgrep's; one within a file stays with it."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.touch()
+    b.touch()
+    out = b"\n".join(
+        [
+            f"{b}\x022\x02x".encode(),
+            f"{b}\x013\x011\x01hit".encode(),
+            b"--",
+            f"{a}\x011\x011\x01hit".encode(),
+            b"--",
+            f"{a}\x015\x011\x01hit".encode(),
+            b"",
+        ],
+    )
+    query = Query(pattern="hit", output_mode="content", context_before=1)
+    with monkeypatch.context() as patch:
+        _ = _Runs(patch, answer=(out, b"", 0))
+        streamed = [row.text for row in streamed_rows([a, b], query)]
+        listed = grep([a, b], query)
+    assert streamed == [
+        f"{b}-2-x",
+        f"{b}:3:hit",
+        "--",
+        f"{a}:1:hit",
+        "--",
+        f"{a}:5:hit",
+    ]
+    assert listed == [f"{a}:1:hit", "--", f"{a}:5:hit", "--", f"{b}-2-x", f"{b}:3:hit"]
+
+
+def test_a_name_outside_every_path_sorts_last() -> None:
+    paths = [pathlib.Path("a"), pathlib.Path("b/")]
+    order = {"a": 0}
+    keys = [_sort_key(name, paths, order) for name in ("z", "b/c", "a")]
+    assert keys == [(2, ("z",)), (1, ("c",)), (0, ())]
+
+
+def test_a_walked_name_sorts_under_the_directory_holding_it() -> None:
+    """The root's own ``/`` is no extra component, and a name keeps its letters."""
+    paths = [pathlib.Path("dX"), pathlib.Path("/")]
+    keys = [_sort_key(name, paths, {}) for name in ("dX/e", "/r/s")]
+    assert keys == [(0, ("e",)), (1, ("r", "s"))]
 
 
 @_BOTH

@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import asyncio
 import os
 import re
+import threading
 
 from treekle import PlainTree
 from wesearch.fetch import FetchSession
@@ -28,12 +29,15 @@ from sagent.session.types import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
+    Counted,
     FileTracker,
     Stream,
+    ThreadWriter,
     Tool,
     ToolContext,
     ToolOutput,
     ToolStreamingResult,
+    _ends,
     checked,
     json_schema,
     parse,
@@ -252,6 +256,37 @@ async def test_a_stream_gives_an_item_written_while_it_is_read() -> None:
     assert await reading == 7
 
 
+def test_a_counted_iterator_counts_what_it_passed_on() -> None:
+    counted = Counted("abc")
+    assert iter(counted) is counted
+    assert next(counted) == "a"
+    assert counted.seen == 1
+    assert list(counted) == ["b", "c"]
+    assert counted.seen == 3
+
+
+@pytest.mark.asyncio
+async def test_a_thread_s_writes_have_landed_once_it_is_told_so() -> None:
+    stream = Stream[str]()
+    writer = ThreadWriter(stream, asyncio.get_running_loop())
+
+    def work() -> None:
+        writer.write("a")
+        writer.write("b")
+        writer.landed()
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    # The loop is held here, so it has written nothing and the thread still waits.
+    thread.join(timeout=0.02)
+    assert thread.is_alive()
+
+    await asyncio.to_thread(thread.join)
+    stream.close()
+
+    assert [item async for item in stream] == ["a", "b"]
+
+
 async def _lines(
     out: Stream[str],
     err: Stream[str],
@@ -433,6 +468,99 @@ async def test_a_tool_that_leaves_its_streams_open_is_recorded_when_it_ends(
     )
     assert [item async for item in out] == []
     assert [item async for item in err] == []
+
+
+@pytest.mark.asyncio
+async def test_each_item_is_seen_as_it_is_read_while_the_tool_runs() -> None:
+    out, err = Stream[str](), Stream[str]()
+    stop, seen = asyncio.Event(), list[tuple[str, object]]()
+
+    async def tool() -> UncategorizedToolResult:
+        out.write("epoch 1\n")
+        err.write("warn\n")
+        _ = await stop.wait()
+        out.write("done\n")
+        return UncategorizedToolResult()
+
+    waiting = asyncio.ensure_future(
+        settled(
+            ToolStreamingResult(
+                result=asyncio.ensure_future(tool()),
+                stdout=out,
+                stderr=err,
+            ),
+            on_item=lambda stream, item: seen.append((stream, item)),
+        ),
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert sorted(seen) == [("stderr", "warn\n"), ("stdout", "epoch 1\n")]
+    assert not waiting.done()
+
+    stop.set()
+
+    assert await waiting == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("epoch 1\n", "done\n"),
+        stderr=("warn\n",),
+        result=UncategorizedToolResult(),
+    )
+    assert seen[-1] == ("stdout", "done\n")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ShownResult:
+    """A result that says what the model reads instead of its items."""
+
+    shown: str | None = None
+    exit_code: int = 0
+
+
+@pytest.mark.parametrize("shown", [None, "a\n... (1 lines omitted)\nc\n"])
+@pytest.mark.asyncio
+async def test_a_result_s_view_is_moved_to_the_record_beside_every_item(
+    shown: str | None,
+) -> None:
+    out, err = Stream[str](), Stream[str]()
+    for line in ("a\n", "b\n", "c\n"):
+        out.write(line)
+    done = asyncio.Future[_ShownResult]()
+    done.set_result(_ShownResult(shown=shown))
+
+    result = await settled(ToolStreamingResult(result=done, stdout=out, stderr=err))
+
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stdout=("a\n", "b\n", "c\n"),
+        result=_ShownResult(),
+        shown=shown,
+    )
+    assert result.text() == (shown if shown is not None else "a\nb\nc\n")
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+@pytest.mark.asyncio
+async def test_work_writes_to_the_stdout_it_is_given_as_it_goes(*, fails: bool) -> None:
+    stdout, stop = Stream[str](), asyncio.Event()
+
+    async def work() -> ToolOutput[UncategorizedToolResult, str, str]:
+        stdout.write("half\n")
+        _ = await stop.wait()
+        if fails:
+            raise ValueError("no")
+        return ToolOutput(stdout=("all\n",), result=UncategorizedToolResult())
+
+    streaming_result = whole_output(work(), stdout=stdout)
+
+    assert await asyncio.wait_for(anext(streaming_result.stdout), timeout=1) == "half\n"
+    stop.set()
+    async with asyncio.timeout(1):
+        assert [item async for item in streaming_result.stdout] == (
+            [] if fails else ["all\n"]
+        )
+    assert streaming_result.stdout is stdout
 
 
 @pytest.mark.asyncio
@@ -1047,6 +1175,74 @@ def test_fit_cuts_a_first_unit_too_large_to_keep_whole() -> None:
 def test_fit_always_keeps_some_of_the_first_unit() -> None:
     context = ToolContext(cwd=Path("/"), max_result_chars=10)
     assert context.fit(["abc"], reserve=50) == ("a\n... (2 chars omitted)", 1)
+
+
+# The line that counts the omitted lines takes 23 characters here, so a cap of 33
+# leaves 10: 6 for the end, and what the end does not use for the start.
+@pytest.mark.parametrize(
+    ("lines", "cap", "expected"),
+    [
+        (
+            ["a0\n", "a1\n", "a2\n", "a3\n", "a4\n"],
+            33,
+            "a0\n... (2 lines omitted)\na3\na4\n",
+        ),
+        (
+            ["x" * 20 + "\n", "b\n", "c\n"],
+            30,
+            "x\n... (20 chars omitted)\n... (0 lines omitted)\nb\nc\n",
+        ),
+        (["a\n", "b\n", "ccccc\n"], 33, "a\nb\n... (0 lines omitted)\nccccc\n"),
+        (["a\n", "b\n", "c\n"], 33, "a\n... (0 lines omitted)\nb\nc\n"),
+        (["aaa\n", "bb\n", "cc\n"], 33, "aaa\n... (0 lines omitted)\nbb\ncc\n"),
+        (
+            ["aaaa\n", "bb\n", "cc\n"],
+            33,
+            "a\n... (4 chars omitted)\n... (0 lines omitted)\nbb\ncc\n",
+        ),
+        (
+            ["a\n", "\n", "\n"],
+            25,
+            "a\n... (1 chars omitted)\n... (1 lines omitted)\n\n",
+        ),
+        (
+            ["a\n", "b\n", "c" * 30 + "\n"],
+            40,
+            "a\nb\n... (1 lines omitted)\n",
+        ),
+    ],
+    ids=[
+        "the-end-gets-three-fifths",
+        "the-end-is-all-but-the-first-line",
+        "a-last-line-that-fills-the-end-is-kept",
+        "no-line-is-in-both-ends",
+        "a-first-line-that-fills-the-start-is-kept",
+        "a-first-line-over-the-start-is-cut",
+        "an-end-of-one-character-holds-one-line",
+        "a-last-line-too-long-for-the-end-is-left-out",
+    ],
+)
+def test_a_cut_output_keeps_its_start_and_its_end(
+    lines: list[str],
+    cap: int,
+    expected: str,
+) -> None:
+    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
+    assert _ends(context, lines, reserve=0, cap=cap, note="") == expected
+    # With no cap of its own, the context's is the room.
+    small = ToolContext(cwd=Path("/"), max_result_chars=cap)
+    assert _ends(small, lines, reserve=0, cap=0, note="") == expected
+
+
+def test_a_view_keeps_lines_that_fit_and_else_their_start_and_end() -> None:
+    context = ToolContext(cwd=Path("/"), max_result_chars=60)
+    assert context.view(["\n", "a\n", "b\n", "\n"]) == ("a\nb\n", False)
+    assert context.view([]) == ("", False)
+    lines = [f"line {i}\n" for i in range(20)]
+    text, cut = context.view(lines, note="; see f")
+    assert cut
+    assert text == "line 0\n... (17 lines omitted; see f)\nline 18\nline 19\n"
+    assert len(text) <= 60
 
 
 def _bump_mtime(path: Path) -> None:

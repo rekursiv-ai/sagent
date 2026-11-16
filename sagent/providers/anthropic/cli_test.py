@@ -1085,6 +1085,17 @@ def test_the_cli_offers_the_effort_it_passes_and_the_rest_as_claude_has_them() -
     assert list(AnthropicCLI()) == list(AnthropicCLI.models())
 
 
+def test_the_cli_cache_lives_the_hour_claude_writes_it_for() -> None:
+    """``claude`` chooses the lifetime, never sagent: an hour on the subscription.
+
+    Measured on 2026-11-16 through this provider with ``claude`` 2.1.309: a call
+    that wrote the cache wrote all 5,249 tokens to the one-hour bucket.
+    """
+    row = AnthropicCLI.models()["opus"]
+    assert row.cache_ttl_sec == {3600.0}
+    assert row.default.cache_ttl_sec == 3600.0
+
+
 def test_the_cli_model_takes_offered_settings_and_refuses_the_rest() -> None:
     model = AnthropicCLI()["opus"]
     model.settings = replace(model.settings, thinking_effort="max")

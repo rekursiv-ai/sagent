@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import asyncio
 import os
+import threading
 import time
 
 import pytest
 
 from sagent.session.types import ListResult
+from sagent.tools import list as list_tool
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.list import List, ls_row, sort_paths
 from sagent.tools.types import ToolContext, parse, settled
@@ -100,6 +103,43 @@ async def test_a_cap_keeps_the_head_or_the_tail_and_counts_the_rest(
 
 
 @pytest.mark.asyncio
+async def test_each_entry_is_its_own_item_and_the_count_of_the_rest_comes_last(
+    tmp_path: Path,
+) -> None:
+    for i in range(1, 4):
+        (tmp_path / f"f{i}").write_text("")
+    result = await settled(
+        List().call(ToolContext(cwd=tmp_path), {"path": ".", "max_results": 2}),
+    )
+    assert result.stdout == ("f1", "\nf2", "\n... (1 more)")
+
+
+@pytest.mark.asyncio
+async def test_each_long_row_is_written_as_it_is_made(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first row reaches a reader while the next is still being made."""
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("")
+    made = threading.Event()
+
+    def row(path: Path, *, name: str) -> str:
+        if path.name == "b":
+            assert made.wait(timeout=5)
+        return name
+
+    monkeypatch.setattr(list_tool, "ls_row", row)
+    streaming_result = List().call(
+        ToolContext(cwd=tmp_path),
+        {"path": ".", "long": True},
+    )
+    assert await asyncio.wait_for(anext(streaming_result.stdout), timeout=5) == "a"
+    made.set()
+    assert [item async for item in streaming_result.stdout] == ["\nb"]
+
+
+@pytest.mark.asyncio
 async def test_long_rows_hold_size_and_mtime(tmp_path: Path) -> None:
     (tmp_path / "f").write_bytes(b"12345")
     os.utime(tmp_path / "f", (0, 1_700_000_000))
@@ -120,6 +160,12 @@ def test_name_sort_folds_case_and_breaks_ties_by_spelling(tmp_path: Path) -> Non
     paths = [tmp_path / n for n in ("b", "B", "a", "A")]
     sort_paths(paths, "name")
     assert [p.name for p in paths] == ["A", "a", "B", "b"]
+
+
+def test_no_sort_leaves_the_order_as_found(tmp_path: Path) -> None:
+    paths = [tmp_path / n for n in ("b", "a", "c")]
+    sort_paths(paths, "none")
+    assert [p.name for p in paths] == ["b", "a", "c"]
 
 
 @pytest.mark.asyncio

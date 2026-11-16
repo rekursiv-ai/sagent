@@ -30,6 +30,7 @@ from sagent.host.wire import (
     Pause,
     Paused,
     Peers,
+    Progress,
     Refused,
     Result,
     Resume,
@@ -39,9 +40,10 @@ from sagent.host.wire import (
 )
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.runtime.types import Nudge
+from sagent.runtime.types import Markers
 from sagent.session.types import (
     AgentToAgentMessage,
+    SystemMessage,
     ToolResult,
     UncategorizedToolResult,
 )
@@ -285,7 +287,36 @@ async def test_the_end_of_input_cancels_what_runs(
         writer.write_eof()
         cancelled = await _result(reader)
         assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
+        assert cancelled.record.shown == Markers().cancelled
         assert cleaned == [True]
+
+
+@pytest.mark.asyncio
+async def test_what_a_call_says_as_it_runs_goes_ahead_of_its_result(
+    tmp_path: Path,
+) -> None:
+    async with _host(tmp_path) as (reader, writer):
+        _ = await received(reader)
+        writer.write(
+            _call(
+                "1",
+                agent="a",
+                window="w",
+                tool="Bash",
+                command="echo one; echo two; echo oops >&2",
+                description="Count",
+            ),
+        )
+        said = [await _said(reader) for _ in range(4)]
+    # Each stream keeps its order; the two streams race each other.
+    assert [s for s in said if isinstance(s, Progress) and s.stream == "stdout"] == [
+        Progress(id="1", text="one\n"),
+        Progress(id="1", text="two\n"),
+    ]
+    assert Progress(id="1", text="oops\n", stream="stderr") in said[:3]
+    assert isinstance(said[3], Result)
+    assert said[3].record.stdout == ("one\n", "two\n")
+    assert said[3].record.stderr == ("oops\n",)
 
 
 @pytest.mark.asyncio
@@ -657,8 +688,13 @@ async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
         assert team.owes("caller#s") == {}
         told = kid.runtime.inbox.drain_nowait()
         assert not [m for m in told if isinstance(m, AgentToAgentMessage)]
-        assert [m for m in told if isinstance(m, Nudge)] == (
-            [Nudge(content="Your message to caller#s was not delivered: withdrawn")]
+        assert [m for m in told if isinstance(m, SystemMessage)] == (
+            [
+                SystemMessage(
+                    content="Your message to caller#s was not delivered: withdrawn",
+                    subtype="nudge",
+                ),
+            ]
             if sender_present
             else []
         )

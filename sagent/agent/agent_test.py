@@ -1466,11 +1466,23 @@ def test_the_hour_rolling_over_states_the_time_again(
 ) -> None:
     _, agent = _agent(tmp_path)
     session = _session(agent)
-    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T13:00:00+00:00")
+    monkeypatch.setattr(
+        agent_module,
+        "now_timestamp",
+        lambda: "2026-10-24T13:00:00+00:00",
+    )
     session.append(*session.updates())
-    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T13:59:59+00:00")
+    monkeypatch.setattr(
+        agent_module,
+        "now_timestamp",
+        lambda: "2026-10-24T13:59:59+00:00",
+    )
     same_hour = session.updates()
-    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T14:00:00+00:00")
+    monkeypatch.setattr(
+        agent_module,
+        "now_timestamp",
+        lambda: "2026-10-24T14:00:00+00:00",
+    )
     (later,) = session.updates()
 
     assert same_hour == []

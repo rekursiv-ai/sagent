@@ -91,6 +91,7 @@ from sagent.tools.mcp_auth import (
     sign_ins,
 )
 from sagent.tools.types import (
+    Stream,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -484,6 +485,7 @@ class McpConnection:
         arguments: Mapping[str, PlainTree],
         *,
         context: ToolContext,
+        stdout: Stream[Attachment | str],
     ) -> ToolOutput[McpResult, Attachment | str, str]:
         """Run the server's ``tool``; return its result, cut to fit ``context``.
 
@@ -491,13 +493,19 @@ class McpConnection:
           tool: The tool's name on the server.
           arguments: What it is called with.
           context: How much of the result fits.
+          stdout: Where each progress report the server sends is written, a line
+            each, as it comes.
 
         Returns:
           output: Its text, or its JSON when it gives no text, then its media;
             its exit code is ``1`` when the server says the tool failed.
 
         """
-        done = await self._open().call_tool(tool, dict(arguments))
+        done = await self._open().call_tool(
+            tool,
+            dict(arguments),
+            progress_callback=_Reports(stdout=stdout),
+        )
         texts, attachments = _blocks(done.content)
         # The SDK types a tool's JSON result as ``dict[str, Any]``.
         structured = cast("PlainTree | None", done.structured_content)
@@ -607,9 +615,26 @@ class McpTool:
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
     ) -> ToolStreamingResult[McpResult, Attachment | str, str]:
-        """Run the tool with ``arguments``, which the server checks."""
+        """Run the tool with ``arguments``, which the server checks.
+
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed.
+
+        Returns:
+          streaming_result: What the server reports as the call runs, then its
+            answer.
+
+        """
+        stdout = Stream[Attachment | str]()
         return whole_output(
-            self._connection.call(self._tool, arguments, context=context),
+            self._connection.call(
+                self._tool,
+                arguments,
+                context=context,
+                stdout=stdout,
+            ),
+            stdout=stdout,
         )
 
 
@@ -716,12 +741,14 @@ class McpServerTool:
           ValueError: The arguments fit no schema, or ``tool`` is not offered.
 
         """
-        return whole_output(self._run(context, arguments))
+        stdout = Stream[Attachment | str]()
+        return whole_output(self._run(context, arguments, stdout), stdout=stdout)
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[Attachment | str],
     ) -> ToolOutput[McpResult, Attachment | str, str]:
         connection = self._connection
         if not self._runs_tools:
@@ -757,7 +784,12 @@ class McpServerTool:
                 tool=tool.name,
                 context=context,
             )
-        return await connection.call(tool.name, b.arguments, context=context)
+        return await connection.call(
+            tool.name,
+            b.arguments,
+            context=context,
+            stdout=stdout,
+        )
 
 
 class McpSession(AsyncResource):
@@ -1029,6 +1061,25 @@ def _output(
 
 def _first_line(text: str | None) -> str:
     return (text or "").strip().split("\n", 1)[0]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Reports:
+    """Writes each progress report of a call as a line: ``reading (1/4)``, ``3/4``."""
+
+    stdout: Stream[Attachment | str]
+
+    async def __call__(
+        self,
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        """Write one report: its message, then how far, and of how much if known."""
+        count = f"{progress:g}" if total is None else f"{progress:g}/{total:g}"
+        self.stdout.write(
+            f"{message} ({count})\n" if message not in {None, ""} else f"{count}\n",
+        )
 
 
 class _Entry(TypedDict):

@@ -105,6 +105,7 @@ __all__ = [
     "WriteResult",
     "current_plain",
     "former_kind",
+    "now_timestamp",
     "record_classes",
     "stored_plain",
     "stored_record",
@@ -200,6 +201,11 @@ def _local(timestamp: str) -> str:
     here = when.astimezone()
     offset = here.strftime("%z")
     return f"{here:%a %Y-%m-%d %H:%M} {offset[:3]}:{offset[3:]} ({here.tzname()})"
+
+
+def now_timestamp() -> str:
+    """Return the time now, local, with its UTC offset, to the second: a ``timestamp``."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -533,6 +539,9 @@ class AgentSpawnResult:
     """The child's journal, when it keeps one."""
 
     exit_code: int = 0
+    shown: str | None = None
+    """What the model reads instead of all the child said: its reply. ``settled``
+    moves it to the record, so a stored one is ``None``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -541,6 +550,9 @@ class BashResult:
 
     command: tuple[str, ...] | None = None
     exit_code: int | None = None
+    shown: str | None = None
+    """What the model reads instead of every line printed: the output cut to its
+    head and tail. ``settled`` moves it to the record, so a stored one is ``None``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

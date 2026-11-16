@@ -51,6 +51,7 @@ from sagent.host.wire import (
     Paused,
     Peers,
     Ping,
+    Progress,
     Refused,
     Result,
     Resume,
@@ -1427,6 +1428,36 @@ async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
         finally:
             host.reader.feed_eof()
             await pumping
+
+
+@pytest.mark.asyncio
+async def test_a_hosts_progress_reaches_a_client_that_is_here_and_is_never_kept(
+    tmp_path: Path,
+) -> None:
+    server, session, host, _ = await _server_unit(tmp_path)
+    sent: list[bytes] = []
+    relayed = asyncio.Event()
+
+    def write(data: bytes) -> None:
+        sent.append(data)
+        relayed.set()
+
+    session.writer = cast(asyncio.StreamWriter, Mock(write=write))
+    progress = (Progress(id="r1", text="one\n"), Progress(id="r1", text="two\n"))
+    host.reader.feed_data(encoded(progress[0]))
+    async with asyncio.TaskGroup() as tasks:
+        pumping = tasks.create_task(server._pump(session, host=host))
+        try:
+            async with asyncio.timeout(5):
+                _ = await relayed.wait()
+            session.writer = None
+            # The pump reads to the end, so the second is handled before it stops.
+            host.reader.feed_data(encoded(progress[1]))
+        finally:
+            host.reader.feed_eof()
+            await pumping
+    assert sent == [encoded(progress[0])]
+    assert session.unacked == {}
 
 
 _SHOWN = ("event", "session", "detail")

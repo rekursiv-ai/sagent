@@ -26,6 +26,8 @@ from sagent.tools.command_analyzer import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
+    Stream,
+    ThreadWriter,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -52,6 +54,7 @@ __all__ = [
 
 
 type Sort = Literal[
+    "none",
     "name",
     "name_desc",
     "mtime",
@@ -177,17 +180,25 @@ class List:
           arguments: What the model passed, as ``List.Arguments``.
 
         Returns:
-          streaming_result: One entry per line, or why there are none.
+          streaming_result: One entry per line, each written as it is made, or
+            why there are none.
 
         """
-        return whole_output(self._run(context, arguments))
+        stdout = Stream[str]()
+        return whole_output(self._run(context, arguments, stdout), stdout=stdout)
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
     ) -> ToolOutput[ListResult, str, str]:
-        return await asyncio.to_thread(_list, context, parse(arguments, List.Arguments))
+        return await asyncio.to_thread(
+            _list,
+            context,
+            parse(arguments, List.Arguments),
+            ThreadWriter(stdout, asyncio.get_running_loop()),
+        )
 
 
 def sort_paths(paths: list[Path], sort: Sort) -> None:
@@ -196,9 +207,11 @@ def sort_paths(paths: list[Path], sort: Sort) -> None:
     Args:
       paths: The paths to sort.
       sort: By ``name`` (as GNU ``ls``), ``mtime``, or ``size``; ``_desc``
-        reverses.
+        reverses. ``none`` leaves them as they are.
 
     """
+    if sort == "none":
+        return
     key = sort.removesuffix("_desc")
     if key == "name":
         paths.sort(key=lambda p: (p.name.casefold(), p.name))
@@ -224,8 +237,12 @@ def ls_row(path: Path, *, name: str) -> str:
     return f"{_stat(path, 'size'):>10}  {when}  {name}"
 
 
-def _list(context: ToolContext, a: List.Arguments) -> ToolOutput[ListResult, str, str]:
-    """List the directory ``a`` names."""
+def _list(
+    context: ToolContext,
+    a: List.Arguments,
+    writer: ThreadWriter[str],
+) -> ToolOutput[ListResult, str, str]:
+    """List the directory ``a`` names, writing each row as it is made."""
     directory = context.path(a.path or ".")
     if not directory.exists():
         return ToolOutput(
@@ -253,16 +270,22 @@ def _list(context: ToolContext, a: List.Arguments) -> ToolOutput[ListResult, str
     entries = (
         entries[: a.max_results] if a.keep_last is None else entries[-a.keep_last :]
     )
-    names = [e.name + ("/" if e.is_dir() else "") for e in entries]
-    rows = (
-        [ls_row(e, name=n) for e, n in zip(entries, names, strict=True)]
-        if a.long
-        else names
-    )
-    out = "\n".join(rows) or "(empty directory)"
-    if total > len(entries):
-        out += f"\n... ({total - len(entries):,} more)"
-    return ToolOutput(stdout=(out,), result=ListResult(path=str(directory)))
+    if not entries:
+        return ToolOutput(
+            stdout=("(empty directory)",),
+            result=ListResult(path=str(directory)),
+        )
+    try:
+        for i, entry in enumerate(entries):
+            name = entry.name + ("/" if entry.is_dir() else "")
+            row = ls_row(entry, name=name) if a.long else name
+            # Each row after the first brings the newline before it.
+            writer.write(row if i == 0 else f"\n{row}")
+        if total > len(entries):
+            writer.write(f"\n... ({total - len(entries):,} more)")
+    finally:
+        writer.landed()
+    return ToolOutput(result=ListResult(path=str(directory)))
 
 
 def _stat(path: Path, key: str) -> float:

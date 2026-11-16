@@ -46,6 +46,7 @@ from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
+    SystemMessage,
     ToolCall,
     UncategorizedRecord,
     UserMessage,
@@ -749,9 +750,10 @@ def test_a_nudge_names_each_creditor_and_what_it_asked(
     _idle(team["a"])
 
     (*_, nudge) = team["a"].runtime.inbox.drain_nowait()
-    assert nudge == types.Nudge(
+    assert nudge == SystemMessage(
         content="You owe a reply to: Agent ('x'); b ('y'). Answer each message"
         " with AgentSend. Do not acknowledge this note.",
+        subtype="nudge",
     )
 
 
@@ -785,7 +787,7 @@ def test_an_idle_debtor_is_nudged_and_its_parent_is_not_told(tmp_path: Path) -> 
     assert [
         m.sender if isinstance(m, AgentToAgentMessage) else "nudge"
         for m in inbox
-        if isinstance(m, (AgentToAgentMessage, types.Nudge))
+        if isinstance(m, (AgentToAgentMessage, SystemMessage))
     ] == ["Agent", "nudge", "nudge", "nudge"]
     assert _told(team["Agent"]) == [("a", "[a is idle] half done")]
 
@@ -944,7 +946,10 @@ def _told(agent: Agent) -> list[tuple[str | None, str | None]]:
 
 def _nudged(agent: Agent) -> int:
     """Return how many nudges wait in ``agent``'s inbox; empty it."""
-    return sum(isinstance(m, types.Nudge) for m in agent.runtime.inbox.drain_nowait())
+    return sum(
+        isinstance(m, SystemMessage) and m.subtype == "nudge"
+        for m in agent.runtime.inbox.drain_nowait()
+    )
 
 
 def test_an_idle_with_no_work_since_the_last_is_not_acted_on(tmp_path: Path) -> None:
@@ -2356,11 +2361,20 @@ def test_a_refused_send_is_the_team_s_note_to_its_sender_and_owed_nothing(
 
     team.refuse("Agent", "lead#412", "the server refused it")
     team.refuse("gone", "lead#412", "no one is told")
+    # Refused again, or for one never asked anything: nothing was owed.
+    team.refuse("Agent", "lead#412", "again")
+    team.refuse("Agent", "nobody#1", "unknown")
 
     assert team["Agent"].runtime.inbox.drain_nowait() == [
-        types.Nudge(
-            content="Your message to lead#412 was not delivered: the server refused it",
-        ),
+        SystemMessage(
+            content=f"Your message to {recipient} was not delivered: {why}",
+            subtype="nudge",
+        )
+        for recipient, why in (
+            ("lead#412", "the server refused it"),
+            ("lead#412", "again"),
+            ("nobody#1", "unknown"),
+        )
     ]
     assert team.owes("lead#412") == {}
 

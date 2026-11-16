@@ -40,6 +40,7 @@ from sagent.host.wire import (
     Note,
     Peers,
     Ping,
+    Progress,
     Refused,
     Result,
     ToolsChanged,
@@ -254,12 +255,15 @@ async def test_tool_dispatch_forwards_identity_window_and_the_result(
             {"endpoint": "gpu1", "tool": "Read", "arguments": {"file_path": "/a"}},
         ),
     ) == replace(result, call_id="")
-    invoke.assert_awaited_once_with(
-        agent="worker",
-        window=context.files.window,
-        tool="Read",
-        arguments={"file_path": "/a"},
-    )
+    invoke.assert_awaited_once()
+    assert invoke.await_args is not None
+    passed = cast(dict[str, object], invoke.await_args.kwargs)
+    assert {k: v for k, v in passed.items() if k != "on_item"} == {
+        "agent": "worker",
+        "window": context.files.window,
+        "tool": "Read",
+        "arguments": {"file_path": "/a"},
+    }
     with pytest.raises(ValueError, match="No endpoint 'gpu9'; endpoints: gpu1"):
         await tool.call(context, {"endpoint": "gpu9"}).result
     with pytest.raises(ValueError, match="Use AgentSend directly"):
@@ -302,6 +306,51 @@ async def test_calls_are_correlated_and_acknowledged_at_the_endpoint(
     assert calling.result() == replace(result, wire_id=request.id)
     assert endpoint._pending == {}
     assert connection.lines[-1] == encoded(Ack(id=request.id))
+
+
+@pytest.mark.asyncio
+async def test_what_a_call_says_there_is_said_here_while_it_runs(
+    endpoint: Endpoint,
+    connection: _Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An item for no call waiting, as one already answered, is dropped unacked."""
+    endpoint._writer = connection.writer
+    endpoint.tools = {"Bash": "d"}
+    session = RemoteSession([])
+    session._endpoints = [endpoint]
+    tool = RemoteTool(remote=session)
+    result = ToolResult(call_id="", state="done", result=UncategorizedToolResult())
+    said: list[tuple[str, object]] = []
+    async with asyncio.TaskGroup() as tasks:
+        calling = tasks.create_task(
+            settled(
+                tool.call(
+                    ToolContext(),
+                    {"endpoint": "gpu1", "tool": "Bash", "arguments": {}},
+                ),
+                on_item=lambda stream, item: said.append((stream, item)),
+            ),
+        )
+        await connection.sent.wait()
+        request = decoded(connection.lines[0])
+        assert isinstance(request, Call)
+        receive = AsyncMock(
+            side_effect=[
+                Progress(id=request.id, text="one\n"),
+                Progress(id=request.id, text="oops\n", stream="stderr"),
+                Progress(id="other", text="lost\n"),
+                Result(id=request.id, record=result),
+                Progress(id=request.id, text="late\n"),
+                None,
+            ],
+        )
+        monkeypatch.setattr(remote, "received", receive)
+        await endpoint._read(connection.reader, connection.writer)
+    assert said == [("stdout", "one\n"), ("stderr", "oops\n")]
+    assert calling.result().state == "done"
+    assert endpoint._said == {}
+    assert connection.lines[1:] == [encoded(Ack(id=request.id))]
 
 
 @pytest.mark.asyncio

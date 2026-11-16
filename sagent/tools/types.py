@@ -3,7 +3,10 @@
 ``Tool.call`` returns a ``ToolStreamingResult`` at once. It has two streams, the
 tool's standard output and standard error, and a future of the tool's result: a
 dataclass with an ``exit_code``. The caller passes it to ``settled``, which
-reads the streams and returns the call's ``ToolResult`` record.
+reads the streams and returns the call's ``ToolResult`` record. A tool writes
+each item as it has it, such as each line a command prints, so a reader sees a
+long call's output while it runs. A result with ``shown`` says what the model
+reads instead of every item, such as a long output cut to its head and tail.
 
 A tool holds no agent's state; each call gets that agent's ``ToolContext``, so
 one tool serves every agent. The context also carries what the session's agents
@@ -90,6 +93,7 @@ import difflib
 import functools
 import hashlib
 import reprlib
+import threading
 import uuid
 
 from treekle import PlainTree
@@ -111,10 +115,13 @@ if TYPE_CHECKING:
 __all__ = [
     "Arg",
     "Briefing",
+    "Counted",
     "FileTracker",
     "Reminding",
+    "Shows",
     "Skipping",
     "Stream",
+    "ThreadWriter",
     "Tool",
     "ToolContext",
     "ToolOutput",
@@ -168,6 +175,17 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
         for stream in (self.stdout, self.stderr):
             if isinstance(stream, Stream):
                 stream.close()
+
+
+@runtime_checkable
+class Shows(Protocol):
+    """A tool's result that says what the model reads instead of the streams' items.
+
+    The items stay in the record whole; ``shown`` is the view, such as a long
+    output cut to its head and tail. ``None`` shows the items themselves.
+    """
+
+    shown: str | None
 
 
 class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
@@ -233,7 +251,8 @@ class Tool(Protocol[Result_co, StreamOut_co, StreamErr_co]):
 
         A tool writes each item when it has it, such as a line its process
         printed, a match, or a path. A tool that has nothing until it finishes
-        writes everything then.
+        writes everything then. A result that ``Shows`` says what the model
+        reads when every item would be too much.
 
         Args:
           context: The calling agent's state.
@@ -271,23 +290,27 @@ class ToolOutput(Generic[Result_co, StreamOut_co, StreamErr_co]):
 
 def whole_output[R, O, E](
     output: Coroutine[object, object, ToolOutput[R, O, E]] | ToolOutput[R, O, E],
+    *,
+    stdout: Stream[O] | None = None,
 ) -> ToolStreamingResult[R, O, E]:
     """Return a ``ToolOutput``, or the one a coroutine returns, as a ``ToolStreamingResult``.
 
     Args:
       output: The tool's output, or the tool's work that returns it. A
         coroutine starts now, on the running loop.
+      stdout: Standard output, if the work writes to it as it goes; ``None``
+        for work that has nothing until it returns.
 
     Returns:
       streaming_result: Its streams get the output's items when the work
-        returns, and nothing when it raises or is cancelled. Its ``result``
-        raises what the work raised.
+        returns, after any the work wrote, and nothing more when it raises or
+        is cancelled. Its ``result`` raises what the work raised.
 
     """
-    stdout, stderr = Stream[O](), Stream[E]()
+    out, stderr = stdout if stdout is not None else Stream[O](), Stream[E]()
     return ToolStreamingResult(
-        result=asyncio.ensure_future(_write_output(output, stdout, stderr)),
-        stdout=stdout,
+        result=asyncio.ensure_future(_write_output(output, out, stderr)),
+        stdout=out,
         stderr=stderr,
     )
 
@@ -324,11 +347,59 @@ class Stream[T]:
         return item
 
 
+class Counted[T]:
+    """An iterator that counts what it has passed on, as a tool counts what it cut."""
+
+    def __init__(self, items: Iterable[T]) -> None:
+        self._items = iter(items)
+        self.seen = 0
+        """How many items it has passed on."""
+
+    def __iter__(self) -> Counted[T]:
+        """Return the iterator itself; it can be iterated once."""
+        return self
+
+    def __next__(self) -> T:
+        """Return the next item, counting it."""
+        item = next(self._items)
+        self.seen += 1
+        return item
+
+
+class ThreadWriter[T]:
+    """Writes to a ``Stream`` from a worker thread, as a tool searching in one does.
+
+    Args:
+      stream: The stream, which the loop owns.
+      loop: The loop running the call.
+
+    """
+
+    def __init__(self, stream: Stream[T], loop: asyncio.AbstractEventLoop) -> None:
+        self._stream = stream
+        self._loop = loop
+
+    def write(self, item: T) -> None:
+        """Hand ``item`` to the loop to write, after any handed to it before."""
+        self._loop.call_soon_threadsafe(self._stream.write, item)
+
+    def landed(self) -> None:
+        """Wait until the loop has written every item handed to it.
+
+        Call it before the thread returns: the call may end, closing the stream,
+        as soon as it does.
+        """
+        written = threading.Event()
+        self._loop.call_soon_threadsafe(written.set)
+        _ = written.wait()
+
+
 @overload
 async def settled(
     streaming_result: ToolStreamingResult[ToolResult, object, object],
     *,
     call_id: str = "",
+    on_item: Callable[[Literal["stdout", "stderr"], object], object] = ...,
 ) -> ToolResult: ...
 
 
@@ -337,6 +408,7 @@ async def settled[R, O, E](
     streaming_result: ToolStreamingResult[R, O, E],
     *,
     call_id: str = "",
+    on_item: Callable[[Literal["stdout", "stderr"], object], object] = ...,
 ) -> ToolResult[R, O, E | str]: ...
 
 
@@ -344,6 +416,9 @@ async def settled(
     streaming_result: ToolStreamingResult[object, object, object],
     *,
     call_id: str = "",
+    on_item: Callable[[Literal["stdout", "stderr"], object], object] = (
+        lambda _stream, _item: None
+    ),
 ) -> ToolResult:
     """Read ``streaming_result`` to its end and return the call's record.
 
@@ -353,20 +428,34 @@ async def settled(
     Args:
       streaming_result: What ``Tool.call`` returned.
       call_id: The id of the call the record answers.
+      on_item: Called with each item, and the stream it came on, as it is read.
 
     Returns:
       result: The record, with the items read from both streams. Its state is
         ``done`` with the tool's result; ``failed`` when the tool raised, with
         the error as the last item of ``stderr``; or ``cancelled``. A tool
         that relays a call run elsewhere returns that call's record as its
-        result, and that record is returned with ``call_id`` set.
+        result, and that record is returned with ``call_id`` set. A result that
+        ``Shows`` gives the record its ``shown``.
 
     """
     stdout: list[object] = []
     stderr: list[object] = []
     readers = (
-        asyncio.ensure_future(_collect(streaming_result.stdout, stdout)),
-        asyncio.ensure_future(_collect(streaming_result.stderr, stderr)),
+        asyncio.ensure_future(
+            _collect(
+                streaming_result.stdout,
+                stdout,
+                functools.partial(on_item, "stdout"),
+            ),
+        ),
+        asyncio.ensure_future(
+            _collect(
+                streaming_result.stderr,
+                stderr,
+                functools.partial(on_item, "stderr"),
+            ),
+        ),
     )
     result_future = streaming_result.result
     try:
@@ -383,12 +472,17 @@ async def settled(
     else:
         if isinstance(result, ToolResult):
             return replace(result, call_id=call_id)
+        # The view moves to the record, which keeps it once, beside the items.
+        shown = result.shown if isinstance(result, Shows) else None
+        if shown is not None and is_dataclass(result) and not isinstance(result, type):
+            result = replace(result, shown=None)
         return ToolResult(
             call_id=call_id,
             state="done",
             stdout=tuple(stdout),
             stderr=tuple(stderr),
             result=result,
+            shown=shown,
         )
     for reader in readers:
         _ = reader.cancel()
@@ -724,19 +818,73 @@ class ToolContext:
           kept: How many units ``body`` holds.
 
         """
+        out = list(self.fitting(units, reserve=reserve, cap=cap))
+        return "".join(out), len(out)
+
+    def fitting(
+        self,
+        units: Iterable[str],
+        *,
+        reserve: int = 0,
+        cap: int = 0,
+    ) -> Iterator[str]:
+        """Yield each of ``units`` while they fit in one result, as ``fit`` keeps them.
+
+        So a tool writes each unit as soon as it is known to fit, and stops
+        taking units at the first that does not.
+
+        Args:
+          units: Rendered pieces, in order.
+          reserve: Room to leave for a note the caller appends.
+          cap: The tool's own limit, if below ``max_result_chars``; ``0`` for none.
+
+        Yields:
+          unit: Each kept unit; the first cut mid-way, and the last, if it alone
+            is too large.
+
+        """
         limit = min(cap, self.max_result_chars) if cap else self.max_result_chars
         budget = max(1, limit - reserve)
-        out: list[str] = []
         used = 0
-        for unit in units:
-            if not out and len(unit) > budget:
+        for i, unit in enumerate(units):
+            if not i and len(unit) > budget:
                 omitted = len(unit) - budget
-                return f"{unit[:budget]}\n... ({omitted:,} chars omitted)", 1
+                yield f"{unit[:budget]}\n... ({omitted:,} chars omitted)"
+                return
             if used + len(unit) > budget:
-                break
+                return
             used += len(unit)
-            out.append(unit)
-        return "".join(out), len(out)
+            yield unit
+
+    def view(
+        self,
+        lines: Sequence[str],
+        *,
+        reserve: int = 0,
+        cap: int = 0,
+        note: str = "",
+    ) -> tuple[str, bool]:
+        """Return output as the model reads it: whole if it fits, else its two ends.
+
+        A failure prints last, so a cut keeps the end as well as the start, the
+        end the larger share, and a line between says how many were left out.
+
+        Args:
+          lines: The output, each line with its newline.
+          reserve: Room to leave for a note the caller appends.
+          cap: The tool's own limit, if below ``max_result_chars``; ``0`` for none.
+          note: What the line between adds, such as where the whole output is.
+
+        Returns:
+          text: The kept lines, stripped, with a final newline; ``""`` for none.
+          cut: Whether any line was left out.
+
+        """
+        body, kept = self.fit(lines, reserve=reserve, cap=cap)
+        cut = kept < len(lines)
+        if cut:
+            body = _ends(self, lines, reserve=reserve, cap=cap, note=note)
+        return (f"{body.strip()}\n" if body.strip() else ""), cut
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -993,6 +1141,39 @@ def _bound(value: PlainTree, f: _Field) -> None:
         raise ValueError(f"{f.key!r} must be at most {f.arg.maximum}, got {value}.")
 
 
+# The end gets the larger share, but no line too long for it, and the start keeps at
+# least part of its first line. Room is left for the longest the cut can say: every
+# line.
+def _ends(
+    context: ToolContext,
+    lines: Sequence[str],
+    *,
+    reserve: int,
+    cap: int,
+    note: str,
+) -> str:
+    """Return the start and end of ``lines``, and how many lines between are left out."""
+    reserve += len(_omitted(len(lines), note=note))
+    limit = min(cap, context.max_result_chars) if cap else context.max_result_chars
+    room = limit - reserve
+    tail_room = room * 3 // 5
+    _, tail = context.fit(reversed(lines[1:]), cap=max(1, tail_room))
+    if len(lines[-1]) > tail_room:
+        tail = 0
+    end = "".join(lines[len(lines) - tail :])
+    reserve += len(end)
+    # A first line cut short says so, past the room ``fit`` was given.
+    if len(lines[0]) > room - len(end):
+        reserve += len(f"\n... ({len(lines[0]):,} chars omitted)")
+    head, kept = context.fit(lines[: len(lines) - tail], reserve=reserve, cap=cap)
+    return f"{head.rstrip()}{_omitted(len(lines) - kept - tail, note=note)}{end}"
+
+
+def _omitted(count: int, *, note: str) -> str:
+    """Return the line between a cut output's start and end: how many lines it left out."""
+    return f"\n... ({count:,} lines omitted{note})\n"
+
+
 def _text(data: bytes, *, max_bytes: int = 1 << 20) -> str | None:
     """Return ``data`` as text to diff against, or ``None`` if large or not UTF-8."""
     if len(data) > max_bytes:
@@ -1066,14 +1247,20 @@ class _Closed:
     """The marker that ends a ``Stream``; a tool cannot write one."""
 
 
-async def _collect[T](stream: AsyncIterator[T], items: list[T]) -> None:
-    """Append each item of ``stream`` to ``items`` until the stream ends."""
+async def _collect[T](
+    stream: AsyncIterator[T],
+    items: list[T],
+    seen: Callable[[T], object],
+) -> None:
+    """Append each item of ``stream`` to ``items``, and show it to ``seen``, to its end."""
     # Appended one at a time, so a cancel midway keeps the items already read.
     while True:
         try:
-            items.append(await anext(stream))
+            item = await anext(stream)
         except StopAsyncIteration:
             return
+        items.append(item)
+        seen(item)
 
 
 # A coroutine is awaited inside the task that is the call's ``result`` future,

@@ -22,6 +22,7 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
+from sagent.runtime.types import DetachSchedule, WakeSchedule
 from sagent.session.types import AgentSelfResult
 from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
@@ -171,6 +172,71 @@ async def test_reasoning_and_tier_changes_are_applied_and_reported(
         "thinking_effort: none -> high",
         "service_tier: auto -> default",
     ]
+
+
+@pytest.mark.asyncio
+async def test_when_long_calls_wake_is_patched_and_reported(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+
+    text = await _patch(
+        tool,
+        tmp_path,
+        {
+            "detach": {
+                "default": {"first_sec": 30, "max_gap_sec": 600},
+                "tools": {"Bash": {"off": True}, "Read": {"growth": 0}},
+            },
+        },
+    )
+
+    schedule = agent.runtime.detach_schedule
+    assert schedule == DetachSchedule(
+        default=WakeSchedule(first_sec=30.0, max_gap_sec=600.0),
+        tools={
+            "Bash": None,
+            "Read": WakeSchedule(first_sec=30.0, growth=0.0, max_gap_sec=600.0),
+        },
+    )
+    assert text == "detach: 30s 1 600s; Bash off; Read 30s 0 600s"
+    assert await _patch(tool, tmp_path, {"detach": {"default": {"off": True}}}) == (
+        "detach: off; Bash off; Read 30s 0 600s"
+    )
+    # A patch to a schedule that is off starts from the default one.
+    assert (
+        await _patch(
+            tool,
+            tmp_path,
+            {"detach": {"tools": {"Bash": {"first_sec": 5}}}},
+        )
+        == "detach: off; Bash 5s 1 300s; Read 30s 0 600s"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detach", "message"),
+    [
+        ({"default": {"first_sec": 0}}, "first_sec must be a number of seconds"),
+        (
+            {"tools": {"Bash": {"soon": 1}}},
+            "detach.tools.Bash takes first_sec, growth, max_gap_sec, off; not soon.",
+        ),
+        ({"default": {"later": 1}}, "detach.default takes .*; not later."),
+        ({"later": {}}, "detach takes default, tools; not later."),
+        ({"default": {"growth": "fast"}}, "growth"),
+    ],
+)
+async def test_a_detach_patch_that_does_not_fit_changes_nothing(
+    tmp_path: Path,
+    detach: dict[str, PlainTree],
+    message: str,
+) -> None:
+    _, agent, tool = _setup(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        _ = await _patch(tool, tmp_path, {"detach": detach, "status": "x"})
+
+    assert agent.runtime.detach_schedule == DetachSchedule()
 
 
 @pytest.mark.asyncio

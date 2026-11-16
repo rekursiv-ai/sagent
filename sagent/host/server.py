@@ -73,6 +73,7 @@ from sagent.host.wire import (
     Pause,
     Paused,
     Peers,
+    Progress,
     Refused,
     Result,
     Resume,
@@ -1022,6 +1023,8 @@ class Server(AsyncResource):
                     self._deliver(session, message)
                     if isinstance(message, Note) and not session.reason:
                         host.writer.write(encoded(Ack(id=message.id)))
+                elif isinstance(message, Progress) and session.writer is not None:
+                    session.writer.write(encoded(message))
                 elif isinstance(message, Peers):
                     session.peers = message.labels
                     session.public_peers = (
