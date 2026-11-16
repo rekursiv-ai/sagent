@@ -33,6 +33,7 @@ import weakref
 from sagent.lib.posix.child import Child, finish
 from sagent.providers import llamacpp
 from sagent.providers.openai.compat import OpenAICompatible
+from sagent.providers.types import ProviderCategory
 
 
 if TYPE_CHECKING:
@@ -85,6 +86,8 @@ class LlamaCpp(OpenAICompatible):
     aliases: ClassVar[tuple[str, ...]] = ("lcpp",)
     package: ClassVar[ModuleType] = llamacpp
     key_variable: ClassVar[str] = "LLAMA_CPP_API_KEY"
+    display_name: ClassVar[str] = "Llama.cpp"
+    category: ClassVar[ProviderCategory] = "local"
 
     stop_timeout_sec: ClassVar[float] = 10.0
     """How long a stopped server may take to exit before it is killed."""

@@ -25,6 +25,7 @@ from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.types import AsyncResource
 
 
@@ -69,6 +70,8 @@ class Anthropic(HasModels, AsyncResource):
     section: ClassVar[str] = "anthropic"
     aliases: ClassVar[tuple[str, ...]] = ("anthropic-api", "aapi")
     package: ClassVar[ModuleType] = anthropic
+    display_name: ClassVar[str] = "Anthropic"
+    category: ClassVar[ProviderCategory] = "api"
 
     betas: ClassVar[tuple[str, ...]] = ()
     """Beta features every request names, whatever it asks for."""

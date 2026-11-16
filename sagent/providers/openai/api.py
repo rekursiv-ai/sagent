@@ -46,6 +46,7 @@ class OpenAI(OpenAICompatible):
 
     section: ClassVar[str] = "openai"
     aliases: ClassVar[tuple[str, ...]] = ("openai-api", "oapi")
+    display_name: ClassVar[str] = "OpenAI"
     package: ClassVar[ModuleType] = openai
     url: ClassVar[str] = "https://api.openai.com/v1"
     key_variable: ClassVar[str] = "OPENAI_API_KEY"

@@ -10,7 +10,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 
 from sagent.providers.usage import ProviderUsage, UsageReporter
 from sagent.types import Resource
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         ToolCallChunk,
         ToolResultChunk,
     )
+    from sagent.providers.catalog import ProviderInfo
     from sagent.providers.login import Logins
     from sagent.session.types import AnyToolResult, Attachment, ToolCall
     from sagent.tools.types import Tool
@@ -42,6 +43,7 @@ __all__ = [
     "ModelCatalog",
     "ProcessPool",
     "Provider",
+    "ProviderCategory",
     "ProviderFactory",
     "ProviderSharedResources",
     "ProviderUsage",
@@ -50,6 +52,10 @@ __all__ = [
     "UsageReporter",
     "UsageWindow",
 ]
+
+
+ProviderCategory = Literal["subscription", "api", "local", "other"]
+"""How a registered provider is grouped; ``other`` covers opaque factories."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -181,6 +187,11 @@ class ModelCatalog(ProviderSharedResources, Protocol):
 
     def use_account(self, account: str | None) -> None:
         """Sign providers in as ``account`` from now on, offering the same names."""
+        ...
+
+
+    def provider_info(self) -> tuple[ProviderInfo, ...]:
+        """Return catalog metadata without constructing providers."""
         ...
 
 

@@ -467,6 +467,10 @@ class HasModels:
         """Return the models this provider serves, offering only what it sends."""
         return models(cls.package, section=cls.section)
 
+    @classmethod
+    def catalog_models(cls) -> tuple[str, ...]:
+        """Return model names a catalog may expose without constructing the provider."""
+        return tuple(cls.models())
 
 # Keyed by name: pyrefly rejects a module as a cache key, though it hashes.
 @cache

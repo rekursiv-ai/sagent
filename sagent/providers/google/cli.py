@@ -44,6 +44,7 @@ from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -97,6 +98,8 @@ class GoogleCLI(HasModels, AsyncResource):
     section: ClassVar[str] = "google-cli"
     aliases: ClassVar[tuple[str, ...]] = ("gcli",)
     package: ClassVar[ModuleType] = google
+    display_name: ClassVar[str] = "Google Antigravity (Legacy CLI)"
+    category: ClassVar[ProviderCategory] = "subscription"
 
     def __init__(
         self,

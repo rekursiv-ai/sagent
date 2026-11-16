@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, Self, override, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Self, cast, override, runtime_checkable
 
 import re
 
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         Model,
         ModelCatalog as CatalogProtocol,
         Provider,
+        ProviderCategory,
         ProviderFactory,
         ProviderSharedResources,
     )
@@ -60,6 +61,7 @@ __all__ = [
     "ModelCatalog",
     "ModelMemory",
     "PerAccount",
+    "ProviderInfo",
     "cache_key",
     "default_provider",
     "listings",
@@ -79,6 +81,21 @@ class Listed(Protocol):
     @property
     def aliases(self) -> tuple[str, ...]:
         """Return the other names it answers to."""
+        ...
+
+    @property
+    def category(self) -> ProviderCategory:
+        """Return whether this provider uses subscriptions, API keys, or local compute."""
+        ...
+
+    @property
+    def display_name(self) -> str:
+        """Return the provider name shown to users."""
+        ...
+
+    @classmethod
+    def catalog_models(cls) -> tuple[str, ...]:
+        """Return model names without constructing the provider."""
         ...
 
     def __call__(
@@ -119,6 +136,16 @@ def listings() -> tuple[Listed, ...]:
 def default_provider() -> str:
     """Return the provider a session starts on unless told otherwise: the first listed."""
     return listings()[0].section
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderInfo:
+    """Catalog metadata for one provider, without constructing it."""
+
+    name: str
+    display_name: str
+    category: ProviderCategory
+    models: tuple[str, ...]
 
 
 class ModelCatalog(SharedResources):
@@ -341,6 +368,22 @@ class ModelCatalog(SharedResources):
             )
         self.factories = {name: self.factories[name] for name in dict.fromkeys(names)}
         return list(self.factories)
+
+    def provider_info(self) -> tuple[ProviderInfo, ...]:
+        """Return registration metadata without constructing any provider."""
+        registered = {listed.section: listed for listed in listings()}
+        items: list[ProviderInfo] = []
+        for name in self.factories:
+            listed = _registration(name, self.factories[name], registered)
+            items.append(
+                ProviderInfo(
+                    name=name,
+                    display_name=listed.display_name if listed is not None else name,
+                    category=listed.category if listed is not None else "other",
+                    models=listed.catalog_models() if listed is not None else (),
+                ),
+            )
+        return tuple(items)
 
     @override
     async def aclose(self) -> None:
@@ -595,6 +638,30 @@ class _SigningIn(Listed, Protocol):
     ) -> Provider:
         """Return a provider the catalog knows as ``name``, signed in as ``account``."""
         ...
+
+
+def _registration(
+    name: str,
+    factory: ProviderFactory,
+    registered: Mapping[str, Listed],
+) -> Listed | None:
+    """Return metadata for a named registration without building its provider.
+
+    The default catalog resolves metadata by section name. Fixed catalogs may
+    rename a provider or wrap its class in ``partial``; in those cases the
+    factory itself is the only safe source of class-level metadata. Opaque
+    callables remain intentionally unknown.
+    """
+    listed = registered.get(name)
+    if listed is not None:
+        return listed
+    candidate = factory.func if isinstance(factory, partial) else factory
+    if all(
+        hasattr(candidate, attribute)
+        for attribute in ("display_name", "category", "catalog_models")
+    ):
+        return cast(Listed, candidate)
+    return None
 
 
 def _fixed(

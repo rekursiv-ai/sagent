@@ -46,6 +46,7 @@ class DashScope(OpenAICompatible):
     """
 
     section: ClassVar[str] = "dashscope"
+    display_name: ClassVar[str] = "DashScope / Qwen"
     aliases: ClassVar[tuple[str, ...]] = ("ds",)
     package: ClassVar[ModuleType] = dashscope
     url: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"

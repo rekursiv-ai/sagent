@@ -91,6 +91,7 @@ class Custom(OpenAICompatible):
 
     section: ClassVar[str] = "custom"
     aliases: ClassVar[tuple[str, ...]] = ("custom-api", "generic", "proxy")
+    display_name: ClassVar[str] = "Custom (OpenAI-compatible)"
     package: ClassVar[ModuleType] = custom
     url: ClassVar[str] = ""
     key_variable: ClassVar[str] = "CUSTOM_API_KEY"
@@ -108,6 +109,13 @@ class Custom(OpenAICompatible):
         "reasoning",
         "reasoning_details",
     )
+
+    @classmethod
+    def catalog_models(cls) -> tuple[str, ...]:
+        """Return model names a catalog may expose without constructing the provider."""
+        stored = read_custom_config().get("model", "")
+        model = (stored or os.environ.get("CUSTOM_MODEL", "")).strip()
+        return (model,) if model else ()
 
     def configure(
         self,

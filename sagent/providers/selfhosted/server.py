@@ -53,6 +53,7 @@ from sagent.providers.openai import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted.calls import read_calls
 from sagent.providers.table import ModelTags
+from sagent.providers.types import ProviderCategory
 from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
 from sagent.types import AsyncResource
 
@@ -103,12 +104,19 @@ class SelfHosted(AsyncResource):
     aliases: ClassVar[tuple[str, ...]] = ()
     """The other names it answers to."""
 
+    display_name: ClassVar[str] = "Hugging Face Transformers"
+
+    category: ClassVar[ProviderCategory] = "local"
+    """The provider category."""
+
+    default_model: ClassVar[str] = "Qwen/Qwen3.6-27B"
+
     def __init__(
         self,
         *,
         name: str = "",
         resources: ProviderSharedResources | None = None,
-        model: str = "Qwen/Qwen3.6-27B",
+        model: str = default_model,
         trust_remote_code: bool = False,
     ) -> None:
         self._name = name or self.section
@@ -134,6 +142,11 @@ class SelfHosted(AsyncResource):
     def usage(self) -> tuple[UsageWindow, ...]:
         """Return ``()``: a local model has no rate limits."""
         return ()
+
+    @classmethod
+    def catalog_models(cls) -> tuple[str, ...]:
+        """Return the default local model without loading it."""
+        return (cls.default_model,)
 
     def __getitem__(self, model: str) -> SelfHostedModel:
         roles = ("default", "best", "everyday", "utility")

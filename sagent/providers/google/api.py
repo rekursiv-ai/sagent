@@ -24,6 +24,7 @@ from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.types import AsyncResource
 
 
@@ -62,6 +63,8 @@ class Google(HasModels, AsyncResource):
     section: ClassVar[str] = "google"
     aliases: ClassVar[tuple[str, ...]] = ("google-api", "gapi")
     package: ClassVar[ModuleType] = google
+    display_name: ClassVar[str] = "Google Gemini"
+    category: ClassVar[ProviderCategory] = "api"
 
     def __init__(
         self,

@@ -35,6 +35,7 @@ from sagent.model.types import (
 from sagent.providers import acp
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.session.types import (
     AnyToolResult,
     AssistantMessage,
@@ -79,6 +80,8 @@ class Acp(HasModels, AsyncResource):
     """
 
     section: ClassVar[str] = "acp"
+    display_name: ClassVar[str] = "Google Antigravity (ACP)"
+    category: ClassVar[ProviderCategory] = "subscription"
     aliases: ClassVar[tuple[str, ...]] = ("acp-agent", "agent-client")
     package: ClassVar[ModuleType] = acp
 

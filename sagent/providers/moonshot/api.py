@@ -41,6 +41,7 @@ class Moonshot(OpenAICompatible):
     """
 
     section: ClassVar[str] = "moonshot"
+    display_name: ClassVar[str] = "Moonshot / Kimi"
     aliases: ClassVar[tuple[str, ...]] = ()
     package: ClassVar[ModuleType] = moonshot
     url: ClassVar[str] = "https://api.moonshot.ai/v1"

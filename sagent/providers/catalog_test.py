@@ -325,6 +325,18 @@ def test_a_catalog_of_fixed_factories_has_no_accounts() -> None:
     )
 
 
+def test_a_fixed_provider_mapping_keeps_class_metadata() -> None:
+    """A renamed class factory remains discoverable without being constructed."""
+    catalog = ModelCatalog(factories={"work": Anthropic})
+
+    (info,) = catalog.provider_info()
+
+    assert info.name == "work"
+    assert info.display_name == Anthropic.display_name
+    assert info.category == "api"
+    assert info.models == tuple(Anthropic.models())
+
+
 def test_a_provider_is_built_once_on_first_lookup() -> None:
     built: list[_Recorded] = []
     catalog = ModelCatalog(factories={"work": _Factory(built=built)})

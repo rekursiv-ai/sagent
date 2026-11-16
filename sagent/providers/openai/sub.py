@@ -25,6 +25,7 @@ from sagent.model.types import Request
 from sagent.providers.login import Logins
 from sagent.providers.openai import token_count, wire
 from sagent.providers.openai.api import OpenAI
+from sagent.providers.types import ProviderCategory
 from sagent.providers.openai.lease import BorrowedLogin
 from sagent.providers.openai.login import ORIGINATOR, CodexLogin
 
@@ -55,6 +56,8 @@ class OpenAISub(OpenAI):
         the login here, and renews it.
 
     """
+    display_name: ClassVar[str] = "ChatGPT (Subscription)"
+    category: ClassVar[ProviderCategory] = "subscription"
 
     section: ClassVar[str] = "openai-sub"
     aliases: ClassVar[tuple[str, ...]] = ("osub", "oaisub")

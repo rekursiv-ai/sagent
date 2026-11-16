@@ -41,6 +41,7 @@ class MiniMax(OpenAICompatible):
     """
 
     section: ClassVar[str] = "minimax"
+    display_name: ClassVar[str] = "MiniMax"
     aliases: ClassVar[tuple[str, ...]] = ()
     package: ClassVar[ModuleType] = minimax
     url: ClassVar[str] = "https://api.minimax.io/v1"

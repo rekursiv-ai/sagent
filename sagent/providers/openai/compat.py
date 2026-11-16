@@ -32,6 +32,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
 from sagent.providers.openai import chat, token_count, wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.types import AsyncResource
 
 
@@ -96,6 +97,11 @@ class OpenAICompatible(HasModels, AsyncResource):
 
     reasoning_field: ClassVar[str] = ""
     """The message field reasoning streams in and is replayed in; empty for none."""
+    category: ClassVar[ProviderCategory] = "api"
+    """The provider category (API key, subscription, or local compute)."""
+
+    display_name: ClassVar[str] = "OpenAI-compatible"
+
 
     reasoning_fields: ClassVar[tuple[str, ...]] = ()
     """Additional response fields accepted when reading reasoning."""

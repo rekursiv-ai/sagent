@@ -39,6 +39,7 @@ from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
+from sagent.providers.types import ProviderCategory
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -95,6 +96,8 @@ class AnthropicCLI(HasModels, AsyncResource):
     section: ClassVar[str] = "anthropic-cli"
     aliases: ClassVar[tuple[str, ...]] = ("acli",)
     package: ClassVar[ModuleType] = anthropic
+    display_name: ClassVar[str] = "Claude (Subscription)"
+    category: ClassVar[ProviderCategory] = "subscription"
 
     def __init__(
         self,
