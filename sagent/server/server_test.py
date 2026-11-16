@@ -5,7 +5,7 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import asyncio
 import os
@@ -32,7 +32,7 @@ from sagent.server.protocol import (
     SYSTEM_METHODS,
 )
 from sagent.server.model_settings import (
-    _model_settings_arguments,
+    _custom_provider_settings,
     _setting_values,
     _usage_payload,
 )
@@ -42,9 +42,9 @@ from sagent.server.server import (
     _resolve_prompt_text,
     serve,
 )
+from sagent.server.sessions import ManagedSession
 from sagent.session.controller import AgentSessionController
 from sagent.session.host import AgentSession
-from sagent.session.snapshot import _record_metadata
 from sagent.session.types import (
     AssistantMessage,
     ShellCommandResult,
@@ -58,6 +58,17 @@ def _wire(message: object) -> dict[str, Any]:
     parsed = json_loads(json_dumps(message))
     assert isinstance(parsed, dict)
     return parsed
+
+
+def _register(
+    server: SagentServer,
+    session: Any,
+    *,
+    session_id: str = "test-session",
+) -> ManagedSession:
+    entry = ManagedSession(session_id=session_id, session=session)
+    server._sessions.add(entry)
+    return entry
 
 
 @pytest.mark.asyncio
@@ -98,7 +109,13 @@ async def test_protocol_serves_requests_until_shutdown(tmp_path: Path) -> None:
         "nativeEvents": True,
         "nativeRecords": True,
     }
-    assert messages[1] == {"id": 2, "result": {"open": False, "agents": []}}
+    assert messages[1] == {
+        "id": 2,
+        "error": {
+            "code": "sagent_error",
+            "message": "sessionId must be a non-empty string",
+        },
+    }
     assert messages[2] == {
         "id": 3,
         "result": {"activePath": None, "sessions": []},
@@ -150,12 +167,9 @@ def test_module_entrypoint_supports_native_handshake(tmp_path: Path) -> None:
         state = json_loads(process.stdout.readline(), dict[str, Any])
         assert state == {
             "id": 2,
-            "result": {
-                "open": False,
-                "sessionId": None,
-                "snapshot": {"version": 1, "items": []},
-                "records": [],
-                "team": {"open": False, "agents": []},
+            "error": {
+                "code": "sagent_error",
+                "message": "sessionId must be a non-empty string",
             },
         }
         shutdown = json_loads(process.stdout.readline(), dict[str, Any])
@@ -222,37 +236,17 @@ def test_model_capability_values_keep_native_json_types() -> None:
     assert _setting_values(capability, "manage_context_server_side") == [False, True]
 
 
-def test_record_metadata_preserves_native_timestamp_before_fallback() -> None:
-    record = AssistantMessage(timestamp="2026-01-02T03:04:05+00:00")
-
-    assert _record_metadata(record, fallback_timestamp="fallback") == {
-        "timestamp": "2026-01-02T03:04:05+00:00",
-    }
-
-
-def test_record_metadata_can_supply_completion_timestamp() -> None:
-    assert _record_metadata(AssistantMessage(), fallback_timestamp="fallback") == {
-        "timestamp": "fallback",
-    }
-
-
-def test_provider_selection_uses_sagents_native_default_model_role() -> None:
-    assert _model_settings_arguments(
-        {"type": "select-provider", "provider": "google-cli"},
-    ) == {"provider": "google-cli", "model": "default"}
-
-
 def test_custom_provider_configuration_requires_an_exact_model() -> None:
-    assert _model_settings_arguments(
+    assert _custom_provider_settings(
         {
             "type": "configure-custom-provider",
             "baseUrl": "https://api.experientiallabs.ai/v1",
             "model": "gpt-6-luna",
         },
-    ) == {"provider": "custom", "model": "gpt-6-luna"}
+    ) == ("https://api.experientiallabs.ai/v1", None, "gpt-6-luna")
 
     with pytest.raises(ValueError, match="Model is required"):
-        _model_settings_arguments(
+        _custom_provider_settings(
             {
                 "type": "configure-custom-provider",
                 "baseUrl": "https://api.experientiallabs.ai/v1",
@@ -341,11 +335,19 @@ async def test_native_protocol_serializes_runtime_events_without_ui_projection(
     assert initialized["protocol"] == "sagent/v2"
     assert initialized["capabilities"]["nativeEvents"] is True
 
-    server._observe(types.ModelResponsePartial(text="hello", record=2), "Agent")
+    server._sessions.add(
+        ManagedSession(session_id="test-session", session=MagicMock()),
+    )
+    server._emit_observed_event(
+        types.ModelResponsePartial(text="hello", record=2),
+        "Agent",
+        session_id="test-session",
+    )
     message = _wire(queue.get_nowait())
     assert message["method"] == "session.event"
     assert message["params"]["protocol"] == NATIVE_PROTOCOL
     assert message["params"]["eventType"] == "ModelResponsePartial"
+    assert message["params"]["category"] == "assistant-stream"
     assert message["params"]["agentLabel"] == "Agent"
     assert str(message["params"]["value"]["py/object"]).endswith(
         ".ModelResponsePartial",
@@ -366,10 +368,14 @@ async def test_native_protocol_serializes_daemon_notifications_with_native_envel
         output=queue,
     )
     await server._dispatch("system.initialize", {})
+    server._sessions.add(
+        ManagedSession(session_id="test-session", session=MagicMock()),
+    )
 
     server._notify(
         "command.output",
         {"text": "done", "tone": "info", "command": "/help"},
+        session_id="test-session",
     )
 
     message = _wire(queue.get_nowait())
@@ -437,12 +443,19 @@ async def test_native_protocol_vertical_slice_uses_a_real_scripted_agent(
 
     opened = await request(2, "session.open", {})
     assert opened["result"]["open"] is True
-    assert opened["result"]["snapshot"] == {"version": 1, "items": []}
+    assert opened["result"]["records"] == []
+    session_id = opened["result"]["sessionId"]
+    assert isinstance(session_id, str)
 
     submitted = await request(
         3,
         "session.submit",
-        {"text": "Say PONG", "agentLabel": "Agent", "mode": "immediate"},
+        {
+            "sessionId": session_id,
+            "text": "Say PONG",
+            "agentLabel": "Agent",
+            "mode": "immediate",
+        },
     )
     assert submitted["result"]["accepted"] is True
 
@@ -458,16 +471,19 @@ async def test_native_protocol_vertical_slice_uses_a_real_scripted_agent(
     assert "ModelResponsePartial" in event_types
     assert "ModelResponseComplete" in event_types
 
-    state = await request(4, "session.state", {})
-    snapshot = state["result"]["snapshot"]
-    assert snapshot["items"][-1]["type"] == "assistant"
-    assert snapshot["items"][-1]["text"] == "PONG"
-    assert state["result"]["records"]
+    state = await request(4, "session.state", {"sessionId": session_id})
+    records = state["result"]["records"]
+    assert records[-1]["recordType"] == "AssistantMessage"
+    assert records[-1]["value"]["content"] == "PONG"
 
-    halted = await request(5, "session.halt", {"agentLabel": "Agent"})
+    halted = await request(
+        5,
+        "session.halt",
+        {"sessionId": session_id, "agentLabel": "Agent"},
+    )
     assert halted["result"] == {"cancelled": False}
 
-    closed = await request(6, "session.close", {})
+    closed = await request(6, "session.close", {"sessionId": session_id})
     assert closed["result"] == {"closed": True}
     shutdown = await request(7, "system.shutdown", {})
     assert shutdown["result"] == {"stopped": True}
@@ -534,6 +550,52 @@ async def test_one_daemon_keeps_two_native_sessions_independent(
 
 
 @pytest.mark.asyncio
+async def test_closing_registered_session_closes_its_native_owner(
+    tmp_path: Path,
+) -> None:
+    server = SagentServer(
+        cwd=tmp_path,
+        model_name="default",
+        output=asyncio.Queue(),
+    )
+    session = MagicMock()
+    session.close = AsyncMock()
+    server._sessions.add(ManagedSession(session_id="one", session=session))
+
+    result = await server._dispatch("session.close", {"sessionId": "one"})
+
+    assert result == {"closed": True}
+    session.close.assert_awaited_once_with()
+    assert server._sessions.ids() == ()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_every_session_and_rejects_new_opens(
+    tmp_path: Path,
+) -> None:
+    server = SagentServer(
+        cwd=tmp_path,
+        model_name="default",
+        output=asyncio.Queue(),
+    )
+    failed = MagicMock()
+    failed.close = AsyncMock(side_effect=RuntimeError("first close failed"))
+    closed = MagicMock()
+    closed.close = AsyncMock()
+    server._sessions.add(ManagedSession(session_id="failed", session=failed))
+    server._sessions.add(ManagedSession(session_id="closed", session=closed))
+
+    with pytest.raises(ExceptionGroup, match="closing Sagent sessions failed"):
+        await server.close()
+
+    failed.close.assert_awaited_once_with()
+    closed.close.assert_awaited_once_with()
+    assert server._sessions.ids() == ()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await server._dispatch("session.open", {})
+
+
+@pytest.mark.asyncio
 async def test_canonical_protocol_dispatches_system_and_session_methods(
     tmp_path: Path,
 ) -> None:
@@ -547,10 +609,10 @@ async def test_canonical_protocol_dispatches_system_and_session_methods(
         "system.initialize", {}
     )
     assert initialized["protocol"] == "sagent/v2"
-    assert (await server._dispatch("session.state", {}))["open"] is False
-    assert (await server._dispatch("session.team.state", {}))["open"] is False
     assert (await server._dispatch("session.list", {}))["sessions"] == []
-    assert await server._dispatch("session.close", {}) == {"closed": True}
+    for method in ("session.state", "session.team.state", "session.close"):
+        with pytest.raises(ValueError, match="sessionId must be a non-empty string"):
+            await server._dispatch(method, {})
 
 
 def test_native_wire_uses_treekle_for_native_values() -> None:
@@ -604,8 +666,8 @@ async def test_server_observes_streaming_tool_call_and_result(tmp_path: Path) ->
         output=queue,
     )
     mock_session = MagicMock()
-    server._session = mock_session
-    server._active_agent_label = "Agent"
+    mock_session.team = {}
+    _register(server, mock_session)
 
     # Tool call started
     call = ToolCall(
@@ -615,12 +677,21 @@ async def test_server_observes_streaming_tool_call_and_result(tmp_path: Path) ->
     )
     tool_call_started_cls = getattr(types, "ToolCallStarted", None)
     assert tool_call_started_cls is not None
-    server._observe(tool_call_started_cls(call=call, title="echo hello"), "Agent")
+    server._observe(
+        tool_call_started_cls(call=call, title="echo hello"),
+        "Agent",
+        session_id="test-session",
+    )
 
     notif1 = _wire(queue.get_nowait())
     assert notif1["method"] == NATIVE_EVENT_METHOD
     assert notif1["params"]["protocol"] == NATIVE_PROTOCOL
     assert notif1["params"]["eventType"] == "ToolCallStarted"
+    assert notif1["params"]["category"] == "tool-call"
+    assert notif1["params"]["native"] == {
+        "callId": "call-1",
+        "summary": "echo hello",
+    }
     assert notif1["params"]["agentLabel"] == "Agent"
     assert notif1["params"]["sequence"] == 1
     assert str(notif1["params"]["value"]["py/object"]).endswith(
@@ -634,12 +705,17 @@ async def test_server_observes_streaming_tool_call_and_result(tmp_path: Path) ->
         exit_code=0,
         is_error=False,
     )
-    server._observe(result, "Agent")
+    server._observe(result, "Agent", session_id="test-session")
 
     notif2 = _wire(queue.get_nowait())
     assert notif2["method"] == NATIVE_EVENT_METHOD
     assert notif2["params"]["protocol"] == NATIVE_PROTOCOL
     assert notif2["params"]["eventType"] == "ShellCommandResult"
+    assert notif2["params"]["category"] == "tool-result"
+    assert notif2["params"]["native"] == {
+        "callId": "call-1",
+        "text": "hello\n",
+    }
     assert notif2["params"]["agentLabel"] == "Agent"
     assert notif2["params"]["sequence"] == 2
     assert str(notif2["params"]["value"]["py/object"]).endswith(
@@ -685,21 +761,33 @@ async def test_native_protocol_routes_submission_modes_records_and_halt(
     session.controller = AgentSessionController(session.team)
     session.submit.side_effect = session.controller.send
     session.halt.side_effect = session.controller.halt
-    server._session = session
+    _register(server, session)
 
     initialized = await server._dispatch("system.initialize", {})
     assert initialized["protocol"] == "sagent/v2"
 
     for mode in ("immediate", "queued", "deferred"):
         result = await server._dispatch(
-            "session.submit", {"text": mode, "agentLabel": "Agent", "mode": mode}
+            "session.submit",
+            {
+                "sessionId": "test-session",
+                "text": mode,
+                "agentLabel": "Agent",
+                "mode": mode,
+            },
         )
         assert result["accepted"] is True
         assert result["mode"] == mode
 
-    records = await server._dispatch("session.records", {"agentLabel": "Agent"})
+    records = await server._dispatch(
+        "session.records",
+        {"sessionId": "test-session", "agentLabel": "Agent"},
+    )
     assert records["records"][0]["recordType"] == "UserMessage"
-    assert await server._dispatch("session.halt", {}) == {"cancelled": True}
+    assert await server._dispatch(
+        "session.halt",
+        {"sessionId": "test-session"},
+    ) == {"cancelled": True}
 
 
 @pytest.mark.asyncio
@@ -716,9 +804,12 @@ async def test_native_halt_targets_requested_child_agent(
     session = MagicMock()
     session.agents = {"child": child}
     session.halt.return_value = True
-    server._session = session
+    _register(server, session)
 
-    result = await server._dispatch("session.halt", {"agentLabel": "child"})
+    result = await server._dispatch(
+        "session.halt",
+        {"sessionId": "test-session", "agentLabel": "child"},
+    )
 
     assert result == {"cancelled": True}
     session.halt.assert_called_once_with(agent_label="child")
@@ -739,7 +830,11 @@ async def test_native_state_queries_serialize_live_agent_and_team_state(
     agent.session.journal.path = tmp_path / "agent.jsonl"
     agent.runtime.tool_context.label = "Agent"
     agent.runtime.conversation = "conversation-1"
-    agent.runtime.is_idle = True
+    # Waiting for input is not idle by Runtime's dispatch definition, but it
+    # is also not active foreground work.
+    agent.runtime.is_idle = False
+    agent.runtime.is_busy = False
+    agent.runtime.waiting_for_input = True
     agent.runtime.accepts_user_dispatch = True
     agent.runtime.accepts_deferred_dispatch = False
     agent.runtime.model_call = None
@@ -771,17 +866,25 @@ async def test_native_state_queries_serialize_live_agent_and_team_state(
     session.path = tmp_path / "session" / "agent.jsonl"
     session.agent = agent
     session.team = team
-    server._session = session
+    _register(server, session)
 
     await server._dispatch("system.initialize", {})
-    state = await server._dispatch("session.state", {})
-    agent_state = await server._dispatch("session.agent.state", {"label": "Agent"})
+    state = await server._dispatch(
+        "session.state",
+        {"sessionId": "test-session"},
+    )
+    agent_state = await server._dispatch(
+        "session.agent.state",
+        {"sessionId": "test-session", "label": "Agent"},
+    )
 
     assert state["records"][0]["recordType"] == "UserMessage"
-    assert state["snapshot"]["version"] == 1
-    assert state["snapshot"]["items"]
+    assert state["running"] is False
+    assert state["team"]["agents"][0]["running"] is False
     assert state["team"]["agents"][0]["runtime"] == {
-        "idle": True,
+        "idle": False,
+        "busy": False,
+        "waitingForInput": True,
         "acceptsUserDispatch": True,
         "acceptsDeferredDispatch": False,
         "modelCall": False,
@@ -792,5 +895,3 @@ async def test_native_state_queries_serialize_live_agent_and_team_state(
     }
     assert agent_state["agent"]["conversationId"] == "conversation-1"
     assert agent_state["records"][0]["recordType"] == "UserMessage"
-    assert agent_state["snapshot"]["version"] == 1
-    assert agent_state["snapshot"]["items"]
