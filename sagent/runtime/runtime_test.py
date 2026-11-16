@@ -38,7 +38,7 @@ from sagent.model.scripted import Reply, ScriptedProvider, call, reply
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.openai import wire
 from sagent.providers.types import Model
-from sagent.runtime import runtime, types
+from sagent.runtime import runtime
 from sagent.runtime.context import InvalidContextError, validate_context
 from sagent.runtime.exceptions import UserFacingError, log_task_exception
 from sagent.runtime.runtime import (
@@ -76,6 +76,7 @@ from sagent.runtime.types import (
     CompactStarted,
     Detach,
     DetachedResult,
+    DetachSchedule,
     Halt,
     Kill,
     Markers,
@@ -94,6 +95,8 @@ from sagent.runtime.types import (
     Scheduled,
     UserDeferredMessage,
     UserQueuedMessage,
+    Wake,
+    WakeSchedule,
     labeled_agent_send_text,
 )
 from sagent.session.types import (
@@ -114,6 +117,7 @@ from sagent.tools.display import ToolDisplay
 from sagent.tools.edit import Edit
 from sagent.tools.read import Read
 from sagent.tools.types import (
+    Stream,
     Tool,
     ToolContext,
     ToolOutput,
@@ -183,6 +187,52 @@ class Gated:
             ),
             result=UncategorizedToolResult(),
         )
+
+
+@dataclass(slots=True, kw_only=True)
+class Talking:
+    """A tool that writes each line the test says, and ends, exit 3, when told."""
+
+    name: str = "talk"
+    description: str = "Talks for tests."
+    schema: Mapping[str, PlainTree] = field(default_factory=dict[str, "PlainTree"])
+    display: ToolDisplay = field(default_factory=ToolDisplay)
+    lines: asyncio.Queue[str | None] = field(default_factory=asyncio.Queue)
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[BashResult, str, str]:
+        del context, arguments
+        stdout = Stream[str]()
+        return whole_output(self._run(stdout), stdout=stdout)
+
+    async def _run(self, stdout: Stream[str]) -> ToolOutput[BashResult, str, str]:
+        self.started.set()
+        while (line := await self.lines.get()) is not None:
+            stdout.write(line)
+        return ToolOutput(result=BashResult(exit_code=3))
+
+    def say(self, *lines: str) -> None:
+        for line in lines:
+            self.lines.put_nowait(line)
+
+    def end(self) -> None:
+        self.lines.put_nowait(None)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -524,6 +574,12 @@ def _text(entry: TapeEvent) -> str:
 
 def _user(text: str) -> UserMessage:
     return UserMessage(content=text)
+
+
+def _timeless(result: ToolResult) -> ToolResult:
+    """Return ``result`` without the time the runtime stamped on it."""
+    assert result.timestamp is not None
+    return replace(result, timestamp=None)
 
 
 def _arrival(h: Harness, call_id: str) -> list[ToolResult]:
@@ -881,8 +937,8 @@ async def test_a_call_no_tool_answered_is_an_error_result_and_a_stand_in_a_bare_
     ) as h:
         h.push(_user("go"))
         await h.seen(ModelIdle, 1)
-    (unknown,) = h.results("u1")
-    (failed,) = h.results("f1")
+    (unknown,) = map(_timeless, h.results("u1"))
+    (failed,) = map(_timeless, h.results("f1"))
     stub = h.results("b1")[0]
     assert unknown == ToolResult(
         call_id="u1",
@@ -1181,7 +1237,7 @@ async def test_a_detached_call_logs_its_completion(
         *_replies(3),
         tools=[tool],
     ) as h:
-        h.runtime.detach_after_sec = 0.01
+        h.runtime.detach_schedule = _SOON
         with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
             h.push(_user("go"))
             await h.seen(ModelIdle)
@@ -1583,14 +1639,14 @@ async def test_a_call_past_the_limit_is_answered_and_runs_on(
             *_replies(3),
             tools=[tool],
         ) as h:
-            h.runtime.detach_after_sec = 0.01
+            h.runtime.detach_schedule = _SOON
             h.push(_user("go"))
             await h.seen(ModelIdle)
             assert [r.state for r in h.results("t1")] == ["pending"]
             tool.release.set()
             await h.seen(ModelIdle, 2)
     assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
-    assert "runtime tool detached after 0.01s: call_id=t1" in caplog.messages
+    assert "runtime wake detaches the cohort: call_id=t1" in caplog.messages
     # Detached, the cohort was not waited out, so it never completes.
     assert h.count(CohortComplete) == 0
 
@@ -1605,7 +1661,7 @@ async def test_a_call_done_in_time_is_waited_for(
         reply("ok"),
         tools=[Gated()],
     ) as h:
-        h.runtime.detach_after_sec = 60.0
+        h.runtime.detach_schedule = DetachSchedule(default=WakeSchedule(first_sec=60.0))
         h.push(_user("go"))
         await h.seen(ModelIdle)
         # The call's own end cancelled its detach: it can never fire.
@@ -1629,7 +1685,7 @@ async def test_a_call_is_waited_for_when_it_may_not_be_detached(
         reply("ok"),
         tools=[tool],
     ) as h:
-        h.runtime.detach_after_sec = 0.01 if limited else None
+        h.runtime.detach_schedule = _SOON if limited else DetachSchedule(default=None)
         h.push(_user("go"))
         await h.until(lambda: bool(tool.started))
         # No detach was ever set to fire.
@@ -1657,7 +1713,7 @@ async def test_a_later_reply_does_not_wait_for_a_call_detached_after_the_limit(
         *_replies(4),
         tools=[tool],
     ) as h:
-        h.runtime.detach_after_sec = 0.01
+        h.runtime.detach_schedule = _SOON
         h.push(_user("go"))
         await h.until(lambda: tool.started == ["a", "b"])
         assert tool.finished == []
@@ -1843,7 +1899,7 @@ async def test_each_slow_group_is_detached_on_its_own() -> None:
         *_replies(4),
         tools=[tool],
     ) as h:
-        h.runtime.detach_after_sec = 0.01
+        h.runtime.detach_schedule = _SOON
         h.push(_user("go"))
         await h.seen(ModelIdle)
         assert [r.state for c in ("a", "b") for r in h.results(c)] == [
@@ -2130,14 +2186,8 @@ async def test_a_running_call_killed_by_id_publishes_its_own_end(
             h.push(Kill(call_id=killed))
             await h.seen(DetachedResult)
     assert f"runtime kill tool: call_id={killed}" in caplog.messages
-    assert [e for e in h.events if isinstance(e, DetachedResult)] == [
-        DetachedResult(
-            result=ToolResult(
-                call_id=killed,
-                state="cancelled",
-                shown=Markers().cancelled,
-            ),
-        ),
+    assert [_timeless(e.result) for e in h.events if isinstance(e, DetachedResult)] == [
+        ToolResult(call_id=killed, state="cancelled", shown=Markers().cancelled),
     ]
 
 
@@ -2452,8 +2502,10 @@ async def test_a_result_racing_its_detach_is_delivered_forward() -> None:
         h.push(_user("go"))
         await h.seen(ModelIdle)
     validate_context(h.history())
-    assert [r.text() for r in h.results("c1")] == [Markers().detached]
-    assert [r.text() for r in _arrival(h, "c1")] == ["pinged"]
+    # The stub shows what the call wrote; the result, that nothing came after.
+    assert [r.text() for r in h.results("c1")] == [f"{Markers().detached}\npinged"]
+    assert [r.text() for r in _arrival(h, "c1")] == ["(no new output)"]
+    assert _arrival(h, "c1")[0].stdout == ("pinged",)
     assert h.said(1) == ["go", "self-ping"]
 
 
@@ -5114,11 +5166,11 @@ async def test_a_nudge_drives_a_round_for_an_idle_agent_and_none_for_a_busy_one(
 ):
     async with Harness(reply("paid")) as h:
         h.runtime.model_call = asyncio.create_task(_forever())
-        h.push(types.Nudge(content="busy"))
+        h.push(SystemMessage(content="busy", subtype="nudge"))
         await spin()
         h.runtime.model_call.cancel()
         h.runtime.model_call = None
-        h.push(types.Nudge(content="you owe a reply"))
+        h.push(SystemMessage(content="you owe a reply", subtype="nudge"))
         await h.seen(ModelIdle)
     nudges = [m for m in h.history() if isinstance(m, SystemMessage)]
     assert [(m.content, m.subtype) for m in nudges] == [("you owe a reply", "nudge")]
@@ -5214,7 +5266,7 @@ async def test_a_scheduling_failure_answers_only_its_call_and_the_round_continue
     )
     await run_once(h.runtime, _user("go"))
     assert h.count(ModelResponseError) == 0
-    assert h.results("b1") == [
+    assert [_timeless(r) for r in h.results("b1")] == [
         ToolResult(call_id="b1", state="failed", stderr=("RuntimeError: no key",)),
     ]
     assert bad.started == []
@@ -5239,7 +5291,7 @@ async def test_an_already_refused_call_never_runs_its_scheduling_hook() -> None:
     h.runtime.allowed = frozenset()
     await run_once(h.runtime, _user("go"))
     assert h.count(ModelResponseError) == 0
-    assert h.results("b1") == [
+    assert [_timeless(r) for r in h.results("b1")] == [
         ToolResult(
             call_id="b1",
             state="failed",
@@ -5880,7 +5932,7 @@ async def test_a_tool_that_cannot_start_answers_its_call_failed() -> None:
     ) as h:
         h.push(_user("go"))
         await h.seen(ModelIdle)
-    assert h.results("t1") == [
+    assert [_timeless(r) for r in h.results("t1")] == [
         ToolResult(call_id="t1", state="failed", stderr=("ValueError: cannot start",)),
     ]
 
@@ -5903,7 +5955,9 @@ async def test_a_failure_with_no_error_text_is_still_answered(
                 DetachedResult(result=ToolResult(call_id="c1", state="failed")),
             )
             await h.seen(ModelIdle)
-    assert h.results("w1") == [ToolResult(call_id="w1", state="failed")]
+    assert [_timeless(r) for r in h.results("w1")] == [
+        ToolResult(call_id="w1", state="failed"),
+    ]
     assert "runtime tool failed: call_id=w1 tool=BackgroundTask error=" in (
         caplog.messages
     )
@@ -7870,7 +7924,10 @@ async def test_before_tool_spawn_is_given_the_reply_as_recorded() -> None:
 
 @pytest.mark.parametrize(
     ("resume", "text"),
-    [(None, "hi"), (types.Nudge(content="you owe a reply"), "you owe a reply")],
+    [
+        (None, "hi"),
+        (SystemMessage(content="you owe a reply", subtype="nudge"), "you owe a reply"),
+    ],
     ids=["retry", "nudge"],
 )
 @pytest.mark.asyncio
@@ -8136,7 +8193,7 @@ async def test_input_held_for_a_reply_is_taken_in_where_the_reply_ended(
                 response=reply(calls=[call("echo", "t1")]),
                 generation=-1,
             )
-        h.push(ended, types.Nudge(content="nudged"))
+        h.push(ended, SystemMessage(content="nudged", subtype="nudge"))
         await h.until(lambda: "nudged" in h.texts())
         await spin()
         said = [t for t in h.texts() if t in ("typed", "nudged")]
@@ -8144,7 +8201,7 @@ async def test_input_held_for_a_reply_is_taken_in_where_the_reply_ended(
 
 
 def _detach_timers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.TimerHandle]:
-    """Collect each detach timer the runtime sets on the running loop."""
+    """Collect each wake timer the runtime sets on the running loop."""
     timers: list[asyncio.TimerHandle] = []
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "call_later", partial(_later, timers, loop.call_later))
@@ -8158,11 +8215,374 @@ def _later(
     callback: Callable[..., object],
     *args: object,
 ) -> asyncio.TimerHandle:
-    """Schedule as ``later`` does, noting the handle when it would push a Detach."""
+    """Schedule as ``later`` does, noting the handle when it would push a Wake."""
     handle = later(delay, callback, *args)
-    if any(isinstance(arg, Detach) for arg in args):
+    if any(isinstance(arg, Wake) for arg in args):
         timers.append(handle)
     return handle
+
+
+def _wakes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, Wake]]:
+    """Hold back each wake the runtime arms, noting when it was due; the test sends it."""
+    armed: list[tuple[float, Wake]] = []
+    loop = asyncio.get_running_loop()
+    later = loop.call_later
+
+    def held(
+        delay: float,
+        callback: Callable[..., object],
+        *args: object,
+    ) -> asyncio.TimerHandle:
+        wakes = [arg for arg in args if isinstance(arg, Wake)]
+        armed.extend((delay, wake) for wake in wakes)
+        return later(3_600 if wakes else delay, callback, *args)
+
+    monkeypatch.setattr(loop, "call_later", held)
+    return armed
+
+
+def _woken(h: Harness) -> list[str]:
+    """Return what each wake told the model."""
+    return [
+        e.content or ""
+        for e in h.history()
+        if isinstance(e, SystemMessage) and e.subtype == "wake"
+    ]
+
+
+_SOON = DetachSchedule(default=WakeSchedule(first_sec=0.01, max_gap_sec=0.01))
+"""Wake at once, whatever the call wrote: the first wake detaches the cohort."""
+
+
+@pytest.mark.asyncio
+async def test_a_first_wake_detaches_the_cohort_with_what_each_call_wrote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed = _wakes(monkeypatch)
+    talk, quiet = Talking(), Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("talk", "t1"), call("echo", "e1")]),
+        *_replies(3),
+        tools=[talk, quiet],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: len(armed) == 2)
+        talk.say("one\n", "two\n")
+        await h.until(lambda: len(h.runtime._watches["t1"].items) == 2)
+        h.push(Wake(call_id="t1", forced=False))
+        await h.seen(ModelIdle)
+        assert [r.text() for c in ("t1", "e1") for r in h.results(c)] == [
+            f"{Markers().detached}\none\ntwo",
+            Markers().detached,
+        ]
+        assert all(r.timestamp is not None for r in h.results("t1"))
+        assert h.runtime.cohort == set()
+        talk.end()
+        quiet.release.set()
+        await h.until(lambda: bool(_arrival(h, "t1")) and bool(_arrival(h, "e1")))
+    (arrived,) = _arrival(h, "t1")
+    # The model saw both lines; it reads what is left, and the exit code.
+    assert arrived.text() == "(no new output)\n[exit 3]"
+    assert arrived.stdout == ("one\n", "two\n")
+    assert [r.text() for r in _arrival(h, "e1")] == ["ok"]
+    # The first wake came at the schedule's first time.
+    assert [delay for delay, _ in armed[:2]] == [15.0, 15.0]
+
+
+@pytest.mark.asyncio
+async def test_a_later_wake_tells_the_model_only_what_is_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed = _wakes(monkeypatch)
+    talk = Talking()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(5),
+        tools=[talk],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        talk.say("one\n")
+        await h.until(lambda: bool(h.runtime._watches["t1"].items))
+        h.push(Wake(call_id="t1", forced=False))
+        await h.seen(ModelIdle)
+        # Nothing new, and not forced: the model is left alone.
+        h.push(Wake(call_id="t1", forced=False))
+        await spin()
+        assert _woken(h) == []
+        talk.say("two\n")
+        await h.until(lambda: len(h.runtime._watches["t1"].items) == 2)
+        h.push(Wake(call_id="t1", forced=False))
+        await h.seen(ModelIdle, 2)
+        # Forced, it tells the model even that nothing is new.
+        h.push(Wake(call_id="t1", forced=True))
+        await h.seen(ModelIdle, 3)
+        talk.say("three\n")
+        talk.end()
+        await h.until(lambda: bool(_arrival(h, "t1")))
+    assert [w.splitlines()[1:] for w in _woken(h)] == [["two"], ["(no new output)"]]
+    assert all(w.startswith("[talk t1 still running after ") for w in _woken(h))
+    assert all(
+        e.timestamp is not None
+        for e in h.history()
+        if isinstance(e, SystemMessage) and e.subtype == "wake"
+    )
+    assert [r.text() for r in _arrival(h, "t1")] == ["three\n[exit 3]"]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_while_the_model_works_rolls_into_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed = _wakes(monkeypatch)
+    talk = Talking()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(5),
+        tools=[talk],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        h.push(Wake(call_id="t1", forced=True))
+        await h.seen(ModelIdle)
+        talk.say("one\n")
+        await h.until(lambda: bool(h.runtime._watches["t1"].items))
+        h.runtime.model_call = asyncio.create_task(_forever())
+        h.push(Wake(call_id="t1", forced=True))
+        await spin()
+        assert _woken(h) == []
+        h.runtime.model_call.cancel()
+        h.runtime.model_call = None
+        talk.say("two\n")
+        await h.until(lambda: len(h.runtime._watches["t1"].items) == 2)
+        h.push(Wake(call_id="t1", forced=True))
+        await h.until(lambda: bool(_woken(h)))
+        talk.end()
+    assert [w.splitlines()[1:] for w in _woken(h)] == [["one", "two"]]
+
+
+@pytest.mark.parametrize(
+    ("ttl", "told"),
+    [(30.5, False), (0.0, True)],
+    ids=["the-cache-deadline-moved-on", "the-longest-gap"],
+)
+@pytest.mark.asyncio
+async def test_a_wake_capped_by_the_cache_is_moot_once_the_model_was_called(
+    monkeypatch: pytest.MonkeyPatch,
+    ttl: float,
+    told: bool,
+) -> None:
+    """A request warms the cache again, so its deadline no longer forces a wake."""
+    armed = _wakes(monkeypatch)
+    talk = Talking()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(5),
+        tools=[talk],
+    ) as h:
+        h.provider.capability = replace(
+            h.provider.capability,
+            cache_ttl_sec=frozenset({0.0, ttl}),
+        )
+        model = h.provider["scripted"]
+        model.settings = replace(model.settings, cache_ttl_sec=ttl)
+        h.runtime.model = model
+        h.runtime.detach_schedule = DetachSchedule(
+            default=WakeSchedule(first_sec=15.0, max_gap_sec=1.0),
+        )
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        due, first = armed[0]
+        # The cache, 30 s short of its lifetime, is due before the longest gap.
+        assert first.forced
+        assert due <= (0.5 if ttl else 1.0)
+        h.push(first)
+        await h.seen(ModelIdle)
+        h.push(armed[-1][1])
+        await spin()
+        assert bool(_woken(h)) is told
+        talk.end()
+
+
+@pytest.mark.parametrize(
+    "requested_ago",
+    [None, 3_600.0],
+    ids=["no-request-yet", "the-cache-lapsed-already"],
+)
+@pytest.mark.asyncio
+async def test_a_cache_that_is_cold_does_not_bound_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    requested_ago: float | None,
+) -> None:
+    """No wake can keep a cache no request warmed, or one that already lapsed."""
+    armed = _wakes(monkeypatch)
+    talk = Talking()
+    async with Harness(*_replies(2), tools=[talk]) as h:
+        h.provider.capability = replace(
+            h.provider.capability,
+            cache_ttl_sec=frozenset({0.0, 300.0}),
+        )
+        model = h.provider["scripted"]
+        model.settings = replace(model.settings, cache_ttl_sec=300.0)
+        h.runtime.model = model
+        if requested_ago is not None:
+            h.runtime._last_request = time.monotonic() - requested_ago
+        h.push(ModelResponseComplete(response=reply(calls=[call("talk", "t1")])))
+        await h.until(lambda: bool(armed))
+        talk.end()
+    assert armed[0] == (15.0, Wake(call_id="t1", forced=False))
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_tool_wakes_no_one_is_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed = _wakes(monkeypatch)
+    talk, quiet = Talking(), Gated()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        reply(calls=[call("echo", "e1")]),
+        *_replies(3),
+        tools=[talk, quiet],
+    ) as h:
+        h.runtime.detach_schedule = DetachSchedule(tools={"talk": None})
+        h.push(_user("go"))
+        await h.until(talk.started.is_set)
+        talk.say("one\n")
+        talk.end()
+        await h.until(lambda: bool(h.results("e1")))
+    # Only ``echo`` has a schedule; ``talk`` ran to its end, waited on.
+    assert [w.call_id for _, w in armed] == ["e1"]
+    assert [r.text() for r in h.results("t1")] == ["one\n\n[exit 3]"]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_for_a_call_that_ended_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed = _wakes(monkeypatch)
+    talk = Talking()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(3),
+        tools=[talk],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        talk.say("one\n")
+        talk.end()
+        await h.seen(ModelIdle)
+        h.push(armed[0][1], Wake(call_id="nope", forced=True))
+        await spin()
+    assert [r.text() for r in h.results("t1")] == ["one\n\n[exit 3]"]
+    assert _woken(h) == []
+    assert h.runtime._watches == {}
+
+
+@pytest.mark.asyncio
+async def test_foreground_returns_at_the_next_wake_with_what_is_new() -> None:
+    """The job runs on; the model looks again, or waits, as it likes."""
+    talk = Talking()
+    look = call("BackgroundTask", "f1", operation="foreground", id="t1")
+    async with Harness(
+        reply(calls=[call("talk", "t1", background=True)]),
+        reply(calls=[look]),
+        reply("looked"),
+        *_replies(3),
+        tools=[talk, BackgroundTask()],
+    ) as h:
+        h.runtime.detach_schedule = DetachSchedule(
+            default=WakeSchedule(first_sec=0.01, growth=0.0, max_gap_sec=60.0),
+        )
+        h.push(_user("go"))
+        await h.until(talk.started.is_set)
+        await h.until(lambda: "f1" in h.runtime.cohort)
+        talk.say("one\n")
+        await h.until(lambda: bool(h.results("f1")))
+        assert "t1" in h.runtime.detached
+        talk.say("two\n")
+        talk.end()
+        await h.until(lambda: bool(_arrival(h, "t1")))
+    (looked,) = h.results("f1")
+    assert looked.text().startswith("[talk t1 still running after ")
+    assert looked.text().endswith("s]\none")
+    assert [r.text() for r in _arrival(h, "t1")] == ["two\n[exit 3]"]
+
+
+@pytest.mark.asyncio
+async def test_foreground_waits_to_the_end_for_a_tool_that_wakes_no_one() -> None:
+    talk = Talking()
+    look = call("BackgroundTask", "f1", operation="foreground", id="t1")
+    async with Harness(
+        reply(calls=[call("talk", "t1", background=True)]),
+        reply(calls=[look]),
+        *_replies(3),
+        tools=[talk, BackgroundTask()],
+    ) as h:
+        h.runtime.detach_schedule = DetachSchedule(default=None)
+        h.push(_user("go"))
+        await h.until(lambda: "f1" in h.runtime.cohort)
+        talk.say("one\n")
+        await spin()
+        assert h.results("f1") == []
+        talk.end()
+        await h.until(lambda: bool(h.results("f1")))
+    assert [r.text() for r in h.results("f1")] == ["one\n\n[exit 3]"]
+
+
+@pytest.mark.asyncio
+async def test_each_call_and_result_says_when() -> None:
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("done"),
+        tools=[Gated()],
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+    (made,) = [
+        r for e in h.history() if isinstance(e, Response) for r in calls(e.records)
+    ]
+    (answered,) = h.results("t1")
+    assert made.timestamp is not None
+    assert answered.timestamp is not None
+    assert made.timestamp <= answered.timestamp
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_runtime_answers_itself_says_when() -> None:
+    """A stub, a killed job's cancellation, and a copied delivery's refusal."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "b1", background=True),
+                call(Markers().arrived, "m1"),
+            ],
+        ),
+        reply("started"),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        h.push(Kill(call_id="b1"))
+        await h.until(lambda: bool(_arrival(h, "b1")))
+    results = [e for e in h.history() if isinstance(e, ToolResult)]
+    assert {r.call_id for r in results} >= {"b1", f"b1{Markers().arrival}"}
+    assert all(r.timestamp is not None for r in results)
+
+
+def test_a_resumed_call_cancelled_for_want_of_a_result_says_when() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"], session_id="s")
+    rt.append_history(reply(calls=[call("echo", "c1")]))
+    rt.append_history(ToolResult(call_id="c1", state="pending"))
+    rt.settle_detached()
+    (arrived,) = [
+        e
+        for e in rt.context().messages
+        if isinstance(e, ToolResult) and e.call_id == f"c1{Markers().arrival}"
+    ]
+    assert arrived.timestamp is not None
 
 
 if __name__ == "__main__":

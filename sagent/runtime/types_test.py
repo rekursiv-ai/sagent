@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import math
+import re
+
 import pytest
 
 from sagent.model.cost import TokenCost, TokenCount
@@ -14,9 +17,11 @@ from sagent.runtime.tape import ContextSplice, TapeRef
 from sagent.runtime.types import (
     CompactComplete,
     DetachedResult,
+    DetachSchedule,
     Markers,
     ModelCallSuspended,
     ModelContextEvent,
+    WakeSchedule,
     labeled_agent_send_text,
     wire_role,
 )
@@ -155,6 +160,76 @@ def test_only_a_first_rate_limit_opens_a_quota_wait(
 ) -> None:
     suspended = ModelCallSuspended(exception=exception, until=0.0, attempt=attempt)
     assert suspended.opens_a_quota_wait is opens
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "cache_left", "gap", "forced"),
+    [
+        (0.0, math.inf, 15.0, False),
+        (15.0, math.inf, 15.0, False),
+        (30.0, math.inf, 30.0, False),
+        (240.0, math.inf, 240.0, False),
+        (299.0, math.inf, 299.0, False),
+        (300.0, math.inf, 300.0, True),
+        (480.0, math.inf, 300.0, True),
+        (240.0, 30.0, 30.0, True),
+        (10.0, 20.0, 15.0, False),
+        (10.0, 15.0, 15.0, True),
+    ],
+)
+def test_a_wake_comes_early_then_less_often_but_within_the_cap_and_the_cache(
+    elapsed: float,
+    cache_left: float,
+    gap: float,
+    forced: bool,
+) -> None:
+    """Paced by growth it fires on new output only; capped, it fires regardless."""
+    assert WakeSchedule().gap(elapsed, cache_left_sec=cache_left) == (gap, forced)
+
+
+def test_a_wake_with_no_growth_comes_at_a_fixed_gap() -> None:
+    schedule = WakeSchedule(first_sec=10.0, growth=0.0, max_gap_sec=60.0)
+    assert [schedule.gap(t, cache_left_sec=math.inf)[0] for t in (0, 50, 500)] == [
+        10.0,
+        10.0,
+        10.0,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("knobs", "message"),
+    [
+        ({"first_sec": 0.0}, "first_sec must be a number of seconds above 0, got 0.0"),
+        ({"first_sec": math.nan}, "first_sec must be a number of seconds above 0"),
+        ({"growth": -1.0}, "growth must be a number at least 0, got -1.0"),
+        ({"growth": math.inf}, "growth must be a number at least 0, got inf"),
+        ({"max_gap_sec": 0.0}, "max_gap_sec must be a number of seconds above 0"),
+        ({"max_gap_sec": math.inf}, "max_gap_sec must be a number of seconds above 0"),
+    ],
+)
+def test_a_wake_schedule_refuses_knobs_that_never_wake(
+    knobs: dict[str, float],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}"):
+        WakeSchedule(**knobs)
+
+
+def test_a_wake_schedule_says_its_knobs() -> None:
+    assert WakeSchedule().text() == "15s 1 300s"
+    assert WakeSchedule(first_sec=0.5, growth=2, max_gap_sec=60).text() == "0.5s 2 60s"
+
+
+def test_a_tool_without_an_override_wakes_as_the_default() -> None:
+    fast = WakeSchedule(first_sec=5.0)
+    schedule = DetachSchedule(
+        default=fast,
+        tools={"Bash": None, "Read": WakeSchedule()},
+    )
+    assert schedule.of("Grep") is fast
+    assert schedule.of("Bash") is None
+    assert schedule.of("Read") == WakeSchedule()
+    assert DetachSchedule().of("Grep") == WakeSchedule()
 
 
 if __name__ == "__main__":

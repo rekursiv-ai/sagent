@@ -42,6 +42,26 @@ def _sse(*events: dict[str, object]) -> bytes:
     ).encode()
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id", "ttl"),
+    [
+        (OpenAI, "sol-6.1", 1800.0),
+        (OpenAI, "gpt-4.1", 1800.0),
+        (OpenAI, "gpt-omni-4.0", 300.0),
+        (OpenAI, "gpt-omni-mini-4.0", 300.0),
+        (OpenAISub, "sol-6.1", 3600.0),
+    ],
+)
+def test_the_cache_lives_as_long_as_the_provider_keeps_it(
+    provider: type[OpenAI | OpenAISub],
+    model_id: str,
+    ttl: float,
+) -> None:
+    row = provider.models()[model_id]
+    assert row.cache_ttl_sec == {ttl}
+    assert row.default.cache_ttl_sec == ttl
+
+
 def test_the_provider_serves_openais_models_by_any_name() -> None:
     openai = OpenAI()
     assert openai.name == "openai"

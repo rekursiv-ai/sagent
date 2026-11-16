@@ -857,6 +857,9 @@ models:
 providers:
   openai:
     sends: [thinking_effort, thinking_output, service_tier]
+    # What a cache lasts unasked; none is sent. GPT-5.6 and later keep at least 30
+    # minutes; earlier models with extended retention keep about as long.
+    cache_ttl_sec: [1800.0]
     retries_internally: true
     models:
       astra-6.0:
@@ -878,10 +881,15 @@ providers:
       gpt-5.1:
       gpt-4.1:
       gpt-mini-4.1:
+      # No extended retention: the cache is in memory, 5 to 10 idle minutes.
       gpt-omni-4.0:
+        cache_ttl_sec: [300.0]
       gpt-omni-mini-4.0:
+        cache_ttl_sec: [300.0]
   openai-sub:
     sends: [thinking_effort, thinking_output, service_tier]
+    # Measured from journals: no misses up to 30 minutes, 1 in 11 at 30 to 60.
+    cache_ttl_sec: [3600.0]
     retries_internally: true
     account_auth: true
     service_tier: [auto, priority]

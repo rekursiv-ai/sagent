@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
+import asyncio
 import os
+import threading
 import time
 
 import pytest
@@ -18,6 +20,7 @@ from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from treekle import PlainTree
@@ -48,18 +51,17 @@ async def test_files_matching_the_pattern_come_back_as_absolute_paths(
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "d.py").write_text("")
     assert (
-        await _glob(tmp_path, pattern="*.py")
+        await _glob(tmp_path, pattern="*.py", sort="name")
         == f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}"
     )
-    assert await _glob(tmp_path, pattern="**/*.py") == (
+    assert await _glob(tmp_path, pattern="**/*.py", sort="name") == (
         f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}\n{tmp_path / 'sub' / 'd.py'}"
     )
     assert await _glob(tmp_path, pattern="*.py", path="sub") == str(
         tmp_path / "sub" / "d.py",
     )
-    assert await _glob(tmp_path, pattern="*.py", path="") == (
-        f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}"
-    )
+    found = await _glob(tmp_path, pattern="*.py", path="")
+    assert sorted(found.split("\n")) == [str(tmp_path / "a.py"), str(tmp_path / "b.py")]
 
 
 @pytest.mark.asyncio
@@ -100,8 +102,13 @@ async def test_an_absolute_pattern_ignores_the_path(tmp_path: Path) -> None:
     (tmp_path / "b").mkdir()
     for sub in ("a", "b"):
         (tmp_path / sub / "x.py").write_text("")
-    relative = await _glob(tmp_path, pattern="{a,b}/x.py")
-    absolute = await _glob(tmp_path, pattern=f"{tmp_path}/{{a,b}}/x.py", path="a")
+    relative = await _glob(tmp_path, pattern="{a,b}/x.py", sort="name")
+    absolute = await _glob(
+        tmp_path,
+        pattern=f"{tmp_path}/{{a,b}}/x.py",
+        path="a",
+        sort="name",
+    )
     assert relative == f"{tmp_path / 'a' / 'x.py'}\n{tmp_path / 'b' / 'x.py'}"
     assert absolute == relative
     assert await _glob(tmp_path, pattern=str(tmp_path / "a" / "x.py")) == str(
@@ -113,7 +120,7 @@ async def test_an_absolute_pattern_ignores_the_path(tmp_path: Path) -> None:
 async def test_a_link_is_listed_under_its_own_path(tmp_path: Path) -> None:
     (tmp_path / "target.py").write_text("")
     (tmp_path / "link.py").symlink_to(tmp_path / "target.py")
-    assert await _glob(tmp_path, pattern="*.py") == (
+    assert await _glob(tmp_path, pattern="*.py", sort="name") == (
         f"{tmp_path / 'link.py'}\n{tmp_path / 'target.py'}"
     )
 
@@ -160,14 +167,87 @@ async def test_a_window_pages_through_the_matches(
     names: list[str],
     note: str,
 ) -> None:
-    matched = Mock(return_value=[tmp_path / f"f{i}" for i in range(4)])
-    monkeypatch.setattr(glob_tool, "glob", matched)
+    matched = Mock(return_value=iter([tmp_path / f"f{i}" for i in range(4)]))
+    monkeypatch.setattr(glob_tool, "streamed_paths", matched)
 
     shown = await _glob(tmp_path, pattern="f*", **window)
 
     rows = [str(tmp_path / name) for name in names] + ([note] if note else [])
     assert shown == "\n".join(rows)
     matched.assert_called_once_with(tmp_path, "f*")
+
+
+@pytest.mark.asyncio
+async def test_by_default_each_path_is_written_as_the_walk_finds_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first path reaches a reader while the walk still runs."""
+    found = threading.Event()
+
+    def slow(root: Path, pattern: str) -> Iterator[Path]:
+        del pattern
+        yield root / "b"
+        assert found.wait(timeout=5)
+        yield root / "a"
+
+    monkeypatch.setattr(glob_tool, "streamed_paths", slow)
+    streaming_result = Glob().call(ToolContext(cwd=tmp_path), {"pattern": "*"})
+    first = await asyncio.wait_for(anext(streaming_result.stdout), timeout=5)
+    assert first == str(tmp_path / "b")
+    found.set()
+    assert [item async for item in streaming_result.stdout] == [f"\n{tmp_path / 'a'}"]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_result_never_passes_its_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """How many paths follow is not known as each is written: room is left for any."""
+    found = [tmp_path / f"f{i}" for i in range(3)]
+    monkeypatch.setattr(glob_tool, "streamed_paths", Mock(return_value=iter(found)))
+    cap = len(str(found[0])) + len(f"\n{found[1]}") + 50
+    result = await settled(
+        Glob().call(
+            ToolContext(cwd=tmp_path, max_result_chars=cap),
+            {"pattern": "f*"},
+        ),
+    )
+    assert result.text() == f"{found[0]}\n... (2 more; pass offset=1 to continue)"
+    assert len(result.text()) <= cap
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sort", "order"),
+    [("name", "ab"), ("size", "ba")],
+)
+async def test_each_match_is_its_own_item_once_a_sort_has_them_all(
+    tmp_path: Path,
+    sort: str,
+    order: str,
+) -> None:
+    """A sort needs every match before it can say which comes first."""
+    for name, size in (("a", 2), ("b", 1)):
+        (tmp_path / name).write_bytes(b"x" * size)
+    result = await settled(
+        Glob().call(ToolContext(cwd=tmp_path), {"pattern": "?", "sort": sort}),
+    )
+    first, second = (tmp_path / name for name in order)
+    assert result.stdout == (str(first), f"\n{second}")
+
+
+@pytest.mark.asyncio
+async def test_name_order_is_path_order_either_way(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    for name in ("sub/a", "b"):
+        (tmp_path / name).write_text("")
+    forward = f"{tmp_path / 'b'}\n{tmp_path / 'sub' / 'a'}"
+    assert await _glob(tmp_path, pattern="**", sort="name") == forward
+    assert await _glob(tmp_path, pattern="**", sort="name_desc") == "\n".join(
+        reversed(forward.split("\n")),
+    )
 
 
 @pytest.mark.asyncio
@@ -183,6 +263,8 @@ async def test_a_full_result_says_where_to_resume(
 ) -> None:
     matched = Mock(return_value=[tmp_path / f"f{i}" for i in range(3)])
     monkeypatch.setattr(glob_tool, "glob", matched)
+    # Every match is known before one is written: room is left for the note that
+    # the window, cut anywhere, could need, and no more.
     context = ToolContext(
         cwd=tmp_path,
         max_result_chars=(
@@ -192,7 +274,9 @@ async def test_a_full_result_says_where_to_resume(
         ),
     )
 
-    result = await settled(Glob().call(context, {"pattern": "f*", "offset": 1}))
+    result = await settled(
+        Glob().call(context, {"pattern": "f*", "offset": 1, "sort": "name"}),
+    )
 
     assert result.text() == (
         f"{tmp_path / 'f1'}\n... (1 more; pass offset=2 to continue)"
@@ -201,6 +285,25 @@ async def test_a_full_result_says_where_to_resume(
     assert result.call_id == ""
     assert result.is_error is False
     matched.assert_called_once_with(tmp_path, "f*")
+
+
+@pytest.mark.asyncio
+async def test_a_path_that_would_crowd_out_the_note_is_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Room enough for two paths but not two paths and the note keeps one."""
+    found = [tmp_path / f"f{i}" for i in range(3)]
+    monkeypatch.setattr(glob_tool, "glob", Mock(return_value=found))
+    cap = len(str(found[0])) + len(f"\n{found[1]}") + 5
+    result = await settled(
+        Glob().call(
+            ToolContext(cwd=tmp_path, max_result_chars=cap),
+            {"pattern": "f*", "sort": "name"},
+        ),
+    )
+    assert result.text() == f"{found[0]}\n... (2 more; pass offset=1 to continue)"
+    assert len(result.text()) <= cap
 
 
 @pytest.mark.asyncio

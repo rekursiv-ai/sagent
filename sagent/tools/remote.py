@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from importlib.resources import files
-from typing import TYPE_CHECKING, Annotated, Final, override
+from typing import TYPE_CHECKING, Annotated, Final, Literal, override
 
 import asyncio
 import contextlib
@@ -56,6 +56,7 @@ from sagent.host.wire import (
     Note,
     Peers,
     Ping,
+    Progress,
     Refused,
     Result,
     Streams,
@@ -301,6 +302,8 @@ class Endpoint:
 
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[ToolResult]] = {}
+        self._said: dict[str, Callable[[Literal["stdout", "stderr"], str], object]] = {}
+        """Where each pending call's items go as they come, by its id on the wire."""
         self._queued: list[Message] = []
         self._changed = asyncio.Condition()
 
@@ -345,6 +348,9 @@ class Endpoint:
         window: str,
         tool: str,
         arguments: Mapping[str, PlainTree],
+        on_item: Callable[[Literal["stdout", "stderr"], str], object] = (
+            lambda _stream, _text: None
+        ),
     ) -> ToolResult:
         """Run ``tool`` there for the agent ``agent``; return its result.
 
@@ -355,6 +361,8 @@ class Endpoint:
           window: The calling agent's context window.
           tool: The tool's name there.
           arguments: What the model passed it.
+          on_item: Called with each text item the call writes there, and its
+            stream, as it comes.
 
         Returns:
           result: The call's record as the endpoint made it. When the endpoint lost
@@ -378,6 +386,7 @@ class Endpoint:
             self._lost_at = None
         call_id = uuid.uuid4().hex
         result = self._pending[call_id] = asyncio.Future[ToolResult]()
+        self._said[call_id] = on_item
         self._writer.write(
             encoded(
                 Call(
@@ -408,6 +417,8 @@ class Endpoint:
                 stderr=(describe(error),),
                 result=RemoteToolResult(endpoint=self.name, exit_code=1),
             )
+        finally:
+            self._said.pop(call_id, None)
         return replace(record, wire_id=call_id)
 
     async def spec(self, tool: str) -> ToolSpec | None:
@@ -567,9 +578,13 @@ class Endpoint:
         while (message := await self._next(reader, writer)) is not None:
             if isinstance(message, Result):
                 result = self._pending.pop(message.id, None)
+                # Answered: an item the host sent after it is from no call waiting.
+                self._said.pop(message.id, None)
                 if result is not None and not result.done():
                     result.set_result(message.record)
                 writer.write(encoded(Ack(id=message.id)))
+            elif isinstance(message, Progress) and message.id in self._said:
+                self._said[message.id](message.stream, message.text)
             elif isinstance(message, ToolsChanged):
                 self._granted(message.tools)
                 if message.peer_messaging is not None:
@@ -970,27 +985,29 @@ class RemoteTool:
           arguments: What the model passed, as ``RemoteTool.Arguments``.
 
         Returns:
-          streaming_result: Both streams are empty. The result is a ``ToolResult``
-            record: of the listing, of the schema, or the record the endpoint
-            made of the call it ran.
+          streaming_result: Each text item the call writes there, on its stream,
+            as it comes. The result is a ``ToolResult`` record: of the listing,
+            of the schema, or the record the endpoint made of the call it ran.
 
         Raises:
           ValueError: No endpoint, or no tool there, has the name given, or the
             endpoint is down; raised from ``streaming_result.result``.
 
         """
-        nothing = Stream[object]()
-        nothing.close()
+        stdout, stderr = Stream[object](), Stream[object]()
         return ToolStreamingResult(
-            result=asyncio.ensure_future(self._run(context, arguments)),
-            stdout=nothing,
-            stderr=nothing,
+            result=asyncio.ensure_future(
+                self._run(context, arguments, {"stdout": stdout, "stderr": stderr}),
+            ),
+            stdout=stdout,
+            stderr=stderr,
         )
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        streams: Mapping[str, Stream[object]],
     ) -> ToolResult:
         """Return the record of the listing, the schema, or the call run there."""
         a = parse(arguments, RemoteTool.Arguments)
@@ -1038,6 +1055,7 @@ class RemoteTool:
             window=context.files.window,
             tool=a.tool,
             arguments=a.arguments,
+            on_item=lambda stream, text: streams[stream].write(text),
         )
 
     def _listing(self, name: str, endpoint: Endpoint) -> str:

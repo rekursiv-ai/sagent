@@ -13,6 +13,7 @@ one, its attachments' bytes included.
       Describe ──────────▶      answers from the specs
                ◀──────────    Described
       Call     ──────────▶      ────────────────▶         runs the tool
+               ◀──────────      ◀────────────────       Progress (each item)
                ◀──────────      ◀────────────────       Result
       Cancel   ──────────▶      ────────────────▶
       Ack      ──────────▶      forgets the result
@@ -29,7 +30,9 @@ connection: ``DaemonControl`` (answered ``DaemonStatus``) or ``GateCall``
 
 A client is sent a tool's digest, never its schema; it asks ``Describe`` only
 for a tool whose digest matches none of its own. A ``Note`` is acked as a
-``Result`` is, and kept until then by whoever sent it, across a drop.
+``Result`` is, and kept until then by whoever sent it, across a drop. A
+``Progress`` is neither acked nor kept: one sent while the client is away is lost,
+as the call's record still holds its answer.
 
 A reader ignores a field its class lacks, at any depth, so a newer peer may add
 one; a message or class it does not know still fails the line, as does a field
@@ -94,6 +97,7 @@ __all__ = [
     "Paused",
     "Peers",
     "Ping",
+    "Progress",
     "Refused",
     "Result",
     "Resume",
@@ -110,9 +114,10 @@ __all__ = [
 ]
 
 
-VERSION: Final = 2
+VERSION: Final = 3
 """The protocol; a client and server of different versions refuse each other.
-Version 2 sends a tool call's ``Result.record`` as a ``ToolResult``."""
+Version 2 sends a tool call's ``Result.record`` as a ``ToolResult``; version 3
+adds ``Progress``, which an older client could not read."""
 
 MAX_LINE_BYTES: Final = 256 << 20
 """The longest line read: a result carrying a PDF's pages is many megabytes."""
@@ -247,6 +252,15 @@ class Result:
 
     id: str
     record: ToolResult
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Progress:
+    """A text item call ``id`` wrote as it ran, such as a line its command printed."""
+
+    id: str
+    text: str
+    stream: Literal["stdout", "stderr"] = "stdout"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -386,6 +400,7 @@ type Message = (
     | Refused
     | Call
     | Result
+    | Progress
     | Ack
     | Cancel
     | Bye
@@ -411,6 +426,7 @@ _KINDS: Final = (
     Refused,
     Call,
     Result,
+    Progress,
     Ack,
     Cancel,
     Bye,

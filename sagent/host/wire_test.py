@@ -46,6 +46,7 @@ from sagent.host.wire import (
     Paused,
     Peers,
     Ping,
+    Progress,
     Refused,
     Result,
     Resume,
@@ -206,6 +207,8 @@ _TOKEN = secrets.token_urlsafe(16)
                 AgentSpawnResult(agent_id="kid", state="completed", tokens=3),
             )
         ),
+        Progress(id="1", text="epoch 3\n"),
+        Progress(id="1", text="oops\n", stream="stderr"),
         Ack(id="1"),
         Cancel(id="1"),
         Bye(),

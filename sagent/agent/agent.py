@@ -17,7 +17,6 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, override
 
@@ -51,6 +50,7 @@ from sagent.session.types import (
     TurnContext,
     UncategorizedRecord,
     UserMessage,
+    now_timestamp,
 )
 from sagent.tools.types import Briefing, Reminding, Skipping, ToolContext
 from sagent.types import AsyncResource
@@ -323,7 +323,7 @@ class Agent(AsyncResource):
         self.spend_usd += usd
         self._session.journal.append(
             TokenUsage(
-                timestamp=_now(),
+                timestamp=now_timestamp(),
                 info={"spend_usd": usd, "agent": by},
                 measurement=measurement,
             ),
@@ -583,7 +583,7 @@ class Agent(AsyncResource):
         moved, context.cwd = context.cwd, root
         self._session.append(
             SystemMessage(
-                timestamp=_now(),
+                timestamp=now_timestamp(),
                 content=f"Working directory reset to {root}; it was {moved}.",
                 subtype="moved",
             ),
@@ -866,7 +866,7 @@ class RuntimeSession:
         """Write a window's start: the prompt, ``history``, the spend, what stands."""
         self.journal.append(
             ContextClear(
-                timestamp=_now(),
+                timestamp=now_timestamp(),
                 system_prompt="\n\n".join(self._agent.runtime.system),
                 history=history,
                 # What was spent before this window, for a resume to go on from.
@@ -916,7 +916,7 @@ class RuntimeSession:
             if text:
                 out.append(
                     SystemMessage(
-                        timestamp=_now(),
+                        timestamp=now_timestamp(),
                         content=text,
                         subtype="rules",
                         extra={"rules": sorted(matched)},
@@ -975,7 +975,7 @@ class RuntimeSession:
                 continue
             out.append(
                 SystemMessage(
-                    timestamp=_now(),
+                    timestamp=now_timestamp(),
                     content=text or f"No longer in force: {last}",
                     subtype="reminder",
                     extra={"tool": name, **({} if text else {"withdrawn": True})},
@@ -1002,7 +1002,7 @@ class RuntimeSession:
             model=ModelTags.from_settings(model.capability, settings).name,
             tools=_gate(agent.runtime.allowed, offered=offered),
         )
-        now = _now()
+        now = now_timestamp()
         delta = current
         if stated:
             last = _last_stated(stated, offered=offered)
@@ -1143,11 +1143,6 @@ def _last_stated(
     return last
 
 
-def _now() -> str:
-    """Return the time now, local, with its UTC offset, to the second."""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
-
-
 def _prompt(prompt: str | None) -> str:
     """Return ``prompt``; ``None`` is the default prompt."""
     return prompt if prompt is not None else default_system_prompt()
@@ -1178,7 +1173,7 @@ def _journaled(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord
         tokens, spend = entry.tokens, entry.spend
         records.append(
             TokenUsage(
-                timestamp=_now(),
+                timestamp=now_timestamp(),
                 info={
                     "request": tokens.request,
                     "response": tokens.response,

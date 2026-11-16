@@ -12,15 +12,24 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
 import asyncio
+import itertools
 import re
 
 from treekle import PlainTree
 
-from sagent.lib.files.grep import GrepError, OutputMode, Query, Row, grep_rows
+from sagent.lib.files.grep import (
+    GrepError,
+    OutputMode,
+    Query,
+    Row,
+    grep_rows,
+    streamed_rows,
+)
 from sagent.session.types import GrepResult
 from sagent.tools.command_analyzer import (
     Invocation,
@@ -33,6 +42,9 @@ from sagent.tools.command_analyzer import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,
+    Counted,
+    Stream,
+    ThreadWriter,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -42,7 +54,7 @@ from sagent.tools.types import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from sagent.tools.types import ToolContext
 
@@ -327,15 +339,18 @@ class Grep:
           arguments: What the model passed, as ``Grep.Arguments``.
 
         Returns:
-          streaming_result: One entry per line, with a note to resume when cut.
+          streaming_result: One entry per line, each written as it is found,
+            with a note to resume when cut.
 
         """
-        return whole_output(self._run(context, arguments))
+        stdout = Stream[str]()
+        return whole_output(self._run(context, arguments, stdout), stdout=stdout)
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
     ) -> ToolOutput[GrepResult, str, str]:
         a = parse(arguments, Grep.Arguments)
         around = max(a.around, a.context)
@@ -363,37 +378,85 @@ class Grep:
             follow=a.follow,
             max_depth=a.max_depth,
         )
+        paths = [context.path(p or ".") for p in named]
+        loop = asyncio.get_running_loop()
         try:
-            rows = await asyncio.to_thread(
-                grep_rows,
-                [context.path(p or ".") for p in named],
-                query,
-            )
+            # ``keep_last`` starts the window at the tail, so it waits for every row.
+            if a.keep_last:
+                rows = await asyncio.to_thread(grep_rows, paths, query)
+                start = max(0, len(rows) - a.keep_last)
+                entries = [self._clip(row) for row in rows[start:]]
+                kept = self._write(context, entries, write=stdout.write)
+                window, total = len(entries), len(rows)
+            else:
+                start = a.offset
+                kept, window, total = await asyncio.to_thread(
+                    self._stream,
+                    context,
+                    partial(streamed_rows, paths, query),
+                    a,
+                    ThreadWriter(stdout, loop),
+                )
         except GrepError as e:
             return ToolOutput(
                 stderr=(str(e),),
                 result=GrepResult(pattern=a.pattern, exit_code=1),
             )
-        # ``keep_last`` starts the window at the tail; the resume note names it.
-        start = max(0, len(rows) - a.keep_last) if a.keep_last else a.offset
-        end = start + a.keep_first if a.keep_first and not a.keep_last else None
-        window = [self._clip(row) + "\n" for row in rows[start:end]]
-        if not window:
+        if not kept:
             # Past the last entry, saying none matched would be false.
-            content = "(no matches in this window)" if rows else "(no matches)"
+            content = "(no matches in this window)" if total else "(no matches)"
             return ToolOutput(stdout=(content,), result=GrepResult(pattern=a.pattern))
-        # Room for the longest note, one naming every entry and the last offset,
-        # less the newline the body ends with, which the note stands in for.
-        note = _more(len(window), offset=start + len(window))
-        body, kept = context.fit(
-            window,
-            reserve=len(note) - 1,
+        if kept < window:
+            stdout.write(_more(window - kept, offset=start + kept))
+        return ToolOutput(result=GrepResult(pattern=a.pattern))
+
+    def _stream(
+        self,
+        context: ToolContext,
+        search: Callable[[], Iterator[Row]],
+        a: Grep.Arguments,
+        writer: ThreadWriter[str],
+    ) -> tuple[int, int, int]:
+        """Write the window ``a`` asks for as rows come; return kept, window, and total."""
+        # Started here, in the worker thread: it checks each path before a row.
+        every = Counted(search())
+        end = a.offset + a.keep_first if a.keep_first else None
+        window = Counted(itertools.islice(every, a.offset, end))
+        try:
+            kept = self._write(
+                context,
+                (self._clip(row) for row in window),
+                write=writer.write,
+            )
+            # Past the cut, the window's rows and then the rest are counted, not written.
+            for _ in window:
+                pass
+            for _ in every:
+                pass
+        finally:
+            writer.landed()
+        return kept, window.seen, every.seen
+
+    def _write(
+        self,
+        context: ToolContext,
+        entries: Iterable[str],
+        *,
+        write: Callable[[str], object],
+    ) -> int:
+        """Write each entry that fits, a line each; return how many were written."""
+        # Room for the longest note there could be; each entry after the first
+        # brings the newline before it, so the text ends on no newline.
+        units = (entry if i == 0 else f"\n{entry}" for i, entry in enumerate(entries))
+        kept = 0
+        for unit in context.fitting(
+            units,
+            reserve=len(_more(10**12, offset=10**12)),
             cap=self.max_result_chars,
-        )
-        body = body.removesuffix("\n")
-        if kept < len(window):
-            body += _more(len(window) - kept, offset=start + kept)
-        return ToolOutput(stdout=(body,), result=GrepResult(pattern=a.pattern))
+        ):
+            write(unit)
+            kept += 1
+        return kept
 
     # The ``path:line:`` prefix is kept whole: it is how the row is found.
     def _clip(self, row: Row) -> str:

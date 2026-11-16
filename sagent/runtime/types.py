@@ -6,11 +6,12 @@ Everything else here is an event the runtime takes from its inbox or publishes.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 import asyncio
+import math
 
 from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
@@ -42,6 +43,7 @@ __all__ = [
     "CompactStarted",
     "CompactionSplice",
     "Detach",
+    "DetachSchedule",
     "DetachedResult",
     "Halt",
     "Job",
@@ -59,7 +61,6 @@ __all__ = [
     "ModelResponseError",
     "ModelResponsePartial",
     "ModelResponseThinking",
-    "Nudge",
     "Quit",
     "Retry",
     "RuntimeEvent",
@@ -69,6 +70,8 @@ __all__ = [
     "StatusChanged",
     "UserDeferredMessage",
     "UserQueuedMessage",
+    "Wake",
+    "WakeSchedule",
     "labeled_agent_send_text",
     "wire_role",
 ]
@@ -269,10 +272,94 @@ class Kill:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Detach:
-    """A call the model waits on ran past the runtime's limit: answer it, let it run on."""
+    """Answer a call the model waits on, and its group, with a stub; let them run on."""
 
     call_id: str
     """A call of the group to detach."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WakeSchedule:
+    """When a long call wakes the model: early, then less often, as a person glances.
+
+    The gap to the next wake is ``max(first_sec, growth * elapsed)``: a wake so
+    timed fires only when the call wrote something since the model last looked.
+    ``max_gap_sec`` and the prompt cache's deadline cap the gap; a capped wake
+    fires regardless, so a quiet call is still seen and the cache stays warm.
+
+    Raises:
+      ValueError: A knob that would never wake, or wake without end.
+
+    """
+
+    first_sec: float = 15.0
+    """The first wake, and the shortest gap."""
+
+    growth: float = 1.0
+    """The next gap as a multiple of the time the call has run: ``1`` doubles the
+    time each wake, ``0`` keeps the gap at ``first_sec``."""
+
+    max_gap_sec: float = 300.0
+    """The longest the model goes without a look."""
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("first_sec", self.first_sec),
+            ("max_gap_sec", self.max_gap_sec),
+        ):
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(
+                    f"{name} must be a number of seconds above 0, got {value}.",
+                )
+        if not (math.isfinite(self.growth) and self.growth >= 0):
+            raise ValueError(f"growth must be a number at least 0, got {self.growth}.")
+
+    def gap(self, elapsed_sec: float, *, cache_left_sec: float) -> tuple[float, bool]:
+        """Return the seconds to the next wake, and whether it fires without new output.
+
+        Args:
+          elapsed_sec: How long the call has run.
+          cache_left_sec: How long the prompt cache stays warm, less a margin;
+            ``math.inf`` when it does not bound the wait.
+
+        Returns:
+          gap: Seconds until the wake.
+          forced: Whether a cap set it, so it fires whatever the call wrote.
+
+        """
+        paced = max(self.first_sec, self.growth * elapsed_sec)
+        cap = min(cache_left_sec, self.max_gap_sec)
+        return min(paced, cap), cap <= paced
+
+    def text(self) -> str:
+        """Return the knobs as a setting takes them: ``15s 1 300s``."""
+        return f"{self.first_sec:g}s {self.growth:g} {self.max_gap_sec:g}s"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DetachSchedule:
+    """How each tool's long calls wake the model; ``None`` never wakes, nor detaches."""
+
+    default: WakeSchedule | None = WakeSchedule()
+    """Each tool's, but those ``tools`` names."""
+
+    tools: Mapping[str, WakeSchedule | None] = field(
+        default_factory=dict[str, "WakeSchedule | None"],
+    )
+    """A tool's own, by name, over ``default``."""
+
+    def of(self, tool: str) -> WakeSchedule | None:
+        """Return how the tool named ``tool`` wakes the model."""
+        return self.tools.get(tool, self.default)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Wake:
+    """A long call's wake time came: show the model what it wrote since it last looked."""
+
+    call_id: str
+    forced: bool
+    """Whether a cap set the time, so it fires whatever the call wrote."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -498,14 +585,6 @@ class Scheduled:
     """Resolved when ``work`` returns, or set to what it raised."""
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Nudge:
-    """A harness note that wakes an idle agent: kept as a ``nudge`` SystemMessage."""
-
-    content: str
-    """What the agent is told, such as the replies it owes."""
-
-
 type ModelContextEvent = (
     UserMessage
     | AgentToAgentMessage
@@ -542,9 +621,10 @@ type RuntimeEvent = (
     | ClearComplete
     | Kill
     | Detach
+    | Wake
     | UserMessage
     | AgentToAgentMessage
-    | Nudge
+    | SystemMessage
     | UserQueuedMessage
     | UserDeferredMessage
     | AgentSendQueuedMessage

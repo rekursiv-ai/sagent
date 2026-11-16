@@ -16,7 +16,9 @@ A tool (`sagent.tools.types.Tool`) exposes:
 - `serialize_key(context, arguments)`: which calls this one must not overlap; `None` runs beside anything; `"*"` waits for every keyed call before it, and every later call waits for it.
 - `call(context, arguments)`: start the tool and return a `ToolStreamingResult` at once: the tool's output streams (`stdout`, `stderr`) and a future of its result (`result`), a dataclass with an `exit_code`, `0` for success.
 
-Whoever ran the call reads the streams and saves the session record, a `ToolResult`; a tool never builds one. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call.
+A tool writes each item as it has it: Bash each line as printed, Grep each match, Glob each path, List each row, PaperFetch each download, AgentSpawn what its child says and calls, an MCP tool each progress report, RemoteTool the other machine's items. Grep and Glob search in parallel, so they write in the order found, no set order. An order that needs every item, such as a `keep_last` tail or a Glob `sort`, and the note counting what was cut, come at the end. A tool whose items are too much for the model, as a long Bash output is, puts the bounded view on its result's `shown`.
+
+Whoever ran the call reads the streams and saves the session record, a `ToolResult`; a tool never builds one. The record keeps every item, and the view, if any, as `shown`. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call; its `on_item` sees each item, and its stream, as it is read.
 
 A tool holds no agent's state. Each call gets the calling agent's `ToolContext`: its working directory, the files it has seen, and its result size limit. Arguments that do not fit the schema raise `ValueError`; the model reads the message as the call's error.
 

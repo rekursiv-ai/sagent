@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, cast
@@ -69,6 +70,7 @@ from sagent.session.types import (
     WriteResult,
     current_plain,
     former_kind,
+    now_timestamp,
     record_classes,
     stored_plain,
     stored_record,
@@ -286,6 +288,16 @@ def test_turn_context_text_states_each_setting_on_its_own_line() -> None:
 )
 def test_the_time_reads_where_the_user_is(timestamp: str, shown: str) -> None:
     assert TurnContext(timestamp=timestamp).text() == f"Current time: {shown}"
+
+
+def test_a_timestamp_is_now_here_to_the_second() -> None:
+    before = datetime.now().astimezone().replace(microsecond=0)
+    stamp = now_timestamp()
+    after = datetime.now().astimezone()
+    when = datetime.fromisoformat(stamp)
+    assert when.utcoffset() == before.utcoffset()
+    assert when.microsecond == 0
+    assert before <= when <= after
 
 
 def test_turn_context_text_skips_what_it_does_not_state() -> None:
@@ -569,7 +581,11 @@ _SPAWNED: Final = AgentSpawnResult(
         ("WebSearchResults", {"query": "q"}, WebSearchResult(query="q")),
         (
             "AgentSpawnResult",
-            {f.name: getattr(_SPAWNED, f.name) for f in fields(_SPAWNED)[:-1]},
+            {
+                f.name: getattr(_SPAWNED, f.name)
+                for f in fields(_SPAWNED)
+                if f.name not in {"exit_code", "shown"}
+            },
             _SPAWNED,
         ),
         ("AgentStatusResult", {"agent_id": "kid"}, AgentSpawnResult(agent_id="kid")),

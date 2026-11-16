@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import asyncio
+import threading
+
 import pytest
 
 from sagent.lib.files.grep import GrepError, Query, Row
@@ -15,7 +18,7 @@ from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     from treekle import PlainTree
@@ -186,7 +189,11 @@ async def test_a_real_search_finds_matching_files_and_lines(tmp_path: Path) -> N
     (tmp_path / "sub" / "c.txt").write_text("ALPHA\n")
     context = ToolContext(cwd=tmp_path)
     files = await settled(Grep().call(context, {"pattern": "alpha", "-i": True}))
-    assert files.text() == f"{tmp_path / 'a.py'}\n{tmp_path / 'sub' / 'c.txt'}"
+    # Ripgrep's parallel search finds them in no set order.
+    assert sorted(files.text().split("\n")) == [
+        str(tmp_path / "a.py"),
+        str(tmp_path / "sub" / "c.txt"),
+    ]
     lines = await settled(
         Grep().call(
             context,
@@ -224,13 +231,74 @@ async def test_a_search_that_cannot_run_is_an_error(
     assert result.call_id == ""
     assert result.text() == f"no such file or directory: {tmp_path / 'missing'}"
 
-    def refuse(paths: Sequence[Path], query: Query) -> list[Row]:
+    def refuse(paths: Sequence[Path], query: Query) -> Iterator[Row]:
         del paths, query
         raise GrepError("bad pattern")
 
-    monkeypatch.setattr(grep, "grep_rows", refuse)
+    monkeypatch.setattr(grep, "streamed_rows", refuse)
     result = await settled(Grep().call(ToolContext(cwd=tmp_path), {"pattern": "("}))
     assert (result.is_error, result.text()) == (True, "bad pattern")
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_fails_midway_keeps_the_rows_it_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(paths: Sequence[Path], query: Query) -> Iterator[Row]:
+        del paths, query
+        yield Row(text="a:1:hit")
+        raise GrepError("ripgrep timed out after 30s; narrow the path or pattern.")
+
+    monkeypatch.setattr(grep, "streamed_rows", broken)
+    result = await settled(Grep().call(ToolContext(cwd=tmp_path), {"pattern": "hit"}))
+    assert result.stdout == ("a:1:hit",)
+    assert result.stderr == (
+        "ripgrep timed out after 30s; narrow the path or pattern.",
+    )
+    assert result.is_error
+
+
+@pytest.mark.asyncio
+async def test_the_search_starts_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its checks of each path touch the disk, which would stall every other task."""
+    started_on: list[threading.Thread] = []
+
+    def search(paths: Sequence[Path], query: Query) -> Iterator[Row]:
+        del paths, query
+        started_on.append(threading.current_thread())
+        return iter(())
+
+    monkeypatch.setattr(grep, "streamed_rows", search)
+    await settled(Grep().call(ToolContext(cwd=tmp_path), {"pattern": "hit"}))
+    assert started_on
+    assert started_on[0] is not threading.current_thread()
+
+
+@pytest.mark.asyncio
+async def test_each_row_is_written_as_it_is_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first row reaches a reader while the search still runs."""
+    found = threading.Event()
+
+    def slow(paths: Sequence[Path], query: Query) -> Iterator[Row]:
+        del paths, query
+        yield Row(text="a:1:hit")
+        assert found.wait(timeout=5)
+        yield Row(text="b:1:hit")
+
+    monkeypatch.setattr(grep, "streamed_rows", slow)
+    streaming_result = Grep().call(ToolContext(cwd=tmp_path), {"pattern": "hit"})
+    assert (
+        await asyncio.wait_for(anext(streaming_result.stdout), timeout=5) == "a:1:hit"
+    )
+    found.set()
+    assert [item async for item in streaming_result.stdout] == ["\nb:1:hit"]
 
 
 @pytest.mark.asyncio
@@ -874,9 +942,13 @@ async def test_a_cut_result_never_passes_its_cap(
     # The resume offset gains a digit while the remaining count loses one.
     _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(10_101)])
     lines = [f"row{i:05d}\n" for i in range(9_999, 10_101)]
-    reserve = len("... (102 more entries; pass offset=10101 to continue)")
+    # Rows are written before how many follow is known: room is left for the
+    # longest note there could be.
+    reserve = len(
+        "\n... (1,000,000,000,000 more entries; pass offset=1000000000000 to continue)",
+    )
     caps = {
-        reserve + len("".join(lines[:kept])) + delta
+        reserve + len("".join(lines[:kept])) - 1 + delta
         for kept in (2, 3, 11)
         for delta in (-1, 0, 1)
     }
@@ -894,7 +966,7 @@ async def test_a_cut_result_never_passes_its_cap(
             f" pass offset={9_999 + kept} to continue)"
         )
         assert len(text) <= cap, cap
-        assert kept == (cap - reserve) // len(lines[0]), cap
+        assert kept == (cap - reserve + 1) // len(lines[0]), cap
 
 
 def test_rg_reading_its_input_by_dash_is_not_greps_job() -> None:
@@ -937,7 +1009,12 @@ def _capture(
         seen.append((list(paths), query))
         return list(rows)
 
+    def streamed(paths: Sequence[Path], query: Query) -> Iterator[Row]:
+        return iter(fake_rows(paths, query))
+
+    # Both ways in: as rows come, and all at once for a tail.
     monkeypatch.setattr(grep, "grep_rows", fake_rows)
+    monkeypatch.setattr(grep, "streamed_rows", streamed)
     return seen
 
 

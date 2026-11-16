@@ -2,9 +2,9 @@
 
 A ``cd`` in the command moves the agent's ``cwd`` for later tools. A command
 that times out, or whose call is cancelled, is stopped with its process group.
-The first lines of output are streamed as the command prints them. A long
-output is truncated in the middle, so the rest is streamed when the command
-ends.
+Each line the command prints is written to its stream as it arrives, so the
+record keeps every line. A long output is cut in the middle for the model,
+which then reads the result's ``shown``: known only when the command ends.
 
 Typical usage example:
 
@@ -76,10 +76,10 @@ class Bash:
         command: Annotated[str, "The command to execute."]
         description: Annotated[str, "What this command does, in active voice."]
         timeout: Annotated[
-            float,
-            "Kill the command after this many milliseconds.",
-            Arg(minimum=1, maximum=600_000),
-        ] = 600_000
+            float | None,
+            "Kill the command after this many milliseconds; omit to let it run.",
+            Arg(minimum=1),
+        ] = None
 
     name = "Bash"
     description = (files(__package__) / "assets" / "bash.md").read_text(
@@ -192,9 +192,9 @@ class Bash:
           arguments: What the model passed, as ``Bash.Arguments``.
 
         Returns:
-          streaming_result: The command's output as it is printed, and a
-            ``BashResult`` with its exit code; the exit code is ``None`` when
-            the shell did not stop.
+          streaming_result: Each line on its stream as it is printed, and a
+            ``BashResult`` with the exit code, ``None`` when the shell did not
+            stop, and, when the output had to be cut, what the model reads.
 
         """
         stdout, stderr = Stream[str](), Stream[str]()
@@ -214,9 +214,11 @@ class Bash:
         """Run the command and return its result; close both streams on any exit."""
         try:
             a = parse(arguments, Bash.Arguments)
+            code, shown = await self._run_command(context, a, stdout, stderr)
             return BashResult(
                 command=("bash", "-c", a.command),
-                exit_code=await self._run_command(context, a, stdout, stderr),
+                exit_code=code,
+                shown=shown,
             )
         finally:
             stdout.close()
@@ -228,8 +230,8 @@ class Bash:
         a: Bash.Arguments,
         stdout: Stream[str],
         stderr: Stream[str],
-    ) -> int | None:
-        """Run ``a.command``, write its output to the streams, and return its exit code."""
+    ) -> tuple[int | None, str | None]:
+        """Run ``a.command``, writing each line as printed; return its code and view."""
         cwd = context.cwd
         # A wrapped shell's directory may be invisible here; ``_guard`` falls back.
         if not self.exec_prefix:
@@ -260,15 +262,12 @@ class Bash:
         )
         note = f"; full output: {spill}" if spill is not None else ""
         stdout_lines = _StdoutLines(
-            writer=_EarlyWriter(
-                stream=stdout,
-                early_chars=_early_chars(cap, note=note),
-            ),
+            printed=_Printed(stream=stdout),
             report_prefix=f"{sentinel}=",
         )
+        stderr_printed = _Printed(stream=stderr)
         # Stderr gets its own quarter, so floods of stdout cannot hide the error.
         stderr_cap = cap // 4
-        stderr_writer = _EarlyWriter(stream=stderr, early_chars=stderr_cap)
         started = time.monotonic()
         reason: str | None = None
         pipes: list[_OutputPipe] = []
@@ -295,13 +294,15 @@ class Bash:
                 _read_output(
                     child,
                     (pipes[0].reader, stdout_lines.add_line),
-                    (pipes[1].reader, stderr_writer.add_line),
+                    (pipes[1].reader, stderr_printed.add_line),
                 ),
             )
             try:
                 await asyncio.wait_for(
                     asyncio.shield(read_task),
-                    timeout=timedelta(milliseconds=a.timeout).total_seconds(),
+                    timeout=None
+                    if a.timeout is None
+                    else timedelta(milliseconds=a.timeout).total_seconds(),
                 )
             except TimeoutError:
                 await finish(_stop(child, held=held, output=read_task))
@@ -340,15 +341,15 @@ class Bash:
             ):
                 context.cwd = end_cwd
         diagnostics, _ = context.fit(
-            [f"{line}\n" for line in "".join(stderr_writer.lines).strip().split("\n")],
+            [f"{line}\n" for line in "".join(stderr_printed.lines).strip().split("\n")],
             cap=stderr_cap,
         )
         diagnostics = diagnostics.strip()
         if reason is not None:
             diagnostics += f"\n[{reason}]"
-        lines = stdout_lines.writer.lines
-        final_text, truncated = _final_text(
-            context,
+            stderr_printed.add_line(f"[{reason}]")
+        lines = stdout_lines.printed.lines
+        final_text, truncated = context.view(
             lines,
             reserve=len(diagnostics),
             cap=cap,
@@ -356,95 +357,65 @@ class Bash:
         )
         if truncated and spill is not None:
             await asyncio.to_thread(_spill, spill, lines)
-        stdout_lines.writer.write_rest(final_text)
-        stderr_writer.write_rest(diagnostics.strip())
-        return child.process.returncode
+        code = child.process.returncode
+        # The record keeps every line; only what the model reads is cut, and then
+        # it reads the view, which says the exit code as ``text`` would.
+        view = final_text + diagnostics.strip()
+        if view == "".join((*lines, *stderr_printed.lines)):
+            return code, None
+        return code, view + (f"\n[exit {code}]" if code not in (None, 0) else "")
 
 
 @dataclass(slots=True, kw_only=True)
-class _EarlyWriter:
-    """Writes a stream's first lines as they arrive, and the rest at the end.
-
-    The final text is known only when the command ends: it is stripped, and a
-    long one is truncated in the middle. A line is written early only when the
-    final text is certain to contain it: a later non-blank line has arrived,
-    and the output so far is within ``early_chars``.
-    """
+class _Printed:
+    """One stream's lines, each written to its stream as it comes and kept."""
 
     stream: Stream[str]
-    early_chars: int
-    """How many characters from the start the final text always keeps."""
-
     lines: list[str] = field(default_factory=list[str])
     """Every line added, each with its newline."""
 
-    _written: list[str] = field(default_factory=list[str])
-    _next_unwritten: int = 0
-    """Index in ``lines`` of the first line neither written nor skipped as a leading blank."""
-
-    _chars_added: int = 0
-
     def add_line(self, line: str) -> None:
-        """Add the next line and write the earlier lines that are now certain.
-
-        Args:
-          line: The next line of output, without its newline.
-
-        """
+        """Write the next line, given without its newline, and keep it."""
         self.lines.append(f"{line}\n")
-        self._chars_added += len(line) + 1
-        if not line.strip() or self._chars_added > self.early_chars:
-            return
-        newest = len(self.lines) - 1
-        for earlier in self.lines[self._next_unwritten : newest]:
-            # The final text is stripped, so a leading blank line is never written.
-            text = earlier if self._written else earlier.lstrip()
-            if text:
-                self._written.append(text)
-                self.stream.write(text)
-        self._next_unwritten = newest
-
-    def write_rest(self, final_text: str) -> None:
-        """Write the part of ``final_text`` that was not written early."""
-        rest = final_text.removeprefix("".join(self._written))
-        for line in rest.splitlines(keepends=True):
-            self.stream.write(line)
+        self.stream.write(f"{line}\n")
 
 
 @dataclass(slots=True, kw_only=True)
 class _StdoutLines:
     """Separates the command's output lines from the script's directory reports."""
 
-    writer: _EarlyWriter
+    printed: _Printed
     report_prefix: str
     """What a report line starts with: the sentinel and ``=``."""
 
     reported_dirs: list[str] = field(default_factory=list[str])
     """Each directory the script reported; the last is where the shell ended."""
 
-    _pending_line: str | None = None
+    _blank_held: bool = False
 
-    # A line is classified only once the next line is known, so it waits here.
+    # The report's leading newline and the stream's final newline each read as an
+    # empty line the command never printed, so an empty line waits for the next:
+    # only then is it known to be the command's. Any other line is said at once.
     def add_line(self, line: str) -> None:
-        """Add the next line of standard output, given without its newline."""
-        if self._pending_line is not None:
-            self._route(self._pending_line, next_line=line)
-        self._pending_line = line
+        """Add the next line of standard output.
+
+        Args:
+          line: The line, without its newline.
+
+        """
+        if line.startswith(self.report_prefix):
+            self._blank_held = False
+            self.reported_dirs.append(line.removeprefix(self.report_prefix))
+            return
+        if self._blank_held:
+            self.printed.add_line("")
+        self._blank_held = not line
+        if line:
+            self.printed.add_line(line)
 
     def finish(self) -> None:
-        """Route the last line, which no line follows."""
-        if self._pending_line is not None:
-            self._route(self._pending_line, next_line=None)
-
-    def _route(self, line: str, *, next_line: str | None) -> None:
-        # The report's leading newline and the stream's final newline each read
-        # as an empty line the command never printed.
-        if not line and (next_line is None or next_line.startswith(self.report_prefix)):
-            return
-        if line.startswith(self.report_prefix):
-            self.reported_dirs.append(line.removeprefix(self.report_prefix))
-        else:
-            self.writer.add_line(line)
+        """Drop an empty line still held: the stream's final newline."""
+        self._blank_held = False
 
 
 # By chunk, not ``readline``: a line longer than the reader's limit raises there.
@@ -458,7 +429,9 @@ async def _read_lines(
         *complete, partial = (partial + chunk).split(b"\n")
         for line in complete:
             add_line(line.decode(errors="replace"))
-    add_line(partial.decode(errors="replace"))
+    # After a final newline nothing is left: no line was printed there.
+    if partial:
+        add_line(partial.decode(errors="replace"))
 
 
 async def _read_output(
@@ -586,63 +559,6 @@ def _script(sentinel: str) -> str:
         "__sagent_report\n"
         "exit $__rc"
     )
-
-
-# ``_ends`` gives the start at least two fifths of the room. The room is ``cap``
-# less the largest diagnostics (a quarter of ``cap`` plus one line of why the
-# command stopped) and less the line that counts the omitted lines.
-def _early_chars(cap: int, *, note: str) -> int:
-    """Return how many characters from the output's start the final text always keeps."""
-    room = cap - (cap // 4 + 160) - len(_omitted(10**18, note=note))
-    return max(0, room * 2 // 5)
-
-
-def _final_text(
-    context: ToolContext,
-    lines: Sequence[str],
-    *,
-    reserve: int,
-    cap: int,
-    note: str,
-) -> tuple[str, bool]:
-    """Return the text the model reads for ``lines``, and whether it was truncated."""
-    body, kept = context.fit(lines, reserve=reserve, cap=cap)
-    truncated = kept < len(lines)
-    if truncated:
-        body = _ends(context, lines, reserve=reserve, cap=cap, note=note)
-    return (f"{body.strip()}\n" if body.strip() else ""), truncated
-
-
-# A failure prints last, so the end is kept as well as the start: the end gets the
-# larger share, but no line too long for it, and the start keeps at least part of
-# its first line. Room is left for the longest the cut can say: every line.
-def _ends(
-    context: ToolContext,
-    lines: Sequence[str],
-    *,
-    reserve: int,
-    cap: int,
-    note: str,
-) -> str:
-    """Return the start and end of ``lines``, and how many lines between are left out."""
-    reserve += len(_omitted(len(lines), note=note))
-    room = min(cap, context.max_result_chars) - reserve
-    tail_room = room * 3 // 5
-    _, tail = context.fit(reversed(lines[1:]), cap=max(1, tail_room))
-    if len(lines[-1]) > tail_room:
-        tail = 0
-    end = "".join(lines[len(lines) - tail :])
-    reserve += len(end)
-    # A first line cut short says so, past the room ``fit`` was given.
-    if len(lines[0]) > room - len(end):
-        reserve += len(f"\n... ({len(lines[0]):,} chars omitted)")
-    head, kept = context.fit(lines[: len(lines) - tail], reserve=reserve, cap=cap)
-    return f"{head.rstrip()}{_omitted(len(lines) - kept - tail, note=note)}{end}"
-
-
-def _omitted(count: int, *, note: str) -> str:
-    """Return the line between a cut output's start and end: how many lines it left out."""
-    return f"\n... ({count:,} lines omitted{note})\n"
 
 
 def _spill(path: Path, stdout: Sequence[str]) -> None:

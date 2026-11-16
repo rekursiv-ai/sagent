@@ -2,8 +2,10 @@
 
 Both backends take one :class:`Query` and return the same lines -- one entry per
 match, per context line, per ``--`` group separator, per counted file, or per
-listed file -- each as a :class:`Row` locating its first match. A directory is
-walked in path order with ``.git``/``.svn``/``.hg`` skipped, ``.gitignore``d
+listed file -- each as a :class:`Row` locating its first match. :func:`grep_rows`
+lists them in path order; :func:`streamed_rows` yields them as they are found,
+each file's rows together. A directory is
+walked with ``.git``/``.svn``/``.hg`` skipped, ``.gitignore``d
 trees skipped unless ``search_ignored``, symlinks followed only under
 ``follow``, hidden entries searched, and binary (NUL-bearing) or unreadable
 files skipped. A file named outright is searched whatever its name, type or
@@ -14,26 +16,27 @@ an error. The Python backend walks with ``rignore``, which binds the Rust
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from stat import S_ISREG
-from typing import TYPE_CHECKING, Final, Literal
+from typing import IO, TYPE_CHECKING, Final, Literal, cast
 
 import codecs
+import collections
+import contextlib
 import dataclasses
 import itertools
 import os
 import re
 import shutil
 import subprocess
+import threading
 
 import rignore
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 
 
 OutputMode = Literal["content", "files_with_matches", "files_without_match", "count"]
@@ -168,6 +171,12 @@ class Row:
     column: int = -1
 
 
+# Each row comes with the name of the file it is from, which the listing sorts by;
+# a ``--`` between two files' context groups is no file's, so it comes with "".
+type _Named = tuple[str, Row]
+_GAP: Final[_Named] = ("", Row(text="--"))
+
+
 def grep(
     paths: Path | Sequence[Path],
     query: Query,
@@ -186,7 +195,7 @@ def grep_rows(
     *,
     timeout_sec: float = 30,
 ) -> list[Row]:
-    """Run ``query`` over ``paths`` and return its output rows.
+    """Run ``query`` over ``paths`` and return its output rows, in path order.
 
     Args:
       paths: A file or directory, or several, searched in the order given.
@@ -194,40 +203,56 @@ def grep_rows(
       timeout_sec: Cap on each ``rg`` run.
 
     Returns:
-      rows: The rendered output, one entry per line; empty when nothing matched.
+      rows: The rendered output, one entry per line: named files in the order
+        given, a walk's files by path. Empty when nothing matched.
 
     Raises:
       GrepError: A path is missing or unreadable, ``file_type`` is unknown, the pattern is
         invalid, two options cannot combine, or the search could not finish.
 
     """
-    targets: list[Path] = [paths] if isinstance(paths, Path) else list(paths)
-    # Checked once, before dispatch, so both backends agree: ``rg`` exits 2 on
-    # either while a walk finds nothing and would report "no matches".
-    if query.file_type and query.file_type not in TYPE_GLOBS:
-        raise GrepError(
-            f"unknown type: {query.file_type!r} (expected one of {sorted(TYPE_GLOBS)})",
-        )
-    if clash := _clash(query):
-        raise GrepError(clash)
-    # Here, not from ``rg``'s stderr: ``--no-messages`` silences it, and a walk
-    # skips what it cannot read, but a path the caller named is never skipped.
-    for path in targets:
-        if not path.exists():
-            raise GrepError(f"no such file or directory: {path}")
-        # A directory needs ``x`` as well to be walked.
-        if not os.access(path, os.R_OK | (os.X_OK if path.is_dir() else 0)):
-            raise GrepError(f"permission denied: {path}")
-    if not targets:
-        return []
-    rg = shutil.which("rg")
-    # However small the search, never in-process when ``rg`` is installed: Python
-    # ``re`` backtracks without bound while holding the GIL, so one pattern froze
-    # the calling process for good. Ripgrep's engine is linear, and its run is
-    # bounded by ``timeout_sec``.
-    if rg is not None:
-        return _grep_rg(rg, targets, query, timeout_sec=timeout_sec)
-    return _grep_python(targets, query)
+    targets = _targets(paths)
+    order = {str(path): i for i, path in enumerate(targets)}
+    blocks = _grouped(_search(targets, query, timeout_sec=timeout_sec))
+    blocks.sort(key=lambda block: _sort_key(block[0], targets, order))
+    rows: list[Row] = []
+    for _, block in blocks:
+        # Ripgrep separates context groups of different files with ``--``.
+        if rows and _has_context(query):
+            rows.append(Row(text="--"))
+        rows.extend(block)
+    return rows
+
+
+def streamed_rows(
+    paths: Path | Sequence[Path],
+    query: Query,
+    /,
+    *,
+    timeout_sec: float = 30,
+) -> Generator[Row, None, None]:
+    """Yield the rows of :func:`grep_rows` as they are found.
+
+    Ripgrep searches files in parallel and prints each file's rows together, in
+    no set order. Closing the generator early, or dropping it, kills the ``rg``
+    run.
+
+    Args:
+      paths: A file or directory, or several, searched in the order given.
+      query: What to find and how to report it.
+      timeout_sec: Cap on each ``rg`` run.
+
+    Returns:
+      rows: The rendered output, one entry per line.
+
+    Raises:
+      GrepError: As :func:`grep_rows`. A bad query or path raises from this call;
+        a search that could not finish raises from the iteration, possibly
+        after rows were yielded.
+
+    """
+    named = _search(_targets(paths), query, timeout_sec=timeout_sec)
+    return _unnamed(named)
 
 
 def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
@@ -258,9 +283,9 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         # and exit 2 would fail the whole search.
         "--no-messages",
         # No ``--sort path``: it makes ripgrep search one file at a time (8x
-        # slower on this repo). Its parallel output is grouped per file and
-        # sorted here instead, and control-byte field separators make each
-        # row's file name and kind unambiguous for that.
+        # slower on this repo). Its parallel output is grouped per file, and
+        # control-byte field separators make each row's file name and kind
+        # unambiguous, for a listing to sort by.
         f"--field-match-separator={_MATCH.decode()}",
         f"--field-context-separator={_CONTEXT.decode()}",
         # No ``--max-columns``: it hides a match far right on a long line (a
@@ -316,80 +341,89 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
     return cmd
 
 
+# The first run alone shows whether the pattern needs PCRE2. Once it has, the other runs
+# start, up to one per CPU at a time, and each is read in turn.
 def _grep_rg(
     rg: str,
     paths: Sequence[Path],
     query: Query,
     *,
     timeout_sec: float,
-) -> list[Row]:
-    """Answer ``query`` with ripgrep, one run per argv-sized batch of paths."""
-    batches = list(_batches(paths))
-    run = partial(_run_rg, query=query, timeout_sec=timeout_sec)
-    try:
-        first = run(rg_command(rg, batches[0], query))
-    except GrepError as error:
-        # Not ``--engine auto``: it also sends a refused ``\n`` to PCRE2,
-        # which then silently matches nothing on a line.
-        if query.pcre or not any(why in str(error) for why in _NEEDS_PCRE2):
-            raise
-        query = dataclasses.replace(query, pcre=True)
-        first = run(rg_command(rg, batches[0], query))
-    # Each run is its own process, so further batches overlap freely.
-    commands = [rg_command(rg, batch, query) for batch in batches[1:]]
-    with ThreadPoolExecutor(max_workers=min(len(batches), os.cpu_count() or 1)) as pool:
-        rest = pool.map(run, commands)
-        blocks = [*first, *(block for found in rest for block in found)]
-    order = {str(path): i for i, path in enumerate(paths)}
-    blocks.sort(key=lambda block: _sort_key(block[0], paths, order))
-    rows: list[Row] = []
-    for _, block in blocks:
-        # Ripgrep separates context groups of different files with ``--``.
-        if rows and _has_context(query):
-            rows.append(Row(text="--"))
-        rows.extend(block)
-    return rows
+) -> Generator[_Named, None, None]:
+    """Answer ``query`` with ripgrep, one run per argv-sized batch, as rows come."""
+    batches = _batches(paths)
+    with contextlib.ExitStack() as runs:
+
+        def run(batch: list[Path]) -> Generator[_Named, None, None]:
+            process, timer = _started(rg_command(rg, batch, query), timeout_sec)
+            runs.callback(_stopped, process, timer)
+            return _read(process, timer, query=query, timeout_sec=timeout_sec)
+
+        first_batch = next(batches)
+        rows = run(first_batch)
+        try:
+            first = next(rows, None)
+        except GrepError as error:
+            # Not ``--engine auto``: it also sends a refused ``\n`` to PCRE2,
+            # which then silently matches nothing on a line.
+            if query.pcre or not any(why in str(error) for why in _NEEDS_PCRE2):
+                raise
+            query = dataclasses.replace(query, pcre=True)
+            rows = run(first_batch)
+            first = next(rows, None)
+        ahead = collections.deque(
+            run(batch) for batch in itertools.islice(batches, os.cpu_count() or 1)
+        )
+        found = False
+        while True:
+            if first is not None:
+                # Ripgrep separates context groups with ``--``, but only within
+                # one run.
+                if found and _has_context(query):
+                    yield _GAP
+                found = True
+                yield first
+                yield from rows
+            if not ahead:
+                return
+            rows = ahead.popleft()
+            ahead.extend(run(batch) for batch in itertools.islice(batches, 1))
+            first = next(rows, None)
 
 
 # ``-l`` prints one name per line. Content rows read ``name M n M [col M] text``
 # with ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first
 # one ends the name. ``-c`` rows and binary-file notes split at their last
 # ``:``, which preserves colons in the file name.
-# ``--`` lines separate context groups and are re-added after sorting.
-def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
-    """Group ripgrep's output into ``(file, rows)`` blocks."""
-    lines = out.removesuffix(b"\n").split(b"\n") if out else []
+def _rows(lines: Iterable[bytes], *, query: Query) -> Iterator[_Named]:
+    """Yield the row each line of ripgrep's output is, as it reads them."""
     if query.output_mode in {"files_with_matches", "files_without_match"}:
-        names = (line.decode(errors="replace") for line in lines)
-        return [(name, [Row(text=name)]) for name in names]
-    blocks: list[tuple[str, list[Row]]] = []
+        for line in lines:
+            name = line.decode(errors="replace")
+            yield name, Row(text=name)
+        return
     previous: tuple[str, int] | None = None  # pragma: no mutate -- "" is no row.
-    for before, line in zip([b"", *lines][:-1], lines, strict=True):
+    for line in lines:
         if line == b"--":
+            yield _GAP
             continue
         cut = min(
             (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i != -1),
             default=None,
         )
         if cut is None:
-            name, text = _plain_row(line.decode(errors="replace"))
-            row = Row(text=text)
-        else:
-            name, number, row = _content_row(line, cut=cut, query=query)
-            matched = row.column != -1
-            # ``-U`` prints a run of matched lines as one block that repeats its
-            # first column on every line, so only the run's first line is located.
-            if query.multiline and previous == (name, number - 1):
-                row = Row(text=row.text, prefix_end=row.prefix_end)
-            previous = (name, number) if matched else None
-        if not blocks or blocks[-1][0] != name:
-            blocks.append((name, []))
-        elif before == b"--":
-            # A gap between groups of one file stays; between files it is
-            # re-added after sorting.
-            blocks[-1][1].append(Row(text="--"))
-        blocks[-1][1].append(row)
-    return blocks
+            text = line.decode(errors="replace")
+            # Neither the count nor the note's text after its ``:`` holds a ``:``.
+            yield text.rpartition(":")[0], Row(text=text)
+            continue
+        name, number, row = _content_row(line, cut=cut, query=query)
+        matched = row.column != -1
+        # ``-U`` prints a run of matched lines as one block that repeats its
+        # first column on every line, so only the run's first line is located.
+        if query.multiline and previous == (name, number - 1):
+            row = Row(text=row.text, prefix_end=row.prefix_end)
+        previous = (name, number) if matched else None
+        yield name, row
 
 
 # ``--column`` implies ``-n`` and counts 1-based bytes of the printed UTF-8 line.
@@ -420,57 +454,59 @@ def _content_row(
     return name, int(number), Row(text=text, prefix_end=len(prefix), column=column)
 
 
-def _plain_row(row: str) -> tuple[str, str]:
-    """Split a ``name:count`` or ``name: binary file matches ...`` row."""
-    # Neither the count nor the note's text after its ``:`` holds a ``:``.
-    return row.rpartition(":")[0], row
-
-
-# Named paths keep the caller's order, as ``rg`` keeps argv order; files a walk
-# found sort by path components within the directory named, as ``--sort path``.
-def _sort_key(
-    name: str,
-    paths: Sequence[Path],
-    order: dict[str, int],
-) -> tuple[int, tuple[str, ...]]:
-    """Return where ``name`` falls among ``paths`` and then within its walk."""
-    if name in order:
-        return order[name], ()
-    for i, path in enumerate(paths):
-        prefix = str(path).rstrip("/") + "/"
-        if name.startswith(prefix):
-            return i, tuple(name[len(prefix) :].split("/"))
-    return len(paths), (name,)
-
-
-def _run_rg(
+def _started(
     cmd: list[str],
+    timeout_sec: float,
+) -> tuple[subprocess.Popen[bytes], threading.Timer]:
+    """Start one ``rg`` argv, and the timer that kills it at ``timeout_sec``."""
+    process = subprocess.Popen(  # noqa: S603 -- Fixed ripgrep argv, no shell.
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    timer = threading.Timer(timeout_sec, process.kill)
+    timer.start()
+    return process, timer
+
+
+def _stopped(process: subprocess.Popen[bytes], timer: threading.Timer) -> None:
+    """Cancel ``timer``, kill ``process`` if it still runs, and close its pipes."""
+    timer.cancel()
+    if process.poll() is None:
+        process.kill()
+        _ = process.wait()
+    # Typeshed leaves each pipe optional; both were asked for, so both are there.
+    cast(IO[bytes], process.stdout).close()
+    cast(IO[bytes], process.stderr).close()
+
+
+def _read(
+    process: subprocess.Popen[bytes],
+    timer: threading.Timer,
     *,
     query: Query,
     timeout_sec: float,
-) -> list[tuple[str, list[Row]]]:
-    """Run one ``rg`` argv and return its output, grouped by file."""
+) -> Generator[_Named, None, None]:
+    """Yield the rows a ``rg`` run prints as it prints them; raise if it failed."""
+    out, errors = cast(IO[bytes], process.stdout), cast(IO[bytes], process.stderr)
     try:
-        done = subprocess.run(  # noqa: S603 -- Fixed ripgrep argv, no shell.
-            cmd,
-            capture_output=True,
-            timeout=timeout_sec,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
+        # Bytes, split on ``\n`` alone: a ``\r`` inside a matched line is part of
+        # it, and text-mode decoding would turn it into a line break.
+        yield from _rows((line.removesuffix(b"\n") for line in out), query=query)
+        err = errors.read().decode(errors="replace").strip()
+        code = process.wait()
+    finally:
+        _stopped(process, timer)
+    if code < 0:
         raise GrepError(
             f"ripgrep timed out after {timeout_sec:g}s; narrow the path or pattern.",
-        ) from error
+        )
     # Exit 2 with nothing said is files ``--no-messages`` skipped; what was found
     # stands.
-    err = done.stderr.decode(errors="replace").strip()
-    if done.returncode >= 2 and err:
+    if code >= 2 and err:
         if 'the literal "\\n" is not allowed' in err:
             err = _NEWLINE_HINT
-        raise GrepError(f"ripgrep error (exit {done.returncode}): {err}")
-    # Bytes, split on ``\n`` alone: a ``\r`` inside a matched line is part of
-    # it, and text-mode decoding would turn it into a line break.
-    return _file_blocks(done.stdout, query=query)
+        raise GrepError(f"ripgrep error (exit {code}): {err}")
 
 
 def _batches(paths: Sequence[Path]) -> Iterator[list[Path]]:
@@ -554,17 +590,23 @@ def _references_newline(pattern: str) -> bool:
     return False
 
 
-def _grep_python(paths: Sequence[Path], query: Query) -> list[Row]:
-    """Answer ``query`` in Python, matching ripgrep's output line for line."""
-    pattern = _compile(query)
-    lines: list[Row] = []
+# The pattern is compiled by the caller, so a bad one raises before any row.
+def _grep_python(
+    paths: Sequence[Path],
+    query: Query,
+    *,
+    pattern: re.Pattern[str],
+) -> Generator[_Named, None, None]:
+    """Answer ``query`` in Python, matching ripgrep's output line for line, file by file."""
+    found = False
     for path in paths:
         for name, file, walked in _files(path, query):
             rows = _search_file(pattern, file, name=name, walked=walked, query=query)
-            if lines and rows and _has_context(query):
-                lines.append(Row(text="--"))
-            lines.extend(rows)
-    return lines
+            if found and rows and _has_context(query):
+                yield _GAP
+            found = found or bool(rows)
+            for row in rows:
+                yield name, row
 
 
 # Each comes with the name ripgrep prints for it and whether a walk found it.
@@ -917,3 +959,90 @@ def _row(
         prefix_end=len(prefix),
         column=-1 if column is None else len(prefix) + column,
     )
+
+
+def _targets(paths: Path | Sequence[Path]) -> list[Path]:
+    return [paths] if isinstance(paths, Path) else list(paths)
+
+
+def _unnamed(named: Generator[_Named, None, None]) -> Generator[Row, None, None]:
+    """Yield each row of ``named`` without its file's name."""
+    with contextlib.closing(named):
+        for _, row in named:
+            yield row
+
+
+def _search(
+    targets: list[Path],
+    query: Query,
+    *,
+    timeout_sec: float,
+) -> Generator[_Named, None, None]:
+    """Check ``query`` and ``targets``, then return the search's rows as they come."""
+    # Checked once, before dispatch, so both backends agree: ``rg`` exits 2 on
+    # either while a walk finds nothing and would report "no matches".
+    if query.file_type and query.file_type not in TYPE_GLOBS:
+        raise GrepError(
+            f"unknown type: {query.file_type!r} (expected one of {sorted(TYPE_GLOBS)})",
+        )
+    if clash := _clash(query):
+        raise GrepError(clash)
+    # Here, not from ``rg``'s stderr: ``--no-messages`` silences it, and a walk
+    # skips what it cannot read, but a path the caller named is never skipped.
+    for path in targets:
+        if not path.exists():
+            raise GrepError(f"no such file or directory: {path}")
+        # A directory needs ``x`` as well to be walked.
+        if not os.access(path, os.R_OK | (os.X_OK if path.is_dir() else 0)):
+            raise GrepError(f"permission denied: {path}")
+    if not targets:
+        return _found_nothing()
+    rg = shutil.which("rg")
+    # However small the search, never in-process when ``rg`` is installed: Python
+    # ``re`` backtracks without bound while holding the GIL, so one pattern froze
+    # the calling process for good. Ripgrep's engine is linear, and its run is
+    # bounded by ``timeout_sec``.
+    if rg is not None:
+        return _grep_rg(rg, targets, query, timeout_sec=timeout_sec)
+    return _grep_python(targets, query, pattern=_compile(query))
+
+
+def _found_nothing() -> Generator[_Named, None, None]:
+    yield from ()
+
+
+# ``--`` lines separate context groups and are re-added after sorting.
+def _grouped(named: Iterable[_Named]) -> list[tuple[str, list[Row]]]:
+    """Group ``named`` rows into ``(file, rows)`` blocks, one per file in turn."""
+    blocks: list[tuple[str, list[Row]]] = []
+    gap = False
+    for name, row in named:
+        if not name:
+            gap = True
+            continue
+        if not blocks or blocks[-1][0] != name:
+            blocks.append((name, []))
+        elif gap:
+            # A gap between groups of one file stays; between files it is
+            # re-added after sorting.
+            blocks[-1][1].append(Row(text="--"))
+        gap = False
+        blocks[-1][1].append(row)
+    return blocks
+
+
+# Named paths keep the caller's order, as ``rg`` keeps argv order; files a walk
+# found sort by path components within the directory named, as ``--sort path``.
+def _sort_key(
+    name: str,
+    paths: Sequence[Path],
+    order: dict[str, int],
+) -> tuple[int, tuple[str, ...]]:
+    """Return where ``name`` falls among ``paths`` and then within its walk."""
+    if name in order:
+        return order[name], ()
+    for i, path in enumerate(paths):
+        prefix = str(path).rstrip("/") + "/"
+        if name.startswith(prefix):
+            return i, tuple(name[len(prefix) :].split("/"))
+    return len(paths), (name,)

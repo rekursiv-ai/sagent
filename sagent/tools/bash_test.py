@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final, override
 
@@ -19,11 +19,6 @@ import subprocess
 import sys
 import time
 
-from hypothesis import (
-    given,
-    strategies as st,
-)
-
 import pytest
 
 from sagent.lib.posix.child import Child
@@ -33,10 +28,6 @@ from sagent.tools import bash
 from sagent.tools.bash import (
     Bash,
     _drain,
-    _early_chars,
-    _EarlyWriter,
-    _ends,
-    _final_text,
     _guard,
     _HeldPipe,
     _OutputPipe,
@@ -49,7 +40,7 @@ from sagent.tools.command_analyzer import Rewrite
 from sagent.tools.grep import Grep
 from sagent.tools.list import List
 from sagent.tools.read import Read
-from sagent.tools.types import Stream, ToolContext, settled
+from sagent.tools.types import ToolContext, parse, settled
 
 
 if TYPE_CHECKING:
@@ -173,7 +164,7 @@ def test_summary_shows_the_command_as_the_pane_prints_it() -> None:
     assert Bash().summary({"command": "  echo X\n"}) == "Bash\n  echo X"
 
 
-def test_schema_requires_a_command_and_its_description_and_bounds_the_timeout() -> None:
+def test_schema_requires_a_command_and_its_description_and_takes_any_timeout() -> None:
     """The description heads the call's row and names it in mined sessions."""
     schema = Bash.schema
     assert schema["required"] == ["command", "description"]
@@ -182,17 +173,25 @@ def test_schema_requires_a_command_and_its_description_and_bounds_the_timeout() 
     assert isinstance(properties, Mapping)
     timeout = properties["timeout"]
     assert isinstance(timeout, Mapping)
-    assert (timeout["minimum"], timeout["maximum"]) == (1, 600_000)
-    assert "600000" in Bash.description
+    assert (timeout["minimum"], "maximum" in timeout) == (1, False)
+    parse({"command": "x", "description": "x", "timeout": 86_400_000}, Bash.Arguments)
 
 
-def test_a_command_with_no_timeout_is_killed_at_the_longest_allowed() -> None:
-    """A hung command never runs on forever, holding what it touches."""
-    properties = Bash.schema["properties"]
-    assert isinstance(properties, Mapping)
-    timeout = properties["timeout"]
-    assert isinstance(timeout, Mapping)
-    assert Bash.Arguments(command="x", description="x").timeout == timeout["maximum"]
+def test_a_command_with_no_timeout_runs_until_it_ends_or_is_cancelled() -> None:
+    """A wake shows the model a long command; it cancels one it wants stopped."""
+    assert Bash.Arguments(command="x", description="x").timeout is None
+    assert "BackgroundTask cancel" in Bash.description
+
+
+@pytest.mark.asyncio
+async def test_a_command_with_no_timeout_is_not_cut_short(tmp_path: Path) -> None:
+    result = await settled(
+        Bash().call(
+            ToolContext(cwd=tmp_path),
+            {"command": "sleep 0.05; echo done", "description": "Wait"},
+        ),
+    )
+    assert result.text() == "done\n"
 
 
 @pytest.mark.asyncio
@@ -200,7 +199,6 @@ def test_a_command_with_no_timeout_is_killed_at_the_longest_allowed() -> None:
     "arguments",
     [
         {"command": "true", "description": "x", "run_as_fully_detached": True},
-        {"command": "true", "description": "x", "timeout": 600_001},
         {"command": "true", "description": "x", "timeout": 0},
         {"description": "x", "timeout": 5},
         {"command": "true"},
@@ -301,7 +299,7 @@ async def test_a_command_reports_what_it_printed_and_how_it_exited(
     # Each stream holds what the command wrote on it; its exit is read after both.
     assert ("".join(result.stdout), "".join(result.stderr), _code(result)) == (
         "out\n",
-        "err",
+        "err\n",
         3,
     )
     assert result.text() == "out\nerr\n[exit 3]"
@@ -548,15 +546,18 @@ async def test_long_output_is_cut_on_a_line_and_says_how_much_was_omitted(
             ),
         ),
     )
-    assert "".join(result.stdout).startswith("line1\nline2\n")
-    kept = sum(row.startswith("line") for row in "".join(result.stdout).splitlines())
+    view = _view(result)
+    assert view.startswith("line1\nline2\n")
+    kept = sum(row.startswith("line") for row in view.splitlines())
     assert 0 < kept < 100
-    assert f"\n... ({100 - kept} lines omitted)\n" in "".join(result.stdout)
-    assert "".join(result.stdout).endswith("line100\n")
-    assert "".join(result.stderr) == "boom"
+    assert f"\n... ({100 - kept} lines omitted)\n" in view
+    assert view.endswith("line100\nboom")
     assert result.text().endswith("boom\n[exit 3]")
+    # The record keeps every line; only the view is cut.
+    assert result.stdout == tuple(f"line{i}\n" for i in range(1, 101))
+    assert result.stderr == ("boom\n",)
     # The cap covers the command's output; ``[exit N]`` is appended after it.
-    assert len("".join(result.stdout)) + len("boom") <= context.max_result_chars
+    assert len(view) <= context.max_result_chars
 
 
 @pytest.mark.asyncio
@@ -571,10 +572,10 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
             _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
         ),
     )
-    assert len("".join(result.stdout)) <= tool.max_result_chars
-    spilled = re.search(r"; full output: (\S+)\)", "".join(result.stdout))
+    assert len(_view(result)) <= tool.max_result_chars
+    spilled = re.search(r"; full output: (\S+)\)", _view(result))
     assert spilled is not None
-    assert "".join(result.stdout).endswith("line-14-padding\n")
+    assert _view(result).endswith("line-14-padding\n")
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
     assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 15)]
     # A short name, as the model reads it in every cut result.
@@ -600,9 +601,9 @@ async def test_output_cut_with_nowhere_to_spill_names_no_file(tmp_path: Path) ->
             _arguments("seq 1 1000"),
         ),
     )
-    assert re.search(r"\.\.\. \(\d+ lines omitted\)", "".join(result.stdout))
-    assert "".join(result.stdout).endswith("1000\n")
-    assert len("".join(result.stdout)) <= 200
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", _view(result))
+    assert _view(result).endswith("1000\n")
+    assert len(_view(result)) <= 200
 
 
 @pytest.mark.asyncio
@@ -617,8 +618,9 @@ async def test_stderr_keeps_a_quarter_so_stdout_cannot_be_crowded_out(
         ),
     )
     assert "".join(result.stdout) == "out\n"
-    assert "".join(result.stderr).startswith("err1\nerr2\n")
-    assert len("".join(result.stderr)) <= 100
+    assert len(result.stderr) == 200
+    assert _view(result).startswith("out\nerr1\nerr2\n")
+    assert len(_view(result).removeprefix("out\n")) <= 100
 
 
 @pytest.mark.asyncio
@@ -637,7 +639,7 @@ async def test_a_timeout_stops_the_command_and_keeps_what_it_printed(
     )
     assert time.monotonic() - began < 5
     assert "".join(result.stdout) == "before\n"
-    assert re.fullmatch(r"\[timeout after 0\.\ds\]", "".join(result.stderr))
+    assert re.fullmatch(r"\[timeout after 0\.\ds\]\n", "".join(result.stderr))
     assert re.fullmatch(
         r"before\n\[timeout after 0\.\ds\]\n\[exit -?\d+\]",
         result.text(),
@@ -918,7 +920,7 @@ async def test_a_wrapped_call_keeps_both_streams_and_the_status(
     )
     assert ("".join(result.stdout), "".join(result.stderr), _code(result)) == (
         "out\n",
-        "err",
+        "err\n",
         3,
     )
     assert result.text() == "out\nerr\n[exit 3]"
@@ -1167,7 +1169,7 @@ async def test_a_wrapper_this_process_cannot_kill_is_left_behind_not_awaited(
     assert "".join(result.stdout) in ("", "before\n")
     assert re.fullmatch(
         r"\[timeout after \d\.\ds; the shell did not stop,"
-        r" and the rest of its output is lost\]",
+        r" and the rest of its output is lost\]\n",
         "".join(result.stderr),
     )
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -1271,7 +1273,7 @@ async def test_a_drain_gives_up_on_a_process_that_does_not_end(
         )
     assert drained is False
     assert read_task.cancelled()
-    assert printed == ["", ""]
+    assert printed == []
     assert caplog.record_tuples == [
         (
             "sagent.tools.bash",
@@ -1312,7 +1314,7 @@ async def test_a_drain_returns_what_a_process_wrote_once_its_pipes_are_cut(
             timeout=2,
         )
     assert drained is True
-    assert (out, err) == (["out", ""], [""])
+    assert (out, err) == (["out"], [])
     # Both ends of both pipes: the job still holds its own copies.
     assert await _open_descriptors_once_closed(before - 4) == before - 4
 
@@ -1381,7 +1383,7 @@ async def test_bytes_that_are_not_utf8_are_replaced_not_raised(tmp_path: Path) -
     result = await _run(tmp_path, r"printf 'a \377\n'; printf 'b \376\nc' >&2")
     assert ("".join(result.stdout), "".join(result.stderr)) == (
         "a \ufffd\n",
-        "b \ufffd\nc",
+        "b \ufffd\nc\n",
     )
 
 
@@ -1417,11 +1419,11 @@ async def test_stderr_keeps_a_quarter_of_bash_s_own_cap(tmp_path: Path) -> None:
         "for i in $(seq 1 200); do echo err$i >&2; done",
         tool=tool,
     )
-    assert "".join(flood.stderr).startswith("err1\nerr2\n")
-    assert len("".join(flood.stderr)) <= 402 // 4
+    assert _view(flood).startswith("err1\nerr2\n")
+    assert len(_view(flood)) <= 402 // 4
     long = await _run(tmp_path, "printf '%0300d' 0 >&2", tool=tool)
     # The line is cut with its newline: 301 characters, 100 kept.
-    assert "".join(long.stderr) == "0" * 100 + "\n... (201 chars omitted)"
+    assert _view(long) == "0" * 100 + "\n... (201 chars omitted)"
 
 
 @pytest.mark.asyncio
@@ -1434,9 +1436,9 @@ async def test_a_cut_output_fills_the_cap_but_for_its_last_line_s_slack(
         "for i in $(seq 1 1000); do echo x; done; echo boom >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert re.search(r"\.\.\. \(\d+ lines omitted\)", "".join(result.stdout))
-    assert "".join(result.stdout).endswith("x\n")
-    assert 200 - 4 <= len("".join(result.stdout)) + len("".join(result.stderr)) <= 200
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", _view(result))
+    assert _view(result).endswith("x\nboom")
+    assert 200 - 4 <= len(_view(result)) <= 200
 
 
 @pytest.mark.asyncio
@@ -1450,7 +1452,7 @@ async def test_a_timeout_keeps_what_the_command_said_on_stderr(
         "echo oops >&2; echo yes > printed; sleep 30",
         limit_ms=60,
     )
-    assert re.fullmatch(r"oops\n\[timeout after 0\.\ds\]", "".join(result.stderr))
+    assert re.fullmatch(r"oops\n\[timeout after 0\.\ds\]\n", "".join(result.stderr))
     assert re.fullmatch(
         r"oops\n\[timeout after 0\.\ds\]\n\[exit -?\d+\]",
         result.text(),
@@ -1475,50 +1477,73 @@ async def test_a_job_slower_than_the_grace_is_killed_mid_cleanup(
     assert not (tmp_path / "got.term").exists()
 
 
+def _view(result: ToolResult) -> str:
+    """Return what the model reads of the output, less the ``[exit N]`` it ends with."""
+    return re.sub(r"\n\[exit -?\d+\]$", "", result.text())
+
+
+async def _next(stream: AsyncIterator[str], count: int) -> list[str]:
+    """Return the next ``count`` items of ``stream``, waiting at most 5 s for them."""
+    return [await asyncio.wait_for(anext(stream), timeout=5) for _ in range(count)]
+
+
 @pytest.mark.asyncio
-async def test_what_a_command_prints_is_written_while_it_still_runs(
+async def test_each_line_is_written_to_its_stream_the_moment_it_is_printed(
     tmp_path: Path,
 ) -> None:
-    """A line is written once a later one shows it is neither the last nor past the cut."""
+    """The newest line too, while the command still waits."""
     waits = "until [ -e go ]; do sleep 0.01; done"
-    streaming_result = Bash().call(
-        ToolContext(cwd=tmp_path),
-        _arguments(f"echo one; echo two; echo three; {waits}; echo end"),
-    )
+    command = f"echo one; echo two >&2; echo three; {waits}; echo end"
+    streaming_result = Bash().call(ToolContext(cwd=tmp_path), _arguments(command))
 
-    assert await asyncio.wait_for(anext(streaming_result.stdout), timeout=5) == "one\n"
+    assert await _next(streaming_result.stdout, 2) == ["one\n", "three\n"]
+    assert await _next(streaming_result.stderr, 1) == ["two\n"]
     assert not streaming_result.result.done()
     (tmp_path / "go").touch()
 
-    assert [line async for line in streaming_result.stdout] == [
-        "two\n",
-        "three\n",
-        "end\n",
-    ]
+    assert [line async for line in streaming_result.stdout] == ["end\n"]
     assert [line async for line in streaming_result.stderr] == []
-    assert (await streaming_result.result).exit_code == 0
+    # The model reads each stream's text stripped, so stderr ends without a newline.
+    assert await streaming_result.result == BashResult(
+        command=("bash", "-c", command),
+        exit_code=0,
+        shown="one\nthree\nend\ntwo",
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_line_is_written_early_up_to_the_last_character_a_cut_keeps(
+async def test_the_record_keeps_every_line_and_the_model_reads_what_fits(
     tmp_path: Path,
 ) -> None:
-    """With nowhere to spill, the line that counts a cut's lines names no file."""
-    cap = 1_000
-    kept = _early_chars(cap, note="")
-    waits = "until [ -e go ]; do sleep 0.01; done"
-    # ``one`` and the zeros, each with its newline, fill ``kept`` exactly.
-    streaming_result = Bash(max_result_chars=cap).call(
-        ToolContext(cwd=tmp_path),
-        _arguments(f"echo one; printf '%0{kept - 5}d\\n' 0; echo end; {waits}"),
+    seen: list[object] = []
+    result = await settled(
+        Bash(max_result_chars=1_000).call(
+            ToolContext(cwd=tmp_path),
+            _arguments("seq 1 2000"),
+        ),
+        on_item=lambda _stream, item: seen.append(item),
     )
-    try:
-        first = await asyncio.wait_for(anext(streaming_result.stdout), timeout=2)
-    finally:
-        (tmp_path / "go").touch()
-        _ = await streaming_result.result
 
-    assert first == "one\n"
+    assert result.stdout == tuple(f"{n}\n" for n in range(1, 2001))
+    assert seen == list(result.stdout)
+    assert result.shown == result.text()
+    assert len(result.text()) <= 1_000
+    assert "lines omitted" in result.text()
+    assert result.result == BashResult(
+        command=("bash", "-c", "seq 1 2000"),
+        exit_code=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_neither_the_shells_reports_nor_its_final_blank_are_written(
+    tmp_path: Path,
+) -> None:
+    """A blank line the command printed is written; the ones the script adds are not."""
+    result = await _run(tmp_path, "echo a; echo; echo b")
+
+    assert result.stdout == ("a\n", "\n", "b\n")
+    assert result.shown is None
 
 
 @pytest.mark.asyncio
@@ -1562,7 +1587,7 @@ async def test_one_read_of_the_output_asks_for_at_most_64_kib() -> None:
     await _read_lines(reader, lines.append)
 
     assert asked == [1 << 16, 1 << 16]
-    assert lines == ["a", ""]
+    assert lines == ["a"]
 
 
 @pytest.mark.asyncio
@@ -1571,169 +1596,6 @@ async def test_arguments_that_do_not_fit_end_both_streams() -> None:
     result = await settled(Bash().call(ToolContext(cwd=Path("/")), {}))
     assert (result.state, result.stdout) == ("failed", ())
     assert "Missing argument" in result.text()
-
-
-async def _read_closed(stream: Stream[str]) -> list[str]:
-    """Close ``stream`` and return its items."""
-    stream.close()
-    return [item async for item in stream]
-
-
-@pytest.mark.asyncio
-async def test_a_line_is_written_early_once_a_later_line_arrives() -> None:
-    """Leading blank lines are never written; the newest line and trailing blanks wait."""
-    stream = Stream[str]()
-    writer = _EarlyWriter(stream=stream, early_chars=100)
-    for line in ("", "  a", "", "b", "   "):
-        writer.add_line(line)
-
-    assert await _read_closed(stream) == ["a\n", "\n"]
-    assert writer.lines == ["\n", "  a\n", "\n", "b\n", "   \n"]
-
-
-@pytest.mark.asyncio
-async def test_the_rest_of_the_final_text_is_written_at_the_end() -> None:
-    stream = Stream[str]()
-    writer = _EarlyWriter(stream=stream, early_chars=100)
-    for line in ("a", "b", "c"):
-        writer.add_line(line)
-
-    writer.write_rest("a\nb\nc\n")
-
-    assert await _read_closed(stream) == ["a\n", "b\n", "c\n"]
-
-
-@pytest.mark.asyncio
-async def test_a_line_past_early_chars_is_written_only_at_the_end() -> None:
-    """Past ``early_chars`` a line may be truncated away, so it is not written early."""
-    stream = Stream[str]()
-    writer = _EarlyWriter(stream=stream, early_chars=6)
-    for line in ("ab", "cd", "ef", "gh"):
-        writer.add_line(line)
-    early = stream._queue.qsize()
-
-    writer.write_rest("ab\n... (2 lines omitted)\ngh\n")
-
-    assert early == 1
-    assert await _read_closed(stream) == ["ab\n", "... (2 lines omitted)\n", "gh\n"]
-
-
-def test_a_long_output_is_written_early_only_as_far_as_truncation_keeps() -> None:
-    """Truncation keeps at least two fifths of the room at the start."""
-    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
-    writer = _EarlyWriter(
-        stream=Stream[str](),
-        early_chars=_early_chars(2_000, note=""),
-    )
-    for _ in range(200):
-        writer.add_line("x" * 19)
-
-    final_text, truncated = _final_text(
-        context,
-        writer.lines,
-        reserve=0,
-        cap=2_000,
-        note="",
-    )
-
-    assert truncated
-    assert 400 < len("".join(writer._written)) <= 2_000 * 2 // 5
-    assert final_text.startswith("".join(writer._written))
-
-
-# The line that counts the omitted lines takes 47 characters at its longest, so a
-# cap of 1,000 leaves 1,000 - (250 + 160) - 47 = 543 characters of room.
-@pytest.mark.parametrize(
-    ("cap", "expected"),
-    [(1_000, 217), (0, 0)],
-    ids=["two-fifths-of-the-room", "no-room"],
-)
-def test_the_start_always_keeps_two_fifths_of_the_room(
-    cap: int,
-    expected: int,
-) -> None:
-    assert _early_chars(cap, note="") == expected
-
-
-@given(
-    lines=st.lists(st.text(alphabet=" \tab", max_size=40), max_size=200),
-    cap=st.integers(min_value=600, max_value=3_000),
-    stderr_share=st.floats(min_value=0, max_value=1),
-    note=st.sampled_from(["", "; full output: /state/spill/bash-0123abcd.txt"]),
-)
-def test_the_final_text_always_starts_with_what_was_written_early(
-    lines: list[str],
-    cap: int,
-    stderr_share: float,
-    note: str,
-) -> None:
-    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
-    writer = _EarlyWriter(
-        stream=Stream[str](),
-        early_chars=_early_chars(cap, note=note),
-    )
-    for line in lines:
-        writer.add_line(line)
-    # The diagnostics take at most a quarter of the cap, and a line of why it stopped.
-    reserve = int(stderr_share * (cap // 4 + 160))
-
-    final_text, _ = _final_text(
-        context,
-        writer.lines,
-        reserve=reserve,
-        cap=cap,
-        note=note,
-    )
-
-    assert final_text.startswith("".join(writer._written))
-
-
-# The line that counts the omitted lines takes 23 characters here, so a cap of 33
-# leaves 10: 6 for the end, and what the end does not use for the start.
-@pytest.mark.parametrize(
-    ("lines", "cap", "expected"),
-    [
-        (
-            ["a0\n", "a1\n", "a2\n", "a3\n", "a4\n"],
-            33,
-            "a0\n... (2 lines omitted)\na3\na4\n",
-        ),
-        (
-            ["x" * 20 + "\n", "b\n", "c\n"],
-            30,
-            "x\n... (20 chars omitted)\n... (0 lines omitted)\nb\nc\n",
-        ),
-        (["a\n", "b\n", "ccccc\n"], 33, "a\nb\n... (0 lines omitted)\nccccc\n"),
-        (["a\n", "b\n", "c\n"], 33, "a\n... (0 lines omitted)\nb\nc\n"),
-        (["aaa\n", "bb\n", "cc\n"], 33, "aaa\n... (0 lines omitted)\nbb\ncc\n"),
-        (
-            ["aaaa\n", "bb\n", "cc\n"],
-            33,
-            "a\n... (4 chars omitted)\n... (0 lines omitted)\nbb\ncc\n",
-        ),
-        (
-            ["a\n", "\n", "\n"],
-            25,
-            "a\n... (1 chars omitted)\n... (1 lines omitted)\n\n",
-        ),
-    ],
-    ids=[
-        "the-end-gets-three-fifths",
-        "the-end-is-all-but-the-first-line",
-        "a-last-line-that-fills-the-end-is-kept",
-        "no-line-is-in-both-ends",
-        "a-first-line-that-fills-the-start-is-kept",
-        "a-first-line-over-the-start-is-cut",
-        "an-end-of-one-character-holds-one-line",
-    ],
-)
-def test_a_cut_output_keeps_its_start_and_its_end(
-    lines: list[str],
-    cap: int,
-    expected: str,
-) -> None:
-    context = ToolContext(cwd=Path("/"), max_result_chars=50_000)
-    assert _ends(context, lines, reserve=0, cap=cap, note="") == expected
 
 
 def _arguments(command: str) -> dict[str, PlainTree]:
@@ -1959,8 +1821,8 @@ async def test_output_that_fits_alone_is_cut_to_leave_room_for_stderr(
         "for i in $(seq 1 20); do echo line-$i--; done; echo errors-here >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert "lines omitted" in "".join(result.stdout)
-    assert len("".join(result.stdout)) + len("".join(result.stderr)) <= 200
+    assert "lines omitted" in _view(result)
+    assert len(_view(result)) <= 200
 
 
 @pytest.mark.parametrize("last", ["y" * 20, "z" * 400])
@@ -1975,16 +1837,14 @@ async def test_a_cut_output_keeps_its_end_and_counts_every_line_left_out(
         f"for i in $(seq 1 100); do echo line-$i; done; echo {last}",
         tool=Bash(max_result_chars=200),
     )
-    kept = re.findall(r"^line-\d+$", "".join(result.stdout), flags=re.MULTILINE)
-    shown_last = last in "".join(result.stdout)
-    assert "".join(result.stdout).count(" lines omitted)") == 1
-    omitted = (
-        "".join(result.stdout).partition(" lines omitted)")[0].rpartition("... (")[2]
-    )
-    assert "".join(result.stdout).startswith("line-1\n")
+    kept = re.findall(r"^line-\d+$", _view(result), flags=re.MULTILINE)
+    shown_last = last in _view(result)
+    assert _view(result).count(" lines omitted)") == 1
+    omitted = _view(result).partition(" lines omitted)")[0].rpartition("... (")[2]
+    assert _view(result).startswith("line-1\n")
     assert int(omitted) == 101 - len(kept) - shown_last
     assert shown_last is (len(last) < 100)
-    assert len("".join(result.stdout)) <= 200
+    assert len(_view(result)) <= 200
 
 
 @pytest.mark.asyncio
@@ -1996,9 +1856,9 @@ async def test_first_and_last_lines_too_long_to_show_still_count_the_lines(
         f"echo {'x' * 400}; seq 1 50; echo {'z' * 400}",
         tool=Bash(max_result_chars=200),
     )
-    assert "".join(result.stdout).startswith("xxx")
-    assert re.search(r"\.\.\. \(5[12] lines omitted\)", "".join(result.stdout))
-    assert len("".join(result.stdout)) <= 200
+    assert _view(result).startswith("xxx")
+    assert re.search(r"\.\.\. \(5[12] lines omitted\)", _view(result))
+    assert len(_view(result)) <= 200
 
 
 if __name__ == "__main__":

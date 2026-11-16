@@ -39,7 +39,8 @@ All notable sagent changes are documented here. This project follows
   tool reads that agent's tiers. An agent whose folders another account writes
   runs with `--directives Managed`.
 - `Team.refuse(sender, recipient, why)`: tells a member that its message did not
-  arrive, as the team's note (`Nudge`), and drops what the message asked.
+  arrive, as the team's note (a `SystemMessage` of subtype `nudge`), and drops
+  what the message asked.
 - An environment variable moves the endpoint of every API provider that had
   none: `ANTHROPIC_BASE_URL` (the origin, as for Claude Code), `OPENAI_BASE_URL`,
   `OPENAI_SUB_BASE_URL`, `GOOGLE_GEMINI_BASE_URL` (through `/v1beta`),
@@ -82,6 +83,23 @@ All notable sagent changes are documented here. This project follows
 
 ### Changed
 
+- A long tool call wakes the model as it runs: after 15 s, then each time it
+  has run twice as long, at most every 5 minutes and before the prompt cache
+  lapses. The first wake answers the calls with what they wrote so far and lets
+  them run on; each later one shows an idle model what is new; the result shows
+  the rest. `/runtime.detach FIRST GROWTH MAX_GAP|off`, `/runtime.detach.TOOL`,
+  the same `--` flags, and AgentSelf's `detach` set the schedule; a child takes
+  its parent's. `BackgroundTask foreground` returns at the job's next wake with
+  what is new. They replace `Runtime.detach_after_sec`.
+- Bash's `timeout` has no default and no maximum: a command runs until it ends
+  or `BackgroundTask cancel` stops it.
+- Every tool writes its output as it has it: Grep each match, Glob each path,
+  List each row, PaperFetch each paper, AgentSpawn what its child says, an MCP
+  tool each progress report, RemoteTool the other machine's items. Grep and Glob
+  write in the order their parallel search finds, no set order; Glob's `sort`
+  defaults to `none`. A result's `shown`
+  holds the bounded view the model reads; `settled(on_item=...)` sees each item.
+- Each tool call and result is stamped with its time.
 - Every provider's calls go through `SharedResources.gate`, the host's files by
   default; a session sets it to the daemon's (`sagent.host.shared.host_gate`),
   which keeps the same files, so a process with no daemon shares one state

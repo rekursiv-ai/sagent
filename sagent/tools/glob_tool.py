@@ -10,13 +10,14 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
 import asyncio
+import itertools
 
-from sagent.lib.files.glob import GlobError, glob
+from sagent.lib.files.glob import GlobError, glob, streamed_paths
 from sagent.session.types import GlobResult
 from sagent.tools.command_analyzer import (
     Invocation,
@@ -29,6 +30,9 @@ from sagent.tools.display import ToolDisplay
 from sagent.tools.list import Sort, ls_row, sort_paths
 from sagent.tools.types import (
     Arg,
+    Counted,
+    Stream,
+    ThreadWriter,
     ToolOutput,
     ToolStreamingResult,
     json_schema,
@@ -38,7 +42,8 @@ from sagent.tools.types import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
+    from pathlib import Path
 
     from treekle import PlainTree
 
@@ -62,8 +67,9 @@ class Glob:
         path: Annotated[str, "Directory to search in. Defaults to the cwd."] = "."
         sort: Annotated[
             Sort,
-            "Result ordering. Default 'name'; 'mtime_desc' is newest first.",
-        ] = "name"
+            "Result ordering. Default 'none': as found, each path as soon as found."
+            " 'name' is by path; 'mtime_desc' is newest first.",
+        ] = "none"
         long: Annotated[
             bool,
             "Prefix each match with size and mtime, like ``ls -l``.",
@@ -170,46 +176,83 @@ class Glob:
           arguments: What the model passed, as ``Glob.Arguments``.
 
         Returns:
-          streaming_result: One absolute path per line, with a note to resume when cut.
+          streaming_result: One absolute path per line, each its own item, with a
+            note to resume when cut.
 
         """
-        return whole_output(self._run(context, arguments))
+        stdout = Stream[str]()
+        return whole_output(self._run(context, arguments, stdout), stdout=stdout)
 
     async def _run(
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
     ) -> ToolOutput[GlobResult, str, str]:
-        return await asyncio.to_thread(_glob, context, parse(arguments, Glob.Arguments))
+        a = parse(arguments, Glob.Arguments)
+        result = GlobResult(pattern=a.pattern, path=a.path)
+        try:
+            kept, total = await asyncio.to_thread(
+                _write_matches,
+                context,
+                a,
+                ThreadWriter(stdout, asyncio.get_running_loop()),
+            )
+        except GlobError as e:
+            return ToolOutput(stderr=(str(e),), result=replace(result, exit_code=1))
+        if not kept:
+            # Past the last match, saying none matched would be false.
+            content = "(no matches in this window)" if total else "(no matches)"
+            return ToolOutput(stdout=(content,), result=result)
+        if a.offset + kept < total:
+            stdout.write(_more(total - a.offset - kept, offset=a.offset + kept))
+        return ToolOutput(result=result)
 
 
-def _glob(context: ToolContext, a: Glob.Arguments) -> ToolOutput[GlobResult, str, str]:
-    """Find the files ``a`` asks for."""
-    try:
-        matches = glob(context.path(a.path or "."), a.pattern)
-    except GlobError as e:
-        return ToolOutput(
-            stderr=(str(e),),
-            result=GlobResult(pattern=a.pattern, path=a.path, exit_code=1),
-        )
-    if not matches:
-        return ToolOutput(
-            stdout=("(no matches)",),
-            result=GlobResult(pattern=a.pattern, path=a.path),
-        )
-    sort_paths(matches, a.sort)
+def _write_matches(
+    context: ToolContext,
+    a: Glob.Arguments,
+    writer: ThreadWriter[str],
+) -> tuple[int, int]:
+    """Write the window of matches ``a`` asks for; return how many, and of how many."""
+    root = context.path(a.path or ".")
+    if a.sort == "none":
+        matches: Iterator[Path] = streamed_paths(root, a.pattern)
+        # How many follow is not known as each is written: room is left for
+        # the longest note there could be.
+        reserve = len(_more(10**12, offset=10**12))
+    else:
+        found = glob(root, a.pattern)
+        # ``glob`` sorts by path, which is ``name`` here.
+        if a.sort == "name_desc":
+            found.reverse()
+        elif a.sort != "name":
+            sort_paths(found, a.sort)
+        matches = iter(found)
+        reserve = len(_more(len(found), offset=len(found)))
+    every = Counted(matches)
     end = a.offset + a.max_results if a.max_results else None
     # ``absolute``, not ``resolve``: a link is listed under its own path.
     rows = (
-        (ls_row(p, name=str(p.absolute())) if a.long else str(p.absolute())) + "\n"
-        for p in matches[a.offset : end]
+        ls_row(p, name=str(p.absolute())) if a.long else str(p.absolute())
+        for p in itertools.islice(every, a.offset, end)
     )
-    note = f"\n... ({len(matches):,} more; pass offset={len(matches)} to continue)"
-    body, kept = context.fit(rows, reserve=len(note))
-    body = body.rstrip("\n") or "(no matches in this window)"
-    if a.offset + kept < len(matches):
-        body += (
-            f"\n... ({len(matches) - a.offset - kept:,} more;"
-            f" pass offset={a.offset + kept} to continue)"
-        )
-    return ToolOutput(stdout=(body,), result=GlobResult(pattern=a.pattern, path=a.path))
+    # Each row after the first brings the newline before it, so the text ends on
+    # none.
+    units = (row if i == 0 else f"\n{row}" for i, row in enumerate(rows))
+    kept = 0
+    try:
+        for unit in context.fitting(units, reserve=reserve):
+            writer.write(unit)
+            kept += 1
+        # Past the cut, the rest are counted, not written.
+        for _ in every:
+            pass
+    finally:
+        writer.landed()
+    return kept, every.seen
+
+
+def _more(entries: int, *, offset: int) -> str:
+    """Return the note saying ``entries`` were cut, and where to resume."""
+    return f"\n... ({entries:,} more; pass offset={offset} to continue)"

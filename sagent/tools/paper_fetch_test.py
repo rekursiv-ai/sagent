@@ -179,6 +179,28 @@ async def test_many_papers_share_one_lookup_and_report_in_input_order(
 
 
 @pytest.mark.asyncio
+async def test_each_paper_is_written_in_order_once_it_and_those_before_are_had(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _batches(monkeypatch, [None, None])
+    _downloads(
+        monkeypatch,
+        {"10.1000/a": PaperError("no a"), "10.1000/b": (_PDF, "arXiv")},
+    )
+    result = await settled(
+        _tool(tmp_path).call(
+            ToolContext(cwd=tmp_path),
+            {"ids": ["10.1000/a", "10.1000/b"]},
+        ),
+    )
+    assert result.stdout == (
+        "no a\n",
+        f"Downloaded via arXiv: {tmp_path / 'doi_10.1000_b.pdf'}",
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_failed_lookup_leaves_each_download_to_find_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

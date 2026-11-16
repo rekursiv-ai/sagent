@@ -1,6 +1,8 @@
-"""Tests for the runtime as settings: when a call detaches, and how a rate limit waits."""
+"""Tests for the runtime as settings: when long calls wake the model, how a rate limit waits."""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import re
 
@@ -8,41 +10,96 @@ import pytest
 
 from sagent.model.scripted import ScriptedProvider
 from sagent.runtime.runtime import Runtime
+from sagent.runtime.types import DetachSchedule, WakeSchedule
 from sagent.settings.harvest import harvest
+from sagent.tools.bash import Bash
+from sagent.tools.read import Read
 from sagent.tui.settings.runtime import RuntimeSettings
 
 
-@pytest.mark.asyncio
-async def test_detach_is_off_until_given_seconds() -> None:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    (setting,) = (
-        s
+if TYPE_CHECKING:
+    from sagent.settings.types import Setting
+
+
+def _settings(runtime: Runtime) -> dict[str, Setting]:
+    return {
+        ".".join(s.name): s
         for s in harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
-        if s.name == ("runtime", "detach")
-    )
+    }
+
+
+def _runtime() -> Runtime:
+    return Runtime(model=ScriptedProvider()["scripted"], tools=[Bash(), Read()])
+
+
+@pytest.mark.asyncio
+async def test_detach_sets_when_every_tool_wakes_the_model() -> None:
+    runtime = _runtime()
+    setting = _settings(runtime)["runtime.detach"]
     assert setting.value is not None
 
-    assert setting.value() == "off (default)"
-    assert await setting.apply("90") == "90s"
-    assert runtime.detach_after_sec == 90.0
-    assert await setting.apply("1.5s") == "1.5s"
-    assert await setting.apply("off") == "off (default)"
-    assert runtime.detach_after_sec is None
-    for bad in ("0", "-3", "soon", "nan", "inf"):
-        message = f"{bad!r} is not off or a number of seconds above 0"
+    assert setting.value() == "15s 1 300s (default)"
+    assert await setting.apply("10 0.5 120") == "10s 0.5 120s"
+    assert runtime.detach_schedule.default == WakeSchedule(
+        first_sec=10.0,
+        growth=0.5,
+        max_gap_sec=120.0,
+    )
+    assert await setting.apply("5s,2,60s") == "5s 2 60s"
+    assert await setting.apply("off") == "off"
+    assert runtime.detach_schedule.default is None
+    assert await setting.apply("default") == "15s 1 300s (default)"
+    assert runtime.detach_schedule == DetachSchedule()
+
+
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        ("10 1", "'10 1' is not FIRST GROWTH MAX_GAP, off, or default"),
+        ("a b c", "'a b c' is not FIRST GROWTH MAX_GAP, off, or default"),
+        ("0 1 300", "first_sec must be a number of seconds above 0, got 0.0."),
+        ("10 -1 300", "growth must be a number at least 0, got -1.0."),
+    ],
+)
+@pytest.mark.asyncio
+async def test_detach_refuses_what_is_not_a_schedule(bad: str, message: str) -> None:
+    runtime = _runtime()
+    settings = _settings(runtime)
+    for name in ("runtime.detach", "runtime.detach.Bash"):
         with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-            await setting.apply(bad)
-    assert runtime.detach_after_sec is None
+            await settings[name].apply(bad)
+    assert runtime.detach_schedule == DetachSchedule()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_s_own_detach_wins_over_the_default_until_given_up() -> None:
+    runtime = _runtime()
+    settings = _settings(runtime)
+    bash = settings["runtime.detach.Bash"]
+    assert bash.value is not None
+    assert bash.value() == "default"
+    assert await bash.apply("off") == "off"
+    assert runtime.detach_schedule.of("Bash") is None
+    assert runtime.detach_schedule.of("Read") == WakeSchedule()
+    assert await settings["runtime.detach"].apply("30 1 600") == "30s 1 600s"
+    assert runtime.detach_schedule.of("Bash") is None
+    assert await bash.apply("1 0 5") == "1s 0 5s"
+    assert runtime.detach_schedule.of("Bash") == WakeSchedule(
+        first_sec=1.0,
+        growth=0.0,
+        max_gap_sec=5.0,
+    )
+    assert await bash.apply("default") == "default"
+    assert runtime.detach_schedule.of("Bash") == WakeSchedule(
+        first_sec=30.0,
+        max_gap_sec=600.0,
+    )
 
 
 @pytest.mark.asyncio
 async def test_retry_waits_out_a_rate_limit_or_ends_the_turn() -> None:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    (setting,) = (
-        s
-        for s in harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
-        if s.name == ("runtime", "retry")
-    )
+    runtime = _runtime()
+    setting = _settings(runtime)["runtime.retry"]
     assert setting.value is not None
 
     assert setting.value() == "off"
@@ -55,17 +112,35 @@ async def test_retry_waits_out_a_rate_limit_or_ends_the_turn() -> None:
 
 
 def test_each_setting_says_how_it_is_typed_what_it_takes_and_what_it_does() -> None:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    detach, retry = harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
+    settings = _settings(_runtime())
+    assert list(settings) == [
+        "runtime.detach",
+        "runtime.detach.Bash",
+        "runtime.detach.Read",
+        "runtime.retry",
+    ]
+    detach, bash, retry = (
+        settings["runtime.detach"],
+        settings["runtime.detach.Bash"],
+        settings["runtime.retry"],
+    )
     assert (detach.help_short, detach.usage, detach.options(), detach.cli) == (
-        "detach a call the model waits on after this long",
-        "off|SECONDS",
-        ("off",),
+        "when a long call wakes the model, and detaches",
+        "FIRST GROWTH MAX_GAP|off|default",
+        ("off", "default"),
         True,
     )
     assert detach.help_long == (
-        "A detached call runs on; its result arrives later as a message, and the"
-        " model works meanwhile."
+        "The first wake is FIRST seconds in; each gap after is GROWTH times how"
+        " long the call has run, at least FIRST, at most MAX_GAP and the prompt"
+        " cache's lifetime. The first wake answers the calls with what they wrote"
+        " and lets them run on; each later one shows the model what is new."
+    )
+    assert (bash.help_short, bash.usage, bash.options(), bash.cli) == (
+        "when a long Bash call wakes the model",
+        "FIRST GROWTH MAX_GAP|off|default",
+        ("off", "default"),
+        True,
     )
     assert (retry.help_short, retry.usage, retry.options(), retry.cli) == (
         "wait out a long rate limit, or end the turn on it",
@@ -76,18 +151,8 @@ def test_each_setting_says_how_it_is_typed_what_it_takes_and_what_it_does() -> N
     assert retry.help_long == ""
 
 
-@pytest.mark.asyncio
-async def test_detach_takes_default_as_off_and_any_time_above_zero() -> None:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    detach, _ = harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
-    await detach.apply("5")
-    assert await detach.apply("default") == "off (default)"
-    assert await detach.apply("0.5") == "0.5s"
-    assert await detach.apply("1") == "1s"
-
-
-def test_a_new_runtime_waits_on_every_call() -> None:
-    assert Runtime(model=ScriptedProvider()["scripted"]).detach_after_sec is None
+def test_a_new_runtime_wakes_on_the_default_schedule() -> None:
+    assert _runtime().detach_schedule == DetachSchedule()
 
 
 if __name__ == "__main__":

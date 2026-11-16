@@ -901,6 +901,34 @@ async def test_a_call_returns_text_images_and_errors(tmp_path: Path) -> None:
     assert (fail.text(), fail.is_error) == ("it broke", True)
 
 
+@pytest.mark.parametrize("loading", ["every_request", "on_demand"])
+@pytest.mark.asyncio
+async def test_what_a_server_reports_of_a_call_is_written_as_it_comes(
+    tmp_path: Path,
+    loading: McpToolLoading,
+) -> None:
+    backend = _Backend(
+        reports=((1, 4, "reading"), (2, None, None), (3, 4, None), (4, 4, "")),
+    )
+    said: list[object] = []
+    arguments: dict[str, PlainTree] = {"text": "hi"}
+    async with _connected(backend, loading=loading) as connection:
+        tool = _by_name(connection.tools())[
+            "mcp__srv" if loading == "on_demand" else "mcp__srv__echo"
+        ]
+        result = await settled(
+            tool.call(
+                ToolContext(cwd=tmp_path),
+                {"tool": "echo", "arguments": arguments}
+                if loading == "on_demand"
+                else arguments,
+            ),
+            on_item=lambda _stream, item: said.append(item),
+        )
+    assert said == ["reading (1/4)\n", "2\n", "3/4\n", "4/4\n", "hi"]
+    assert result.text() == "reading (1/4)\n2\n3/4\n4/4\nhi"
+
+
 @pytest.mark.asyncio
 async def test_long_text_is_cut_to_what_one_result_holds(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_result_chars=10)
@@ -1476,6 +1504,9 @@ class _Backend:
     page_size: int | None = None
     """Tools per page of the list; ``None`` lists them in one."""
 
+    reports: Sequence[tuple[float, float | None, str | None]] = ()
+    """Progress each call reports before it answers: done, total, and message."""
+
     def server(self) -> Server[object]:
         return Server(
             "srv",
@@ -1530,7 +1561,8 @@ class _Backend:
         ctx: ServerRequestContext[object],
         params: mcp_types.CallToolRequestParams,
     ) -> mcp_types.CallToolResult:
-        del ctx
+        for done, total, message in self.reports:
+            await ctx.session.report_progress(done, total, message)
         if params.name == "picture":
             return mcp_types.CallToolResult(
                 content=[
