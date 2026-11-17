@@ -769,14 +769,45 @@ def test_a_taped_delivery_is_numbered_when_detached_and_again_when_it_lands(
     render.show(_result("1:detached", "late"))
     assert printer.said == [
         ("call", "Echo a"),
-        ("output", "[detached; #1]"),
+        ("output", "[detached; Echo#1]"),
         ("call", "Echo b"),
         ("output", "now"),
         ("call", "Echo a"),
-        ("output", "[undetached; #1]"),
+        ("output", "[undetached; Echo#1]"),
         ("output", "late"),
     ]
     assert render.shown == 3
+
+
+def test_a_wake_shows_as_its_call_s_output_named_by_its_job() -> None:
+    render, printer = _renderer()
+    render(_turn(call("Echo", "c9", text="a")))
+    render(_result("c9", "[detached]", stub="pending"))
+    render(types.ModelCallStarted())
+    render(UserMessage(content="meanwhile"))
+    render(
+        SystemMessage(
+            content="[Echo c9 still running after 30s]\nbeat 4\nbeat 5",
+            subtype="wake",
+            call_id="c9",
+        ),
+    )
+    assert printer.said == [
+        ("call", "Echo a"),
+        ("output", "[detached; Echo#1]"),
+        ("user", "meanwhile"),
+        ("call", "Echo a"),
+        ("output", "[Echo#1 still running after 30s]"),
+        ("output", "beat 4\nbeat 5"),
+    ]
+    assert printer.displays[-2:] == [_SHOWN, _tools()["Echo"].display]
+
+
+def test_a_wake_for_a_call_scrollback_never_labelled_is_a_note() -> None:
+    render, printer = _renderer()
+    note = "[Echo c9 still running after 30s]\nbeat 4"
+    render.show(SystemMessage(content=note, subtype="wake", call_id="c9"))
+    assert printer.said == [("note", note)]
 
 
 def test_a_second_detached_call_takes_the_next_number() -> None:
@@ -787,9 +818,9 @@ def test_a_second_detached_call_takes_the_next_number() -> None:
     render(types.ModelCallStarted())
     assert printer.said == [
         ("call", "Echo a"),
-        ("output", "[detached; #1]"),
+        ("output", "[detached; Echo#1]"),
         ("call", "Echo b"),
-        ("output", "[detached; #2]"),
+        ("output", "[detached; Echo#2]"),
     ]
 
 
@@ -802,11 +833,11 @@ def test_a_backgrounded_call_beside_a_running_one_is_labelled_once() -> None:
     render(types.DetachedResult(result=_result("1", "slow done")))
     assert printer.said == [
         ("call", "Echo slow"),
-        ("output", "[detached; #1]"),
+        ("output", "[detached; Echo#1]"),
         ("call", "Echo fast"),
         ("output", "fast done"),
         ("call", "Echo slow"),
-        ("output", "[undetached; #1]"),
+        ("output", "[undetached; Echo#1]"),
         ("output", "slow done"),
     ]
     assert printer.displays[1] == printer.displays[5] == _SHOWN
@@ -817,7 +848,7 @@ def test_a_call_detached_while_it_runs_is_numbered_under_its_label() -> None:
     render(_turn(call("Echo", "1", text="a")))
     render(types.CohortStarted())
     render(_result("1", "[detached]", stub="pending"))
-    assert printer.said == [("call", "Echo a"), ("output", "[detached; #1]")]
+    assert printer.said == [("call", "Echo a"), ("output", "[detached; Echo#1]")]
     assert printer.displays[-1] == _SHOWN
 
 
@@ -834,7 +865,7 @@ def test_a_stub_for_an_earlier_call_labels_the_held_ones_first() -> None:
         ("call", "Echo a"),
         ("call", "Echo b"),
         ("call", "Echo a"),
-        ("output", "[detached; #1]"),
+        ("output", "[detached; Echo#1]"),
     ]
 
 
@@ -1548,8 +1579,8 @@ def test_a_result_right_after_its_detached_label_names_its_call_once() -> None:
     render(types.DetachedResult(result=_result("1", "late")))
     assert printer.said == [
         ("call", "Echo a"),
-        ("output", "[detached; #1]"),
-        ("output", "[undetached; #1]"),
+        ("output", "[detached; Echo#1]"),
+        ("output", "[undetached; Echo#1]"),
         ("output", "late"),
     ]
 

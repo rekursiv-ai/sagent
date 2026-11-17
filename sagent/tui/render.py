@@ -129,8 +129,10 @@ class Scrollback:
         # The calls not yet answered, as labelled, by key: a result printed below
         # anything else names its call again.
         self._calls: dict[str, Header] = {}
-        # Each detached call's number, by key, in the order they detached.
-        self._jobs: dict[str, int] = {}
+        # Each detached call's job, ``Bash#12``, by key: its tool, and when it
+        # detached among the others.
+        self._jobs: dict[str, str] = {}
+        self._names: dict[str, str] = {}
         # A turn's calls, labelled once the stubs that follow the turn are in, so
         # a backgrounded call's ``[detached; #N]`` prints under its own label.
         self._held: list[Header] = []
@@ -144,7 +146,7 @@ class Scrollback:
             job = self._jobs.get(header.key)
             if job is not None:
                 self.printer.output(
-                    f"[detached; #{job}]",
+                    f"[detached; {job}]",
                     display=_NOTED,
                     header=header,
                 )
@@ -311,6 +313,18 @@ class Scrollback:
                 self._flush()
                 p.agent(sender or "agent", recipient=None, text=content or "")
                 self.shown += 1
+            case SystemMessage(
+                subtype="wake",
+                call_id=str() as call_id,
+                content=str() as content,
+            ) if (header := self._calls.get(_key(call_id))) is not None:
+                self._flush()
+                head, _, news = content.partition("\n")
+                name = self._names[header.key]
+                # The model's note names the call by the id BackgroundTask takes.
+                head = head.replace(f"{name} {call_id} ", f"{self._job(header)} ", 1)
+                p.output(head, display=_NOTED, header=header)
+                p.output(news, display=header.display, header=header)
             # A note that drives the model shows, so the user sees why it spoke;
             # one that only informs it, as a reminder does, stays out of the way.
             case SystemMessage(subtype="wake" | "nudge", content=str() as content):
@@ -339,6 +353,7 @@ class Scrollback:
                 header = call_header(record, tools=self.tools, home=self.home)
                 self._held.append(header)
                 self._calls[header.key] = header
+                self._names[header.key] = record.name
             case ToolResult():
                 self._flush()
                 call_id = record.call_id.removesuffix(self.markers.arrival)
@@ -350,23 +365,26 @@ class Scrollback:
                 # lands, is shown under the label again with the same number. A
                 # held call's number prints when its label does.
                 if record.state == "pending":
-                    job = self._jobs.setdefault(header.key, len(self._jobs) + 1)
+                    job = self._job(header)
                     self.shown += 1
                     if not self._held:
-                        p.output(
-                            f"[detached; #{job}]",
-                            display=_NOTED,
-                            header=header,
-                        )
+                        p.output(f"[detached; {job}]", display=_NOTED, header=header)
                     return
                 del self._calls[header.key]
                 job = self._jobs.get(header.key)
                 if job is not None and record.state != "cancelled":
-                    p.output(f"[undetached; #{job}]", display=_NOTED, header=header)
+                    p.output(f"[undetached; {job}]", display=_NOTED, header=header)
                 show_result(p, record, header=header)
                 self.shown += 1
             case _:
                 assert_never(record)
+
+    def _job(self, header: Header) -> str:
+        """Return the call's job, ``Bash#12``, numbering it if it has none."""
+        return self._jobs.setdefault(
+            header.key,
+            f"{self._names[header.key]}#{len(self._jobs) + 1}",
+        )
 
     # A child's work shows in brief, each line led by its label: its calls, what it
     # says, and what fails. Its results show only when they fail.
