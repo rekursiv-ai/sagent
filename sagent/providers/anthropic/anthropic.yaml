@@ -356,7 +356,7 @@ providers:
       haiku-4.5:
   # Claude Code on the subscription, as sagent's anthropic-cli runs it and as
   # Trackinizer prices a person's sessions (``session_usage.py``).
-  anthropic-cli: &claude_code
+  anthropic-cli: &anthropic_cli
     sends: [thinking_effort, thinking_budget, thinking_output, cache_ttl_sec]
     # ``claude`` holds the conversation; what it compacts or prunes is its own.
     manage_context_server_side: [true]

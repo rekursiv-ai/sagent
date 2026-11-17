@@ -63,8 +63,11 @@ async def _lines(*lines: str) -> AsyncIterator[str]:
 @pytest.mark.parametrize(
     "model_id",
     [
+        "astra-6.2",
+        "sol-6.2",
         "astra-6.0",
         "sol-6.1",
+        "terra-6.1",
         "sol-6.0",
         "luna-6.0",
         "sol-5.6",

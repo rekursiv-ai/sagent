@@ -172,8 +172,11 @@ def gpt_6(model_id: str) -> bool:
 
     """
     return model_id in {
+        "astra-6.2",
+        "sol-6.2",
         "astra-6.0",
         "sol-6.1",
+        "terra-6.1",
         "sol-6.0",
         "luna-6.0",
         "sol-5.6",

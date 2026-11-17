@@ -142,7 +142,7 @@ class _Tiles:
     """Tokens per 512px tile, after the 2048px and 768px short-side shrinks."""
 
 
-# The images-vision guide's tables (2026-10-03). GPT-6 Sol and Luna and 6.1 Sol
+# The images-vision guide's tables (2026-10-03). GPT-6 Sol and Luna, 6.1 and 6.2
 # are in neither; they take Astra's GPT-6 rule, as ``wire.gpt_6`` names them.
 # GPT-4.1 and GPT-4o bill the default, 85 a base and 170 a tile.
 def _vision(model_id: str) -> _Patches | _Tiles:

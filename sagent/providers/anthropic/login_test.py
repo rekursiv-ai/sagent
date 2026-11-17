@@ -30,7 +30,7 @@ from sagent.providers.testing import refuse_browsers
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
 
@@ -389,6 +389,58 @@ async def test_refresh_waits_for_lock_admission_before_exchanging_tokens(
 
 
 @pytest.mark.asyncio
+async def test_a_renewal_holds_the_locks_claude_renews_under(tmp_path: Path) -> None:
+    """``claude`` takes these, not sagent's lock, before it spends a refresh token.
+
+    The second is named for the directory the config one links to.
+    """
+    (tmp_path / "real").mkdir()
+    config = tmp_path / "claude"
+    config.symlink_to(tmp_path / "real")
+    path = config / ".credentials.json"
+    _store(path, access="at-1", expires_in_sec=0.0)
+    current, legacy = config / ".oauth_refresh.lock", tmp_path / "real.lock"
+    held: list[tuple[bool, bool]] = []
+
+    def grant(request: httpx2.Request) -> httpx2.Response:
+        del request
+        held.append((current.is_dir(), legacy.is_dir()))
+        return _granted("at-2")
+
+    async with _Served(grant) as shared:
+        assert await ClaudeLogin(path, resources=shared).token() == "at-2"
+    assert held == [(True, True)]
+    assert not current.exists()
+    assert not legacy.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_saves_under_the_locks_claude_renews_under(
+    tmp_path: Path,
+    authorization: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "claude" / ".credentials.json"
+    current, legacy = path.parent / ".oauth_refresh.lock", tmp_path / "claude.lock"
+    held: list[tuple[bool, bool]] = []
+    write = login._File.write
+
+    async def saved(store: login._File, stored: Mapping[str, object]) -> None:
+        held.append((current.is_dir(), legacy.is_dir()))
+        await write(store, stored)
+
+    monkeypatch.setattr(login._File, "write", saved)
+    server = _Server(
+        replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
+    )
+    async with _Served(server) as shared:
+        await ClaudeLogin(path, resources=shared).sign_in()
+    authorization.assert_awaited_once()
+    assert held == [(True, True)]
+    assert _oauth(path)["accessToken"] == "at-1"
+
+
+@pytest.mark.asyncio
 async def test_sign_in_exchanges_the_authorized_code_and_stores_its_plan(
     tmp_path: Path,
     authorization: AsyncMock,
@@ -706,6 +758,7 @@ async def test_the_keychain_reads_only_claudes_oauth_entry(
     monkeypatch.setattr(login, "_security", security)
     keychain = login._Keychain()
     assert keychain.lock == tmp_path / ".claude" / ".credentials.lock"
+    assert keychain.config_dir == tmp_path / ".claude"
     assert await keychain.read() == oauth
     security.assert_awaited_once_with(
         "find-generic-password",

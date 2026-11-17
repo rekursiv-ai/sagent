@@ -61,6 +61,7 @@ __all__ = [
     "Logins",
     "Spent",
     "check_account",
+    "dir_lock",
     "file_lock",
     "headless_wanted",
     "login_flow",
@@ -374,6 +375,51 @@ async def file_lock(path: Path) -> AsyncGenerator[None]:
         yield
     finally:
         os.close(fd)
+
+
+@asynccontextmanager
+async def dir_lock(
+    path: Path,
+    *,
+    stale_sec: float = 60.0,
+    update_sec: float = 5.0,
+) -> AsyncGenerator[None]:
+    """Hold ``path`` as a lock directory, as Node's ``proper-lockfile`` does.
+
+    Whoever makes the directory holds the lock, and touches it every
+    ``update_sec`` while it does. One untouched for ``stale_sec`` lost its
+    holder, and is taken over.
+
+    Args:
+      path: The lock directory; its parent must exist.
+      stale_sec: How long untouched before the lock is taken over.
+      update_sec: How often the holder touches it.
+
+    Yields:
+      nothing: The lock is held until the block ends.
+
+    """
+    while True:
+        taking = asyncio.ensure_future(asyncio.to_thread(_take, path, stale_sec))
+        try:
+            # Shielded: a lock made as its taker is cancelled is still given back.
+            await asyncio.shield(taking)
+            break
+        except FileExistsError:
+            await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            with suppress(FileExistsError):
+                await taking
+                await asyncio.to_thread(_give_back, path)
+            raise
+    released = asyncio.Event()
+    touching = asyncio.create_task(_keep_fresh(path, update_sec, released))
+    try:
+        yield
+    finally:
+        released.set()
+        await asyncio.to_thread(_give_back, path)
+        await touching
 
 
 def check_account(account: str) -> None:
@@ -719,3 +765,30 @@ def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:
     if url.path == path and params.get("state") == [state] and received:
         return received
     return None
+
+
+def _take(path: Path, stale_sec: float) -> None:
+    """Make the lock directory ``path``, or remove it if its holder is gone."""
+    try:
+        path.mkdir()
+    except FileExistsError:
+        with suppress(FileNotFoundError):
+            if time.time() - path.stat().st_mtime > stale_sec:
+                path.rmdir()
+        raise
+
+
+async def _keep_fresh(path: Path, update_sec: float, released: asyncio.Event) -> None:
+    """Touch the lock directory ``path`` every ``update_sec`` until ``released``."""
+    while True:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(released.wait(), timeout=update_sec)
+            return
+        # Gone only if taken over as stale; nothing then is this holder's to touch.
+        with suppress(FileNotFoundError):
+            await asyncio.to_thread(os.utime, path)
+
+
+def _give_back(path: Path) -> None:
+    with suppress(FileNotFoundError):
+        path.rmdir()
