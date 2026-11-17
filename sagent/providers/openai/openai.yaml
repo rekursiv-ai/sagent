@@ -272,6 +272,64 @@ models:
     cache_write: 10.0
     cache_write_1h: 0.0
     cache_read: 0.4
+  - service_tier: ultrafast
+    request: 12.0
+    response: 60.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 24.0
+    response: 90.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+
+- model_id: terra-6.1
+  wire_model_id: gpt-6.1-terra
+  profile: gpt_6
+  knowledge_cutoff: June 1, 2026
+  prices:
+  - service_tier: auto
+    request: 1.0
+    response: 5.0
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.05
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 2.0
+    response: 7.5
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: flex
+    request: 0.5
+    response: 2.5
+    cache_write: 0.625
+    cache_write_1h: 0.0
+    cache_read: 0.025
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 1.0
+    response: 3.75
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.05
+  - service_tier: priority
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
 
 - model_id: sol-6.0
   wire_model_id: gpt-6-sol
@@ -864,6 +922,7 @@ providers:
     models:
       astra-6.0:
       sol-6.1:
+      terra-6.1:
       sol-6.0:
       luna-6.0:
       sol-5.6:
