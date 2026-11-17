@@ -570,7 +570,7 @@ def test_a_context_tag_selects_its_size() -> None:
 def test_iterating_lists_the_sections_models() -> None:
     names = list(Anthropic())
     assert names[:3] == ["fable-5.2", "fable-5.1", "fable-5.0"]
-    assert len(names) == 17
+    assert len(names) == 18
     assert "default" not in names
 
 
@@ -634,7 +634,7 @@ def test_a_row_bills_the_published_standard_card(
 def test_only_the_fast_mode_models_offer_priority() -> None:
     table = Anthropic.models()
     fast = {name for name, row in table.items() if "priority" in row.service_tier}
-    assert fast == {"fable-5.2", "opus-5.5", "opus-5.0", "opus-4.8"}
+    assert fast == {"fable-5.2", "mythos-5.2", "opus-5.5", "opus-5.0", "opus-4.8"}
     card = table["opus-5.0"].prices["priority", 1, date(2026, 10, 22)]
     assert (card.request, card.cache_write, card.cache_read) == (10.0, 12.5, 1.0)
     # Fast mode's $16 / $80 card, with the caching multipliers on top.
