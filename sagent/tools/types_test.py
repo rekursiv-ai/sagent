@@ -14,7 +14,7 @@ import os
 import re
 import threading
 
-from treekle import PlainTree
+from treekle import PlainTree, immutable
 from wesearch.fetch import FetchSession
 from wesearch.fetch.session import default_session
 
@@ -946,6 +946,8 @@ def test_checked_takes_what_wire_records_hold(
         (frozenset[str], frozenset({1}), "'x' must be string, got 1"),
         (Mapping[str, int], {1: 1}, "'x' must be string, got 1"),
         (_Inner, _Other(name="a"), "'x' must be _Inner, got _Other"),
+        # A wire message holds records; only a tool's arguments build one from JSON.
+        (_Inner, {"name": "a"}, r"'x' must be _Inner, got \{'name': 'a'\}"),
         (_Inner, _holding(_Inner(name="a"), name=1), r"^'x\.name' must be string"),
         (_Inner, _holding(_Deeper(name="a"), count="2"), r"'x\.count' must be integer"),
         # Only the member a record is an instance of judges it.
@@ -971,6 +973,189 @@ def test_checked_refuses_a_type_it_cannot_check() -> None:
 def test_parse_accepts_the_bounds_themselves() -> None:
     assert parse({"text": "x", "times": 1}, _Arguments).times == 1
     assert parse({"text": "x", "times": 3}, _Arguments).times == 3
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Step:
+    step: Annotated[str, "What to do."]
+    status: Annotated[Literal["pending", "done"], "Where it stands."] = "pending"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Timed:
+    before: Annotated[int, "Seconds before it.", Arg(minimum=0, key="-B")] = 0
+
+
+type _Steps = tuple[_Step, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Plan:
+    plan: Annotated[tuple[_Step, ...], "The steps."]
+    lead: Annotated[_Step | None, "The step in hand."] = None
+    timed: Annotated[tuple[_Timed, ...], "Waits."] = ()
+    later: Annotated[_Steps, "Steps for later."] = ()
+    notes: Annotated[Mapping[str, str], "Notes by step."] = field(
+        default_factory=dict[str, str],
+    )
+    named: Annotated[Mapping[str, _Step], "Steps by name."] = field(
+        default_factory=dict[str, _Step],
+    )
+    either: Annotated[_Timed | _Step | None, "A wait or a step."] = None
+    maybe: Annotated[tuple[_Step, ...] | None, "Steps, if any."] = None
+
+
+def test_schema_spells_a_nested_record_as_an_object_of_its_own() -> None:
+    step = {
+        "type": "object",
+        "properties": {
+            "step": {"type": "string", "description": "What to do."},
+            "status": {
+                "type": "string",
+                "enum": ["pending", "done"],
+                "description": "Where it stands.",
+            },
+        },
+        "required": ["step"],
+        "additionalProperties": False,
+    }
+    properties = json_schema(_Plan)["properties"]
+    assert isinstance(properties, Mapping)
+    assert properties["plan"] == {
+        "type": "array",
+        "items": step,
+        "description": "The steps.",
+    }
+    assert properties["lead"] == {**step, "description": "The step in hand."}
+
+
+_EMPTY: Final[dict[str, PlainTree]] = {}
+"""A nested record's object with none of its fields."""
+
+
+def test_parse_builds_each_nested_record_from_its_object() -> None:
+    assert parse(
+        {
+            "plan": [{"step": "a"}, {"step": "b", "status": "done"}],
+            "lead": {"step": "a"},
+        },
+        _Plan,
+    ) == _Plan(
+        plan=(_Step(step="a"), _Step(step="b", status="done")),
+        lead=_Step(step="a"),
+    )
+    assert parse({"plan": [], "lead": None}, _Plan) == _Plan(plan=())
+    # Through a type alias too; an object a record does not stand for stays as it came.
+    assert parse(
+        {"plan": [], "later": [{"step": "c"}], "notes": {"a": "b"}},
+        _Plan,
+    ) == _Plan(plan=(), later=(_Step(step="c"),), notes={"a": "b"})
+    # A nested record's fields keep their own names and bounds.
+    assert parse({"plan": [], "timed": [{"-B": 2}]}, _Plan).timed == (_Timed(before=2),)
+    # As the schema offers them: an object's values, and any record of a union.
+    assert parse({"plan": [], "named": {"x": {"step": "a"}}}, _Plan).named == {
+        "x": _Step(step="a"),
+    }
+    assert parse({"plan": [], "either": {"step": "a"}}, _Plan).either == _Step(step="a")
+    assert parse({"plan": [], "either": {"-B": 1}}, _Plan).either == _Timed(before=1)
+    assert parse({"plan": [], "maybe": [{"step": "a"}]}, _Plan).maybe == (
+        _Step(step="a"),
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Free:
+    tree: Annotated[PlainTree, "Any JSON."]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _StepOrNotes:
+    either: Annotated[_Step | Mapping[str, str], "A step, or notes."]
+
+
+def test_parse_takes_an_object_a_union_s_other_member_holds_when_its_record_refuses() -> (
+    None
+):
+    assert parse({"either": {"a": "b"}}, _StepOrNotes).either == {"a": "b"}
+    assert parse({"either": {"step": "a"}}, _StepOrNotes).either == _Step(step="a")
+    # Held by neither: the record says why.
+    with pytest.raises(ValueError, match=r"^In 'either': Unknown arguments: a\.$"):
+        parse({"either": {"a": 1}}, _StepOrNotes)
+
+
+def _nested(depth: int) -> PlainTree:
+    """Return ``depth`` arrays, each holding the next."""
+    return (_nested(depth - 1),) if depth else ()
+
+
+def test_parse_hands_on_a_plain_tree_as_it_came() -> None:
+    tree = immutable({"a": [{"b": 1}]})
+    assert parse({"tree": tree}, _Free).tree is tree
+    # A tree can hold no record, so it is never walked: depth costs nothing.
+    deep = _nested(400)
+    assert parse({"tree": deep}, _Free).tree is deep
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Ordered:
+    notes: Annotated[Mapping[str, str] | _Step, "Notes, or a step."] = field(
+        default_factory=dict[str, str],
+    )
+    steps: Annotated[tuple[str, ...] | tuple[_Step, ...], "Names, or steps."] = ()
+
+
+def test_a_union_member_that_builds_nothing_gives_way_to_one_that_builds() -> None:
+    parsed = parse({"notes": {"step": "a"}, "steps": [{"step": "b"}]}, _Ordered)
+    assert parsed == _Ordered(notes=_Step(step="a"), steps=(_Step(step="b"),))
+
+
+def test_parse_builds_nested_records_from_arguments_as_the_runtime_freezes_them() -> (
+    None
+):
+    """A model's arguments reach a tool frozen: objects as mapping proxies, arrays as tuples."""
+    assert parse(
+        immutable({"plan": [{"step": "a"}], "lead": {"step": "b", "status": "done"}}),
+        _Plan,
+    ) == _Plan(plan=(_Step(step="a"),), lead=_Step(step="b", status="done"))
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"plan": [_EMPTY]}, r"^In 'plan\[0\]': Missing argument 'step'\.$"),
+        ({"plan": [{"step": "a"}, {"step": 1}]}, r"^In 'plan\[1\]': 'step' must be"),
+        (
+            {"plan": [{"step": "a", "why": "b"}]},
+            r"^In 'plan\[0\]': Unknown arguments: why\.$",
+        ),
+        ({"plan": ["a"]}, r"^'plan' must be _Step, got 'a'\.$"),
+        ({"plan": [], "lead": {"status": "done"}}, r"^In 'lead': Missing argument"),
+        (
+            {"plan": [], "later": [_EMPTY]},
+            r"^In 'later\[0\]': Missing argument 'step'\.$",
+        ),
+        (
+            {"plan": [], "timed": [{"-B": -1}]},
+            r"^In 'timed\[0\]': '-B' must be at least 0, got -1\.$",
+        ),
+        (
+            {"plan": [], "timed": [{"before": 1}]},
+            r"^In 'timed\[0\]': Unknown arguments",
+        ),
+        ({"plan": [], "named": {"x": _EMPTY}}, r"^In 'named\[x\]': Missing argument"),
+        # A union says why each of its records refused the object.
+        (
+            {"plan": [], "either": {"why": 1}},
+            r"^In 'either': Unknown arguments: why\. In 'either': Unknown arguments: why\.$",
+        ),
+    ],
+)
+def test_parse_says_where_a_nested_record_does_not_fit(
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse(arguments, _Plan)
 
 
 def test_a_file_never_seen_has_not_changed(tmp_path: Path) -> None:

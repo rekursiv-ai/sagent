@@ -111,7 +111,7 @@ sagent --tools Read Bash BackgroundTask
 `--tools` accepts tool names, MCP tools included. The default is every tool:
 
 ```text
-Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch Memory PlayAudio AgentSpawn AgentSend AgentSelf AgentSession Skill BackgroundTask RemoteTool
+Bash Read Write Edit Grep Glob List WebSearch WebFetch WebBrowser PaperSearch PaperDetails PaperAuthor PaperFetch Memory PlayAudio Plan AgentSpawn AgentSend AgentSelf AgentSession Skill BackgroundTask RemoteTool
 ```
 
 `Memory` is left out under `--ephemeral`; naming it there is an error.

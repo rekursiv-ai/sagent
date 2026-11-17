@@ -7,6 +7,16 @@ All notable sagent changes are documented here. This project follows
 
 ### Added
 
+- `Plan`, a built-in tool on by default: the model says the steps of the work in
+  hand and where each stands, as codex's `update_plan` takes them (each step's text
+  and `pending`, `in_progress` or `completed`, and an optional `explanation`). The
+  tool keeps nothing and refuses a plan of no step, more than 12, two in progress,
+  or a step with no text. Its record is a `PlanResult`; a viewer of the session
+  draws the calls as a checklist.
+- A tool's `Arguments` may hold records: as a field, a member of a union, a
+  mapping's values, or a sequence's items. `json_schema` spells each as an object
+  of its own, and `parse` builds it, naming the object that does not fit
+  (`In 'plan[1]': ...`).
 - `anthropic-cli` passes `claude` a thinking budget (`none`, `auto`, and `fixed`
   where the model takes one) and the cache lifetime (5 minutes or 1 hour, 1 hour
   by default), as the API is asked them.

@@ -77,6 +77,7 @@ __all__ = [
     "PaperDetailsResult",
     "PaperFetchResult",
     "PaperSearchResult",
+    "PlanResult",
     "PlayAudioResult",
     "ReadResult",
     "RemoteToolResult",
@@ -692,6 +693,13 @@ class PaperFetchResult:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class PlanResult:
+    """Result of a ``Plan`` call."""
+
+    exit_code: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SystemMessage:
     """Instructions or status from the harness, such as a reminder."""
 
@@ -841,6 +849,7 @@ type KnownToolResult = ToolResult[
     | PaperDetailsResult
     | PaperFetchResult
     | PaperSearchResult
+    | PlanResult
     | PlayAudioResult
     | ReadResult
     | RemoteToolResult
@@ -918,6 +927,7 @@ def record_classes() -> dict[str, type]:
             McpResult,
             AgentSelfResult,
             PaperFetchResult,
+            PlanResult,
             SystemMessage,
             RequestMeasurement,
             TokenUsage,
@@ -962,6 +972,7 @@ _FORMER_RESULT_RECORDS: Final = frozenset(
         "PaperDetailsResult",
         "PaperFetchResult",
         "PaperSearchResult",
+        "PlanResult",
         "PlayAudioResult",
         "ReadResult",
         "RemoteToolResult",
@@ -998,6 +1009,7 @@ _RESULT_FIELDS: Final = MappingProxyType[str, tuple[str, ...]](
         "McpResult": ("server", "tool"),
         "AgentSelfResult": (),
         "PaperFetchResult": (),
+        "PlanResult": (),
         "UncategorizedToolResult": (),
         "ReadResult": ("path", "status"),
         "WriteResult": ("path", "content"),

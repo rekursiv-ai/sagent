@@ -2691,6 +2691,7 @@ _DEFAULT_TOOLS = [
     "PaperFetch",
     "Memory",
     "PlayAudio",
+    "Plan",
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",

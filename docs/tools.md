@@ -140,6 +140,7 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 | `AgentSession` | List, read, search, prune, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
+| `Plan` | Say the steps of the work in hand and where each stands; viewers draw it as a checklist. | `plan` (each `step`, `status`: `pending`, `in_progress` or `completed`); optional `explanation`. |
 
 ## File tools
 

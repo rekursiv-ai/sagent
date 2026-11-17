@@ -32,6 +32,7 @@ from sagent.tools.paper_author import PaperAuthor
 from sagent.tools.paper_details import PaperDetails
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
+from sagent.tools.plan import Plan
 from sagent.tools.play_audio import PlayAudio
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteTool
@@ -75,6 +76,7 @@ TOOLS: Final = (
     "PaperFetch",
     "Memory",
     "PlayAudio",
+    "Plan",
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
@@ -125,6 +127,7 @@ def builders(
         "PaperFetch": PaperFetch,
         "Memory": lambda: Memory(directory=_memories(cwd)),
         "PlayAudio": PlayAudio,
+        "Plan": Plan,
         "AgentSpawn": lambda: AgentSpawn(team=team),
         "AgentSend": lambda: AgentSend(team=team),
         "AgentSelf": lambda: AgentSelf(team=team),
