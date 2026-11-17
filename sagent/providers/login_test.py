@@ -12,6 +12,7 @@ import logging
 import os
 import stat
 import subprocess
+import threading
 import time
 import webbrowser
 
@@ -26,6 +27,7 @@ from sagent.providers.login import (
     Logins,
     Spent,
     check_account,
+    dir_lock,
     file_lock,
     headless_wanted,
     open_browser,
@@ -381,6 +383,141 @@ async def test_a_waiter_cancelled_closes_its_lock(tmp_path: Path) -> None:
     flock.assert_called_once_with(17, fcntl.LOCK_EX | fcntl.LOCK_NB)
     sleeping.assert_awaited_once_with(0.01)
     closed.assert_called_once_with(17)
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_waits_for_its_holder_then_holds_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    lock.mkdir()
+    refused = _refusals(monkeypatch, 2)
+    entered = asyncio.Event()
+
+    async def hold() -> None:
+        async with dir_lock(lock):
+            entered.set()
+            assert lock.is_dir()
+
+    holding = asyncio.create_task(hold())
+    assert await asyncio.to_thread(refused.wait, 5.0)
+    assert not entered.is_set()
+    lock.rmdir()
+    await asyncio.wait_for(holding, timeout=5.0)
+    assert entered.is_set()
+    assert not lock.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_left_stale_is_taken_over(tmp_path: Path) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    lock.mkdir()
+    old = time.time() - 61.0
+    os.utime(lock, (old, old))
+    async with asyncio.timeout(5.0), dir_lock(lock):
+        assert lock.stat().st_mtime > old
+    assert not lock.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_is_kept_fresh_while_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    utime = os.utime
+    touched = threading.Event()
+
+    def touch(path: Path) -> None:
+        utime(path)
+        touched.set()
+
+    monkeypatch.setattr(os, "utime", touch)
+    async with dir_lock(lock, update_sec=0.01):
+        old = time.time() - 30.0
+        utime(lock, (old, old))
+        touched.clear()
+        assert await asyncio.to_thread(touched.wait, 5.0)
+        assert lock.stat().st_mtime > old
+    assert not lock.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_taken_over_is_released_without_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A holder whose lock was taken over as stale has nothing left to touch."""
+    lock = tmp_path / ".oauth_refresh.lock"
+    utime = os.utime
+    tried = threading.Event()
+
+    def touch(path: Path) -> None:
+        try:
+            utime(path)
+        finally:
+            tried.set()
+
+    monkeypatch.setattr(os, "utime", touch)
+    async with dir_lock(lock, update_sec=0.01):
+        lock.rmdir()
+        assert await asyncio.to_thread(tried.wait, 5.0)
+    assert not lock.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_waiter_cancelled_leaves_the_holder_s_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    lock.mkdir()
+    refused = _refusals(monkeypatch, 1)
+
+    async def enter() -> None:
+        async with dir_lock(lock):
+            pytest.fail("A held lock admitted a second holder.")
+
+    entering = asyncio.create_task(enter())
+    assert await asyncio.to_thread(refused.wait, 5.0)
+    entering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await entering
+    assert lock.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_directory_lock_made_as_its_taker_is_cancelled_is_given_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    started, finish, finished = threading.Event(), threading.Event(), threading.Event()
+    take = login._take
+
+    def slow(path: Path, stale_sec: float) -> None:
+        started.set()
+        finish.wait(5.0)
+        try:
+            return take(path, stale_sec)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(login, "_take", slow)
+
+    async def enter() -> None:
+        async with dir_lock(lock):
+            pytest.fail("A cancelled taker was admitted.")
+
+    entering = asyncio.create_task(enter())
+    assert await asyncio.to_thread(started.wait, 5.0)
+    entering.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await entering
+    assert await asyncio.to_thread(finished.wait, 5.0)
+    assert not lock.exists()
 
 
 def test_an_account_s_file_sits_beside_the_default_one() -> None:
@@ -883,6 +1020,25 @@ async def test_a_mark_past_its_reset_is_dropped_on_the_next_write(
     ledger = state_dir() / "rekursiv-ai" / "sagent" / "logins.json"
     kept = json_loads(ledger.read_text(), dict[str, dict[str, dict[str, object]]])
     assert list(kept[str(logins.default)]["spent"]) == ["default"]
+
+
+def _refusals(monkeypatch: pytest.MonkeyPatch, count: int) -> threading.Event:
+    """Return an event set once ``count`` tries at a lock directory found it held."""
+    take = login._take
+    refused = threading.Event()
+    tries = [0]
+
+    def counted(path: Path, stale_sec: float) -> None:
+        try:
+            take(path, stale_sec)
+        except FileExistsError:
+            tries[0] += 1
+            if tries[0] >= count:
+                refused.set()
+            raise
+
+    monkeypatch.setattr(login, "_take", counted)
+    return refused
 
 
 if __name__ == "__main__":

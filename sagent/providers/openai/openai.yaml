@@ -169,6 +169,127 @@ profiles:
       truncates_at_context: true
 
 models:
+# GPT-6.2 has no flex tier; ultrafast is 3x standard through 2027-02-28, 6x after.
+- model_id: astra-6.2
+  wire_model_id: gpt-6.2-astra
+  profile: reasoning_only
+  knowledge_cutoff: May 18, 2026
+  prices:
+  - service_tier: auto
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 16.0
+    response: 60.0
+    cache_write: 20.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: priority
+    request: 16.0
+    response: 80.0
+    cache_write: 20.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 32.0
+    response: 120.0
+    cache_write: 40.0
+    cache_write_1h: 0.0
+    cache_read: 1.6
+  - service_tier: ultrafast
+    request: 24.0
+    response: 120.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 48.0
+    response: 180.0
+    cache_write: 60.0
+    cache_write_1h: 0.0
+    cache_read: 2.4
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    request: 48.0
+    response: 240.0
+    cache_write: 60.0
+    cache_write_1h: 0.0
+    cache_read: 2.4
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    effective_prompt_tokens: 272_000
+    request: 96.0
+    response: 360.0
+    cache_write: 120.0
+    cache_write_1h: 0.0
+    cache_read: 4.8
+
+- model_id: sol-6.2
+  wire_model_id: gpt-6.2-sol
+  profile: reasoning_only
+  knowledge_cutoff: June 1, 2026
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 30.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: ultrafast
+    request: 6.0
+    response: 30.0
+    cache_write: 7.5
+    cache_write_1h: 0.0
+    cache_read: 0.3
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 12.0
+    response: 45.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    request: 12.0
+    response: 60.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    effective_prompt_tokens: 272_000
+    request: 24.0
+    response: 90.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+
 - model_id: astra-6.0
   wire_model_id: gpt-6-astra
   profile: reasoning_only
@@ -920,6 +1041,8 @@ providers:
     cache_ttl_sec: [1800.0]
     retries_internally: true
     models:
+      astra-6.2:
+      sol-6.2:
       astra-6.0:
       sol-6.1:
       terra-6.1:
@@ -959,6 +1082,8 @@ providers:
       max_image_edge_px: 65_535
       truncates_at_context: true
     models:
+      astra-6.2:
+      sol-6.2:
       astra-6.0:
       sol-6.1:
       sol-6.0:

@@ -13,6 +13,7 @@ Typical usage example:
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -32,6 +33,7 @@ from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
+    dir_lock,
     file_lock,
     login_flow,
     open_browser,
@@ -42,7 +44,7 @@ from sagent.providers.login import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncGenerator, Callable, Mapping
 
     from sagent.providers.types import ProviderResources
 
@@ -147,7 +149,7 @@ class ClaudeLogin:
             },
         )
         plan = await self._plan(grant)
-        async with self._lock, file_lock(self._store.lock):
+        async with self._lock, file_lock(self._store.lock), _claude_lock(self._store):
             await self._save(grant, plan=plan)
 
     def _expiring(self) -> bool:
@@ -171,7 +173,7 @@ class ClaudeLogin:
     # of them holding a revoked token.
     async def _renew(self) -> None:
         """Rotate the token, under a lock every process on this login shares."""
-        async with file_lock(self._store.lock):
+        async with file_lock(self._store.lock), _claude_lock(self._store):
             before = self._access
             stored = await self._store.read()
             self._adopt(stored)
@@ -254,6 +256,7 @@ class _File:
 
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser()
+        self.config_dir = self.path.parent
         self.lock = self.path.with_suffix(".lock")
 
     async def read(self) -> dict[str, object]:
@@ -272,7 +275,8 @@ class _Keychain:
     """Credentials in the macOS Keychain entry ``claude`` keeps them in."""
 
     def __init__(self) -> None:
-        self.lock = Path("~/.claude/.credentials.lock").expanduser()
+        self.config_dir = Path("~/.claude").expanduser()
+        self.lock = self.config_dir / ".credentials.lock"
 
     async def read(self) -> dict[str, object]:
         return _claude_login(await _security(*_find_entry(), "-w"))
@@ -290,6 +294,20 @@ class _Keychain:
                 f" -X {secret}\n"
             ),
         )
+
+
+# ``claude`` takes neither sagent's lock nor a file lock: as of 2.1.259 it makes
+# ``.oauth_refresh.lock`` in its config directory, then the lock it took before, named
+# for the directory, in that order.
+@asynccontextmanager
+async def _claude_lock(store: _File | _Keychain) -> AsyncGenerator[None]:
+    """Hold the locks ``claude`` takes before it renews or saves ``store``'s login."""
+    resolved = await asyncio.to_thread(store.config_dir.resolve)
+    async with (
+        dir_lock(store.config_dir / ".oauth_refresh.lock"),
+        dir_lock(resolved.with_name(f"{resolved.name}.lock")),
+    ):
+        yield
 
 
 # ``None`` when no browser reaches us within five minutes, as over ssh.
