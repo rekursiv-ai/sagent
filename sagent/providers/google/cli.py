@@ -11,7 +11,8 @@ continues. Anything else -- a new system prompt, new tools, another model or
 effort, a rewritten history -- starts a fresh ``agy``, which reads the
 conversation as text.
 
-``agy`` keeps its own login in the system keyring. ``login(headless=True)``
+``agy`` keeps its own login in the system keyring, or, with none, in a file under
+``~/.gemini``, which each home links to. ``login(headless=True)``
 runs its hosted-code terminal sign-in. It takes text alone, so an image is named,
 not sent.
 
@@ -142,7 +143,7 @@ class GoogleCLI(HasModels, AsyncResource):
         *,
         headless: bool = False,  # pragma: no mutate -- Both values use native terminal auth.
     ) -> None:
-        """Sign in through agy's terminal flow, keeping its credentials in its keyring.
+        """Sign in through agy's terminal flow, keeping its credentials as it keeps them.
 
         Args:
           headless: Both modes use agy's hosted-code terminal flow.
@@ -336,6 +337,7 @@ class GoogleCLIModel(AsyncResource):
             system=request.system,
             tools=request.tools,
             url=mount.url,
+            login=Path("~/.gemini/antigravity-cli/antigravity-oauth-token"),
         )
         argv = self.command(home / "workdir")
         # An API key would send ``agy`` to the Gemini API, not the plan.
@@ -723,8 +725,9 @@ def _furnish(
     system: Sequence[str],
     tools: Sequence[Tool],
     url: str,
+    login: Path,
 ) -> None:
-    """Lay out a home for ``agy``: our agent, our tool server, and its settings."""
+    """Lay out a home for ``agy``: our agent, our tool server, its settings and login."""
     (home / "workdir").mkdir(mode=0o700)
     config = home / ".gemini" / "config"
     agent = config / "agents" / "sagent"
@@ -748,6 +751,10 @@ def _furnish(
     )
     settings = home / ".gemini" / "antigravity-cli"
     settings.mkdir(mode=0o700)
+    # A host with no keyring keeps the login in this file; without it, every turn
+    # fails to sign in, however recently ``login`` ran.
+    if (kept := login.expanduser()).exists():
+        (settings / kept.name).symlink_to(kept)
     # Our tools ask for no approval; the caller already decided.
     (settings / "settings.json").write_text(
         json_dumps(

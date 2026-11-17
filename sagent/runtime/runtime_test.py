@@ -8369,6 +8369,11 @@ async def test_a_later_wake_tells_the_model_only_what_is_new(
     assert not _rescued(h)
     published = [e.content for e in h.events if isinstance(e, SystemMessage)]
     assert published == _woken(h)
+    assert {
+        e.call_id
+        for e in h.history()
+        if isinstance(e, SystemMessage) and e.subtype == "wake"
+    } == {"t1"}
     assert len(h.answers()) == len(h.requests())
     assert all(
         e.timestamp is not None

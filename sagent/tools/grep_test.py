@@ -1021,9 +1021,9 @@ async def test_a_cut_result_never_passes_its_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The resume offset gains a digit while the remaining count loses one.
-    _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(10_101)])
-    lines = [f"row{i:05d}\n" for i in range(9_999, 10_101)]
-    reserve = len("... (102 more entries; pass offset=10101 to continue)")
+    _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(201)])
+    lines = [f"row{i:05d}\n" for i in range(99, 201)]
+    reserve = len("... (102 more entries; pass offset=201 to continue)")
     caps = {
         reserve + len("".join(lines[:kept])) + delta
         for kept in (2, 3, 11)
@@ -1033,14 +1033,13 @@ async def test_a_cut_result_never_passes_its_cap(
         result = await settled(
             Grep(max_result_chars=cap).call(
                 ToolContext(cwd=tmp_path),
-                {"pattern": "r", "offset": 9_999},
+                {"pattern": "r", "offset": 99},
             ),
         )
         text = result.text()
         kept = text.count("\n")
         assert text == "".join(lines[:kept]).rstrip("\n") + (
-            f"\n... ({102 - kept:,} more entries;"
-            f" pass offset={9_999 + kept} to continue)"
+            f"\n... ({102 - kept:,} more entries; pass offset={99 + kept} to continue)"
         )
         assert len(text) <= cap, cap
         assert kept == (cap - reserve) // len(lines[0]), cap

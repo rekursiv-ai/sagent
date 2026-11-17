@@ -700,6 +700,9 @@ class SystemMessage:
     content: str | None = None
     attachments: tuple[Attachment, ...] = ()
     subtype: str | None = None
+    call_id: str | None = None
+    """The call a ``wake`` is news of; ``None`` for a note about no call."""
+
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
 
     def __post_init__(self) -> None:

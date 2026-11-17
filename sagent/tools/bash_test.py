@@ -714,7 +714,7 @@ async def test_stderr_past_the_record_s_cap_still_ends_with_why_it_stopped(
     result = await settled(
         tool.call(
             ToolContext(cwd=tmp_path),
-            {**_arguments("seq 1 1000 >&2; sleep 60"), "timeout": 300},
+            {**_arguments("seq 1 1000 >&2; sleep 60"), "timeout": 60},
         ),
     )
     assert "".join(result.stderr).endswith("]\n")

@@ -1793,6 +1793,7 @@ class Runtime:
                         timestamp=now_timestamp(),
                         content=self._progress(cid, watch),
                         subtype="wake",
+                        call_id=cid,
                     ),
                 )
         self._arm(cid, watch)
@@ -2703,6 +2704,8 @@ class Runtime:
             dataclasses.replace(self.request(), recheck_quota=self.recheck_quota),
         )
         self.recheck_quota = False
+        # Only this request starts with the agent's tools and system prompt; a
+        # compaction's, with its own prompt and none, warms nothing this reuses.
         self._last_request = time.monotonic()
         snapshot = self.token_accounting.capture(request, model=self._called_model)
         # Only the first call after a compaction is told of it.

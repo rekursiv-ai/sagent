@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import asyncio
 import os
+import shutil
 import stat
 import tempfile
 
@@ -1104,7 +1105,13 @@ def test_a_failure_is_what_agy_says_or_its_status(
 def test_a_home_is_private_and_its_agent_has_no_tools_section_without_tools(
     tmp_path: Path,
 ) -> None:
-    cli._furnish(tmp_path, system=("Be terse.",), tools=(), url="http://x")
+    cli._furnish(
+        tmp_path,
+        system=("Be terse.",),
+        tools=(),
+        url="http://x",
+        login=tmp_path / "none",
+    )
 
     for directory in (
         tmp_path / "workdir",
@@ -1116,9 +1123,68 @@ def test_a_home_is_private_and_its_agent_has_no_tools_section_without_tools(
     assert agent.read_text().endswith("---\nBe terse.\n")
 
 
+@pytest.mark.parametrize("signed_in", [True, False])
+def test_a_home_reads_the_login_agy_keeps_in_a_file(
+    tmp_path: Path,
+    *,
+    signed_in: bool,
+) -> None:
+    """With no keyring, ``agy`` keeps its token under the real home, not ours."""
+    token = tmp_path / "real" / "antigravity-oauth-token"
+    if signed_in:
+        token.parent.mkdir()
+        token.write_text("token")
+    home = tmp_path / "home"
+    home.mkdir()
+    cli._furnish(home, system=(), tools=(), url="http://x", login=token)
+
+    linked = home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    assert linked.is_symlink() is signed_in
+    if signed_in:
+        assert linked.readlink() == token
+        assert linked.read_text() == "token"
+
+
+@pytest.mark.asyncio
+async def test_agy_starts_with_the_login_under_the_real_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = tmp_path / "real"
+    token = real / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    token.parent.mkdir(parents=True)
+    token.write_text("token")
+    monkeypatch.setenv("HOME", str(real))
+    process = Mock(
+        stdin=Mock(spec=asyncio.StreamWriter, write=Mock(), drain=AsyncMock()),
+    )
+    pool = Mock(acquire=AsyncMock(return_value=process), release=AsyncMock())
+    mount = Mock(url="http://127.0.0.1:1/mount")
+    resources = Mock(
+        process_pool=Mock(return_value=pool),
+        tool_server=Mock(mount=AsyncMock(return_value=mount), unmount=AsyncMock()),
+    )
+    model = GoogleCLI(resources=resources)["gemini-flash"]
+    agy = await model._start(
+        Request(records=(UserMessage(content="hi"),)),
+        started_with=(),
+    )
+    try:
+        linked = agy.home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+        assert linked.read_text() == "token"
+    finally:
+        shutil.rmtree(agy.home)
+
+
 def test_a_tool_schema_keeps_its_characters(tmp_path: Path) -> None:
     accented = _Echo(schema=MappingProxyType({"title": "café"}))
-    cli._furnish(tmp_path, system=(), tools=(accented,), url="http://x")
+    cli._furnish(
+        tmp_path,
+        system=(),
+        tools=(accented,),
+        url="http://x",
+        login=tmp_path / "none",
+    )
 
     agent = tmp_path / ".gemini" / "config" / "agents" / "sagent" / "agent.md"
     assert 'Input schema: {"title":"café"}' in agent.read_text()

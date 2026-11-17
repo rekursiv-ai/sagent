@@ -304,10 +304,10 @@ def test_a_taped_delivery_redraws_only_its_result_and_counts_once() -> None:
     assert said == [
         ("user", "go"),
         ("call", "Echo a"),
-        ("output", "[detached; #1]"),
+        ("output", "[detached; Echo#1]"),
         ("markdown", "later"),
         ("call", "Echo a"),
-        ("output", "[undetached; #1]"),
+        ("output", "[undetached; Echo#1]"),
         ("output", "late"),
         ("line", "── resumed · 4 messages · scripted/scripted ──"),
     ]
@@ -423,8 +423,8 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
         "Reading a.py.",
         "  Echo a\n    a\n  Fix a.py\n",
         " x = 2",
-        "  Slow\n    [detached; #1]",
-        "  Slow\n    [undetached; #1]\n    finally done",
+        "  Slow\n    [detached; Slow#1]",
+        "  Slow\n    [undetached; Slow#1]\n    finally done",
         "The slow one finished.",
     ):
         assert shown in live
