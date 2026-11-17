@@ -908,6 +908,54 @@ async def test_cohort_events_bracket_the_tools_before_the_next_round() -> None:
     assert h.count(CohortComplete) == 1
 
 
+@dataclass(slots=True, kw_only=True)
+class _Registry:
+    """An observer noting, as it hears each event, which calls the runtime holds."""
+
+    runtime: Runtime
+    held: list[tuple[str, frozenset[str], frozenset[str], frozenset[str]]] = field(
+        default_factory=list,
+    )
+
+    def __call__(self, event: RuntimeEvent) -> None:
+        if isinstance(event, (CohortStarted, ToolResult)):
+            rt = self.runtime
+            self.held.append(
+                (
+                    type(event).__name__,
+                    frozenset(rt.cohort),
+                    frozenset(rt.running_tools),
+                    frozenset(rt.detached),
+                ),
+            )
+
+
+# An observer reads the runtime as it hears an event: the status line counts the
+# calls the model waits on as it hears their start, and the jobs apart as it hears
+# their stubs. Told before the runtime notes them, it saw none.
+@pytest.mark.asyncio
+async def test_a_call_is_registered_where_it_runs_before_its_event_is_told() -> None:
+    gated, slow = Gated(), Gated(name="slow")
+    async with Harness(
+        reply(calls=[call("echo", "t1"), call("slow", "bg", background=True)]),
+        reply("after"),
+        tools=[gated, slow],
+    ) as h:
+        registry = _Registry(runtime=h.runtime)
+        h.runtime.observers.append(registry)
+        h.push(_user("go"))
+        await h.seen(CohortStarted)
+        h.push(Kill(call_id="t1"))
+        await h.until(lambda: len(registry.held) == 3)
+        slow.release.set()
+        await h.seen(ModelIdle)
+    [started] = [each for each in registry.held if each[0] == "CohortStarted"]
+    stub, killed = [each for each in registry.held if each[0] == "ToolResult"][:2]
+    assert started == ("CohortStarted", {"t1"}, {"t1"}, {"bg"})
+    assert "bg" in stub[3]
+    assert killed == ("ToolResult", frozenset(), frozenset(), {"bg", "t1"})
+
+
 @pytest.mark.asyncio
 async def test_a_text_reply_starts_no_cohort() -> None:
     async with Harness(reply("hello")) as h:

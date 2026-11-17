@@ -85,6 +85,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
     from pathlib import Path
 
+    from treekle import PlainTree
+
     from sagent.host.wire import Dial, Streams
 
 
@@ -1011,6 +1013,27 @@ def test_a_call_runs_in_order_with_others_at_its_endpoint() -> None:
     )
     assert tool.summary({"endpoint": "gpu1", "tool": "Read"}) == "RemoteTool gpu1 Read"
     assert tool.summary({}) == "RemoteTool"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "said"),
+    [
+        ({"command": "ls -la\npwd", "description": "List it"}, " List it"),
+        ({"command": "ls -la\npwd"}, " ls -la"),
+        ({"file_path": "/a.txt", "limit": 5}, " /a.txt"),
+        ({"description": " ", "query": "cats"}, " cats"),
+        ({"limit": 5}, ""),
+    ],
+    ids=["description", "command", "path", "blank-skipped", "none"],
+)
+def test_a_run_s_summary_says_what_its_arguments_say_it_does(
+    arguments: dict[str, PlainTree],
+    said: str,
+) -> None:
+    tool = RemoteTool(remote=RemoteSession([]))
+    run = {"endpoint": "gpu1", "tool": "Bash", "arguments": arguments}
+
+    assert tool.summary(run) == f"RemoteTool gpu1 Bash{said}"
 
 
 def test_saved_strings_are_read_from_the_users_secrets() -> None:

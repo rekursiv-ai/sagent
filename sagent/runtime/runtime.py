@@ -1745,8 +1745,7 @@ class Runtime:
             self._cancel_detached()
         elif cid in self.running_tools:
             logger.debug("runtime kill tool: call_id=%s", cid)
-            self._stop_tool(cid, self.running_tools.pop(cid), mode="kill")
-            self.cohort.discard(cid)
+            self._stop_tool(cid, mode="kill")
         else:
             # Its own late result then matches nothing; the model is told it was
             # cancelled instead.
@@ -1764,8 +1763,7 @@ class Runtime:
             if mid not in self.cohort:
                 continue
             logger.debug("runtime tool detached: call_id=%s", mid)
-            self._stop_tool(mid, self.running_tools.pop(mid), mode="detach")
-            self.cohort.discard(mid)
+            self._stop_tool(mid, mode="detach")
         if not self.cohort:
             self._cohort_seen = False  # pragma: no mutate[truthiness]
 
@@ -1806,8 +1804,7 @@ class Runtime:
             watch = self._watches.get(cid)
             if watch is None or watch.timer is None:
                 continue
-            self._stop_tool(cid, self.running_tools.pop(cid), mode="detach")
-            self.cohort.discard(cid)
+            self._stop_tool(cid, mode="detach")
         if not self.cohort:
             self._cohort_seen = False  # pragma: no mutate[truthiness]
 
@@ -2207,15 +2204,14 @@ class Runtime:
 
     # The call is answered now, by a stub, and its task registered as detached, so
     # its own result, if it comes, is delivered forward.
-    # A detached call's stub holds what it wrote so far.
-    def _stop_tool(
-        self,
-        cid: str,
-        task: asyncio.Task[None],
-        *,
-        mode: Literal["detach", "kill"],
-    ) -> None:
+    # A detached call's stub holds what it wrote so far. The call leaves the cohort
+    # before its stub is published: an observer reading the runtime as it hears the
+    # stub sees the call apart, not still waited on.
+    def _stop_tool(self, cid: str, *, mode: Literal["detach", "kill"]) -> None:
         """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
+        task = self.running_tools.pop(cid)
+        self.cohort.discard(cid)
+        self.detached[cid] = task
         match mode:
             case "kill":
                 state, shown = "cancelled", self.markers.cancelled
@@ -2236,15 +2232,13 @@ class Runtime:
         )
         self.append_history(stub)
         self.publish(stub)
-        self.detached[cid] = task
         if mode == "kill":
             self._stop(cid, task)
 
     def _stop_all_tools(self, *, mode: Literal["detach", "kill"]) -> None:
         """Run :meth:`_stop_tool` for every cohort tool; reset cohort state."""
-        for cid, task in list(self.running_tools.items()):
-            self._stop_tool(cid, task, mode=mode)
-        self.running_tools.clear()
+        for cid in list(self.running_tools):
+            self._stop_tool(cid, mode=mode)
         self.cohort.clear()
         self._cohort_seen = False
 
@@ -2430,8 +2424,6 @@ class Runtime:
         cohort = [tc for tc in tool_calls if tc.call_id not in delays]
         if cohort:
             self._cohort_seen = True
-            if waited:
-                self.publish(CohortStarted())
             logger.debug(
                 "runtime cohort start: tools=%s",
                 [(tc.call_id, tc.name) for tc in cohort],
@@ -2492,6 +2484,10 @@ class Runtime:
         groups.extend(by_key.values())
         for members in groups:
             self._start_group(tuple(members), [tasks[m.call_id] for m in members])
+        # Told once the calls are registered: an observer reading the runtime as it
+        # hears the start, as the status line does, sees them running.
+        if cohort and waited:
+            self.publish(CohortStarted())
 
     def _forget(self, call_id: str) -> None:
         """Drop what the runtime knows of ``call_id``, once its task has ended."""
@@ -2529,6 +2525,7 @@ class Runtime:
 
     def _start_background(self, call: ToolCall, task: asyncio.Task[None]) -> None:
         """Answer ``call``, which ``task`` runs apart, with a stub."""
+        self.detached[call.call_id] = task
         stub = ToolResult(
             call_id=call.call_id,
             timestamp=now_timestamp(),
@@ -2537,7 +2534,6 @@ class Runtime:
         )
         self.append_history(stub)
         self.publish(stub)
-        self.detached[call.call_id] = task
 
     def _stop(self, call_id: str, task: asyncio.Task[None]) -> None:
         """Cancel ``task``; until it stops, a later contending call waits for it."""

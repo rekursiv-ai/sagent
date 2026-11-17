@@ -928,9 +928,48 @@ class RemoteTool:
     endpoint's ``changes`` stood."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
-        """Return ``RemoteTool``, the endpoint, and the tool, such as ``RemoteTool gpu1 Bash``."""
-        named = [str(arguments.get(k, "")) for k in ("endpoint", "tool")]
-        return " ".join(["RemoteTool", *filter(None, named)])
+        """Return ``RemoteTool``, the endpoint, and the tool, such as ``RemoteTool gpu1 Bash``.
+
+        Args:
+          arguments: What the model passed.
+
+        Returns:
+          summary: A run adds what its arguments say it does, its description or
+            the first line of what it acts on, as ``RemoteTool gpu1 Bash ls -la``.
+
+        """
+        inner = arguments.get("arguments")
+        # What a tool's arguments say it does, by the name each tool gives it, in order.
+        said = (
+            [
+                inner.get(name)
+                for name in (
+                    "description",
+                    "command",
+                    "file_path",
+                    "pattern",
+                    "path",
+                    "url",
+                    "query",
+                )
+            ]
+            if isinstance(inner, Mapping)
+            else []
+        )
+        what = next(
+            (
+                value.strip().splitlines()[0]
+                for value in said
+                if isinstance(value, str) and value.strip()
+            ),
+            "",
+        )
+        named = [
+            str(arguments.get("endpoint", "")),
+            str(arguments.get("tool", "")),
+            what,
+        ]
+        return " ".join(["RemoteTool", *(part for part in named if part)])
 
     # One endpoint's calls run in order: two of them may write one file there.
     def serialize_key(
