@@ -92,6 +92,7 @@ import contextlib
 import difflib
 import functools
 import hashlib
+import operator
 import reprlib
 import threading
 import uuid
@@ -636,7 +637,11 @@ def parse[A: DataclassInstance](arguments: Mapping[str, PlainTree], kind: type[A
             if f.required:
                 raise ValueError(f"Missing argument {f.key!r}.")
             continue
-        values[f.name] = checked(arguments[f.key], f.hint, key=f.key)
+        values[f.name] = checked(
+            _built(arguments[f.key], f.hint, key=f.key),
+            f.hint,
+            key=f.key,
+        )
         _bound(arguments[f.key], f)
     return kind(**values)
 
@@ -1258,6 +1263,8 @@ def _schema(hint: object) -> dict[str, PlainTree]:
         return {"type": "array", "items": _schema(args[0])}
     if origin in {dict, Mapping}:
         return {"type": "object", "additionalProperties": _schema(args[1])}
+    if _is_record(hint):
+        return dict(json_schema(hint))
     for kind, name in (
         (str, "string"),
         (bool, "boolean"),
@@ -1320,3 +1327,72 @@ def _kept[T](items: Iterable[T], kept: list[T]) -> Iterator[T]:
     for item in items:
         kept.append(item)
         yield item
+
+
+# A tool's arguments arrive as JSON, so a record among them (alone, one of a union, an
+# object's values, or a sequence's items) is an object: ``parse`` builds it, its fields
+# named and bounded as its schema says, and ``checked`` then takes it as it takes a wire
+# message's records, which arrive built. Anything else is left for ``checked`` to judge,
+# and a value holding no record is handed back itself, as frozen as it came.
+def _built(value: PlainTree, hint: object, *, key: str) -> object:
+    """Return ``value`` with each object a nested record of ``hint`` holds built as it."""
+    # A tree holds no record, so it is not walked, however deep.
+    if hint is PlainTree or hint is object:
+        return value
+    if isinstance(hint, TypeAliasType):
+        return _built(value, _value(hint), key=key)
+    origin, args = get_origin(hint), _args(hint)
+    if _is_union(origin):
+        return _built_member(value, args, key=key)
+    if isinstance(value, Mapping):
+        if _is_record(hint):
+            try:
+                return parse(value, hint)
+            except ValueError as e:
+                raise ValueError(f"In {key!r}: {e}") from e
+        if origin in {dict, Mapping}:
+            entries = {
+                k: _built(v, args[1], key=f"{key}[{k}]") for k, v in value.items()
+            }
+            return (
+                value
+                if all(map(operator.is_, entries.values(), value.values()))
+                else entries
+            )
+        return value
+    # The runtime hands a tool its arguments frozen (``treekle.immutable``): arrays as tuples.
+    if origin in {tuple, list, Sequence} and isinstance(value, (list, tuple)):
+        items = [
+            _built(item, args[0], key=f"{key}[{k}]") for k, item in enumerate(value)
+        ]
+        return value if all(map(operator.is_, items, value)) else items
+    return value
+
+
+# A member builds nothing when it hands back ``value`` itself: a record for an object
+# that is no record's, a string, a number. An object every record refuses still stands
+# when a member that is no record holds it, such as a mapping.
+def _built_member(value: PlainTree, members: tuple[object, ...], *, key: str) -> object:
+    """Return ``value`` as the first member of a union that builds it; raise if all refuse."""
+    errors: list[str] = []
+    for member in members:
+        try:
+            built = _built(value, member, key=key)
+        except ValueError as e:
+            errors.append(str(e))
+            continue
+        if built is not value:
+            return built
+    others = (m for m in members if not _is_record(m) and m is not NoneType)
+    if errors and not any(_holds(value, m, key=key) for m in others):
+        raise ValueError(" ".join(errors))
+    return value
+
+
+def _holds(value: object, hint: object, *, key: str) -> bool:
+    """Return whether ``value`` is of ``hint`` as ``checked`` judges it."""
+    try:
+        checked(value, hint, key=key)
+    except ValueError:
+        return False
+    return True

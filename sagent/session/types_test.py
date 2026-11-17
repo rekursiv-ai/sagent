@@ -46,6 +46,7 @@ from sagent.session.types import (
     PaperDetailsResult,
     PaperFetchResult,
     PaperSearchResult,
+    PlanResult,
     PlayAudioResult,
     ReadResult,
     RemoteToolResult,
@@ -105,6 +106,7 @@ _ARGUMENT_ECHO_RESULTS: Final = (
     UncategorizedToolResult(),
     AgentSelfResult(),
     PaperFetchResult(),
+    PlanResult(),
 )
 """One result of each class whose fields only repeat the call's arguments."""
 
