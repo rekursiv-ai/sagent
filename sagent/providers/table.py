@@ -127,7 +127,7 @@ class ModelTable(Mapping[str, ModelCapability]):
 
         """
         document = from_plain(
-            parse(path.read_text(), source=str(path)),
+            parse(path.read_text(), source=str(path), aliases=True),
             _CatalogDocument,
         )
         for layer in (document.reference, *document.profiles.values()):

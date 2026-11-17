@@ -241,6 +241,9 @@ providers:
       effort: [low, medium, high]
       output: [none]
     manage_context_server_side: [true]
+    # ``agy`` picks the cache lifetime, not sagent: a second turn read the cache
+    # after 600 s, not after 900 s (1.5.1, 2026-11-16).
+    cache_ttl_sec: [600.0]
     account_auth: true
     models:
       gemini-flash-3.8:

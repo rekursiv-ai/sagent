@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
+    from sagent.model.capability import ModelSettingName
     from sagent.providers.types import ProcessPool, ToolMount
     from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
@@ -1065,44 +1066,90 @@ async def test_count_bills_an_image_by_its_pixels_not_its_bytes() -> None:
     assert added == model.attachment_tokens(picture) == 300 * 300 // 750
 
 
-def test_the_cli_offers_the_effort_it_passes_and_the_rest_as_claude_has_them() -> None:
-    """``claude`` takes ``--effort`` and a display; its thinking and tier are its own.
+@pytest.mark.parametrize(
+    ("model", "budgets"),
+    [("opus", {"none", "auto"}), ("opus-4.6", {"none", "auto", "fixed"})],
+)
+def test_the_cli_offers_what_claude_takes_and_no_tier(
+    model: str,
+    budgets: set[str],
+) -> None:
+    """``claude`` takes effort, a thinking budget, a display, and a cache lifetime.
 
-    As ``claude`` 2.1.309 sent opus-5.5, captured on 2026-10-29: adaptive
-    thinking, its display omitted, no tier. Asked, it shows the summary
-    (``--thinking-display summarized``, 2.1.312), which a session keeps.
+    Its tier and its context are its own. Unasked, on the subscription, it wrote
+    every token of a measured call to the one-hour cache (2.1.309, 2026-11-16).
     """
-    row = AnthropicCLI.models()["opus"]
-    assert row.thinking_effort == {"low", "medium", "high", "xhigh", "max"}
-    assert row.thinking_budget == {"auto"}
+    row = AnthropicCLI.models()[model]
+    assert row.thinking_budget == budgets
     assert row.thinking_output == {"none", "text"}
     assert row.default.thinking_output == "text"
     assert row.manage_context_server_side == {True}
     assert row.service_tier == {"auto"}
+    assert row.cache_ttl_sec == {300.0, 3600.0}
+    assert row.default.cache_ttl_sec == 3600.0
     assert AnthropicCLI().usage == ()
     assert AnthropicCLI().name == "anthropic-cli"
     assert isinstance(AnthropicCLI(), HasLogin)
     assert list(AnthropicCLI()) == list(AnthropicCLI.models())
 
 
-def test_the_cli_cache_lives_the_hour_claude_writes_it_for() -> None:
-    """``claude`` chooses the lifetime, never sagent: an hour on the subscription.
-
-    Measured on 2026-11-16 through this provider with ``claude`` 2.1.309: a call
-    that wrote the cache wrote all 5,249 tokens to the one-hour bucket.
-    """
-    row = AnthropicCLI.models()["opus"]
-    assert row.cache_ttl_sec == {3600.0}
-    assert row.default.cache_ttl_sec == 3600.0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "changed", "told"),
+    [
+        ("opus", (), {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}),
+        ("opus", (("cache_ttl_sec", 300.0),), {"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}),
+        (
+            "opus",
+            (("thinking_budget", "none"),),
+            {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h", "CLAUDE_CODE_DISABLE_THINKING": "1"},
+        ),
+        (
+            "opus-4.6",
+            (("thinking_budget", "fixed"),),
+            {
+                "CLAUDE_CODE_PROMPT_CACHE_TTL": "1h",
+                "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                "MAX_THINKING_TOKENS": "64000",
+            },
+        ),
+        (
+            "sonnet-4.5",
+            (),
+            {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h", "MAX_THINKING_TOKENS": "32000"},
+        ),
+    ],
+    ids=["auto", "5m", "no-thinking", "fixed-over-adaptive", "fixed"],
+)
+async def test_claude_is_told_the_budget_and_cache_lifetime_chosen(
+    model: str,
+    changed: tuple[tuple[ModelSettingName, object], ...],
+    told: dict[str, str],
+) -> None:
+    """As the API is asked them: half the reply room for a fixed budget."""
+    chosen = AnthropicCLI()[model]
+    settings = chosen.settings
+    for name, value in changed:
+        settings = settings.with_value(name, value)
+    chosen.settings = settings
+    env = await chosen.environment()
+    knobs = (
+        "CLAUDE_CODE_PROMPT_CACHE_TTL",
+        "CLAUDE_CODE_DISABLE_THINKING",
+        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+        "MAX_THINKING_TOKENS",
+    )
+    assert {key: env[key] for key in knobs if key in env} == told
+    assert env["DISABLE_AUTO_COMPACT"] == "1"
 
 
 def test_the_cli_model_takes_offered_settings_and_refuses_the_rest() -> None:
     model = AnthropicCLI()["opus"]
     model.settings = replace(model.settings, thinking_effort="max")
     assert model.settings.thinking_effort == "max"
-    with pytest.raises(ValueError, match="thinking_budget='none' is not offered"):
-        model.settings = replace(model.settings, thinking_budget="none")
-    assert model.settings.thinking_budget == "auto"
+    with pytest.raises(ValueError, match="thinking_output='redacted' is not offered"):
+        model.settings = replace(model.settings, thinking_output="redacted")
+    assert model.settings.thinking_output == "text"
 
 
 @dataclass(slots=True, kw_only=True)

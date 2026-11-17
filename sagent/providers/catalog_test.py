@@ -1155,7 +1155,10 @@ async def _sent(model: Model, request: Request) -> str:
         case AnthropicModel():
             return repr(model.encode(request))
         case AnthropicCLIModel():
-            return repr(model.command(request, url="http://mcp"))
+            # ``claude`` takes some settings as flags, the rest from its environment.
+            return repr(
+                (model.command(request, url="http://mcp"), await model.environment()),
+            )
         case OpenAIModel():
             return repr(model.provider.encode(request, model=model))
         case GoogleModel():

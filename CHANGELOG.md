@@ -7,6 +7,9 @@ All notable sagent changes are documented here. This project follows
 
 ### Added
 
+- `anthropic-cli` passes `claude` a thinking budget (`none`, `auto`, and `fixed`
+  where the model takes one) and the cache lifetime (5 minutes or 1 hour, 1 hour
+  by default), as the API is asked them.
 - With `Team.relay` set, AgentSend's reminder says how to name another session's
   agent (`LABEL#SESSION`), and an unknown label's error asks "Did you mean
   'lead#N', the agent of session N?", so an agent learns it can reach one; with
