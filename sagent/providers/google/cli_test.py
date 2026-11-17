@@ -469,6 +469,18 @@ async def test_stdout_keeps_streaming_while_a_tool_call_has_not_arrived(
     received.assert_awaited_once_with()
 
 
+def test_the_cli_cache_lives_as_long_as_agy_keeps_it() -> None:
+    """``agy`` chooses the lifetime, never sagent: at least 10 minutes, under 15.
+
+    Measured on 2026-11-16 through this provider with ``agy`` 1.5.1: a second turn
+    read 29.4k of 31.5k prompt tokens from the cache after 60 to 600 s, none after
+    900 s.
+    """
+    row = GoogleCLI.models()["gemini-flash"]
+    assert row.cache_ttl_sec == {600.0}
+    assert row.default.cache_ttl_sec == 600.0
+
+
 def test_another_system_prompt_cannot_reuse_the_conversation() -> None:
     agy = cli._Agy(
         Mock(),

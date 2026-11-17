@@ -51,7 +51,6 @@ _EVERY = {
     "output": ["none"],
 }
 _WHOLE = "A catalog's thinking must state effort, budget, and output."
-_ALIASES = "YAML aliases are not allowed."
 
 
 def _in(path: Path, *, line: int, message: str) -> str:
@@ -1087,7 +1086,6 @@ def test_a_card_given_twice_is_rejected(tmp_path: Path) -> None:
     [
         ("models: []\nmodels: []", 2, "the key 'models' is given twice."),
         ("models: []\n1: bad", 2, "YAML mapping keys must be strings."),
-        ("models: &rows []\nprofiles: {bad: {context: *rows}}", 2, _ALIASES),
     ],
 )
 def test_a_document_the_strict_loader_refuses_names_file_and_line(
@@ -1135,17 +1133,21 @@ def test_a_section_naming_an_unknown_thinking_axis_is_rejected(tmp_path: Path) -
         _load(path)
 
 
-def test_an_alias_inside_a_list_is_rejected(tmp_path: Path) -> None:
+def test_a_section_serves_the_models_another_names_by_anchor(tmp_path: Path) -> None:
+    """One list, so a model added to one section's is served by both."""
     path = tmp_path / "x.yaml"
     path.write_text(
         "reference: {thinking: {effort: [none], budget: [none], output: [none]}}\n"
         "models:\n"
-        "- {model_id: a-1.0, prices: [&card {request: 0, response: 0, cache_write: 0,"
+        "- {model_id: a-1.0, prices: [{request: 0, response: 0, cache_write: 0,"
         " cache_write_1h: 0, cache_read: 0}]}\n"
-        "- {model_id: b-1.0, prices: [*card]}\n",
+        "providers:\n"
+        "  sub: {sends: [], models: &served {a-1.0: }}\n"
+        "  cli: {sends: [], models: *served}\n",
     )
-    with pytest.raises(ValueError, match=_in(path, line=4, message=_ALIASES)):
-        _load(path)
+    sub = ModelTable.from_yaml(path, section="sub")
+    cli = ModelTable.from_yaml(path, section="cli")
+    assert list(sub) == list(cli) == ["a-1.0"]
 
 
 def test_a_section_listing_no_models_serves_none(tmp_path: Path) -> None:

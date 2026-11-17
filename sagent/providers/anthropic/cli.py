@@ -310,7 +310,7 @@ class AnthropicCLIModel(AsyncResource):
         records = tuple(request.records)
         mount = await self._mounted()
         mount.offer(request.tools)
-        env = await self.provider.environment()
+        env = await self.environment()
         command = self.command(request, url=mount.url)
         # A process serves one command line (its prompt and settings), one tool
         # set, one login.
@@ -405,6 +405,33 @@ class AnthropicCLIModel(AsyncResource):
             ),
         )
         return self._claude
+
+    async def environment(self) -> dict[str, str]:
+        """Return the environment ``claude`` starts in, with this model's settings.
+
+        ``claude`` takes its thinking budget and cache lifetime only from its
+        environment, and the provider's drops every ``CLAUDE_CODE_`` variable, so
+        these are set after. A budget is as the API is asked it: none omits
+        thinking, ``auto`` is ``claude``'s own adaptive thinking, and ``fixed``
+        is half the reply's room (``claude`` holds it to at least 1,024).
+
+        Returns:
+          env: The provider's environment, and this model's settings.
+
+        """
+        settings = self.settings
+        env = await self.provider.environment()
+        env["CLAUDE_CODE_PROMPT_CACHE_TTL"] = (
+            "1h" if settings.cache_ttl_sec >= 3600.0 else "5m"
+        )
+        if settings.thinking_budget == "none":
+            env["CLAUDE_CODE_DISABLE_THINKING"] = "1"
+        elif settings.thinking_budget == "fixed":
+            reply = self.capability.limits.max_response_tokens
+            env["MAX_THINKING_TOKENS"] = str(reply // 2)
+            if "auto" in self.capability.thinking_budget:
+                env["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
+        return env
 
     def command(self, request: Request, *, url: str) -> list[str]:
         """Return the command line that starts ``claude`` for ``request``.
