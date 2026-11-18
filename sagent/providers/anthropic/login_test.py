@@ -41,6 +41,14 @@ def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
     refuse_browsers(monkeypatch, login)
 
 
+# On macOS a login lives in the user's Keychain, whose ``security`` asks the user to
+# make one when it finds none; a Keychain test opts in, with ``_security`` faked.
+@pytest.fixture(autouse=True)
+def file_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep each login in its file, as off macOS."""
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Linux"))
+
+
 _GRANT_URL = "https://platform.claude.com/v1/oauth/token"
 _PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 _NOW = 1_800_000_000.0
@@ -122,7 +130,6 @@ async def test_the_default_login_is_the_one_claude_keeps_in_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Off macOS, where the Keychain holds it, ``claude`` keeps it in a file."""
-    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Linux"))
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".claude").mkdir()
     _store(
