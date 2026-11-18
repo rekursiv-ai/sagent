@@ -35,7 +35,11 @@ from sagent.runtime import types
 from sagent.runtime.context import resolve_context
 from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
 from sagent.runtime.runtime import Compactor, Pruning, Runtime, Sizing
-from sagent.runtime.tape import ContextSplice, ReferrableTapeEvent
+from sagent.runtime.tape import (
+    ContextSplice,
+    ReferrableTapeEvent,
+    parts_model_turns,
+)
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -1188,9 +1192,9 @@ def _journaled(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord
     return records
 
 
-# Only a user turn or a result ends a reply. Claude writes a line per block, each with
-# its usage, so ending a reply at usage splits one reply into turns that break role
-# alternation. No provider starts a reply before every call is answered, so a model
+# Only a user turn, a result, or a note the wire sends (one with text, as a wake) ends
+# a reply. Claude writes a line per block, each with its usage, so ending a reply at
+# usage splits one reply into turns that break role alternation. No provider starts a reply before every call is answered, so a model
 # record while a call is open joins the open reply; once the user has spoken, a call
 # a killed run left unanswered no longer holds it open.
 def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
@@ -1205,7 +1209,11 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
     for record in _flatten(records):
         if isinstance(record, AssistantMessage | Thinking | ToolCall):
             spoke = any(isinstance(e, UserMessage | AgentToAgentMessage) for e in held)
-            answered = not calling and any(isinstance(e, ToolResult) for e in held)
+            answered = not calling and any(
+                isinstance(e, ToolResult)
+                or (isinstance(e, SystemMessage | TurnContext) and parts_model_turns(e))
+                for e in held
+            )
             if turn and (spoke or answered):
                 entries.extend(_reply_entries(turn, held, usage=usage))
                 turn.clear()

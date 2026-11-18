@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, override
 
 import asyncio
@@ -73,6 +73,14 @@ if TYPE_CHECKING:
 def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail a test that opens the user's browser, as a sign-in not headless would."""
     refuse_browsers(monkeypatch, login)
+
+
+# On macOS a login lives in the user's Keychain, whose ``security`` asks the user to
+# make one when it finds none.
+@pytest.fixture(autouse=True)
+def file_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep each login in its file, as off macOS."""
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Linux"))
 
 
 # Answers each line it reads with the next scripted turn, numbered across every

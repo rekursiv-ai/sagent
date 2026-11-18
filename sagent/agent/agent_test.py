@@ -1171,6 +1171,70 @@ def test_a_note_before_a_reply_stays_before_it(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "note",
+    [
+        SystemMessage(content="[news]", subtype="wake"),
+        SystemMessage(content="you owe a reply", subtype="nudge"),
+        SystemMessage(content="z", subtype="reminder"),
+        TurnContext(model="opus"),
+    ],
+    ids=["wake", "nudge", "reminder", "settings"],
+)
+def test_a_note_with_text_parts_the_replies_either_side(
+    tmp_path: Path,
+    note: SystemMessage | TurnContext,
+) -> None:
+    """The wire sends it on the user side, as the runtime woke the model with it."""
+    _, agent = _agent(tmp_path)
+
+    agent.session.append(
+        UserMessage(content="go"),
+        AssistantMessage(content="waiting"),
+        note,
+        AssistantMessage(content="still"),
+    )
+
+    assert [
+        entry.records if isinstance(entry, Response) else entry
+        for entry in agent.runtime.context().messages
+    ] == [
+        UserMessage(content="go"),
+        (AssistantMessage(content="waiting"),),
+        note,
+        (AssistantMessage(content="still"),),
+    ]
+
+
+@pytest.mark.parametrize(
+    "note",
+    [SystemMessage(content=""), TurnContext()],
+    ids=["empty", "no-settings"],
+)
+def test_a_note_without_text_leaves_its_reply_whole(
+    tmp_path: Path,
+    note: SystemMessage | TurnContext,
+) -> None:
+    """No wire sends it, so the blocks either side are one reply."""
+    _, agent = _agent(tmp_path)
+
+    agent.session.append(
+        UserMessage(content="go"),
+        _SIGNED,
+        note,
+        AssistantMessage(content="done"),
+    )
+
+    assert [
+        entry.records if isinstance(entry, Response) else entry
+        for entry in agent.runtime.context().messages
+    ] == [
+        UserMessage(content="go"),
+        (_SIGNED, AssistantMessage(content="done")),
+        note,
+    ]
+
+
 def test_a_reply_after_a_cli_s_own_error_line_resumes_with_its_thinking(
     tmp_path: Path,
 ) -> None:
