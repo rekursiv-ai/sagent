@@ -7,14 +7,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 
 import asyncio
 import contextlib
 import threading
 import uuid
 
-from treekle import PlainTree
+from treekle import PlainTree, immutable
 
 import pytest
 
@@ -75,6 +75,8 @@ from sagent.tools.types import (
     whole_output,
 )
 
+
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1034,6 +1036,246 @@ async def test_a_resumed_session_is_what_the_model_sees_and_is_not_rewritten(
         "noted",
         "what was it?",
     ]
+
+
+_BOOKKEEPING: Final = UncategorizedRecord(kind="queue-operation", payload=immutable({}))
+_SIGNED: Final = Thinking(content="read both", encrypted="c2ln")
+
+
+def _resumed_request(tmp_path: Path, *records: SessionRecord) -> list[SessionRecord]:
+    """Return what the model is sent after a session of ``records`` resumes."""
+    journal = RecordingJournal()
+    journal.append(ContextClear(system_prompt="S"), *records)
+    provider, agent = _agent(tmp_path, reply("ok"), journal=journal)
+
+    async def resumed() -> None:
+        async with agent:
+            _ = await agent.send("next")
+
+    asyncio.run(resumed())
+    return list(provider.requests[0].records)
+
+
+def _done(call_id: str) -> ToolResult:
+    return ToolResult(call_id=call_id, state="done", stdout=(call_id,))
+
+
+def test_a_reply_written_a_line_per_block_resumes_as_one_turn(tmp_path: Path) -> None:
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="read a and b"),
+        _SIGNED,
+        TokenUsage(info=immutable({"output_tokens": 1})),
+        ToolCall(call_id="a", name="Read"),
+        _BOOKKEEPING,
+        TurnContext(),
+        ToolCall(call_id="b", name="Read"),
+        TokenUsage(info=immutable({"output_tokens": 2})),
+        _done("a"),
+        _done("b"),
+        AssistantMessage(content="both read"),
+    )
+
+    assert [r for r in sent if not isinstance(r, TurnContext)][:7] == [
+        UserMessage(content="read a and b"),
+        _SIGNED,
+        ToolCall(call_id="a", name="Read"),
+        ToolCall(call_id="b", name="Read"),
+        _done("a"),
+        _done("b"),
+        AssistantMessage(content="both read"),
+    ]
+
+
+def test_a_result_logged_while_its_reply_still_calls_follows_the_reply(
+    tmp_path: Path,
+) -> None:
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="read a, b and c"),
+        _SIGNED,
+        ToolCall(call_id="a", name="Read"),
+        ToolCall(call_id="b", name="Read"),
+        _done("a"),
+        ToolCall(call_id="c", name="Read"),
+        _done("b"),
+        _done("c"),
+        AssistantMessage(content="all read"),
+    )
+
+    assert sent[1:8] == [
+        _SIGNED,
+        ToolCall(call_id="a", name="Read"),
+        ToolCall(call_id="b", name="Read"),
+        ToolCall(call_id="c", name="Read"),
+        _done("a"),
+        _done("b"),
+        _done("c"),
+    ]
+
+
+def test_a_call_left_unanswered_does_not_hold_the_next_reply_open(
+    tmp_path: Path,
+) -> None:
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="go"),
+        ToolCall(call_id="a", name="Read"),
+        UserMessage(content="again"),
+        AssistantMessage(content="hi"),
+    )
+
+    assert _texts(sent)[:3] == ["go", "again", "hi"]
+    [answer] = [r for r in sent if isinstance(r, ToolResult)]
+    assert (answer.call_id, answer.state) == ("a", "failed")
+
+
+def test_a_user_who_spoke_while_a_call_ran_is_heard_after_its_result(
+    tmp_path: Path,
+) -> None:
+    """Claude logs a skill's text as the user's as soon as its call ends."""
+    calls = (ToolCall(call_id="a", name="Skill"), ToolCall(call_id="b", name="Skill"))
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="go"),
+        *calls,
+        _done("a"),
+        UserMessage(content="skill a"),
+        _done("b"),
+        UserMessage(content="skill b"),
+        AssistantMessage(content="after"),
+    )
+
+    assert sent[:7] == [
+        UserMessage(content="go"),
+        *calls,
+        _done("a"),
+        _done("b"),
+        UserMessage(content="skill a\n\nskill b"),
+        AssistantMessage(content="after"),
+    ]
+
+
+def test_a_note_before_a_reply_stays_before_it(tmp_path: Path) -> None:
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="go"),
+        SystemMessage(content="a note"),
+        AssistantMessage(content="done"),
+    )
+
+    assert sent[:3] == [
+        UserMessage(content="go"),
+        SystemMessage(content="a note"),
+        AssistantMessage(content="done"),
+    ]
+
+
+def test_a_reply_after_a_cli_s_own_error_line_resumes_with_its_thinking(
+    tmp_path: Path,
+) -> None:
+    """Claude logs an API error as a reply of its own, and the retry under its model."""
+    error = AssistantMessage(content="API Error: an image could not be processed")
+    sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="think"),
+        error,
+        TurnContext(model="claude-opus-5-5"),
+        _SIGNED,
+        AssistantMessage(content="done"),
+    )
+
+    assert [r for r in sent if not isinstance(r, TurnContext)][:4] == [
+        UserMessage(content="think"),
+        error,
+        _SIGNED,
+        AssistantMessage(content="done"),
+    ]
+
+
+def test_a_codex_reply_between_its_events_is_one_turn(tmp_path: Path) -> None:
+    """Codex logs an event beside each item, and echoes a result under its own id."""
+    reasoning = Thinking(
+        content="",
+        encrypted="gAAAA",
+        extra=immutable({"type": "reasoning"}),
+    )
+    run = ToolCall(call_id="call_1", name="Bash")
+    _, agent = _agent(tmp_path)
+
+    agent.session.append(
+        UserMessage(content="run it"),
+        UncategorizedRecord(kind="event_msg/item_completed/Reasoning"),
+        reasoning,
+        UncategorizedRecord(kind="event_msg/item_completed/AgentMessage"),
+        AssistantMessage(content="running it"),
+        run,
+        _done("exec-1"),
+        _done("call_1"),
+        AssistantMessage(content="ran"),
+    )
+
+    assert [
+        entry.records if isinstance(entry, Response) else entry
+        for entry in agent.runtime.context().messages
+    ] == [
+        UserMessage(content="run it"),
+        (reasoning, AssistantMessage(content="running it"), run),
+        _done("exec-1"),
+        _done("call_1"),
+        (AssistantMessage(content="ran"),),
+    ]
+
+
+def _cost(request: int) -> TokenUsage:
+    return TokenUsage(info=immutable({"request": request}))
+
+
+@pytest.mark.parametrize(
+    ("records", "costs"),
+    [
+        (
+            (AssistantMessage(content="a"), _cost(1), UserMessage(content="u")),
+            [1],
+        ),
+        (
+            (
+                ToolCall(call_id="c", name="Read"),
+                _cost(1),
+                _done("c"),
+                AssistantMessage(content="b"),
+            ),
+            [1, 0],
+        ),
+        ((AssistantMessage(content="a"), _cost(1)), [1]),
+        (
+            (
+                AssistantMessage(content="a"),
+                _cost(1),
+                _BOOKKEEPING,
+                _cost(7),
+                UserMessage(content="u"),
+            ),
+            [1],
+        ),
+        ((_cost(9), AssistantMessage(content="a"), UserMessage(content="u")), [0]),
+    ],
+    ids=["a-user-turn", "the-next-reply", "the-end", "a-childs-after", "one-before"],
+)
+def test_a_reply_costs_the_first_usage_after_its_last_block(
+    tmp_path: Path,
+    records: tuple[SessionRecord, ...],
+    costs: list[int],
+) -> None:
+    _, agent = _agent(tmp_path)
+
+    agent.session.append(*records)
+
+    assert [
+        entry.tokens.request
+        for entry in agent.runtime.context().messages
+        if isinstance(entry, Response)
+    ] == costs
 
 
 @pytest.mark.asyncio
