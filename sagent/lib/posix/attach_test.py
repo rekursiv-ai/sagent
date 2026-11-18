@@ -810,6 +810,56 @@ class TestRemoteTerminalEdges:
             encode_frame(Frame.INPUT, b"a"),
         ]
 
+    def test_an_offset_attach_reads_where_the_stream_resumes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> tuple[int, list[bytes]]:
+            _answering(
+                monkeypatch,
+                encode_frame(Frame.ACK, (7).to_bytes(8))
+                + encode_frame(Frame.OUTPUT, b"later"),
+                writer,
+            )
+            remote = RemoteTerminal(Path("unused"), offset=5)
+            await remote.start()
+            return remote.resume, [chunk async for chunk in remote.output()]
+
+        assert asyncio.run(run()) == (7, [b"later"])
+        assert writer.frames == [encode_frame(Frame.ATTACH, (5).to_bytes(8))]
+
+    def test_an_offset_attach_to_a_child_that_already_exited_reports_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> tuple[int, list[bytes], int]:
+            _answering(monkeypatch, encode_frame(Frame.EXIT, (3).to_bytes(4)), writer)
+            remote = RemoteTerminal(Path("unused"), offset=5)
+            await remote.start()
+            chunks = [chunk async for chunk in remote.output()]
+            return remote.resume, chunks, await remote.wait()
+
+        assert asyncio.run(run()) == (0, [], 3)
+
+    def test_no_detach_key_sends_every_byte_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> bool:
+            _answering(monkeypatch, b"", writer)
+            remote = RemoteTerminal(Path("unused"), detach_key=b"")
+            await remote.start()
+            return await remote.write(b"a" + DETACH_KEY)
+
+        assert asyncio.run(run())
+        assert writer.frames[1:] == [encode_frame(Frame.INPUT, b"a" + DETACH_KEY)]
+
     def test_wait_returns_the_status_the_host_reported(
         self,
         monkeypatch: pytest.MonkeyPatch,

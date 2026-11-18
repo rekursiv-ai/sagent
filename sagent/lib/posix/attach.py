@@ -59,10 +59,12 @@ class RemoteTerminal:
     Args:
       address: The host's socket.
       detach_key: The keystroke that ends the attach instead of reaching the
-        child.
+        child; empty for none, when every byte is the child's.
       read_only: Watch only: no keystroke and no geometry reaches the child,
         so another terminal driving it is undisturbed.
       take_over: Detach every other terminal, as ``tmux attach -d`` does.
+      offset: Continue the output from this offset of the child's stream, not
+        from a replay; :attr:`resume` then says where it continues.
 
     """
 
@@ -73,11 +75,16 @@ class RemoteTerminal:
         detach_key: bytes = DETACH_KEY,
         read_only: bool = False,
         take_over: bool = False,
+        offset: int | None = None,
     ) -> None:
         self._address = address
         self._detach_key = detach_key
         self._read_only = read_only
         self._take_over = take_over
+        self._offset = offset
+        self.resume = 0
+        """Where the output continues, once :meth:`start` returns with an offset."""
+
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._first: tuple[Frame, bytes] | None = None
@@ -115,7 +122,15 @@ class RemoteTerminal:
             else:
                 return
         self._reader, self._writer = await asyncio.open_unix_connection(self._address)
-        self._send(Frame.ATTACH)
+        if self._offset is None:
+            self._send(Frame.ATTACH)
+            return
+        self._send(Frame.ATTACH, self._offset.to_bytes(8))
+        self._first = await read_frame(self._reader)
+        kind, payload = self._first
+        if kind is Frame.ACK:
+            self._first = None
+            self.resume = int.from_bytes(payload)
 
     def set_winsize(self, rows: int, cols: int) -> None:
         """Give the hosted child this terminal's geometry, unless only watching."""
@@ -155,7 +170,9 @@ class RemoteTerminal:
           written: False once the attach is over.
 
         """
-        typed, detach, _ = data.partition(self._detach_key)
+        typed, detach, _ = (
+            data.partition(self._detach_key) if self._detach_key else (data, b"", b"")
+        )
         if typed and not self._read_only:
             self._send(Frame.INPUT, typed)
         if detach:
