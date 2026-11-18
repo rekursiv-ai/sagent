@@ -17,6 +17,7 @@ from sagent.providers.resources import SharedResources, SubprocessPool, close_al
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_acquire_reuses_only_its_command_and_environment_and_replaces_the_
     async with pool:
         assert await pool.acquire(["cli", "chat"], env=original) is first
         assert len(pool._spares) == 1
-        assert await next(iter(pool._spares.values())) is spare
+        assert await next(iter(pool._spares.values()))[1] is spare
         assert await pool.acquire(argv, env=env) is (spare if reused else replacement)
     assert pool._spares == {}
     assert spawn.await_args_list == [
@@ -52,6 +53,33 @@ async def test_acquire_reuses_only_its_command_and_environment_and_replaces_the_
         call(["cli", "chat"], env=original),
         *([call(argv, env=env)] * (1 if reused else 2)),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_spare_of_a_program_since_updated_is_released_not_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``claude update`` repoints ``claude`` at a new version; a spare runs the old."""
+    for version in ("1", "2"):
+        (tmp_path / version).write_text("")
+        (tmp_path / version).chmod(0o755)
+    program = tmp_path / "bin" / "cli"
+    program.parent.mkdir()
+    program.symlink_to(tmp_path / "1")
+    first, spare, replacement, successor = [Mock(returncode=None) for _ in range(4)]
+    spawn = AsyncMock(side_effect=[first, spare, replacement, successor])
+    release = AsyncMock()
+    pool = SubprocessPool()
+    monkeypatch.setattr(pool, "_spawn", spawn)
+    monkeypatch.setattr(pool, "release", release)
+    env = {"PATH": str(program.parent)}
+    async with pool:
+        assert await pool.acquire(["cli"], env=env) is first
+        program.unlink()
+        program.symlink_to(tmp_path / "2")
+        assert await pool.acquire(["cli"], env=env) is replacement
+        release.assert_awaited_once_with(spare)
 
 
 @pytest.mark.asyncio
@@ -215,10 +243,10 @@ async def test_closing_awaits_each_spare_and_releases_every_live_process(
     spawning = asyncio.create_task(
         _pending_spare(pool, second, ready=ready, finish=finish),
     )
-    pool._spares[(("cli",), ())] = spawning
+    pool._spares[(("cli",), ())] = ("/bin/cli", spawning)
     if failed_spare:
         failed = asyncio.create_task(_failed_spare())
-        pool._spares[(("missing",), ())] = failed
+        pool._spares[(("missing",), ())] = ("", failed)
     released: list[Mock] = []
 
     def release(process: Mock) -> None:
@@ -226,7 +254,7 @@ async def test_closing_awaits_each_spare_and_releases_every_live_process(
         released.append(process)
 
     monkeypatch.setattr(pool, "release", AsyncMock(side_effect=release))
-    spares = tuple(pool._spares.values())
+    spares = tuple(spare for _, spare in pool._spares.values())
     closing = asyncio.create_task(pool.aclose())
     try:
         await ready.wait()
