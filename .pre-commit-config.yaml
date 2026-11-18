@@ -11,9 +11,9 @@
 #   scratch project). Name it anyway so the command does not depend on that
 #   chain staying intact.
 #
-#     uv --quiet run --frozen --group pre-commit pre-commit install
-#     uv --quiet run --frozen --group pre-commit pre-commit autoupdate
-#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
+#     uvr --group pre-commit pre-commit install
+#     uvr --group pre-commit pre-commit autoupdate
+#     uvr --group pre-commit pre-commit run --all-files
 #
 #   May need: git config --unset-all core.hooksPath
 #     if: [ERROR] Cowardly refusing to install hooks with `core.hooksPath` set.
@@ -22,9 +22,9 @@
 #   the pre-commit hooks; the heavy ones (ty-check-global, basedpyright-global,
 #   pytest*) declare `stages: [pre-push]` and need it named explicitly:
 #
-#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
-#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage pre-push
-#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage commit-msg
+#     uvr --group pre-commit pre-commit run --all-files
+#     uvr --group pre-commit pre-commit run --all-files --hook-stage pre-push
+#     uvr --group pre-commit pre-commit run --all-files --hook-stage commit-msg
 #
 #   Always pass --files or --all-files. Bare `run` (and the hook `git commit`
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
@@ -50,42 +50,47 @@
 #   arguments under `$(...)` or a bare `xargs`, and a rename record yields the
 #   name that no longer exists.
 #
+#   # Run only the diffed files from the CWD (the AGENTS.md gate).
+#     { git --no-pager diff -z --name-only --relative --diff-filter=d --merge-base origin/main .
+#       git ls-files -z --others --exclude-standard .
+#     } | xargs -0 -r uvr --group pre-commit pre-commit run --files
+#
 #   # Harvest all changed files from the perspective of CWD.
 #     git -C "$(git rev-parse --show-toplevel)" diff -z --name-only --diff-filter=d HEAD \
-#       | xargs -0 --no-run-if-empty uv --quiet run --frozen --group pre-commit pre-commit run --files
+#       | xargs -0 --no-run-if-empty uvr --group pre-commit pre-commit run --files
 #
-#   # Run only the files from the CWD.
+#   # Run only the staged files from the CWD.
 #     git --no-pager diff -z --name-only --cached --relative \
-#       | xargs -0 --no-run-if-empty uv --quiet run --frozen --group pre-commit pre-commit run --files
+#       | xargs -0 --no-run-if-empty uvr --group pre-commit pre-commit run --files
 #
 #   # Run all the files from CWD.
-#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git ls-files .)
+#     git ls-files -z . | xargs -0 -r uvr --group pre-commit pre-commit run --files
 #
 #   One hook at a time, by id (`ruff-check`, `ty-check`, `pytest-global`, ...):
-#     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
-#     uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
+#     uvr --group pre-commit pre-commit run ruff-check --all-files
+#     uvr --group pre-commit pre-commit run pytest-global --hook-stage pre-push
 #
 #   Force full pytest tiers despite testmon's warm dependency database:
-#     PYTEST_FORCE_ALL=1 uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
+#     PYTEST_FORCE_ALL=1 uvr --group pre-commit pre-commit run pytest-global --hook-stage pre-push
 #
 #   Individual tests: the pytest hooks take no test selector, so call pytest
 #   directly.
 #
-#     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py
-#     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py::test_name
-#     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
-#     uv --quiet run --frozen --group pre-commit pytest -n 5 path/to/
+#     uvr --group pre-commit pytest path/to/thing_test.py
+#     uvr --group pre-commit pytest path/to/thing_test.py::test_name
+#     uvr --group pre-commit pytest -k some_substring path/to/
+#     uvr --group pre-commit pytest -n 5 path/to/
 #
 #   Marker tiers mirror the pytest-slow-global / -ci-smoke-global /
 #   -integration-global hooks; the
 #   default `-m` filter lives in pyproject addopts, so ask for them by name:
 #
-#     uv --quiet run --frozen --group pre-commit pytest -m slow path/to/
+#     uvr --group pre-commit pytest -m slow path/to/
 #
 #   Skipping. SKIP takes hook ids, comma-separated, and reports "Skipped":
 #
-#     SKIP=ruff-check uv --quiet run --frozen --group pre-commit pre-commit run --all-files
-#     SKIP=pytest-global,pytest-slow-global uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
+#     SKIP=ruff-check uvr --group pre-commit pre-commit run --all-files
+#     SKIP=pytest-global,pytest-slow-global uvr --group pre-commit pre-commit run --hook-stage pre-push --all-files
 #
 #   `git commit --no-verify` / `git push --no-verify` bypass every hook. Both
 #   are a last resort, not a way past a red gate -- the gates are house rules
