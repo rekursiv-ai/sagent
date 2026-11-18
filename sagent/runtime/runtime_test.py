@@ -1701,7 +1701,9 @@ async def test_a_call_past_the_limit_is_answered_and_runs_on(
             await h.seen(ModelIdle)
             assert [r.state for r in h.results("t1")] == ["pending"]
             tool.release.set()
-            await h.seen(ModelIdle, 2)
+            # Not a count of idles: a wake every 10 ms can idle the model again
+            # before the released call's result is taken.
+            await h.until(lambda: bool(_arrival(h, "t1")))
     assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
     assert "runtime wake detaches the cohort: call_id=t1" in caplog.messages
     # Detached, the cohort was not waited out, so it never completes.
