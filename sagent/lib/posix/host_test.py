@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 from unittest import mock
@@ -9,6 +10,7 @@ from unittest import mock
 import asyncio
 import contextlib
 import functools
+import json
 import os
 import shutil
 import signal
@@ -25,6 +27,7 @@ from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import (
     Frame,
     Host,
+    Hosting,
     HostSpec,
     decode_frame,
     decode_status,
@@ -376,7 +379,10 @@ class TestHost:
                 encode_frame(Frame.EXIT, b"\x00\x00\x00\x00"),
                 "EXIT is a host frame, not a client's",
             ),
-            (encode_frame(Frame.ATTACH, b"x"), "ATTACH carries no payload"),
+            (
+                encode_frame(Frame.ATTACH, b"x"),
+                "ATTACH carries nothing or a u64 offset",
+            ),
             (encode_frame(Frame.STOP, b"x"), "STOP carries no payload"),
         ],
     )
@@ -900,14 +906,145 @@ class _FakeTerminal(Terminal):
         self.calls.append("close")
 
 
+class _HeldOpen(_FakeTerminal):
+    """A child that wrote, then exited with 3, its pty held open by what it left."""
+
+    def __init__(self) -> None:
+        super().__init__(pid=123)
+
+    @override
+    async def output(self) -> AsyncIterator[bytes]:
+        yield b"bye"
+        _ = await asyncio.Event().wait()
+
+    @override
+    async def wait(self) -> int:
+        _ = await super().wait()
+        return 3
+
+
 class _UnservedHost(Host):
     """A host that skips listening and pumping; counts how often it would."""
 
     served = 0
 
     @override
-    async def _serve_started(self) -> None:
+    async def _serve_started(self, exited: asyncio.Task[int]) -> None:
+        del exited
         self.served += 1
+
+
+class TestOffsetAttach:
+    """A viewer that numbers the output continues it exactly where it left off."""
+
+    @pytest.mark.parametrize(
+        ("offset", "resume"),
+        [(0, 0), (3, 3), (10_000, 13)],
+    )
+    def test_it_acks_where_the_stream_resumes_then_sends_every_byte_from_there(
+        self,
+        short_dir: Path,
+        offset: int,
+        resume: int,
+    ) -> None:
+        """An offset past what the child wrote resumes at its end."""
+        child = "import time\nprint('0123456789A', flush=True)\ntime.sleep(60)\n"
+
+        async def run() -> tuple[tuple[Frame, bytes], bytes]:
+            async with _hosted(child, short_dir) as (spec, _):
+                await _wait_for(lambda: len(_read(spec.scrollback)) == 13, 5.0)
+                reader, writer = await asyncio.open_unix_connection(spec.address)
+                writer.write(encode_frame(Frame.ATTACH, offset.to_bytes(8)))
+                ack = await read_frame(reader)
+                writer.write(encode_frame(Frame.INPUT, b"x"))
+                seen, _ = await _collect(reader, until=b"x")
+                writer.close()
+                return ack, seen
+
+        ack, seen = asyncio.run(run())
+        assert ack == (Frame.ACK, resume.to_bytes(8))
+        # The echo of the typed byte follows; no repaint precedes it.
+        assert seen == b"0123456789A\r\n"[resume:] + b"x"
+
+    def test_an_offset_older_than_the_kept_bytes_resumes_at_the_oldest(
+        self,
+        short_dir: Path,
+    ) -> None:
+        child = "import time\nprint('0123456789A', flush=True)\ntime.sleep(60)\n"
+
+        async def run() -> tuple[tuple[Frame, bytes], tuple[Frame, bytes]]:
+            async with _hosted(child, short_dir, replay_bytes=4) as (spec, _):
+                await _wait_for(lambda: len(_read(spec.scrollback)) == 13, 5.0)
+                reader, writer = await asyncio.open_unix_connection(spec.address)
+                writer.write(encode_frame(Frame.ATTACH, (0).to_bytes(8)))
+                frames = await read_frame(reader), await read_frame(reader)
+                writer.close()
+                return frames
+
+        ack, output = asyncio.run(run())
+        assert ack == (Frame.ACK, (9).to_bytes(8))
+        assert output == (Frame.OUTPUT, b"9A\r\n")
+
+
+class TestChildExit:
+    """The child's own exit ends the host, whatever still holds the pty."""
+
+    def test_a_pty_held_open_after_the_child_exits_does_not_keep_the_host(
+        self,
+        short_dir: Path,
+    ) -> None:
+        """A job the child left on the pty keeps its output open; the host ends anyway."""
+        host = Host(
+            _HeldOpen(),
+            spec=HostSpec(address=short_dir / "s", scrollback=short_dir / "log"),
+        )
+
+        async def run() -> int:
+            return await asyncio.wait_for(host.serve(), 5.0)
+
+        assert asyncio.run(run()) == 3
+        assert (short_dir / "log").read_bytes() == b"bye"
+
+
+class TestUnattended:
+    """A host whose clients all stay away stops its child."""
+
+    def test_no_client_for_the_limit_stops_the_child(self, short_dir: Path) -> None:
+        async def run() -> int:
+            async with _hosted(_SLEEPER, short_dir, unattended_sec=0.05) as (
+                _,
+                serving,
+            ):
+                return await asyncio.wait_for(serving, 5.0)
+
+        assert asyncio.run(run()) != 0
+
+    def test_a_connected_client_keeps_it_and_its_leaving_starts_the_clock(
+        self,
+        short_dir: Path,
+    ) -> None:
+        async def run() -> tuple[bool, int]:
+            async with _hosted(_SLEEPER, short_dir, unattended_sec=0.2) as (
+                spec,
+                serving,
+            ):
+                _, writer = await asyncio.open_unix_connection(spec.address)
+                await asyncio.wait({serving}, timeout=0.5)
+                kept = not serving.done()
+                writer.close()
+                return kept, await asyncio.wait_for(serving, 5.0)
+
+        kept, status = asyncio.run(run())
+        assert kept
+        assert status != 0
+
+    def test_none_never_stops_it(self, short_dir: Path) -> None:
+        async def run() -> bool:
+            async with _hosted(_SLEEPER, short_dir) as (_, serving):
+                await asyncio.wait({serving}, timeout=0.3)
+                return serving.done()
+
+        assert not asyncio.run(run())
 
 
 class _RecordingTransport(asyncio.WriteTransport):
@@ -953,6 +1090,8 @@ async def _hosted(
     *,
     line_reader: bool = False,
     on_input: Callable[[bytes], None] | None = None,
+    replay_bytes: int = 262_144,
+    unattended_sec: float | None = None,
 ) -> AsyncGenerator[tuple[HostSpec, asyncio.Task[int]]]:
     """Serve ``child`` until the block exits; yield its spec and serving task."""
     listening = asyncio.Event()
@@ -960,6 +1099,8 @@ async def _hosted(
         address=directory / "s",
         scrollback=directory / "scrollback",
         on_listening=listening.set,
+        replay_bytes=replay_bytes,
+        unattended_sec=unattended_sec,
     )
     terminal = (
         child
@@ -1064,6 +1205,35 @@ class TestALaunchedHost:
         assert serve_command([*argv, sys.executable, "-c", script]) == 4
         assert await_ready(read_fd, timeout_sec=1.0) is True
 
+    def test_its_hosting_sets_the_folder_environment_and_unattended_limit(
+        self,
+        short_dir: Path,
+    ) -> None:
+        read_fd, write_fd = os.pipe()
+        script = (
+            "import os,sys,time;"
+            "ok = os.getcwd() == os.path.realpath(sys.argv[1]) "
+            "and os.environ.get('MARK') == 'yes' and 'STRAY' not in os.environ;"
+            "time.sleep(60) if ok else sys.exit(5)"
+        )
+        hosting = Hosting(
+            cwd=str(short_dir),
+            env={"MARK": "yes"},
+            clean_env=True,
+            unattended_sec=0.05,
+        )
+        argv = [str(short_dir / "h.sock"), str(write_fd), "24", "80", "--"]
+        command = [sys.executable, "-c", script, str(short_dir)]
+        with mock.patch.dict(os.environ, {"STRAY": "1"}):
+            status = serve_command(
+                [*argv, *command],
+                stdin=json.dumps(asdict(hosting)).encode(),
+            )
+
+        # Stopped by the unattended limit, not exited by the script's own check.
+        assert status not in {0, 5}
+        assert await_ready(read_fd, timeout_sec=1.0) is True
+
     def test_a_command_it_cannot_run_is_logged_and_fails(
         self,
         short_dir: Path,
@@ -1151,12 +1321,21 @@ def test_launch_runs_this_module_with_its_arguments_then_the_command(
     """The argv ``serve_command`` reads by position, the command after ``--``."""
     held: list[int] = []
     argvs: list[Sequence[str]] = []
+    stdins: list[bytes] = []
 
-    def spawn(argv: Sequence[str], *, log: Path, pass_fds: Sequence[int]) -> int:
+    def spawn(
+        argv: Sequence[str],
+        *,
+        log: Path,
+        pass_fds: Sequence[int],
+        stdin: bytes,
+    ) -> int:
         argvs.append(argv)
-        return _hold(held, argv, log=log, pass_fds=pass_fds)
+        stdins.append(stdin)
+        return _hold(held, argv, log=log, pass_fds=pass_fds, stdin=stdin)
 
     monkeypatch.setattr(host_module, "spawn_detached", spawn)
+    hosting = Hosting(cwd="/w", env={"A": "b"}, unattended_sec=9.0)
     try:
         _ = launch(
             tmp_path / "s",
@@ -1164,11 +1343,15 @@ def test_launch_runs_this_module_with_its_arguments_then_the_command(
             log=tmp_path / "log",
             winsize=(30, 100),
             timeout_sec=0.01,
+            hosting=hosting,
+            wrap=lambda argv: ["wrapper", *argv],
         )
     finally:
         for fd in held:
             os.close(fd)
-    (argv,) = argvs
+    ((wrapper, *argv),) = argvs
+    assert wrapper == "wrapper"
+    assert host_module._hosting(stdins[0]) == hosting
     executable, *flags, address, write_fd = argv[:6]
     assert (executable, flags, address) == (
         sys.executable,
@@ -1185,9 +1368,10 @@ def _hold(
     *,
     log: Path,
     pass_fds: Sequence[int],
+    stdin: bytes,
 ) -> int:
     """Stand in for a host that starts and never answers: hold its pipe open."""
-    del argv, log
+    del argv, log, stdin
     held.extend(os.dup(fd) for fd in pass_fds)
     return 0
 

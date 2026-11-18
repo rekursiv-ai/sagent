@@ -15,6 +15,9 @@ The socket carries :class:`Frame` records -- a five-byte header and a payload:
 - A viewer sends ``ATTACH`` and receives the recent output as one replay, then
   every later chunk as it is written. ``INPUT`` carries its keystrokes and
   ``RESIZE`` its geometry.
+- A viewer that numbers the output sends ``ATTACH`` with the u64 offset it has
+  reached instead: it receives ``ACK`` with the u64 offset the stream resumes at,
+  the later of its own and the oldest byte kept, then every byte from there.
 - Any client may ``SUBMIT`` a message, answered with ``ACK``, or ``STOP`` the
   child. Every client still connected when the child exits receives ``EXIT``
   with its status.
@@ -25,23 +28,26 @@ The socket carries :class:`Frame` records -- a five-byte header and a payload:
   as ``tmux attach -d`` does.
 
 One host serves an address: a second refuses to start while the first runs.
+A host given :attr:`HostSpec.unattended_sec` stops its child once no client has
+been connected that long, so a child whose launcher never comes back ends.
 
 :func:`launch` starts a command under a host in a session of its own, running
 this module as ``python -m`` (:func:`serve_command`), and returns once it
-listens.
+listens. Its :class:`Hosting` says where and with what environment the child runs.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Generator, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, TypedDict, cast
 
 import asyncio
 import contextlib
 import enum
 import fcntl
+import json
 import logging
 import os
 import signal
@@ -56,6 +62,7 @@ __all__ = [
     "Frame",
     "Host",
     "HostSpec",
+    "Hosting",
     "decode_frame",
     "decode_status",
     "decode_winsize",
@@ -85,6 +92,10 @@ _VIEWER_BACKLOG_BYTES: Final = 8 * 1024 * 1024
 # event loop ends with ``serve``, and a transport closed with bytes still
 # buffered loses them -- a viewer would see its connection drop with no status.
 _FAREWELL_SEC: Final = 1.0
+
+# How long output may keep coming after the child exits before the host ends anyway:
+# what the child wrote last is still in the pty when its exit is seen.
+_DRAIN_SEC: Final = 0.5
 
 
 class Frame(enum.IntEnum):
@@ -219,6 +230,31 @@ class HostSpec:
     replay_bytes: int = 262_144
     """How much recent output an arriving viewer is shown."""
 
+    unattended_sec: float | None = None
+    """Stop the child once no client has been connected this long; ``None`` never."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Hosting:
+    """How a launched host runs its child, beyond the command and its size.
+
+    Attributes:
+      cwd: The folder the child starts in; empty for the host's own.
+      env: The child's environment over the host's, or its whole one with
+        ``clean_env``; see :class:`~sagent.lib.posix.terminal.Terminal`.
+      clean_env: Whether the child starts from an empty environment.
+      terminate_grace_sec: How long the child gets to honor TERM before its
+        process group is killed.
+      unattended_sec: See :attr:`HostSpec.unattended_sec`.
+
+    """
+
+    cwd: str = ""
+    env: Mapping[str, str] = field(default_factory=dict[str, str])
+    clean_env: bool = False
+    terminate_grace_sec: float = 1.0
+    unattended_sec: float | None = None
+
 
 class Host:
     """Run a child on a pty and serve it to viewers over a Unix socket.
@@ -256,7 +292,13 @@ class Host:
         self._on_started = on_started
         self._clients: set[asyncio.StreamWriter] = set()
         self._viewers: set[asyncio.StreamWriter] = set()
+        self._alone = asyncio.Event()
+        self._alone.set()
+        self._attended = asyncio.Event()
         self._recent = bytearray()
+        self._written = 0
+        """Every byte the child wrote so far: the offset its next byte has."""
+
         self._recent_trimmed = False  # pragma: no mutate[truthiness]
         self._scrollback_failed = False  # pragma: no mutate[truthiness]
         self._interrupted: int | None = None
@@ -276,6 +318,8 @@ class Host:
         """
         with _owned(self._spec.address):
             await self._terminal.start()
+            # The one reaper: a second concurrent ``wait`` would steal its status.
+            exited = asyncio.get_running_loop().create_task(self._terminal.wait())
             # From here the child exists, so every later failure must still reap
             # it, exactly as in ``Relay.serve``.
             try:
@@ -284,10 +328,10 @@ class Host:
                     if pid is None:
                         raise RuntimeError("terminal started without a child PID")
                     self._on_started(pid)
-                await self._serve_started()
+                await self._serve_started(exited)
             finally:
                 await self._terminal.terminate()
-                status = await self._terminal.wait()
+                status = await exited
                 await self._terminal.close()
                 if self._interrupted is not None:
                     status = 128 + self._interrupted
@@ -296,7 +340,7 @@ class Host:
 
     # Torn down in reverse: the handlers go first, then the listener and its path --
     # so no viewer arrives to a child that is already gone -- then the scrollback.
-    async def _serve_started(self) -> None:
+    async def _serve_started(self, exited: asyncio.Task[int]) -> None:
         """Listen, then pump the child's output until it exits."""
         with contextlib.ExitStack() as stack:
             scrollback = os.open(
@@ -316,9 +360,14 @@ class Host:
             loop = asyncio.get_running_loop()
             for sig in self._install_handlers():
                 stack.callback(loop.remove_signal_handler, sig)
+            if self._spec.unattended_sec is not None:
+                watch = loop.create_task(
+                    self._end_unattended(self._spec.unattended_sec),
+                )
+                stack.callback(watch.cancel)
             if self._spec.on_listening is not None:
                 self._spec.on_listening()
-            await self._pump(scrollback)
+            await self._pump_until_exit(scrollback, exited)
 
     # A host has no controlling terminal, so HUP and INT arrive only when someone sends
     # them -- an operator or a supervisor -- and each means the same as TERM: stop.
@@ -348,6 +397,36 @@ class Host:
                 self._terminal.terminate(),
             )
 
+    # The child's own exit ends the host, not only the pty closing: a job it left
+    # running keeps the pty open, and would otherwise hide that the child is gone.
+    async def _pump_until_exit(
+        self,
+        scrollback: int,
+        exited: asyncio.Task[int],
+    ) -> None:
+        """Pump until the pty closes, or the child exits and its output drains."""
+        pumping = asyncio.get_running_loop().create_task(self._pump(scrollback))
+        try:
+            _ = await asyncio.wait(
+                {pumping, exited},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not pumping.done():
+                _ = await asyncio.wait({pumping}, timeout=_DRAIN_SEC)
+        finally:
+            _ = pumping.cancel()
+            _ = await asyncio.gather(pumping, return_exceptions=True)
+
+    async def _end_unattended(self, limit_sec: float) -> None:
+        """Stop the child once no client has been connected for ``limit_sec``."""
+        while True:
+            await self._alone.wait()
+            try:
+                await asyncio.wait_for(self._attended.wait(), timeout=limit_sec)
+            except TimeoutError:
+                self._stop()
+                return
+
     async def _pump(self, scrollback: int) -> None:
         """Record each output chunk, then hand it to every viewer."""
         async for chunk in self._terminal.output():
@@ -366,6 +445,7 @@ class Host:
         if not write_all(scrollback, chunk) and not self._scrollback_failed:
             self._scrollback_failed = True
             _logger.warning("scrollback write failed: %s", self._spec.scrollback)
+        self._written += len(chunk)
         self._recent += chunk
         excess = len(self._recent) - self._spec.replay_bytes
         if excess > 0:
@@ -390,6 +470,7 @@ class Host:
     ) -> None:
         """Answer one connection's frames until it leaves."""
         self._clients.add(writer)
+        self._note_presence()
         try:
             while True:
                 kind, payload = await read_frame(reader)
@@ -416,10 +497,14 @@ class Host:
         payload: bytes,
     ) -> None:
         """Act on one client frame."""
-        empty = {Frame.ATTACH, Frame.TAKEOVER, Frame.STOP, Frame.VIEWERS, Frame.REDRAW}
+        empty = {Frame.TAKEOVER, Frame.STOP, Frame.VIEWERS, Frame.REDRAW}
         if kind in empty and payload:
             raise ValueError(f"{kind.name} carries no payload")
+        if kind is Frame.ATTACH and len(payload) not in {0, 8}:
+            raise ValueError("ATTACH carries nothing or a u64 offset")
         match kind:
+            case Frame.ATTACH if payload:
+                self._resume(writer, int.from_bytes(payload))
             case Frame.ATTACH | Frame.TAKEOVER:
                 if kind is Frame.TAKEOVER:
                     for viewer in self._viewers - {writer}:
@@ -454,6 +539,18 @@ class Host:
             ):
                 raise ValueError(f"{kind.name} is a host frame, not a client's")
 
+    # No repaint, unlike a plain ``ATTACH``: the viewer continues the very byte stream
+    # it had, so a repaint would only draw its screen a second time.
+    def _resume(self, writer: asyncio.StreamWriter, offset: int) -> None:
+        """Send where the stream resumes for ``offset``, then every kept byte from there."""
+        start = self._written - len(self._recent)
+        resume = min(max(offset, start), self._written)
+        self._send(writer, encode_frame(Frame.ACK, resume.to_bytes(8)))
+        if resume < self._written:
+            kept = bytes(self._recent[resume - start :])
+            self._send(writer, encode_frame(Frame.OUTPUT, kept))
+        self._viewers.add(writer)
+
     def _send(self, writer: asyncio.StreamWriter, frame: bytes) -> None:
         """Queue ``frame`` for ``writer``, dropping a viewer that fell too far behind."""
         if writer.is_closing():
@@ -473,6 +570,17 @@ class Host:
         """Forget ``writer`` as a client and as a viewer."""
         self._clients.discard(writer)
         self._viewers.discard(writer)
+        self._note_presence()
+
+    def _note_presence(self) -> None:
+        """Set ``_alone`` while no client is connected, ``_attended`` while one is."""
+        alone, attended = (
+            (self._attended, self._alone)
+            if self._clients
+            else (self._alone, self._attended)
+        )
+        alone.set()
+        attended.clear()
 
     async def _farewell(self, status: int) -> None:
         """Tell every connected client the child's status, then close them."""
@@ -498,6 +606,8 @@ def launch(
     log: Path,
     winsize: tuple[int, int],
     timeout_sec: float,
+    hosting: Hosting | None = None,
+    wrap: Callable[[list[str]], list[str]] = list,
 ) -> bool | None:
     """Start ``command`` under a host no terminal owns; return once it listens.
 
@@ -510,6 +620,11 @@ def launch(
       log: Receives the host's own output, and what it says when it fails.
       winsize: The child's starting rows and columns.
       timeout_sec: How long the host may take to listen.
+      hosting: Where and with what environment the child runs, handed to the
+        host on its stdin, so no variable shows in a process listing; ``None``
+        for the defaults.
+      wrap: Returns the host's whole command given its own, such as one run in a
+        scope of its own that a service manager stopping the launcher leaves be.
 
     Returns:
       ready: True once it listens; False when it failed first (its log says
@@ -520,31 +635,36 @@ def launch(
     read_fd, write_fd = os.pipe()
     try:
         _ = spawn_detached(
-            [
-                sys.executable,
-                "-P",
-                "-m",
-                __name__,
-                str(address),
-                str(write_fd),
-                str(rows),
-                str(cols),
-                "--",
-                *command,
-            ],
+            wrap(
+                [
+                    sys.executable,
+                    "-P",
+                    "-m",
+                    __name__,
+                    str(address),
+                    str(write_fd),
+                    str(rows),
+                    str(cols),
+                    "--",
+                    *command,
+                ],
+            ),
             log=log,
             pass_fds=(write_fd,),
+            stdin=json.dumps(asdict(hosting or Hosting())).encode(),
         )
     finally:
         os.close(write_fd)
     return await_ready(read_fd, timeout_sec=timeout_sec)
 
 
-def serve_command(argv: Sequence[str]) -> int:
+def serve_command(argv: Sequence[str], *, stdin: bytes = b"") -> int:
     """Host a command, as :func:`launch` starts this module: ``ADDRESS FD ROWS COLS -- CMD...``.
 
     Args:
       argv: The arguments :func:`launch` passed.
+      stdin: The :class:`Hosting` :func:`launch` wrote, as JSON; empty for the
+        defaults.
 
     Returns:
       status: The hosted command's exit status; 1 when it could not be hosted.
@@ -552,16 +672,25 @@ def serve_command(argv: Sequence[str]) -> int:
     """
     address, ready, rows, cols, _, *command = argv
     readiness = Readiness(int(ready))
+    hosting = _hosting(stdin)
     try:
         return asyncio.run(
             Host(
-                Terminal(command, winsize=(int(rows), int(cols))),
+                Terminal(
+                    command,
+                    cwd=Path(hosting.cwd) if hosting.cwd else None,
+                    env=hosting.env,
+                    clean_env=hosting.clean_env,
+                    terminate_grace_sec=hosting.terminate_grace_sec,
+                    winsize=(int(rows), int(cols)),
+                ),
                 spec=HostSpec(
                     address=Path(address),
                     # Whoever hosts a plain command keeps its own record; a
                     # second copy of every repaint would only grow.
                     scrollback=Path(os.devnull),
                     on_listening=readiness.accept,
+                    unattended_sec=hosting.unattended_sec,
                 ),
             ).serve(),
         )
@@ -572,6 +701,30 @@ def serve_command(argv: Sequence[str]) -> int:
         return 1
     finally:
         readiness.close()
+
+
+def _hosting(stdin: bytes) -> Hosting:
+    """Return the :class:`Hosting` :func:`launch` wrote; the defaults for none."""
+    if not stdin:
+        return Hosting()
+    written = cast("_HostingJson", json.loads(stdin))
+    return Hosting(
+        cwd=written["cwd"],
+        env=written["env"],
+        clean_env=written["clean_env"],
+        terminate_grace_sec=written["terminate_grace_sec"],
+        unattended_sec=written["unattended_sec"],
+    )
+
+
+class _HostingJson(TypedDict):
+    """A :class:`Hosting` as :func:`launch` writes it."""
+
+    cwd: str
+    env: dict[str, str]
+    clean_env: bool
+    terminate_grace_sec: float
+    unattended_sec: float | None
 
 
 # Binding unlinks whatever socket is at the address, a live host's too; the lock is
@@ -595,4 +748,4 @@ def _owned(address: Path) -> Generator[None]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(serve_command(sys.argv[1:]))
+    raise SystemExit(serve_command(sys.argv[1:], stdin=sys.stdin.buffer.read()))
