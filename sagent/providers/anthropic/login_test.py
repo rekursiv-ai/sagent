@@ -25,6 +25,7 @@ from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.anthropic import login
 from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.testing import refuse_browsers
 
@@ -894,7 +895,7 @@ def test_a_named_login_kept_beside_claude_s_moves_into_a_directory_of_its_own(
     claude = tmp_path / ".claude"
     claude.mkdir()
     _store(claude / ".credentials-work.json", access="at-work", expires_in_sec=60.0)
-    logins = ClaudeLogin.logins()
+    logins = Logins(ClaudeLogin.default_path(), own_directory=True)
     logins.move_in()
     assert logins.default == claude / ".credentials.json"
     assert logins.accounts() == ("work",)
@@ -937,7 +938,7 @@ async def test_a_named_login_signed_in_on_a_mac_is_listed(
     monkeypatch.setattr(getpass, "getuser", lambda: "user")
     keychain = _FakeKeychain()
     monkeypatch.setattr(login, "_security", keychain)
-    logins = ClaudeLogin.logins()
+    logins = Logins(ClaudeLogin.default_path(), own_directory=True)
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )

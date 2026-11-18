@@ -28,13 +28,7 @@ from sagent.providers import (
     anthropic,
     table as provider_table,
 )
-from sagent.providers.table import (
-    HasModels,
-    ModelTable,
-    ModelTags,
-    family,
-    models,
-)
+from sagent.providers.table import HasModels, ModelTable, ModelTags, models
 
 
 if TYPE_CHECKING:
@@ -130,21 +124,6 @@ def test_a_key_is_an_exact_name_a_vendor_id_a_role_or_a_family(
 ) -> None:
     assert _table()[key].model_id == model_id
     assert key in _table()
-
-
-@pytest.mark.parametrize(
-    ("model_id", "named"),
-    [
-        ("opus-5.5", "opus"),
-        ("gemini-flash-lite-2.5", "gemini-flash-lite"),
-        ("local-model", None),
-    ],
-)
-def test_a_family_is_a_versioned_id_less_its_version(
-    model_id: str,
-    named: str | None,
-) -> None:
-    assert family(model_id) == named
 
 
 def test_an_exact_name_outranks_a_role_of_the_same_spelling() -> None:

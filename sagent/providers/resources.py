@@ -11,11 +11,11 @@ Typical usage example:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, override
 
 import asyncio
 import contextlib
-import os
 import shutil
 
 from wesearch.fetch.gate import FileGate
@@ -81,7 +81,10 @@ class SubprocessPool(AsyncResource):
 
         """
         key = (tuple(argv), tuple(sorted(env.items())))
-        program = await asyncio.to_thread(_program, argv[0], env=env)
+        found = await asyncio.to_thread(
+            lambda: shutil.which(argv[0], path=env.get("PATH")),
+        )
+        program = str(await asyncio.to_thread(Path(found or argv[0]).resolve))
         held = self._spares.pop(key, None)
         process = None
         if held is not None:
@@ -143,12 +146,6 @@ class SubprocessPool(AsyncResource):
         )
         self._live.add(child.process)
         return child.process
-
-
-def _program(name: str, *, env: Mapping[str, str]) -> str:
-    """Return the file ``name`` runs in ``env``, links followed; ``""`` if none."""
-    found = shutil.which(name, path=env.get("PATH"))
-    return os.path.realpath(found) if found is not None else ""
 
 
 class SharedResources(AsyncResource):

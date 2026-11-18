@@ -37,6 +37,7 @@ from sagent.model.exceptions import ContextOverflowError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
@@ -66,7 +67,6 @@ if TYPE_CHECKING:
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.login import Logins
     from sagent.providers.types import (
         ProviderResources,
         ToolMount,
@@ -109,7 +109,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._logins = ClaudeLogin.logins()
+        self._logins = Logins(ClaudeLogin.default_path(), own_directory=True)
         self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
 
     @property

@@ -2257,7 +2257,8 @@ async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
     async with main.opened(flags, given=(), interactive=False, use_daemon=False):
         pass
     assert not beside.exists()
-    assert ClaudeLogin.logins().path("work").read_text() == "{}"
+    named = Logins(ClaudeLogin.default_path(), own_directory=True).path("work")
+    assert named.read_text() == "{}"
     del script, offline_daemon
 
 
