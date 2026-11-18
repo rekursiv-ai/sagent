@@ -443,9 +443,9 @@ async def dir_lock(
         except FileExistsError:
             await asyncio.sleep(0.01)
         except asyncio.CancelledError:
-            with suppress(FileExistsError):
+            with suppress(FileExistsError, FileNotFoundError):
                 await taking
-                await asyncio.to_thread(_give_back, path)
+                await asyncio.to_thread(path.rmdir)
             raise
     released = asyncio.Event()
     touching = asyncio.create_task(_keep_fresh(path, update_sec, released))
@@ -453,7 +453,8 @@ async def dir_lock(
         yield
     finally:
         released.set()
-        await asyncio.to_thread(_give_back, path)
+        with suppress(FileNotFoundError):
+            await asyncio.to_thread(path.rmdir)
         await touching
 
 
@@ -833,8 +834,3 @@ async def _keep_fresh(path: Path, update_sec: float, released: asyncio.Event) ->
         # Gone only if taken over as stale; nothing then is this holder's to touch.
         with suppress(FileNotFoundError):
             await asyncio.to_thread(os.utime, path)
-
-
-def _give_back(path: Path) -> None:
-    with suppress(FileNotFoundError):
-        path.rmdir()

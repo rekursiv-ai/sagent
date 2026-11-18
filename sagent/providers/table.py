@@ -54,7 +54,6 @@ __all__ = [
     "HasModels",
     "ModelTable",
     "ModelTags",
-    "family",
     "models",
 ]
 
@@ -516,12 +515,6 @@ def _choices() -> tuple[ModelSettingName, ...]:
         "cache_ttl_sec",
         "manage_context_server_side",
     )
-
-
-def family(model_id: str) -> str | None:
-    """Return ``opus`` for ``opus-5.5``; ``None`` for an id with no version."""
-    parsed = _family_version(model_id)
-    return None if parsed is None else parsed[0]
 
 
 def _family_version(model_id: str) -> tuple[str, tuple[int, int]] | None:

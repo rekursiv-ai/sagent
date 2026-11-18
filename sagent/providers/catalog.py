@@ -57,7 +57,7 @@ from sagent.providers.perplexity.api import Perplexity
 from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
-from sagent.providers.table import ModelTags, family
+from sagent.providers.table import ModelTags
 from sagent.providers.together.api import Together
 from sagent.providers.vertex.api import Vertex
 from sagent.providers.xai.api import XAI
@@ -524,11 +524,14 @@ async def counterpart(
             f" {model_id!r}; name one of its models.",
         )
     middle = ladder.index("default")
-    kin = family(model_id)
+    # Its family, as its own provider resolves it: ``opus-4.6`` holds ``opus``'s
+    # roles. A name with no version names no family there, and holds none.
+    family = model_id.rpartition("-")[0]
+    newest = (await _filled(current.provider, (family,))).get(family)
     held = [
         ladder.index(role)
         for role, row in (await _filled(current.provider, ladder)).items()
-        if row.model_id == model_id or (kin is not None and family(row.model_id) == kin)
+        if row.model_id == model_id or row == newest
     ]
     priced = {
         ladder.index(role): price

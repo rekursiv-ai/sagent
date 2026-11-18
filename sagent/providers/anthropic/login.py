@@ -5,7 +5,8 @@
 Typical usage example:
 
   login = ClaudeLogin(resources=shared)        # ~/.claude, or the macOS Keychain.
-  work = ClaudeLogin(ClaudeLogin.logins().path("work"), resources=shared)
+  logins = Logins(ClaudeLogin.default_path(), own_directory=True)
+  work = ClaudeLogin(logins.path("work"), resources=shared)  # ~/.claude-work
 
   await login.sign_in()    # In the browser; over ssh, paste the code it shows.
   await login.token()      # An access token, renewed before it expires.
@@ -33,7 +34,6 @@ from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
-    Logins,
     dir_lock,
     file_lock,
     login_flow,
@@ -89,19 +89,6 @@ class ClaudeLogin:
     def default_path(cls) -> Path:
         """Return the file ``claude`` keeps its login in, off macOS."""
         return Path("~/.claude/.credentials.json").expanduser()
-
-    @classmethod
-    def logins(cls) -> Logins:
-        """Return every account, each in a config directory of its own.
-
-        ``claude`` renews a login only where ``CLAUDE_CONFIG_DIR`` points, so a
-        named one lives in ``~/.claude-<account>``.
-
-        Returns:
-          logins: Every account, the default's file being ``default_path``.
-
-        """
-        return Logins(cls.default_path(), own_directory=True)
 
     async def token(self) -> str:
         """Return an access token good for at least five more minutes.

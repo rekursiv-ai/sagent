@@ -79,6 +79,7 @@ from sagent.lib.posix.sockets import accepts, socket_address
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.catalog import ModelCatalog, default_provider
+from sagent.providers.login import Logins
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
 from sagent.session.jsonl import JournalInUseError, JsonlJournal
@@ -332,7 +333,7 @@ async def opened(
     cwd = Path.cwd()
     screen = _Screen()
     theme = ThemeState()
-    ClaudeLogin.logins().move_in()
+    Logins(ClaudeLogin.default_path(), own_directory=True).move_in()
     async with (
         ModelCatalog() as catalog,
         Team(catalog=catalog) as team,
@@ -1059,7 +1060,7 @@ async def _agent_action(argv: Sequence[str]) -> int:
     allow = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     _allow_providers_argument(allow)
     allowed, argv = allow.parse_known_args(argv)
-    ClaudeLogin.logins().move_in()
+    Logins(ClaudeLogin.default_path(), own_directory=True).move_in()
     async with ModelCatalog() as catalog:
         name = _provider_name(catalog, cast(str, allowed.allow_providers))
         agent = Agent(model=catalog.model("default", current=name))
