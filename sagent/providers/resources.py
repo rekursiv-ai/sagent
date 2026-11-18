@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Protocol, override
 
 import asyncio
 import contextlib
+import os
+import shutil
 
 from wesearch.fetch.gate import FileGate
 
@@ -57,7 +59,7 @@ class SubprocessPool(AsyncResource):
         self._live: set[Process] = set()
         self._spares: dict[
             tuple[tuple[str, ...], tuple[tuple[str, str], ...]],
-            asyncio.Task[Process],
+            tuple[str, asyncio.Task[Process]],
         ] = {}
 
     async def acquire(
@@ -74,22 +76,30 @@ class SubprocessPool(AsyncResource):
 
         Returns:
           process: The spare started earlier for this command line, if it is
-            still running, else one started now.
+            still running the program the command names now, else one started
+            now.
 
         """
         key = (tuple(argv), tuple(sorted(env.items())))
-        spare = self._spares.pop(key, None)
+        program = await asyncio.to_thread(_program, argv[0], env=env)
+        held = self._spares.pop(key, None)
         process = None
-        if spare is not None:
+        if held is not None:
             with contextlib.suppress(OSError):
-                process = await spare
-        if process is None or process.returncode is not None:
+                process = await held[1]
+        # An update repoints the name at a new binary; the spare runs the old.
+        if (
+            held is None
+            or process is None
+            or process.returncode is not None
+            or held[0] != program
+        ):
             if process is not None:
                 await self.release(process)
             process = await self._spawn(argv, env=env)
         # Starting ``claude`` takes seconds; the next acquire of this command
         # line, a new conversation, takes this one instead of waiting.
-        self._spares[key] = asyncio.create_task(self._spawn(argv, env=env))
+        self._spares[key] = (program, asyncio.create_task(self._spawn(argv, env=env)))
         return process
 
     async def release(self, process: Process) -> None:
@@ -110,7 +120,7 @@ class SubprocessPool(AsyncResource):
         # process no one holds.
         spares = self._spares
         self._spares = {}
-        for spare in spares.values():
+        for _, spare in spares.values():
             with contextlib.suppress(OSError):
                 await spare
         for process in tuple(self._live):
@@ -133,6 +143,12 @@ class SubprocessPool(AsyncResource):
         )
         self._live.add(child.process)
         return child.process
+
+
+def _program(name: str, *, env: Mapping[str, str]) -> str:
+    """Return the file ``name`` runs in ``env``, links followed; ``""`` if none."""
+    found = shutil.which(name, path=env.get("PATH"))
+    return os.path.realpath(found) if found is not None else ""
 
 
 class SharedResources(AsyncResource):
