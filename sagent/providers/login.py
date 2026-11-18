@@ -138,8 +138,7 @@ class Logins:
       default: The default login's file; a named one sits beside it.
       own_directory: Keep a named login in a directory of its own beside the
         default's, under the same name, as ``claude`` keeps a second login in
-        ``~/.claude-work``. One kept beside the default moves into its
-        directory when the accounts are next listed.
+        ``~/.claude-work``. ``move_in`` moves one kept beside the default there.
 
     """
 
@@ -226,26 +225,40 @@ class Logins:
             order = (first, *(a for a in order if a != first))
         return tuple((a, _spent(family, a, model, now=now)) for a in order)
 
-    def _accounts(self, family: _Family) -> tuple[str, ...]:
-        """Return ``accounts``, as ``family`` orders those added."""
+    def move_in(self) -> None:
+        """Move each login kept beside the default into a directory of its own.
+
+        Only with ``own_directory``. One whose directory already holds a login
+        stays where it is, and a warning names both: either may be the newer.
+        """
+        if not self.own_directory:
+            return
+        for name, found in self._beside().items():
+            _move_in(found, self.path(name))
+
+    def _beside(self) -> dict[str, Path]:
+        """Return each named login kept beside the default's file, by account."""
         stem, suffix = self.default.stem, self.default.suffix
-        beside = {
+        return {
             name: found
             for found in self.default.parent.glob(f"{stem}-*{suffix}")
             if _ACCOUNT.fullmatch(
                 name := found.name.removeprefix(f"{stem}-").removesuffix(suffix),
             )
         }
+
+    def _accounts(self, family: _Family) -> tuple[str, ...]:
+        """Return ``accounts``, as ``family`` orders those added."""
         if self.own_directory:
-            for name, found in beside.items():
-                _move_in(found, self.path(name))
-            folder = self.default.parent
-            names = (
+            # A login the macOS Keychain holds leaves only the lock its save took.
+            folder, lock = self.default.parent, self.default.with_suffix(".lock").name
+            names = {
                 found.parent.name.removeprefix(f"{folder.name}-")
-                for found in folder.parent.glob(f"{folder.name}-*/{self.default.name}")
-            )
+                for kept in (self.default.name, lock)
+                for found in folder.parent.glob(f"{folder.name}-*/{kept}")
+            }
         else:
-            names = iter(beside)
+            names = set(self._beside())
         saved = {n for n in names if _ACCOUNT.fullmatch(n)}
         added = [a for a in family.added if a in saved]
         return (*added, *sorted(saved - set(added)))
@@ -789,14 +802,15 @@ def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:
     return None
 
 
-# Kept beside the default before each account had a directory of its own. One
-# already in its directory is newer, and stays.
 def _move_in(beside: Path, own: Path) -> None:
     """Move a login kept at ``beside`` to ``own``, in a private directory."""
+    if own.exists():
+        logger.warning("%s was not moved: %s already holds a login", beside, own)
+        return
     own.parent.mkdir(mode=0o700, exist_ok=True)
+    # Moved by another process meanwhile.
     with suppress(FileNotFoundError):
-        if not own.exists():
-            beside.rename(own)
+        beside.rename(own)
 
 
 def _take(path: Path, stale_sec: float) -> None:

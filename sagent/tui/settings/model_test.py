@@ -147,7 +147,7 @@ def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
         (
             "model.provider",
             "NAME",
-            "the provider serving this model; one that cannot is refused",
+            "the provider serving this model, else the model in its role there",
         ),
         (
             "model.provider.account",
@@ -316,15 +316,13 @@ async def test_a_model_refused_leaves_the_model_and_account_as_they_were() -> No
 
 
 @pytest.mark.asyncio
-async def test_provider_keeps_the_model_or_is_refused() -> None:
+async def test_provider_keeps_the_model_or_takes_its_role_there() -> None:
     owner, agent, _ = _model("narrow")
     await _apply(owner, "model.provider", "vendor")
     assert agent.model.capability.model_id == "narrow-1.0"
-    owner, agent, _ = _model()
-    before = agent.model
-    with pytest.raises(UnknownModelError, match=r"Unknown model 'wide-1\.0'"):
-        await _apply(owner, "model.provider", "other")
-    assert agent.model is before
+    # ``other`` lacks ``narrow``, the vendor's default, so serves its own.
+    await _apply(owner, "model.provider", "other")
+    assert agent.model.capability.model_id == "other-1.0"
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 ::
 
     model                          [ACCOUNT@][PROVIDER/]MODEL[+TAG...]
-    model.provider                 the provider; refused unless it serves the model
+    model.provider                 the provider; the model, else the one in its role there
     model.provider.account         the login providers sign in as
     model.context                  the window, by size
     model.thinking                 effort, budget, and output at once
@@ -42,7 +42,7 @@ from sagent.model.capability import (
     literal_members,
     typed_text,
 )
-from sagent.providers.catalog import successor
+from sagent.providers.catalog import counterpart, successor
 from sagent.providers.table import ModelTags
 from sagent.providers.types import HasLogins, ModelCatalog
 from sagent.settings.exceptions import SettingError
@@ -96,7 +96,7 @@ class AgentModel:
             ),
             Setting(
                 name=("provider",),
-                help_short="the provider serving this model; one that cannot is refused",
+                help_short="the provider serving this model, else the model in its role there",
                 usage="NAME",
                 value=lambda: self.agent.model.provider.name,
                 options=lambda: tuple(self.catalog.factories),
@@ -199,9 +199,10 @@ class AgentModel:
         return self._described()
 
     async def _provider(self, name: str) -> str:
+        provider = self.catalog[name]
         await self._swap(
-            self.catalog[name].__getitem__,
-            self.agent.model.capability.model_id,
+            provider.__getitem__,
+            await counterpart(provider, self.agent.model),
         )
         return self._described()
 

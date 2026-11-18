@@ -89,8 +89,8 @@ class AnthropicCLI(HasModels, AsyncResource):
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
-      account: A named account, its login kept beside ``claude``'s; ``None``
-        uses the login ``claude`` keeps.
+      account: A named account, its login kept in ``~/.claude-<account>``,
+        where ``claude`` renews it; ``None`` uses the login ``claude`` keeps.
 
     """
 
@@ -145,7 +145,7 @@ class AnthropicCLI(HasModels, AsyncResource):
 
     @property
     def logins(self) -> Logins:
-        """Return every account kept beside ``claude``'s login."""
+        """Return every Claude account: ``claude``'s own, and each named one."""
         return self._logins
 
     @property

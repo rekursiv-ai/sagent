@@ -66,7 +66,7 @@ from sagent.tools.types import (
 if TYPE_CHECKING:
     from sagent.agent.types import Factory, Journal, Shrinker
     from sagent.model.types import Request, Response
-    from sagent.providers.types import ProviderResources
+    from sagent.providers.types import ProviderFactory, ProviderResources
 
 
 @pytest.fixture(autouse=True)
@@ -1303,6 +1303,38 @@ async def test_a_child_keeps_its_parent_s_window_and_stands_with_it(
             if isinstance(r, UncategorizedRecord) and r.kind == "model"
         ]
     assert stood == ["wide/wide-1.0+200k+nothink"]  # codespell:ignore nothink
+
+
+@pytest.mark.asyncio
+async def test_a_child_on_a_provider_without_the_model_gets_the_one_in_its_role(
+    tmp_path: Path,
+) -> None:
+    def tiered(model_id: str, family: str, *replies: Reply) -> ProviderFactory:
+        return partial(
+            ScriptedProvider,
+            models=ModelTable(
+                rows=(_capability(model_id),),
+                roles={"default": family},
+            ),
+            replies=replies,
+        )
+
+    catalog = ModelCatalog(
+        factories={
+            "anthropic": tiered("opus-5.5", "opus"),
+            "openai": tiered("sol-6.2", "sol", reply("ready")),
+        },
+    )
+    setup = _setup(tmp_path)
+    setup.team.catalog = catalog
+    setup.parent.model = catalog["anthropic"]["opus"]
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait", "label": "helper", "provider": "openai"},
+        )
+        assert setup.team["helper"].model.capability.model_id == "sol-6.2"
 
 
 @pytest.mark.asyncio

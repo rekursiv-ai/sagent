@@ -541,8 +541,28 @@ def test_an_account_kept_in_a_directory_of_its_own_sits_beside_the_default_s(
     assert logins.accounts() == ("home", "work")
 
 
+def test_a_login_kept_elsewhere_than_its_file_is_known_by_its_lock(
+    tmp_path: Path,
+) -> None:
+    """As the macOS Keychain keeps it: only the lock its save took is a file."""
+    logins = Logins(tmp_path / ".tool" / "auth.json", own_directory=True)
+    (tmp_path / ".tool-work").mkdir()
+    (tmp_path / ".tool-work" / "auth.lock").touch()
+    assert logins.accounts() == ("work",)
+
+
+def test_listing_the_accounts_moves_nothing(tmp_path: Path) -> None:
+    beside = Logins(tmp_path / ".tool" / "auth.json")
+    own = Logins(beside.default, own_directory=True)
+    _save(beside, "default", "work")
+    assert own.accounts() == ()
+    assert own.order() == ("default",)
+    assert beside.path("work").exists()
+
+
 def test_a_login_kept_beside_the_default_moves_into_a_directory_of_its_own(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     beside = Logins(tmp_path / ".tool" / "auth.json")
     own = Logins(beside.default, own_directory=True)
@@ -551,16 +571,28 @@ def test_a_login_kept_beside_the_default_moves_into_a_directory_of_its_own(
     beside.path("home").write_text("old home")
     _save(own, "home")
     own.path("home").write_text("new home")
+    with caplog.at_level(logging.WARNING, logger=login.__name__):
+        own.move_in()
     assert own.accounts() == ("home", "work")
     assert own.path("work").read_text() == "work"
     assert not beside.path("work").exists()
     assert own.path("work").parent.stat().st_mode & 0o777 == 0o700
-    # One already in its directory is newer; the one beside stays where it is.
+    # Each holds a login; neither is the user's to lose, so the one beside is named.
     assert own.path("home").read_text() == "new home"
     assert beside.path("home").read_text() == "old home"
+    assert [r.getMessage() for r in caplog.records] == [
+        f"{beside.path('home')} was not moved: {own.path('home')} already holds a login",
+    ]
     # Moved by another process meanwhile, it is not moved again.
     login._move_in(beside.path("gone"), own.path("gone"))
     assert not own.path("gone").exists()
+
+
+def test_a_login_kept_in_one_file_has_nothing_to_move(tmp_path: Path) -> None:
+    beside = Logins(tmp_path / "auth.json")
+    _save(beside, "work")
+    beside.move_in()
+    assert beside.path("work").exists()
 
 
 @pytest.mark.parametrize(
