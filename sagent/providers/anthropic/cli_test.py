@@ -187,17 +187,32 @@ async def test_claude_starts_without_other_accounts_and_without_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_a_named_login_reaches_claude_as_a_token(
+async def test_claude_keeps_the_login_sagent_keeps_whatever_this_process_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/elsewhere")
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/elsewhere")
+    env = await AnthropicCLI().environment()
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in env
+
+
+@pytest.mark.asyncio
+async def test_a_named_login_is_claude_s_own_in_its_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``claude`` renews it there, so a renewal never restarts it."""
     _keep_logins_in(tmp_path, monkeypatch)
-    oauth = {"accessToken": "at-work", "expiresAt": 10**15}
-    (tmp_path / ".credentials-work.json").write_text(
-        json_dumps({"claudeAiOauth": oauth}),
-    )
-    env = await AnthropicCLI(account="work").environment()
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == oauth["accessToken"]
+    cli = AnthropicCLI(account="work")
+    path = cli.logins.path("work")
+    path.parent.mkdir()
+    path.write_text(json_dumps({"claudeAiOauth": {"accessToken": "at-1"}}))
+    env = await cli.environment()
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-work")
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    path.write_text(json_dumps({"claudeAiOauth": {"accessToken": "at-2"}}))
+    assert await cli.environment() == env
 
 
 def test_its_accounts_are_the_logins_saved_beside_claude_s(
@@ -205,17 +220,18 @@ def test_its_accounts_are_the_logins_saved_beside_claude_s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _keep_logins_in(tmp_path, monkeypatch)
-    for name in (".credentials.json", ".credentials-work.json"):
-        (tmp_path / name).write_text("{}")
+    for name in (".claude", ".claude-work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / ".credentials.json").write_text("{}")
     assert AnthropicCLI().logins.accounts() == ("work",)
 
 
-def _keep_logins_in(folder: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``claude``'s default login, and so every account's, live in ``folder``."""
+def _keep_logins_in(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``claude``'s default login, and so every account's, live in ``home``."""
     monkeypatch.setattr(
         login.ClaudeLogin,
         "default_path",
-        staticmethod(lambda: folder / ".credentials.json"),
+        staticmethod(lambda: home / ".claude" / ".credentials.json"),
     )
 
 
@@ -1013,7 +1029,10 @@ async def test_login_signs_claude_in_to_the_named_account(
         cli = AnthropicCLI(resources=resources, account="work")
         await cli.login()
         env = await cli.environment()
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == grant["access_token"]
+    saved = (tmp_path / ".claude-work" / ".credentials.json").read_text()
+    oauth = json_loads(saved, dict[str, dict[str, object]])["claudeAiOauth"]
+    assert oauth["accessToken"] == grant["access_token"]
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-work")
 
 
 @pytest.mark.asyncio

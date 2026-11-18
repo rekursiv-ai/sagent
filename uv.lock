@@ -600,7 +600,7 @@ wheels = [
 [[package]]
 name = "codedoctor"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#3a32db35af11045e08abdd22ba294b87ee390588" }
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#7adb3bf443533965c51f7fb7b15ee6de3018408c" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rignore" },
@@ -3298,7 +3298,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.18"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#9bca9cb5f2a34e103ea73002fddb60329e057849" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#2ca24df2aae847c857e6d0a78f406281dbde8b00" }
 
 [[package]]
 name = "requests"
@@ -4641,7 +4641,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.18"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#d17384097a82abbe61d4e388cb081d99a62d09fe" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#054b0ab0b7ca156b1ee8048200fadfa1827c5c3c" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

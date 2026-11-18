@@ -14,7 +14,7 @@ Typical usage example:
       async for event in opus.stream(request):   # The same events as the API.
           ...
 
-  work = AnthropicCLI(account="work")           # ~/.claude/.credentials-work.json
+  work = AnthropicCLI(account="work")           # ~/.claude-work/.credentials.json
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from sagent.model.exceptions import ContextOverflowError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
-from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
@@ -67,6 +66,7 @@ if TYPE_CHECKING:
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.login import Logins
     from sagent.providers.types import (
         ProviderResources,
         ToolMount,
@@ -109,7 +109,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._logins = Logins(ClaudeLogin.default_path())
+        self._logins = ClaudeLogin.logins()
         self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
 
     @property
@@ -172,7 +172,12 @@ class AnthropicCLI(HasModels, AsyncResource):
             key: value
             for key, value in os.environ.items()
             if not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
-            and key != "AWS_BEARER_TOKEN_BEDROCK"
+            and key
+            not in {
+                "AWS_BEARER_TOKEN_BEDROCK",
+                "CLAUDE_CONFIG_DIR",
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            }
         }
         env |= {
             "DISABLE_TELEMETRY": "1",
@@ -184,9 +189,10 @@ class AnthropicCLI(HasModels, AsyncResource):
             # A held call waits for the caller's tool, which may run for hours.
             "MCP_TOOL_TIMEOUT": str(24 * 3600 * 1000),
         }
-        # ``claude`` keeps one login of its own; a named one arrives as a token.
+        # There ``claude`` renews the login itself, under the lock sagent takes:
+        # handed a token, it could only be restarted with the next one.
         if self._account is not None:
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = await self._login.token()
+            env["CLAUDE_CONFIG_DIR"] = str(self._logins.path(self._account).parent)
         return env
 
 

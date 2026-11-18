@@ -756,7 +756,7 @@ async def test_the_keychain_reads_only_claudes_oauth_entry(
         ),
     )
     monkeypatch.setattr(login, "_security", security)
-    keychain = login._Keychain()
+    keychain = login._Keychain(ClaudeLogin.default_path())
     assert keychain.lock == tmp_path / ".claude" / ".credentials.lock"
     assert keychain.config_dir == tmp_path / ".claude"
     assert await keychain.read() == oauth
@@ -783,14 +783,16 @@ def test_the_default_file_named_on_macos_is_the_keychain_entry(
     resources = Mock(spec=SharedResources)
     for path in (None, ClaudeLogin.default_path()):
         assert ClaudeLogin(path, resources=resources)._store is keychain
-    assert factory.call_args_list == [call(), call()]
+    assert factory.call_args_list == [call(ClaudeLogin.default_path())] * 2
 
 
 @pytest.mark.asyncio
 async def test_a_keychain_write_keeps_other_logins_and_secrets_off_argv(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Any local user can read a process's arguments while it runs."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(getpass, "getuser", lambda: "user")
     mcp = {"github|1": {"accessToken": "gh"}}
     security = AsyncMock(
@@ -800,7 +802,7 @@ async def test_a_keychain_write_keeps_other_logins_and_secrets_off_argv(
     )
     monkeypatch.setattr(login, "_security", security)
     oauth = {"accessToken": "at-2", "refreshToken": "rt-at-2"}
-    await login._Keychain().write(oauth)
+    await login._Keychain(ClaudeLogin.default_path()).write(oauth)
     secret = json_dumps({"claudeAiOauth": oauth, "mcpOAuth": mcp}).encode().hex()
     assert security.await_args_list == [
         call(
@@ -823,11 +825,12 @@ async def test_a_keychain_write_keeps_other_logins_and_secrets_off_argv(
 
 @pytest.mark.asyncio
 async def test_an_empty_keychain_holds_no_login(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     security = AsyncMock(return_value="")
     monkeypatch.setattr(login, "_security", security)
-    assert await login._Keychain().read() == {}
+    assert await login._Keychain(tmp_path / ".credentials.json").read() == {}
     security.assert_awaited_once()
 
 
@@ -882,21 +885,45 @@ async def test_security_owns_command_streams_and_child_cleanup(
     communicate.assert_awaited_once_with(b"private")
 
 
-@pytest.mark.asyncio
-async def test_a_named_login_on_a_mac_is_its_file(
+def test_a_named_login_kept_beside_claude_s_moves_into_a_directory_of_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``claude`` keeps a second login where ``CLAUDE_CONFIG_DIR`` says, and renews it there."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    _store(claude / ".credentials-work.json", access="at-work", expires_in_sec=60.0)
+    logins = ClaudeLogin.logins()
+    assert logins.default == claude / ".credentials.json"
+    assert logins.accounts() == ("work",)
+    assert logins.path("work") == tmp_path / ".claude-work" / ".credentials.json"
+    assert _oauth(logins.path("work"))["accessToken"] == "at-work"
+
+
+@pytest.mark.asyncio
+async def test_a_named_login_on_a_mac_is_the_keychain_entry_claude_reads_for_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``claude`` names the entry for its config directory; until written, it is the file."""
     monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Darwin"))
-    keychain = Mock(spec=login._Keychain)
-    monkeypatch.setattr(login, "_Keychain", keychain)
-    path = tmp_path / ".credentials-work.json"
-    _store(path, access="at-work", expires_in_sec=3600.0)
-    async with _Served(_Server()) as shared:
-        claude_login = ClaudeLogin(path, resources=shared)
-        keychain.assert_not_called()
-        assert await claude_login.token() == "at-work"
+    monkeypatch.setattr(getpass, "getuser", lambda: "user")
+    path = tmp_path / ".claude-work" / ".credentials.json"
+    path.parent.mkdir()
+    _store(path, access="at-1", expires_in_sec=0.0)
+    kept = _oauth(path)["refreshToken"]
+    digest = hashlib.sha256(str(path.parent).encode()).hexdigest()[:8]
+    service = f"Claude Code-credentials-{digest}"
+    keychain = _FakeKeychain()
+    monkeypatch.setattr(login, "_security", keychain)
+    server = _Server(replies={_GRANT_URL: [_granted("at-2")]})
+    async with _Served(server) as shared:
+        assert await ClaudeLogin(path, resources=shared).token() == "at-2"
+    assert _body(server.requests[0])["refresh_token"] == kept
+    stored = json_loads(keychain.entries[service], dict[str, dict[str, object]])
+    assert stored["claudeAiOauth"]["accessToken"] == "at-2"
+    assert list(keychain.entries) == [service]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -911,6 +938,24 @@ class _Server:
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         return self.replies[str(request.url)].pop(0)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeKeychain:
+    """Stands in for ``security``: finds and adds generic passwords by service."""
+
+    entries: dict[str, str] = field(default_factory=dict[str, str])
+
+    async def __call__(self, *args: str, commands: str = "") -> str:
+        if args and args[0] == "find-generic-password":
+            return self.entries.get(args[args.index("-s") + 1], "")
+        added = re.fullmatch(
+            r'add-generic-password -U -a "\w+" -s "(.+)" -X (\w+)\n',
+            commands,
+        )
+        assert added is not None
+        self.entries[added[1]] = bytes.fromhex(added[2]).decode()
+        return ""
 
 
 @dataclass(slots=True, kw_only=True)

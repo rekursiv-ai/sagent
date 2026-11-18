@@ -232,6 +232,8 @@ models:
 
 - model_id: sol-6.2
   wire_model_id: gpt-6.2-sol
+  # New ChatGPT Work chats start GPT-6.2 Sol at Light (``low``).
+  thinking_effort_default: low
   profile: reasoning_only
   knowledge_cutoff: June 1, 2026
   prices:
