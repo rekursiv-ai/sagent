@@ -656,6 +656,31 @@ def test_home_is_the_isolated_roots_too(
     assert home.stat().st_mode & 0o777 == 0o700
 
 
+def test_toolchain_homes_stay_the_operators(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """``cargo`` is a rustup proxy; under a tmp ``~`` it finds no toolchain."""
+    for variable in ("RUSTUP_HOME", "CARGO_HOME"):
+        toolchain = Path(os.environ[variable])
+        assert toolchain.is_absolute()
+        assert not toolchain.is_relative_to(tmp_path_factory.getbasetemp())
+
+
+def test_an_operators_own_toolchain_home_is_kept(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RUSTUP_HOME", str(tmp_path / "rustup"))
+    monkeypatch.delenv("CARGO_HOME")
+
+    _allocate(request, tmp_path_factory, monkeypatch)
+
+    assert os.environ["RUSTUP_HOME"] == str(tmp_path / "rustup")
+    assert Path(os.environ["CARGO_HOME"]).name == ".cargo"
+
+
 def test_configure_declares_the_exported_opt_out_marker(
     pytestconfig: pytest.Config,
 ) -> None:
