@@ -5,7 +5,7 @@
 Typical usage example:
 
   login = ClaudeLogin(resources=shared)        # ~/.claude, or the macOS Keychain.
-  work = ClaudeLogin(Path("~/.claude/.credentials-work.json"), resources=shared)
+  work = ClaudeLogin(ClaudeLogin.logins().path("work"), resources=shared)
 
   await login.sign_in()    # In the browser; over ssh, paste the code it shows.
   await login.token()      # An access token, renewed before it expires.
@@ -33,6 +33,7 @@ from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
+    Logins,
     dir_lock,
     file_lock,
     login_flow,
@@ -75,11 +76,11 @@ class ClaudeLogin:
         *,
         resources: ProviderResources,
     ) -> None:
-        default = path is None or path == self.default_path()
-        if default and platform.system() == "Darwin":
-            self._store: _File | _Keychain = _Keychain()
+        path = self.default_path() if path is None else path.expanduser()
+        if platform.system() == "Darwin":
+            self._store: _File | _Keychain = _Keychain(path)
         else:
-            self._store = _File(path or self.default_path())
+            self._store = _File(path)
         self._resources = resources
         self._adopt({})
         self._lock = asyncio.Lock()
@@ -88,6 +89,19 @@ class ClaudeLogin:
     def default_path(cls) -> Path:
         """Return the file ``claude`` keeps its login in, off macOS."""
         return Path("~/.claude/.credentials.json").expanduser()
+
+    @classmethod
+    def logins(cls) -> Logins:
+        """Return every account, each in a config directory of its own.
+
+        ``claude`` renews a login only where ``CLAUDE_CONFIG_DIR`` points, so a
+        named one lives in ``~/.claude-<account>``.
+
+        Returns:
+          logins: Every account, the default's file being ``default_path``.
+
+        """
+        return Logins(cls.default_path(), own_directory=True)
 
     async def token(self) -> str:
         """Return an access token good for at least five more minutes.
@@ -272,17 +286,28 @@ class _File:
 
 
 class _Keychain:
-    """Credentials in the macOS Keychain entry ``claude`` keeps them in."""
+    """Credentials in the macOS Keychain entry ``claude`` keeps for ``path``'s directory.
 
-    def __init__(self) -> None:
-        self.config_dir = Path("~/.claude").expanduser()
+    ``claude`` names the entry for its config directory, unless that is
+    ``~/.claude``. An entry not yet written is read from ``path``, where
+    ``claude`` keeps a login the Keychain refused, and an older sagent kept a
+    named one.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.config_dir = path.parent
         self.lock = self.config_dir / ".credentials.lock"
+        self.service = "Claude Code-credentials"
+        if self.config_dir != ClaudeLogin.default_path().parent:
+            digest = hashlib.sha256(str(self.config_dir).encode()).hexdigest()
+            self.service += f"-{digest[:8]}"
 
     async def read(self) -> dict[str, object]:
-        return _claude_login(await _security(*_find_entry(), "-w"))
+        return _claude_login(await self._text())
 
     async def write(self, stored: Mapping[str, object]) -> None:
-        document = _document(await _security(*_find_entry(), "-w"))
+        document = _document(await self._text())
         secret = json_dumps(document | {"claudeAiOauth": stored}).encode().hex()
         # Read from stdin, not given as an argument: any local user can read a
         # running process's arguments, and this one carries the refresh token.
@@ -290,10 +315,15 @@ class _Keychain:
         await _security(
             "-i",
             commands=(
-                f'add-generic-password -U -a "{user}" -s "Claude Code-credentials"'
-                f" -X {secret}\n"
+                f'add-generic-password -U -a "{user}" -s "{self.service}" -X {secret}\n'
             ),
         )
+
+    async def _text(self) -> str:
+        return await _security(
+            *_find_entry(self.service),
+            "-w",
+        ) or await asyncio.to_thread(_read_text, self.path)
 
 
 # ``claude`` takes neither sagent's lock nor a file lock: as of 2.1.259 it makes
@@ -405,15 +435,9 @@ def _read_text(path: Path) -> str:
     return path.read_text() if path.exists() else ""
 
 
-def _find_entry() -> tuple[str, ...]:
-    """Return the arguments that find the Keychain entry ``claude`` keeps its login in."""
-    return (
-        "find-generic-password",
-        "-a",
-        getpass.getuser(),
-        "-s",
-        "Claude Code-credentials",
-    )
+def _find_entry(service: str) -> tuple[str, ...]:
+    """Return the arguments that find the Keychain entry ``claude`` keeps a login in."""
+    return ("find-generic-password", "-a", getpass.getuser(), "-s", service)
 
 
 async def _security(*args: str, commands: str = "") -> str:

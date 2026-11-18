@@ -526,6 +526,43 @@ def test_an_account_s_file_sits_beside_the_default_one() -> None:
     assert logins.path(None) == logins.path("default") == Path("/logins/auth.json")
 
 
+def test_an_account_kept_in_a_directory_of_its_own_sits_beside_the_default_s(
+    tmp_path: Path,
+) -> None:
+    """As ``CLAUDE_CONFIG_DIR=~/.claude-work`` keeps a second ``claude`` login."""
+    logins = Logins(tmp_path / ".tool" / "auth.json", own_directory=True)
+    assert logins.path("work") == tmp_path / ".tool-work" / "auth.json"
+    assert logins.path(None) == tmp_path / ".tool" / "auth.json"
+    assert logins.accounts() == ()
+    _save(logins, "default", "work", "home")
+    (tmp_path / ".tool-empty").mkdir()
+    (tmp_path / ".tool-x.y").mkdir()
+    (tmp_path / ".tool-x.y" / "auth.json").write_text("{}")
+    assert logins.accounts() == ("home", "work")
+
+
+def test_a_login_kept_beside_the_default_moves_into_a_directory_of_its_own(
+    tmp_path: Path,
+) -> None:
+    beside = Logins(tmp_path / ".tool" / "auth.json")
+    own = Logins(beside.default, own_directory=True)
+    _save(beside, "default")
+    beside.path("work").write_text("work")
+    beside.path("home").write_text("old home")
+    _save(own, "home")
+    own.path("home").write_text("new home")
+    assert own.accounts() == ("home", "work")
+    assert own.path("work").read_text() == "work"
+    assert not beside.path("work").exists()
+    assert own.path("work").parent.stat().st_mode & 0o777 == 0o700
+    # One already in its directory is newer; the one beside stays where it is.
+    assert own.path("home").read_text() == "new home"
+    assert beside.path("home").read_text() == "old home"
+    # Moved by another process meanwhile, it is not moved again.
+    login._move_in(beside.path("gone"), own.path("gone"))
+    assert not own.path("gone").exists()
+
+
 @pytest.mark.parametrize(
     ("environ", "platform", "wanted"),
     [
@@ -609,8 +646,8 @@ def test_an_account_of_letters_digits_and_separators_is_a_name(account: str) -> 
 
 def _save(logins: Logins, *accounts: str) -> None:
     """Write a login file for each of ``accounts``, ``default`` included."""
-    logins.default.parent.mkdir(parents=True, exist_ok=True)
     for account in accounts:
+        logins.path(account).parent.mkdir(parents=True, exist_ok=True)
         logins.path(account).write_text("{}")
 
 

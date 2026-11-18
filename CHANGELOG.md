@@ -20,6 +20,9 @@ All notable sagent changes are documented here. This project follows
 - `anthropic-cli` passes `claude` a thinking budget (`none`, `auto`, and `fixed`
   where the model takes one) and the cache lifetime (5 minutes or 1 hour, 1 hour
   by default), as the API is asked them.
+- Models: GPT-6.2 Astra (`astra-6.2`, $8 / $40 per MTok) and GPT-6.2 Sol
+  (`sol-6.2`, $2 / $10), with fast and ultrafast tiers. `best` and `default`
+  on `openai` and `openai-sub` now resolve to them.
 - With `Team.relay` set, AgentSend's reminder says how to name another session's
   agent (`LABEL#SESSION`), and an unknown label's error asks "Did you mean
   'lead#N', the agent of session N?", so an agent learns it can reach one; with
@@ -63,6 +66,19 @@ All notable sagent changes are documented here. This project follows
 
 ### Fixed
 
+- A Claude login is renewed under the lock `claude` itself takes
+  (`.oauth_refresh.lock` in its config directory), so sagent and `claude` never
+  both spend one refresh token and sign the login out.
+- A named Claude account lives in `~/.claude-<account>`, the directory
+  `CLAUDE_CONFIG_DIR` gives `claude`, which now renews it there itself: a
+  renewal no longer restarts `claude` mid-conversation. A login kept beside the
+  default one, as `.credentials-<account>.json`, moves there when the accounts
+  are next listed. On macOS a named login is the Keychain entry `claude` keeps for
+  that directory.
+- `anthropic-cli` drops an inherited `CLAUDE_CONFIG_DIR`, so `claude` keeps the
+  login sagent renews.
+- `gpt-6.1-terra` reasons over every turn and bills images by the patch, as
+  the other GPT-6 models do.
 - A message a link or relay refused reads as the team's note, "Your message to X
   was not delivered: why", never as a message from X, which never saw it; and
   AgentSend to an agent on another machine or session says it was sent, not

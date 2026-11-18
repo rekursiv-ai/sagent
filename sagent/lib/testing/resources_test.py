@@ -646,6 +646,16 @@ def test_isolated_base_directories_exist() -> None:
         assert helper().stat().st_mode & 0o777 == 0o700
 
 
+def test_home_is_the_isolated_roots_too(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A vendor's fixed path under ``~`` (``~/.claude``) is not the operator's either."""
+    home = Path("~").expanduser()
+    assert home.is_relative_to(tmp_path_factory.getbasetemp())
+    assert home.is_dir()
+    assert home.stat().st_mode & 0o777 == 0o700
+
+
 def test_configure_declares_the_exported_opt_out_marker(
     pytestconfig: pytest.Config,
 ) -> None:
@@ -777,6 +787,7 @@ def test_real_user_dirs_marker_restores_the_operators_directories(
         assert not resolved.is_relative_to(tmp_path_factory.getbasetemp()), (
             f"{helper.__name__} still resolved into a pytest tmp root"
         )
+    assert not Path("~").expanduser().is_relative_to(tmp_path_factory.getbasetemp())
 
 
 def test_opting_out_allocates_no_root_and_repoints_nothing(

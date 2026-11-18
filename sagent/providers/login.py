@@ -5,7 +5,8 @@ one of them signed out. Each holds ``file_lock`` across the whole read, renew
 and write, and the one that waited reads the token the other just wrote.
 
 A named account keeps its login beside the default one, ``-<account>`` added
-to its stem. ``Logins`` owns every account kept beside one default file: their
+to its stem, or to its directory's name where each has a directory of its own
+(``~/.claude-work``). ``Logins`` owns every account kept beside one default file: their
 files, the order they were added in, the order the user prefers, and which
 have spent a quota window. What is not a file, it keeps in one ledger every
 process shares.
@@ -135,14 +136,19 @@ class Logins:
 
     Args:
       default: The default login's file; a named one sits beside it.
+      own_directory: Keep a named login in a directory of its own beside the
+        default's, under the same name, as ``claude`` keeps a second login in
+        ``~/.claude-work``. One kept beside the default moves into its
+        directory when the accounts are next listed.
 
     """
 
     signed_out_sec: ClassVar[float] = 86_400.0
     """How long a login found signed out is passed over, unless signed in again."""
 
-    def __init__(self, default: Path) -> None:
+    def __init__(self, default: Path, *, own_directory: bool = False) -> None:
         self.default = default
+        self.own_directory = own_directory
 
     def path(self, account: str | None) -> Path:
         """Return the file ``account`` keeps its login in.
@@ -152,7 +158,7 @@ class Logins:
 
         Returns:
           path: ``default`` for the default; else it, ``-<account>`` added to
-            its stem.
+            its stem, or to its directory's name when each has its own.
 
         Raises:
           ValueError: ``account`` is no name.
@@ -161,6 +167,9 @@ class Logins:
         if account is None or account == "default":
             return self.default
         check_account(account)
+        if self.own_directory:
+            folder = self.default.parent
+            return folder.with_name(f"{folder.name}-{account}") / self.default.name
         stem, suffix = self.default.stem, self.default.suffix
         return self.default.with_name(f"{stem}-{account}{suffix}")
 
@@ -220,10 +229,23 @@ class Logins:
     def _accounts(self, family: _Family) -> tuple[str, ...]:
         """Return ``accounts``, as ``family`` orders those added."""
         stem, suffix = self.default.stem, self.default.suffix
-        names = (
-            found.name.removeprefix(f"{stem}-").removesuffix(suffix)
+        beside = {
+            name: found
             for found in self.default.parent.glob(f"{stem}-*{suffix}")
-        )
+            if _ACCOUNT.fullmatch(
+                name := found.name.removeprefix(f"{stem}-").removesuffix(suffix),
+            )
+        }
+        if self.own_directory:
+            for name, found in beside.items():
+                _move_in(found, self.path(name))
+            folder = self.default.parent
+            names = (
+                found.parent.name.removeprefix(f"{folder.name}-")
+                for found in folder.parent.glob(f"{folder.name}-*/{self.default.name}")
+            )
+        else:
+            names = iter(beside)
         saved = {n for n in names if _ACCOUNT.fullmatch(n)}
         added = [a for a in family.added if a in saved]
         return (*added, *sorted(saved - set(added)))
@@ -765,6 +787,16 @@ def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:
     if url.path == path and params.get("state") == [state] and received:
         return received
     return None
+
+
+# Kept beside the default before each account had a directory of its own. One
+# already in its directory is newer, and stays.
+def _move_in(beside: Path, own: Path) -> None:
+    """Move a login kept at ``beside`` to ``own``, in a private directory."""
+    own.parent.mkdir(mode=0o700, exist_ok=True)
+    with suppress(FileNotFoundError):
+        if not own.exists():
+            beside.rename(own)
 
 
 def _take(path: Path, stale_sec: float) -> None:

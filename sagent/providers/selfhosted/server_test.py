@@ -255,11 +255,7 @@ def test_a_name_that_is_no_repo_id_or_path_is_unknown(name: str) -> None:
         ("Org/M+no-compile+mps", server._Spec(path="Org/M", device="mps")),
         (
             "~/w+cpu+float32",
-            server._Spec(
-                path=str(Path("~/w").expanduser()),
-                device="cpu",
-                dtype="float32",
-            ),
+            server._Spec(path="~/w", device="cpu", dtype="float32"),
         ),
     ],
 )
@@ -267,7 +263,9 @@ def test_a_name_carries_its_load_options_in_any_order(
     name: str,
     spec: server._Spec,
 ) -> None:
-    assert server._spec(name) == (spec, "fullcontext")
+    # Expanded here, not at collection: each test has a home of its own.
+    expanded = replace(spec, path=str(Path(spec.path).expanduser()))
+    assert server._spec(name) == (expanded, "fullcontext")
 
 
 @pytest.mark.parametrize(
