@@ -65,6 +65,7 @@ from sagent.model.scripted import (
     call,
     reply,
 )
+from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
@@ -2241,6 +2242,23 @@ async def test_an_agent_opened_by_default_starts_and_links_this_machine_s_daemon
         assert [link.where for link in o.links] == ["local"]
         assert [e.where for e in o.remote.endpoints().values()] == ["local"]
     del script
+
+
+@pytest.mark.asyncio
+async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    """``claude`` renews a named login only in its own ``CLAUDE_CONFIG_DIR``."""
+    beside = ClaudeLogin.default_path().with_name(".credentials-work.json")
+    beside.parent.mkdir(parents=True)
+    beside.write_text("{}")
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(flags, given=(), interactive=False, use_daemon=False):
+        pass
+    assert not beside.exists()
+    assert ClaudeLogin.logins().path("work").read_text() == "{}"
+    del script, offline_daemon
 
 
 @pytest.mark.asyncio

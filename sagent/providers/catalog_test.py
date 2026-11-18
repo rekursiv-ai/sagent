@@ -22,7 +22,7 @@ from sagent.model.capability import (
     model_setting_names,
     typed_text,
 )
-from sagent.model.cost import PriceCatalog, TokenCount
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.model.scripted import ScriptedModel, ScriptedProvider, reply
 from sagent.model.types import Request
@@ -34,6 +34,7 @@ from sagent.providers.catalog import (
     CachedModel,
     ModelCatalog,
     ModelMemory,
+    counterpart,
     default_provider,
     listings,
     recall,
@@ -686,6 +687,124 @@ def test_a_provider_named_that_refuses_is_the_answer(name: str) -> None:
     )
     with pytest.raises(UnknownModelError, match="selfhosted/"):
         catalog.model(name, current="anthropic")
+
+
+# A price of 0 is none published.
+def _tiered(models: dict[str, float], *, roles: dict[str, str]) -> ScriptedProvider:
+    """Serve ``models``, newest first in each family, each at its reply price per MTok."""
+    rows = tuple(
+        ModelCapability(
+            model_id=model_id,
+            limits=ModelLimits(max_request_tokens=200_000),
+            prices=(
+                prices := PriceCatalog(
+                    prices=(
+                        {PriceCondition(): TokenPrice(response=response)}
+                        if response
+                        else {}
+                    ),
+                    window=200_000,
+                )
+            ),
+            default=ModelSettings(context_size=prices["fullcontext"]),
+        )
+        for model_id, response in models.items()
+    )
+    return ScriptedProvider(models=ModelTable(rows=rows, roles=roles))
+
+
+def _anthropic() -> ScriptedProvider:
+    return _tiered(
+        {
+            "fable-5.2": 40.0,
+            "mythos-5.2": 50.0,
+            "opus-5.5": 25.0,
+            "opus-4.6": 25.0,
+            "sonnet-5.5": 15.0,
+            "haiku-4.5": 5.0,
+            "spark-1.0": 0.4,
+            "relic-1.0": 0.0,
+        },
+        roles={
+            "best": "fable",
+            "default": "opus",
+            "everyday": "sonnet",
+            "utility": "haiku",
+        },
+    )
+
+
+def _openai() -> ScriptedProvider:
+    return _tiered(
+        {"astra-6.2": 40.0, "sol-6.2": 10.0, "sonnet-5.5": 15.0, "luna-6.0": 0.5},
+        roles={"best": "astra", "default": "sol", "utility": "luna"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "asked"),
+    [
+        # Served there too, it is kept.
+        ("sonnet-5.5", "sonnet-5.5"),
+        # Not served: the role it fills here, by name or by family.
+        ("opus-5.5", "default"),
+        ("opus-4.6", "default"),
+        ("fable-5.2", "best"),
+        # In no role: the role whose model here costs nearest it.
+        ("mythos-5.2", "best"),
+        ("spark-1.0", "utility"),
+        # Priced nowhere: the default.
+        ("relic-1.0", "default"),
+    ],
+)
+async def test_a_provider_that_lacks_the_model_is_asked_for_the_same_role(
+    current: str,
+    asked: str,
+) -> None:
+    """``opus`` is Anthropic's default, so on OpenAI it is OpenAI's: ``sol``."""
+    assert await counterpart(_openai(), _anthropic()[current]) == asked
+
+
+@pytest.mark.asyncio
+async def test_a_role_the_other_lacks_is_its_nearest_tier() -> None:
+    """A ``default`` fills ``best`` and ``everyday`` too, but never ``utility``."""
+    defaulted = _tiered({"sol-6.2": 10.0}, roles={"default": "sol"})
+    assert await counterpart(defaulted, _anthropic()["haiku"]) == "everyday"
+    lacking = _tiered({"luna-6.0": 0.5}, roles={"utility": "luna"})
+    assert await counterpart(lacking, _anthropic()["opus"]) == "utility"
+
+
+@pytest.mark.asyncio
+async def test_a_model_in_every_role_counts_as_the_default() -> None:
+    """Else one model a provider names for each would always ask for the best."""
+    zai = _tiered(
+        {"glm-5.3": 3.0},
+        roles=dict.fromkeys(("best", "default", "everyday", "utility"), "glm"),
+    )
+    assert await counterpart(_openai(), zai["glm"]) == "default"
+
+
+@pytest.mark.asyncio
+async def test_a_role_unpriced_there_is_never_the_nearest_price() -> None:
+    free = _tiered(
+        {"astra-6.2": 40.0, "free-1.0": 0.0},
+        roles={"best": "astra", "utility": "free"},
+    )
+    assert await counterpart(free, _anthropic()["mythos-5.2"]) == "best"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_names_no_role_is_refused() -> None:
+    unroled = _tiered({"sol-6.2": 10.0}, roles={})
+    with pytest.raises(UnknownModelError, match="names no model for any role"):
+        await counterpart(unroled, _anthropic()["opus"])
+
+
+@pytest.mark.asyncio
+async def test_a_model_from_a_provider_of_no_roles_takes_the_nearest_price() -> None:
+    unroled = _tiered({"opus-5.5": 25.0}, roles={})
+    assert await counterpart(_openai(), unroled["opus-5.5"]) == "best"
 
 
 def _windowed() -> ScriptedProvider:

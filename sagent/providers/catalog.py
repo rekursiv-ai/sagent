@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Protocol, Self, override, runtime_checkable
 
+import math
 import re
 
 from sagent.model.capability import (
@@ -55,7 +57,7 @@ from sagent.providers.perplexity.api import Perplexity
 from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
-from sagent.providers.table import ModelTags
+from sagent.providers.table import ModelTags, family
 from sagent.providers.together.api import Together
 from sagent.providers.vertex.api import Vertex
 from sagent.providers.xai.api import XAI
@@ -63,7 +65,7 @@ from sagent.providers.zai.api import ZAI
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Sequence
 
     from sagent.providers.types import (
         Model,
@@ -80,6 +82,7 @@ __all__ = [
     "ModelMemory",
     "PerAccount",
     "cache_key",
+    "counterpart",
     "default_provider",
     "listings",
     "recall",
@@ -481,6 +484,70 @@ def cache_key(model: Model) -> str:
     return f"{model.provider.name}/{model.capability.model_id}"
 
 
+async def counterpart(
+    provider: Provider,
+    current: Model,
+    *,
+    ladder: Sequence[str] = ("utility", "everyday", "default", "best"),
+) -> str:
+    """Return what to ask ``provider`` for in place of ``current``'s model.
+
+    The model itself, where ``provider`` serves it. Else the role it fills
+    where it is, as itself or as its family's newest (``opus-4.6`` fills
+    Anthropic's ``default``, so OpenAI's ``default``, ``sol``, takes its
+    place); one filling several counts as the one nearest ``default``. A model
+    in no role takes the role whose model ``provider`` prices nearest it, and
+    one priced nowhere, ``default``. A role ``provider`` lacks is its nearest
+    one on ``ladder``, the cheaper on a tie.
+
+    Args:
+      provider: The provider switched to.
+      current: The model switched from.
+      ladder: The roles, cheapest first.
+
+    Returns:
+      name: A model id or a role, for ``provider[name]``.
+
+    Raises:
+      UnknownModelError: ``provider`` neither serves the model nor names one
+        for any role.
+
+    """
+    model_id = current.capability.model_id
+    # Asked, not looked for in its list: SelfHosted lists one model, serves any.
+    if await _filled(provider, (model_id,)):
+        return model_id
+    offered = await _filled(provider, ladder)
+    if not offered:
+        raise UnknownModelError(
+            f"{provider.name} names no model for any role, nor serves"
+            f" {model_id!r}; name one of its models.",
+        )
+    middle = ladder.index("default")
+    kin = family(model_id)
+    held = [
+        ladder.index(role)
+        for role, row in (await _filled(current.provider, ladder)).items()
+        if row.model_id == model_id or (kin is not None and family(row.model_id) == kin)
+    ]
+    priced = {
+        ladder.index(role): price
+        for role, row in offered.items()
+        if (price := _reply_price(row)) > 0.0
+    }
+    price = _reply_price(current.capability)
+    if held:
+        tier = min(held, key=lambda at: (abs(at - middle), at))
+    elif price > 0.0 and priced:
+        tier = min(priced, key=lambda at: abs(math.log(priced[at] / price)))
+    else:
+        tier = middle
+    return min(
+        offered,
+        key=lambda role: (abs(ladder.index(role) - tier), ladder.index(role)),
+    )
+
+
 async def successor(
     build: Callable[[str], Model],
     name: str,
@@ -662,3 +729,28 @@ def _abbreviates(short: str, name: str) -> bool:
     """Return whether ``short`` is ``name``'s letters in order, starting at its first."""
     letters = iter(name)
     return bool(short) and short[0] == name[:1] and all(c in letters for c in short)
+
+
+async def _filled(
+    provider: Provider,
+    names: Sequence[str],
+) -> dict[str, ModelCapability]:
+    """Return the model ``provider`` serves for each of ``names`` it serves one for."""
+    filled: dict[str, ModelCapability] = {}
+    for name in names:
+        try:
+            model = provider[name]
+        except UnknownModelError:
+            continue
+        filled[name] = model.capability
+        await model.aclose()
+    return filled
+
+
+def _reply_price(capability: ModelCapability) -> float:
+    """Return what a reply costs per unit at the standard tier today; 0 when unpriced."""
+    today = datetime.now(UTC).date()
+    try:
+        return capability.prices["auto", "smallcontext", today].response
+    except KeyError:
+        return 0.0

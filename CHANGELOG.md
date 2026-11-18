@@ -66,15 +66,20 @@ All notable sagent changes are documented here. This project follows
 
 ### Fixed
 
+- Switching provider (`/provider`, AgentSelf's or AgentSpawn's `provider`) to
+  one that lacks the model takes the model in its role there, not a refusal:
+  `anthropic/opus` to `openai` is `sol`, `haiku` is `luna`, `fable` is `astra`.
+  A model in several roles counts as the default; one in none takes the role
+  priced nearest it; a role the provider lacks is its nearest one.
 - A Claude login is renewed under the lock `claude` itself takes
   (`.oauth_refresh.lock` in its config directory), so sagent and `claude` never
   both spend one refresh token and sign the login out.
 - A named Claude account lives in `~/.claude-<account>`, the directory
   `CLAUDE_CONFIG_DIR` gives `claude`, which now renews it there itself: a
   renewal no longer restarts `claude` mid-conversation. A login kept beside the
-  default one, as `.credentials-<account>.json`, moves there when the accounts
-  are next listed. On macOS a named login is the Keychain entry `claude` keeps for
-  that directory.
+  default one, as `.credentials-<account>.json`, moves there when sagent starts.
+  On macOS a named login is the Keychain entry `claude` keeps for that
+  directory, and is listed though no credentials file holds it.
 - `anthropic-cli` drops an inherited `CLAUDE_CONFIG_DIR`, so `claude` keeps the
   login sagent renews.
 - `gpt-6.1-terra` reasons over every turn and bills images by the patch, as

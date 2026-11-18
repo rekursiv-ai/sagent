@@ -895,6 +895,7 @@ def test_a_named_login_kept_beside_claude_s_moves_into_a_directory_of_its_own(
     claude.mkdir()
     _store(claude / ".credentials-work.json", access="at-work", expires_in_sec=60.0)
     logins = ClaudeLogin.logins()
+    logins.move_in()
     assert logins.default == claude / ".credentials.json"
     assert logins.accounts() == ("work",)
     assert logins.path("work") == tmp_path / ".claude-work" / ".credentials.json"
@@ -924,6 +925,27 @@ async def test_a_named_login_on_a_mac_is_the_keychain_entry_claude_reads_for_it(
     stored = json_loads(keychain.entries[service], dict[str, dict[str, object]])
     assert stored["claudeAiOauth"]["accessToken"] == "at-2"
     assert list(keychain.entries) == [service]
+
+
+@pytest.mark.asyncio
+async def test_a_named_login_signed_in_on_a_mac_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+    authorization: AsyncMock,
+) -> None:
+    """The Keychain holds it, so no credentials file says it was saved."""
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Darwin"))
+    monkeypatch.setattr(getpass, "getuser", lambda: "user")
+    keychain = _FakeKeychain()
+    monkeypatch.setattr(login, "_security", keychain)
+    logins = ClaudeLogin.logins()
+    server = _Server(
+        replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
+    )
+    async with _Served(server) as shared:
+        await ClaudeLogin(logins.path("work"), resources=shared).sign_in()
+    authorization.assert_awaited_once()
+    assert not logins.path("work").exists()
+    assert logins.accounts() == ("work",)
 
 
 @dataclass(slots=True, kw_only=True)

@@ -43,7 +43,7 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import RESERVED, ChildSpec, Team
 from sagent.model.capability import ThinkingBudget, ThinkingEffort, ThinkingOutput
 from sagent.model.types import Request
-from sagent.providers.catalog import successor
+from sagent.providers.catalog import counterpart, successor
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe
 from sagent.session.jsonl import JsonlJournal
@@ -78,7 +78,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.providers.types import Model
+    from sagent.providers.types import Model, Provider
     from sagent.tools.types import ToolContext
 
 
@@ -693,20 +693,23 @@ class AgentSpawn:
         """Return a model of its own for the child, the parent's choices kept."""
         current = parent.model
         catalog = self.team.catalog
-        build: Callable[[str], Model]
+        chosen: Provider | None = None
         if account is not None:
-            signed_in = catalog.signed_in(
+            chosen = catalog.signed_in(
                 provider or current.provider.name,
                 account=account,
             )
-            build = signed_in.__getitem__
         elif provider is not None:
-            build = catalog[provider].__getitem__
-        else:
+            chosen = catalog[provider]
+        build: Callable[[str], Model]
+        if chosen is None:
             build = partial(catalog.model, current=current.provider.name)
+        else:
+            build = chosen.__getitem__
+            name = name or await counterpart(chosen, current)
         model = await successor(
             build,
-            name if name is not None else current.capability.model_id,
+            name or current.capability.model_id,
             current=current,
             model_cache=parent.model_cache,
         )

@@ -390,6 +390,54 @@ async def test_a_switch_signs_in_as_the_catalogs_account(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_a_provider_without_the_model_serves_the_one_in_its_role(
+    tmp_path: Path,
+) -> None:
+    catalog = ModelCatalog(
+        factories={
+            "anthropic": partial(
+                ScriptedProvider,
+                models=ModelTable(
+                    rows=(_capability("opus-5.5"),),
+                    roles={"default": "opus"},
+                ),
+            ),
+            "openai": partial(
+                ScriptedProvider,
+                models=ModelTable(
+                    rows=(_capability("sol-6.2"),),
+                    roles={"default": "sol"},
+                ),
+            ),
+        },
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["anthropic"]["opus"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(agent)
+
+    _ = await _patch(AgentSelf(team=team), tmp_path, {"provider": "openai"})
+
+    assert agent.model.provider is catalog["openai"]
+    assert agent.model.capability.model_id == "sol-6.2"
+
+
+@pytest.mark.asyncio
+async def test_switching_back_restores_what_the_model_was_left_with(
+    tmp_path: Path,
+) -> None:
+    _, agent, tool = _setup(tmp_path)
+    _ = await _patch(tool, tmp_path, {"effort": "low"})
+    _ = await _patch(tool, tmp_path, {"provider": "other", "effort": "high"})
+
+    _ = await _patch(tool, tmp_path, {"provider": "scripted"})
+
+    assert agent.model.settings.thinking_effort == "low"
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_provider_is_refused(tmp_path: Path) -> None:
     _, agent, tool = _setup(tmp_path)
     model = agent.model
@@ -491,8 +539,9 @@ async def test_a_refused_switch_closes_the_model_it_built(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="not offered"):
         _ = await _patch(tool, tmp_path, {"provider": "other", "effort": "max"})
 
+    # The switch built one model; finding its role built and closed one a role.
     assert closed == built
-    assert len(built) == 1
+    assert built
 
 
 class _Recording(ScriptedProvider):

@@ -22,7 +22,7 @@ from treekle import PlainTree, from_plain
 from sagent.agent.team import Team
 from sagent.model.capability import ThinkingBudget, ThinkingEffort, ThinkingOutput
 from sagent.model.cost import ServiceTier
-from sagent.providers.catalog import successor
+from sagent.providers.catalog import counterpart, successor
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
 from sagent.runtime.types import DetachSchedule, WakeSchedule
@@ -39,6 +39,8 @@ from sagent.tools.types import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sagent.agent.agent import Agent
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.providers.types import Model
@@ -226,11 +228,19 @@ class AgentSelf:
             return None
         current = agent.model
         catalog = self.team.catalog
+        if a.provider is None:
+            build: Callable[[str], Model] = partial(
+                catalog.model,
+                current=current.provider.name,
+            )
+            name = a.model
+        else:
+            provider = catalog[a.provider]
+            build = provider.__getitem__
+            name = a.model or await counterpart(provider, current)
         return await successor(
-            partial(catalog.model, current=current.provider.name)
-            if a.provider is None
-            else catalog[a.provider].__getitem__,
-            a.model if a.model is not None else current.capability.model_id,
+            build,
+            name or current.capability.model_id,
             current=current,
             model_cache=agent.model_cache,
         )
