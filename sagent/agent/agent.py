@@ -1188,31 +1188,76 @@ def _journaled(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord
     return records
 
 
+# Only a user turn or a result ends a reply. Claude writes a line per block, each with
+# its usage, so ending a reply at usage splits one reply into turns that break role
+# alternation. No provider starts a reply before every call is answered, so a model
+# record while a call is open joins the open reply; once the user has spoken, a call
+# a killed run left unanswered no longer holds it open.
 def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
-    """Return records as history entries; a run of the model's records is one turn."""
+    """Return records as history entries; each reply the model gave is one turn."""
     entries: list[types.ModelContextEvent] = []
     turn: list[AssistantMessage | Thinking | ToolCall] = []
+    held: list[types.ModelContextEvent] = []
+    calling: set[str] = set()
+    # A usage after the reply's own is a child's.
+    usage: TokenUsage | None = None
+    priced = False  # pragma: no mutate[truthiness]
     for record in _flatten(records):
-        if isinstance(record, (AssistantMessage, Thinking, ToolCall)):
+        if isinstance(record, AssistantMessage | Thinking | ToolCall):
+            spoke = any(isinstance(e, UserMessage | AgentToAgentMessage) for e in held)
+            answered = not calling and any(isinstance(e, ToolResult) for e in held)
+            if turn and (spoke or answered):
+                entries.extend(_reply_entries(turn, held, usage=usage))
+                turn.clear()
+                held.clear()
+                calling.clear()
+                usage = None
             turn.append(record)
+            priced = True
+            if isinstance(record, ToolCall):
+                calling.add(record.call_id)
             continue
-        in_history = isinstance(
+        if isinstance(record, TokenUsage):
+            if priced:
+                usage = record
+                priced = False  # pragma: no mutate[truthiness]
+            continue
+        if not isinstance(
             record,
-            (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext, ToolResult),
-        )
-        if turn and (in_history or isinstance(record, TokenUsage)):
-            entries.append(
-                _response(
-                    turn,
-                    usage=record if isinstance(record, TokenUsage) else None,
-                ),
-            )
-            turn = []
-        if in_history:
+            UserMessage
+            | AgentToAgentMessage
+            | SystemMessage
+            | TurnContext
+            | ToolResult,
+        ):
+            continue
+        priced = False  # pragma: no mutate[truthiness]
+        if isinstance(record, ToolResult):
+            calling.discard(record.call_id)
+        elif isinstance(record, UserMessage | AgentToAgentMessage) and not calling:
+            entries.extend(_reply_entries(turn, held, usage=usage))
+            turn.clear()
+            held.clear()
+            usage = None
             entries.append(record)
-    if turn:
-        entries.append(_response(turn))
+            continue
+        (held if turn else entries).append(record)
+    entries.extend(_reply_entries(turn, held, usage=usage))
     return entries
+
+
+# A provider refuses a user turn between a call and its result.
+def _reply_entries(
+    turn: Sequence[AssistantMessage | Thinking | ToolCall],
+    held: Sequence[types.ModelContextEvent],
+    *,
+    usage: TokenUsage | None,
+) -> list[types.ModelContextEvent]:
+    """Return the reply as one turn, then what came while it was open, users last."""
+    reply = [_response(turn, usage=usage)] if turn else []
+    spoken = [e for e in held if isinstance(e, UserMessage | AgentToAgentMessage)]
+    rest = [e for e in held if not isinstance(e, UserMessage | AgentToAgentMessage)]
+    return [*reply, *rest, *spoken]
 
 
 def _response(
