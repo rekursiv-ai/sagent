@@ -35,6 +35,7 @@ from sagent.model.exceptions import (
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers import cli_login
 from sagent.providers.google import cli
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
 from sagent.session.types import (
@@ -114,8 +115,26 @@ async def test_login_is_agy_s_own_sign_in_at_sagent_s_prompt(
         "acp",
         "--login",
         browser=browser,
-        grace_sec=0.0,
+        grace_sec=GoogleCLI.sign_in_grace_sec,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_says_what_agy_said_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agy = tmp_path / "agy"
+    agy.write_text(
+        "#!/bin/sh\necho 'https://sign.in/x'\nread code\n"
+        # Its words reach the pipe just after it exits, as a loaded machine's may.
+        "(sleep 0.1; echo 'bad code' >&2) &\nexit 1\n",
+    )
+    agy.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(cli_login, "read_login_input", AsyncMock(return_value="c"))
+    with pytest.raises(AuthError, match=r"^agy sign-in failed: bad code$"):
+        await GoogleCLI(resources=Mock()).login(headless=True)
 
 
 @pytest.mark.asyncio

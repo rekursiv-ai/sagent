@@ -521,7 +521,8 @@ def _choices() -> tuple[ModelSettingName, ...]:
 def _family_version(model_id: str) -> tuple[str, tuple[int, int]] | None:
     """Split ``opus-5.5`` into ``("opus", (5, 5))``; ``None`` for other names."""
     family, _, version = model_id.rpartition("-")
-    major, dot, minor = version.partition(".")
+    # A second dot fails either split: ``2.3`` or ``1.2`` is no decimal.
+    major, dot, minor = version.partition(".")  # pragma: no mutate
     if (
         not dot
         or not major.isdecimal()
@@ -808,7 +809,8 @@ def _effort_ladder(
 
 def _default_first[T](default: T | None, ladder: tuple[T, ...]) -> tuple[T, ...]:
     """Return ``ladder`` with ``default``, when one is given, tried first."""
-    return ladder if default is None else (default, *ladder)
+    # A ``None`` tried first changes nothing: no row offers ``None``.
+    return ladder if default is None else (default, *ladder)  # pragma: no mutate
 
 
 def _lowest[T](name: str, offered: Collection[T], ladder: Sequence[T]) -> T:

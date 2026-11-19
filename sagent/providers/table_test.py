@@ -745,6 +745,44 @@ def test_the_default_effort_layers_like_any_field(
     assert _load(path)["example"].default.thinking_effort == effort
 
 
+def test_a_default_effort_a_row_lacks_falls_to_none_last(tmp_path: Path) -> None:
+    """Every level below and above the default is tried before ``none``."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model() | {"thinking_effort_default": "high"},
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _THINKING,
+            },
+        },
+    )
+    assert _load(path)["example"].default.thinking_effort == "none"
+
+
+def test_a_limit_a_profile_adds_must_be_restated_by_the_model(tmp_path: Path) -> None:
+    """Each layer is checked against every layer below it, not the reference alone."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(profile="p", limits={"max_request_tokens": 500}),
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _THINKING,
+            },
+            "profiles": {
+                "p": {"limits": {"max_request_tokens": 800, "max_image_edge_px": 2048}},
+            },
+        },
+    )
+    message = (
+        "model 'example-1.0' restates no max_image_edge_px of the limits below it;"
+        " state it, 0 for none."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
 @pytest.mark.parametrize("cutoff", ["2025-05", "2026-05-18"])
 def test_a_cutoff_is_iso_at_the_precision_the_vendor_publishes(
     tmp_path: Path,
@@ -757,7 +795,11 @@ def test_a_cutoff_is_iso_at_the_precision_the_vendor_publishes(
 @pytest.mark.parametrize("cutoff", ["May 2025", "2025-13", "2026-02-30", "2025"])
 def test_a_cutoff_in_any_other_form_is_refused(tmp_path: Path, cutoff: str) -> None:
     path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
-    with pytest.raises(ValueError, match="knowledge_cutoff"):
+    message = (
+        f"Model 'example-1.0' has knowledge_cutoff {cutoff!r};"
+        " write it as YYYY-MM or YYYY-MM-DD."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
         _load(path)
 
 

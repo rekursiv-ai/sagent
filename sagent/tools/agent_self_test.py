@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, override
 from unittest.mock import Mock
 
 import math
+import re
 import runpy
 
 import pytest
@@ -104,7 +105,7 @@ def test_the_summary_names_the_keys_set(
 async def test_a_caller_outside_the_team_is_refused(tmp_path: Path) -> None:
     _, _, tool = _setup(tmp_path)
 
-    with pytest.raises(ValueError, match="needs a calling agent"):
+    with pytest.raises(ValueError, match=r"^AgentSelf needs a calling agent"):
         _ = await _patch(tool, tmp_path, {"status": "x"}, label="nobody")
 
 
@@ -556,6 +557,64 @@ async def test_the_catalog_lists_providers_or_one_providers_models(
     _, _, tool = _setup(tmp_path)
 
     assert await _patch(tool, tmp_path, arguments) == line
+
+
+@pytest.mark.asyncio
+async def test_a_provider_s_models_are_listed_comma_separated(tmp_path: Path) -> None:
+    rows = (_capability("first-1.0"), _capability("second-1.0"))
+    catalog = ModelCatalog(
+        factories={
+            "scripted": partial(ScriptedProvider, models=ModelTable(rows=rows)),
+        },
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["scripted"]["first"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(agent)
+
+    text = await _patch(AgentSelf(team=team), tmp_path, {"catalog": "models"})
+
+    assert text == "scripted models: first-1.0, second-1.0"
+
+
+@pytest.mark.asyncio
+async def test_a_patch_keeps_each_knob_it_leaves_out(tmp_path: Path) -> None:
+    """The default's own knobs, and a tool's own, not the schedule's defaults."""
+    _, _, tool = _setup(tmp_path)
+    _ = await _patch(
+        tool,
+        tmp_path,
+        {
+            "detach": {
+                "default": {"first_sec": 30},
+                "tools": {"Bash": {"first_sec": 5}},
+            },
+        },
+    )
+
+    text = await _patch(
+        tool,
+        tmp_path,
+        {"detach": {"default": {"growth": 2}, "tools": {"Bash": {"growth": 3}}}},
+    )
+
+    assert text == "detach: 30s 2 300s; Bash 5s 3 300s"
+
+
+@pytest.mark.asyncio
+async def test_every_unknown_knob_is_named(tmp_path: Path) -> None:
+    _, _, tool = _setup(tmp_path)
+    message = (
+        "detach.default takes first_sec, growth, max_gap_sec, off; not later, soon."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        _ = await _patch(
+            tool,
+            tmp_path,
+            {"detach": {"default": {"soon": 1, "later": 2}}},
+        )
 
 
 @pytest.mark.asyncio

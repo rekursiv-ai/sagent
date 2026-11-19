@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta, timezone
 from functools import partial
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast, override
 
+import math
 import re
 
 import pytest
@@ -26,6 +28,7 @@ from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPri
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.model.scripted import ScriptedModel, ScriptedProvider, reply
 from sagent.model.types import Request
+from sagent.providers import catalog as catalog_module
 from sagent.providers.anthropic.api import Anthropic, AnthropicModel
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
 from sagent.providers.azure.api import Azure
@@ -724,6 +727,8 @@ def _anthropic() -> ScriptedProvider:
             "haiku-4.5": 5.0,
             "spark-1.0": 0.4,
             "relic-1.0": 0.0,
+            # A family of two words is its own: ``opus-pro``, not ``opus``.
+            "opus-pro-4.0": 0.5,
         },
         roles={
             "best": "fable",
@@ -754,6 +759,7 @@ def _openai() -> ScriptedProvider:
         # In no role: the role whose model here costs nearest it.
         ("mythos-5.2", "best"),
         ("spark-1.0", "utility"),
+        ("opus-pro-4.0", "utility"),
         # Priced nowhere: the default.
         ("relic-1.0", "default"),
     ],
@@ -764,6 +770,57 @@ async def test_a_provider_that_lacks_the_model_is_asked_for_the_same_role(
 ) -> None:
     """``opus`` is Anthropic's default, so on OpenAI it is OpenAI's: ``sol``."""
     assert await counterpart(_openai(), _anthropic()[current]) == asked
+
+
+# A prompt past 1,000 tokens replies at 40 throughout.
+def _dated(*, until: float, after: float) -> ScriptedProvider:
+    """Serve ``banded-1.0``: a small prompt's reply at ``until``, from 2026-12-01 ``after``."""
+    prices = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(0, 1_001)): TokenPrice(response=until),
+            PriceCondition(
+                token_size_range=(0, 1_001),
+                effective_date=date(2026, 12, 1),
+            ): TokenPrice(response=after),
+            PriceCondition(token_size_range=(1_001, math.inf)): TokenPrice(
+                response=40.0,
+            ),
+        },
+        window=200_000,
+    )
+    row = ModelCapability(
+        model_id="banded-1.0",
+        limits=ModelLimits(max_request_tokens=200_000),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+    return ScriptedProvider(models=ModelTable(rows=(row,)))
+
+
+@pytest.mark.asyncio
+async def test_a_model_in_no_role_is_priced_by_its_small_prompt_reply() -> None:
+    """Not the long-prompt band: most replies follow a small prompt."""
+    banded = _dated(until=0.5, after=0.5)["banded"]
+    assert await counterpart(_openai(), banded) == "utility"
+
+
+@pytest.mark.asyncio
+async def test_a_model_is_priced_on_today_s_date_in_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vendors date prices in UTC; the local day can still be the one before."""
+
+    class _Clock:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            # 01:00 UTC on Dec 1 is still Nov 30 west of Greenwich.
+            if tz is UTC:
+                return datetime(2026, 12, 1, 1, tzinfo=UTC)
+            return datetime(2026, 11, 30, 17, tzinfo=timezone(timedelta(hours=-8)))
+
+    monkeypatch.setattr(catalog_module, "datetime", _Clock)
+    banded = _dated(until=0.5, after=40.0)["banded"]
+    assert await counterpart(_openai(), banded) == "best"
 
 
 @pytest.mark.asyncio

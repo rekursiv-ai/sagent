@@ -549,7 +549,8 @@ class AgentSpawn:
         max_rounds: int | None,
         max_depth: int | None,
         spec: ChildSpec | None,
-        recall: bool = False,
+        # Recalling a fresh spawn's journal finds nothing: it is a new uuid path.
+        recall: bool = False,  # pragma: no mutate
     ) -> Agent:
         """Join a child of ``parent`` to the team, then open it and its journal."""
         stack = AsyncExitStack()
