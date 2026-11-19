@@ -90,6 +90,28 @@ def test_the_subscription_serves_its_sections_clamped_models() -> None:
     assert sorted(sub["gpt-nano-5.4"].capability.service_tier) == ["auto"]
 
 
+@pytest.mark.parametrize(
+    ("model", "served"),
+    [
+        ("astra-6.2", 921_624),
+        ("sol-6.2", 921_624),
+        ("astra-6.0", 921_858),
+        ("sol-6.1", 921_858),
+    ],
+)
+def test_the_subscription_serves_the_1m_window_where_measured(
+    model: str,
+    served: int,
+) -> None:
+    """Bsearched 2026-11-18: the most input tokens served, by the server's count.
+
+    One more was refused (``ContextOverflowError``), as was 1,000,000.
+    """
+    limits = OpenAISub()[model].capability.limits
+    assert limits.max_request_tokens == served
+    assert limits.max_context_tokens == 1_050_000
+
+
 @pytest.mark.asyncio
 async def test_the_endpoint_is_openai_sub_base_url_else_codexs(
     monkeypatch: pytest.MonkeyPatch,

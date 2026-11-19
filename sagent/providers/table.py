@@ -158,6 +158,7 @@ class ModelTable(Mapping[str, ModelCapability]):
                     raw,
                     document=document,
                     section=layer,
+                    section_name=section,
                     entry=listed[model_id] or {},
                 ),
                 sends=sends,
@@ -578,11 +579,16 @@ class _CapabilityProfile:
     """Model facts several rows share; no identity, prices, or profile of its own."""
 
     knowledge_cutoff: str | None = None
+    """ISO 8601 at the precision the vendor publishes: ``2026-06`` or ``2026-05-18``."""
+
     tokenizer: str | None = None
     approx_chars_per_token: float = 4.0
     limits: ModelLimits = field(default_factory=ModelLimits)
     thinking: _Thinking = field(default_factory=_Thinking)
     effort_as_level: bool = False
+    thinking_off_max_effort: ThinkingEffort | None = None
+    """The highest effort at which thinking may be off; ``None`` is any."""
+
     thinking_effort_default: ThinkingEffort | None = None
     """The vendor's effort when none is sent; ``None`` is the lowest offered."""
 
@@ -606,11 +612,32 @@ class _CapabilityProfile:
     """Tiers offered; ``None`` offers every tier the row prices."""
 
 
+# ``limits`` replaces whole, as ``thinking`` does, so a limit a higher layer leaves
+# out would silently fall to 0 (no cap) rather than keep the value below it.
+def _require_restated_limits(
+    below: Mapping[str, object],
+    layer: Mapping[str, object],
+    *,
+    name: str,
+) -> None:
+    """Reject a ``limits`` override that drops a limit the layers below it state."""
+    if "limits" not in layer or "limits" not in below:
+        return
+    stated = from_plain(below["limits"], dict[str, object]).keys()
+    kept = from_plain(layer["limits"], dict[str, object]).keys()
+    for dropped in sorted(stated - kept):
+        raise ValueError(
+            f"{name} restates no {dropped} of the limits below it;"
+            " state it, 0 for none.",
+        )
+
+
 def _model(
     raw: dict[str, object],
     *,
     document: _CatalogDocument,
     section: dict[str, object],
+    section_name: str,
     entry: dict[str, object],
 ) -> ModelCapability:
     """Return one model's row, its layers merged, as one provider serves it."""
@@ -620,7 +647,18 @@ def _model(
     profile = from_plain(values.pop("profile", ""), str)
     if profile and profile not in document.profiles:
         raise ValueError(f"The catalog has no profile {profile!r}.")
-    values = document.reference | document.profiles.get(profile, {}) | values
+    profiled = document.profiles.get(profile, {})
+    model_id = from_plain(values.get("model_id"), str)
+    merged = document.reference
+    for layer, name in (
+        (profiled, f"profile {profile!r}"),
+        (values, f"model {model_id!r}"),
+        (section, f"section {section_name!r}"),
+        (entry, f"section {section_name!r}"),
+    ):
+        _require_restated_limits(merged, layer, name=name)
+        merged = merged | {k: v for k, v in layer.items() if k == "limits"}
+    values = document.reference | profiled | values
     axes = from_plain(section.get("thinking", {}), dict[str, object])
     if axes.keys() - {"effort", "budget", "output"}:
         raise ValueError(f"Unknown thinking axes: {sorted(axes)}.")
@@ -633,6 +671,7 @@ def _model(
     if _family_version(row.model_id) is None:
         raise ValueError(f"Model id {row.model_id!r} is not family-major.minor.")
     _check_limits(row)
+    _check_cutoff(row)
     if (
         not row.prices
         or row.approx_chars_per_token <= 0
@@ -658,7 +697,7 @@ def _model(
             f"Model {row.model_id!r} has a bad context_size_default:"
             f" {row.context_size_default!r}.",
         )
-    return ModelCapability(
+    capability = ModelCapability(
         model_id=row.model_id,
         wire_model_id=row.wire_model_id,
         knowledge_cutoff=row.knowledge_cutoff,
@@ -669,6 +708,7 @@ def _model(
         thinking_budget=row.thinking.budget,
         thinking_output=row.thinking.output,
         effort_as_level=row.effort_as_level,
+        thinking_off_max_effort=row.thinking_off_max_effort,
         prices=prices,
         service_tier=tiers,
         cache_ttl_sec=row.cache_ttl_sec,
@@ -720,6 +760,9 @@ def _model(
             context_size=prices[size],
         ),
     )
+    # Each default is picked alone; a pairing of them can still be refused.
+    capability.check(capability.default)
+    return capability
 
 
 def _unsent_fixed(
@@ -815,6 +858,27 @@ def _check_limits(row: _ModelRow) -> None:
         raise ValueError(
             f"Model {row.model_id!r} has a context smaller than its request.",
         )
+
+
+def _check_cutoff(row: _ModelRow) -> None:
+    """Reject a knowledge cutoff that is not an ISO year-month or date."""
+    cutoff = row.knowledge_cutoff
+    if cutoff is None:
+        return
+    if re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", cutoff):
+        # A year-month is checked as its first day: ``2025-13`` fails as ``2025-13-01``.
+        try:
+            date.fromisoformat(
+                cutoff if len(cutoff) > len("2026-05") else f"{cutoff}-01",
+            )
+        except ValueError:
+            pass
+        else:
+            return
+    raise ValueError(
+        f"Model {row.model_id!r} has knowledge_cutoff {cutoff!r};"
+        " write it as YYYY-MM or YYYY-MM-DD.",
+    )
 
 
 def _prices(row: _ModelRow) -> PriceCatalog:

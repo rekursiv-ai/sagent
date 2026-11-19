@@ -312,10 +312,7 @@ class AgentModel:
     def _choose(self, picked: dict[ModelSettingName, object]) -> None:
         """Set the model's ``picked`` choices."""
         model = self.agent.model
-        settings = model.settings
-        for field, value in picked.items():
-            settings = settings.with_value(field, value)
-        model.settings = settings
+        model.settings = model.capability.with_choices(model.settings, picked)
 
     # ``default`` is a fresh model's; an effort or a tier reads as its tag does
     # in a model line, ``highthink`` and ``fast`` too.

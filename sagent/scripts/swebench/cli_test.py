@@ -22,8 +22,8 @@ from treekle import PlainTree, ReadError, json_dumps, json_loads
 
 import pytest
 
-from sagent.scripts import swebench
-from sagent.scripts.swebench import (
+from sagent.scripts.swebench import cli
+from sagent.scripts.swebench.cli import (
     Agent,
     Mirrors,
     Task,
@@ -201,7 +201,7 @@ def test_every_agent_is_asked_the_same() -> None:
 def test_each_agent_runs_headless_with_its_permission_prompts_off(
     tmp_path: Path,
 ) -> None:
-    main_py = Path(swebench.__file__).resolve().parents[1] / "__main__.py"
+    main_py = Path(cli.__file__).resolve().parents[2] / "__main__.py"
     assert command("sagent", _TASK, log=tmp_path, model=None, effort="low") == [
         "sh",
         str(main_py),
@@ -464,7 +464,7 @@ def test_every_agent_solves_at_once_then_is_graded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     git = _Git()
     out = tmp_path / "out"
     meet = threading.Barrier(4)
@@ -473,14 +473,14 @@ def test_every_agent_solves_at_once_then_is_graded(
         del args, kwargs
         return meet.wait(timeout=5.0)
 
-    with patch.object(swebench, "solve", side_effect=solving) as solve_tasks:
-        codes = _run_all(tmp_path, git, [_TASK], agents=swebench.AGENTS)
+    with patch.object(cli, "solve", side_effect=solving) as solve_tasks:
+        codes = _run_all(tmp_path, git, [_TASK], agents=cli.AGENTS)
 
     assert codes == {"sagent": 0, "claude": 0, "codex": 0, "sagent-noskills": 0}
     assert solve_tasks.call_count == 4
     calls = {cast(Agent, call.args[0]): call for call in solve_tasks.call_args_list}
-    assert set(calls) == set(swebench.AGENTS)
-    for agent in swebench.AGENTS:
+    assert set(calls) == set(cli.AGENTS)
+    for agent in cli.AGENTS:
         invocation = calls[agent]
         assert invocation.args == (agent, [_TASK])
         configuration = cast(dict[str, object], invocation.kwargs)
@@ -527,10 +527,10 @@ def _run_all(
     git: _Git,
     tasks: Sequence[Task],
     *,
-    agents: Sequence[swebench.Agent] = swebench.DEFAULT_AGENTS,
+    agents: Sequence[cli.Agent] = cli.DEFAULT_AGENTS,
     model: str | None = None,
     jobs: int = 1,
-) -> dict[swebench.Agent, int]:
+) -> dict[cli.Agent, int]:
     return run(
         agents,
         tasks,
@@ -564,10 +564,10 @@ def test_each_batch_is_graded_for_every_agent_then_its_new_images_removed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     git = _Git(images={"img-b"})
 
-    with patch.object(swebench, "solve", return_value=0):
+    with patch.object(cli, "solve", return_value=0):
         _ = _run_all(tmp_path, git, _imaged("a", "b", "c"))
 
     steps = [
@@ -597,7 +597,7 @@ def test_each_batch_is_graded_for_every_agent_then_its_new_images_removed(
 
 def test_an_agent_given_no_tasks_has_graded_cleanly(tmp_path: Path) -> None:
     git = _Git()
-    with patch.object(swebench, "solve", return_value=0) as solve_tasks:
+    with patch.object(cli, "solve", return_value=0) as solve_tasks:
         assert _run_all(tmp_path, git, [], agents=["codex"]) == {"codex": 0}
     assert solve_tasks.call_count == 1
     assert solve_tasks.call_args.args == ("codex", [])
@@ -609,11 +609,11 @@ def test_a_harness_that_fails_is_each_agents_code_and_progress_is_logged(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
 
     with (
-        patch.object(swebench, "solve", return_value=1),
-        caplog.at_level(logging.INFO, logger=swebench.__name__),
+        patch.object(cli, "solve", return_value=1),
+        caplog.at_level(logging.INFO, logger=cli.__name__),
     ):
         codes = _run_all(tmp_path, _Git(fail="--run_id"), [_TASK], agents=["sagent"])
 
@@ -625,10 +625,10 @@ def test_each_agent_runs_with_the_model_and_time_it_is_given(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     git = _Git()
 
-    with patch.object(swebench, "solve", return_value=1) as solve_tasks:
+    with patch.object(cli, "solve", return_value=1) as solve_tasks:
         _ = _run_all(tmp_path, git, [_TASK], agents=["claude"], model="m")
 
     assert solve_tasks.call_count == 1
@@ -639,7 +639,7 @@ def test_each_agent_runs_with_the_model_and_time_it_is_given(
 
 
 def test_a_run_passes_the_job_limit_to_each_solver(tmp_path: Path) -> None:
-    with patch.object(swebench, "solve", return_value=2) as solve_tasks:
+    with patch.object(cli, "solve", return_value=2) as solve_tasks:
         _ = _run_all(tmp_path, _Git(), _sized_tasks(a=2), agents=["sagent"], jobs=2)
     assert solve_tasks.call_count == 1
     assert solve_tasks.call_args.kwargs["jobs"] == 2
@@ -649,11 +649,11 @@ def test_a_batch_that_fails_to_grade_still_removes_its_images(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     git = _Git(crash="--run_id")
 
     with (
-        patch.object(swebench, "solve", return_value=1),
+        patch.object(cli, "solve", return_value=1),
         pytest.raises(OSError, match="--run_id"),
     ):
         _ = _run_all(tmp_path, git, _imaged("a"))
@@ -671,15 +671,15 @@ def test_grading_joins_the_docker_group_only_when_it_must(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path / "absent.sock")
-    assert swebench._docker(["uvx", "a b"]) == [
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path / "absent.sock")
+    assert cli._docker(["uvx", "a b"]) == [
         "/usr/bin/sg",
         "docker",
         "-c",
         "uvx 'a b'",
     ]
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
-    assert swebench._docker(["uvx", "a b"]) == ["uvx", "a b"]
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
+    assert cli._docker(["uvx", "a b"]) == ["uvx", "a b"]
 
 
 def test_what_each_agent_spent_is_read_from_its_own_log(tmp_path: Path) -> None:
@@ -727,7 +727,7 @@ def test_what_each_agent_spent_is_read_from_its_own_log(tmp_path: Path) -> None:
         "sagent",
         tmp_path / "sagent" / "logs" / "i",
     )
-    for agent in swebench.AGENTS:
+    for agent in cli.AGENTS:
         assert usage(agent, tmp_path / "none") is None
 
 
@@ -803,7 +803,7 @@ def test_a_result_line_of_the_wrong_shape_is_no_usage(tmp_path: Path) -> None:
 
 def test_sigterm_exits_as_ctrl_c_would_with_its_signal_s_code() -> None:
     with pytest.raises(SystemExit) as exited:
-        swebench._exit_on_term(signal.SIGTERM, None)
+        cli._exit_on_term(signal.SIGTERM, None)
     assert exited.value.code == 128 + signal.SIGTERM
 
 
@@ -848,7 +848,7 @@ def test_a_cost_not_known_for_every_task_is_not_summed(
 def test_a_sample_keeps_each_repositorys_share() -> None:
     tasks = _sized_tasks(big=6, mid=3, small=2, tiny=1)
 
-    drawn = swebench.stratified(tasks, 5, seed=0)
+    drawn = cli.stratified(tasks, 5, seed=0)
 
     counts = {
         r: sum(t.repo == r for t in drawn) for r in ("big", "mid", "small", "tiny")
@@ -859,7 +859,7 @@ def test_a_sample_keeps_each_repositorys_share() -> None:
 
 
 def test_a_remainder_is_added_to_a_repositorys_floor() -> None:
-    drawn = swebench.stratified(_sized_tasks(a=3, b=1), 2, seed=0)
+    drawn = cli.stratified(_sized_tasks(a=3, b=1), 2, seed=0)
 
     # Shares 1.5 and 0.5 tie; the one left over goes to the first.
     assert [sum(t.repo == r for t in drawn) for r in ("a", "b")] == [2, 0]
@@ -868,16 +868,16 @@ def test_a_remainder_is_added_to_a_repositorys_floor() -> None:
 def test_a_sample_is_the_same_for_a_seed_and_differs_across_seeds() -> None:
     tasks = _sized_tasks(a=3, b=3)
 
-    first = swebench.stratified(tasks, 2, seed=2)
+    first = cli.stratified(tasks, 2, seed=2)
 
-    assert first == swebench.stratified(tasks, 2, seed=2)
-    assert first != swebench.stratified(tasks, 2, seed=1)
+    assert first == cli.stratified(tasks, 2, seed=2)
+    assert first != cli.stratified(tasks, 2, seed=1)
     assert first != [tasks[0], tasks[3]]
 
 
 def test_a_sample_as_large_as_the_tasks_is_all_of_them() -> None:
     tasks = _sized_tasks(a=2, b=1)
-    assert swebench.stratified(tasks, 5, seed=0) == tasks
+    assert cli.stratified(tasks, 5, seed=0) == tasks
 
 
 def test_tasks_are_read_from_the_dataset_named_and_sampled(
@@ -898,16 +898,16 @@ def test_tasks_are_read_from_the_dataset_named_and_sampled(
             for n in range(3)
         ]
 
-    monkeypatch.setattr(swebench, "load_dataset", load)
+    monkeypatch.setattr(cli, "load_dataset", load)
 
-    every = swebench._tasks("d", instances=(), sample=50, seed=0)
-    named = swebench._tasks("d", instances=("i2", "i0"), sample=50, seed=0)
-    drawn = swebench._tasks("d", instances=(), sample=2, seed=0)
+    every = cli._tasks("d", instances=(), sample=50, seed=0)
+    named = cli._tasks("d", instances=("i2", "i0"), sample=50, seed=0)
+    drawn = cli._tasks("d", instances=(), sample=2, seed=0)
 
     assert asked == [("d", "test")] * 3
     assert [t.instance_id for t in every] == ["i0", "i1", "i2"]
     assert [t.instance_id for t in named] == ["i0", "i2"]
-    assert drawn == swebench.stratified(every, 2, seed=0)
+    assert drawn == cli.stratified(every, 2, seed=0)
     assert every[0] == Task(
         instance_id="i0",
         repo="o/r",
@@ -926,7 +926,7 @@ def test_a_command_says_how_it_ended_and_keeps_what_it_printed(tmp_path: Path) -
         "run",
         return_value=subprocess.CompletedProcess(script, 7),
     ) as execute:
-        assert swebench._run(script, tmp_path, "question\n", 5.0, output) == 7
+        assert cli._run(script, tmp_path, "question\n", 5.0, output) == 7
     sink = cast(TextIO, execute.call_args.kwargs["stdout"])
     assert sink.closed
     assert sink.encoding == "utf-8"
@@ -950,7 +950,7 @@ def test_a_command_out_of_time_returns_124_and_closes_output(tmp_path: Path) -> 
         "run",
         side_effect=subprocess.TimeoutExpired("agent", 0.01),
     ) as execute:
-        assert swebench._run(["agent"], tmp_path, "", 0.01, output) == 124
+        assert cli._run(["agent"], tmp_path, "", 0.01, output) == 124
     sink = cast(TextIO, execute.call_args.kwargs["stdout"])
     assert sink.closed
     execute.assert_called_once_with(
@@ -977,8 +977,8 @@ def test_a_command_without_an_output_file_prints_where_this_process_does(
             subprocess.CompletedProcess(script, 1),
         ],
     ) as execute:
-        assert swebench._run(script, tmp_path, "", 5.0, None) == 0
-        assert swebench._run(script, tmp_path, "", 5.0, None) == 1
+        assert cli._run(script, tmp_path, "", 5.0, None) == 0
+        assert cli._run(script, tmp_path, "", 5.0, None) == 1
     assert execute.call_count == 2
     execute.assert_called_with(
         script,
@@ -998,13 +998,13 @@ def scratch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[Path, None, None]:
     """Isolate CLI paths, signal handling, and logging configuration."""
-    monkeypatch.setattr(swebench, "_OUT", tmp_path / "out")
+    monkeypatch.setattr(cli, "_OUT", tmp_path / "out")
 
     def basic_config(**kwargs: object) -> None:
         del kwargs
 
-    monkeypatch.setattr(swebench, "_WORK", tmp_path / "work")
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_WORK", tmp_path / "work")
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     monkeypatch.setattr(logging, "basicConfig", basic_config)
     previous = signal.getsignal(signal.SIGTERM)
     loggers = [
@@ -1063,7 +1063,7 @@ def test_an_experiment_is_named_by_its_flags() -> None:
         effort: str = "medium",
         model: str | None = None,
     ) -> str:
-        return swebench.experiment(
+        return cli.experiment(
             dataset=dataset,
             instances=instances,
             sample=sample,
@@ -1087,18 +1087,18 @@ def test_the_bare_command_runs_the_default_agents_where_report_finds_them(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     out = scratch / "out" / "n50-seed0-medium"
-    for agent in swebench.AGENTS:
+    for agent in cli.AGENTS:
         (out / agent).mkdir(parents=True)
         (out / agent / "predictions.jsonl").touch()
     with (
-        patch.object(swebench, "_tasks", return_value=[_TASK]) as tasks,
-        patch.object(swebench, "run", return_value={}) as execute,
-        patch.object(swebench, "report", return_value="the report") as describe,
+        patch.object(cli, "_tasks", return_value=[_TASK]) as tasks,
+        patch.object(cli, "run", return_value={}) as execute,
+        patch.object(cli, "report", return_value="the report") as describe,
     ):
         mirrors = ["--mirrors", str(scratch / "m")]
-        assert swebench.main(mirrors) == 0
-        assert swebench.main(["--agent", "sagent-noskills", *mirrors]) == 0
-        assert swebench.main(["report"]) == 0
+        assert cli.main(mirrors) == 0
+        assert cli.main(["--agent", "sagent-noskills", *mirrors]) == 0
+        assert cli.main(["report"]) == 0
     assert tasks.call_count == 2
     tasks.assert_called_with(
         "SWE-bench/SWE-bench_Verified",
@@ -1124,13 +1124,13 @@ def test_the_bare_command_runs_the_default_agents_where_report_finds_them(
         "jobs": 2,
         "dataset": "SWE-bench/SWE-bench_Verified",
         "workers": 2,
-        "runner": swebench._run,
+        "runner": cli._run,
     }
     assert describe.call_count == 3
     assert (
         describe.call_args_list
         == [
-            ((out,), {"agents": list(swebench.AGENTS)}),
+            ((out,), {"agents": list(cli.AGENTS)}),
         ]
         * 3
     )
@@ -1141,12 +1141,12 @@ def test_a_run_removes_new_images_while_system_exit_unwinds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
+    monkeypatch.setattr(cli, "_DOCKER_SOCKET", tmp_path)
     git = _Git()
     killed = SystemExit(128 + signal.SIGTERM)
     with (
-        patch.object(swebench, "solve", return_value=0) as solve_tasks,
-        patch.object(swebench, "_grade", side_effect=killed) as grade,
+        patch.object(cli, "solve", return_value=0) as solve_tasks,
+        patch.object(cli, "_grade", side_effect=killed) as grade,
         pytest.raises(SystemExit) as exited,
     ):
         _ = _run_all(tmp_path, git, _imaged("a"), agents=["codex"])
@@ -1174,7 +1174,7 @@ def test_a_report_names_only_the_agents_asked(
     for agent in ("sagent", "codex"):
         (out / agent).mkdir(parents=True)
         _ = (out / agent / "predictions.jsonl").write_text("")
-    assert swebench.main(["report", "--agent", "codex"]) == 0
+    assert cli.main(["report", "--agent", "codex"]) == 0
     shown = capsys.readouterr().out.splitlines()
     assert shown[0] == str(out)
     assert [r.split("|")[1].strip() for r in shown[3:]] == ["codex"]
@@ -1199,22 +1199,22 @@ def test_a_run_passes_every_flag_on_and_says_where_it_runs(
     def basic_config(**kwargs: object) -> None:
         configured.append(kwargs)
 
-    monkeypatch.setattr(swebench, "run", recorded)
+    monkeypatch.setattr(cli, "run", recorded)
 
     def tasks(dataset: str, **flags: object) -> list[Task]:
         del dataset, flags
         return [_TASK]
 
-    monkeypatch.setattr(swebench, "_tasks", tasks)
+    monkeypatch.setattr(cli, "_tasks", tasks)
     monkeypatch.setattr(logging, "basicConfig", basic_config)
     # An earlier main may have quieted these and set the handler already.
     for noisy in ("httpx", "huggingface_hub", "datasets"):
         monkeypatch.setattr(logging.getLogger(noisy), "level", logging.NOTSET)
     previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
     try:
-        with caplog.at_level(logging.INFO, logger=swebench.__name__):
+        with caplog.at_level(logging.INFO, logger=cli.__name__):
             assert (
-                swebench.main(
+                cli.main(
                     [
                         "--agent=codex",
                         "--agent=sagent",
@@ -1232,7 +1232,7 @@ def test_a_run_passes_every_flag_on_and_says_where_it_runs(
     finally:
         _ = signal.signal(signal.SIGTERM, previous)
 
-    name = swebench.experiment(
+    name = cli.experiment(
         dataset="SWE-bench/SWE-bench_Verified",
         instances=["x"],
         sample=50,
@@ -1256,9 +1256,9 @@ def test_a_run_passes_every_flag_on_and_says_where_it_runs(
         "jobs": 3,
         "dataset": "SWE-bench/SWE-bench_Verified",
         "workers": 4,
-        "runner": swebench._run,
+        "runner": cli._run,
     }
-    assert handler is swebench._exit_on_term
+    assert handler is cli._exit_on_term
     assert configured == [{"level": logging.INFO, "format": "%(asctime)s %(message)s"}]
     for noisy in ("httpx", "huggingface_hub", "datasets"):
         assert logging.getLogger(noisy).level == logging.WARNING
@@ -1267,7 +1267,7 @@ def test_a_run_passes_every_flag_on_and_says_where_it_runs(
 
 def test_help_says_what_the_driver_does(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
-        swebench.main(["--help"])
+        cli.main(["--help"])
 
     out = capsys.readouterr().out
     assert out.split("\n\n")[1] == (
@@ -1279,7 +1279,7 @@ def test_help_says_what_the_driver_does(capsys: pytest.CaptureFixture[str]) -> N
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="swebench")
-    swebench._add_arguments(parser)
+    cli._add_arguments(parser)
     return parser
 
 
@@ -1344,7 +1344,7 @@ def test_each_flag_reads_its_own_type() -> None:
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 def test_each_effort_is_taken(effort: str) -> None:
-    flags = cast(swebench.Flags, _parser().parse_args([f"--effort={effort}"]))
+    flags = cast(cli.Flags, _parser().parse_args([f"--effort={effort}"]))
     assert flags.effort == effort
 
 

@@ -12,9 +12,8 @@ effort, a rewritten history -- starts a fresh ``agy``, which reads the
 conversation as text.
 
 ``agy`` keeps its own login in the system keyring, or, with none, in a file under
-``~/.gemini``, which each home links to. ``login(headless=True)``
-runs its hosted-code terminal sign-in. It takes text alone, so an image is named,
-not sent.
+``~/.gemini``, which each home links to. ``login`` runs its own sign-in, at
+sagent's prompt. It takes text alone, so an image is named, not sent.
 
 Typical usage example:
 
@@ -40,11 +39,11 @@ import tempfile
 
 from treekle import ReadError, from_plain, json_dumps, json_loads, mutable
 
-from sagent.lib.posix.child import Child
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedError
 from sagent.model.types import Response, TextChunk
 from sagent.providers import google
+from sagent.providers.cli_login import cli_sign_in
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import account_key, retried
@@ -138,25 +137,14 @@ class GoogleCLI(HasModels, AsyncResource):
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
 
-    async def login(
-        self,
-        *,
-        headless: bool = False,  # pragma: no mutate -- Both values use native terminal auth.
-    ) -> None:
-        """Sign in through agy's terminal flow, keeping its credentials as it keeps them.
+    async def login(self, *, headless: bool = False) -> None:
+        """Sign in through ``agy``'s own sign-in, pasting the code its page shows.
 
         Args:
-          headless: Both modes use agy's hosted-code terminal flow.
-
-        Raises:
-          AuthError: The native sign-in failed.
+          headless: Open no browser. ``agy`` opens none itself, so one opens here.
 
         """
-        del headless
-        async with await Child.start("agy", "acp", "--login") as child:
-            status = await child.process.wait()
-        if status:
-            raise AuthError(f"agy sign-in failed (exit {status}).")
+        await cli_sign_in("agy", "acp", "--login", browser=not headless, grace_sec=0.0)
 
     @override
     async def aclose(self) -> None:

@@ -1101,7 +1101,10 @@ def _at_effort(model: Model, effort: ThinkingEffort | None) -> Generator[None]:
         before.thinking_effort,
     ):
         try:
-            model.settings = replace(before, thinking_effort=effort)
+            model.settings = model.capability.with_choices(
+                before,
+                {"thinking_effort": effort},
+            )
         except ValueError:
             logger.info(
                 "the model does not offer effort %r; keeping %r",
@@ -1114,9 +1117,9 @@ def _at_effort(model: Model, effort: ThinkingEffort | None) -> Generator[None]:
         yield
     finally:
         if lowered:
-            model.settings = replace(
+            model.settings = model.capability.with_choices(
                 model.settings,
-                thinking_effort=before.thinking_effort,
+                {"thinking_effort": before.thinking_effort},
             )
 
 

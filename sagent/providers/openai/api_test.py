@@ -199,7 +199,8 @@ class _Served(SharedResources):
         ("sol-6.0", "medium"),
         ("luna-6.0", "medium"),
         ("sol-5.6", "low"),
-        ("gpt-5.6", "medium"),
+        # ``gpt-5.6`` is OpenAI's alias for GPT-5.6 Sol.
+        ("gpt-5.6", "low"),
         ("luna-5.6", "medium"),
         ("terra-5.6", "medium"),
         ("gpt-5.5", "medium"),

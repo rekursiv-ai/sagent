@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, override
+from unittest.mock import AsyncMock
 
 import asyncio
 import io
@@ -19,17 +20,18 @@ import time
 from PIL import Image
 from treekle import PlainTree, ReadError, from_plain, json_dumps, json_loads
 
-import httpx2
 import pytest
 import pytest_asyncio
 
 from sagent.model.exceptions import (
+    AuthError,
     ContextOverflowError,
     DisconnectedError,
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers.anthropic import cli, login, wire
+from sagent.providers import cli_login
+from sagent.providers.anthropic import cli, wire
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
 from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
@@ -61,7 +63,9 @@ from sagent.types import AsyncResource
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Sequence
+
+    import httpx2
 
     from sagent.model.capability import ModelSettingName
     from sagent.providers.types import ProcessPool, ToolMount
@@ -72,15 +76,7 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail a test that opens the user's browser, as a sign-in not headless would."""
-    refuse_browsers(monkeypatch, login)
-
-
-# On macOS a login lives in the user's Keychain, whose ``security`` asks the user to
-# make one when it finds none.
-@pytest.fixture(autouse=True)
-def file_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep each login in its file, as off macOS."""
-    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Linux"))
+    refuse_browsers(monkeypatch, cli_login)
 
 
 # Answers each line it reads with the next scripted turn, numbered across every
@@ -237,8 +233,8 @@ def test_its_accounts_are_the_logins_saved_beside_claude_s(
 def _keep_logins_in(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make ``claude``'s default login, and so every account's, live in ``home``."""
     monkeypatch.setattr(
-        login.ClaudeLogin,
-        "default_path",
+        AnthropicCLI,
+        "default_login_path",
         staticmethod(lambda: home / ".claude" / ".credentials.json"),
     )
 
@@ -1015,57 +1011,64 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
         assert not client.is_closed
 
 
-@pytest.mark.asyncio
-async def test_login_signs_claude_in_to_the_named_account(
+def test_the_default_login_is_the_file_claude_keeps_in_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(login, "_browser_code", _answered)
-    grant = {"access_token": "at-new", "refresh_token": "rt", "expires_in": 3600}
-    replies = {
-        "https://platform.claude.com/v1/oauth/token": httpx2.Response(
-            200,
-            content=json_dumps(grant).encode(),
-        ),
-        "https://api.anthropic.com/api/oauth/profile": httpx2.Response(500),
-    }
-    client = httpx2.AsyncClient(
-        transport=httpx2.MockTransport(lambda request: replies[str(request.url)]),
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert AnthropicCLI.default_login_path() == (
+        tmp_path / ".claude" / ".credentials.json"
     )
-    _keep_logins_in(tmp_path, monkeypatch)
-    async with _Resources(http=client) as resources:
-        cli = AnthropicCLI(resources=resources, account="work")
-        await cli.login()
-        env = await cli.environment()
-    saved = (tmp_path / ".claude-work" / ".credentials.json").read_text()
-    oauth = json_loads(saved, dict[str, dict[str, object]])["claudeAiOauth"]
-    assert oauth["accessToken"] == grant["access_token"]
-    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-work")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("headless", [True, False])
-async def test_login_passes_headless_to_the_sign_in(
+@pytest.mark.parametrize(
+    ("given", "headless"),
+    [({"headless": True}, True), ({"headless": False}, False), ({}, False)],
+    ids=["headless", "browser", "default"],
+)
+async def test_login_is_claude_s_own_sign_in_to_the_named_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    given: dict[str, bool],
     headless: bool,
 ) -> None:
-    seen: list[bool] = []
-    added: list[str | None] = []
-
-    async def sign_in(self: object, *, headless: bool = False) -> None:
-        del self
-        seen.append(headless)
-
-    async def add(self: object, account: str | None) -> None:
-        del self
-        added.append(account)
-
-    monkeypatch.setattr(login.ClaudeLogin, "sign_in", sign_in)
-    monkeypatch.setattr(Logins, "added", add)
+    """``claude`` opens its own browser, at its own loopback server, unless headless."""
+    signed_in = AsyncMock()
+    added = AsyncMock()
+    monkeypatch.setattr(cli, "cli_sign_in", signed_in)
+    monkeypatch.setattr(Logins, "added", added)
     _keep_logins_in(tmp_path, monkeypatch)
-    await AnthropicCLI(account="c").login(headless=headless)
-    assert (seen, added) == ([headless], ["c"])
+    provider = AnthropicCLI(account="work")
+    await provider.login(**given)
+    env = await provider.environment()
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-work")
+    signed_in.assert_awaited_once_with(
+        "claude",
+        "auth",
+        "login",
+        "--claudeai",
+        env=env | ({"BROWSER": "true"} if headless else {}),
+        browser=False,
+        grace_sec=1.0,
+    )
+    added.assert_awaited_once_with("work")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_login_adds_no_account(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refused = AuthError("claude sign-in failed: no")
+    added = AsyncMock()
+    monkeypatch.setattr(cli, "cli_sign_in", AsyncMock(side_effect=refused))
+    monkeypatch.setattr(Logins, "added", added)
+    _keep_logins_in(tmp_path, monkeypatch)
+    with pytest.raises(AuthError) as raised:
+        await AnthropicCLI(account="work").login()
+    assert raised.value is refused
+    added.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1093,9 +1096,35 @@ async def test_count_bills_an_image_by_its_pixels_not_its_bytes() -> None:
     assert added == model.attachment_tokens(picture) == 300 * 300 // 750
 
 
+@pytest.mark.asyncio
+async def test_count_bills_a_tool_results_image_by_its_pixels_not_its_bytes() -> None:
+    model = AnthropicCLI()["opus"]
+    picture = Attachment(mime_descriptor="image/png", data=_png(300, 300))
+    added = await model.count(_answered("seen", picture)) - await model.count(
+        _answered("seen"),
+    )
+    assert added == model.attachment_tokens(picture) == 300 * 300 // 750
+
+
+def _answered(*stdout: str | Attachment) -> Request:
+    """Return a request whose one tool call was answered with ``stdout``."""
+    call = ToolCall(call_id="toolu_1", name="Read", arguments={})
+    result = ToolResult(
+        call_id="toolu_1",
+        state="done",
+        stdout=stdout,
+        result=UncategorizedToolResult(),
+    )
+    return Request(records=(UserMessage(content="look"), call, result))
+
+
 @pytest.mark.parametrize(
     ("model", "budgets"),
-    [("opus", {"none", "auto"}), ("opus-4.6", {"none", "auto", "fixed"})],
+    [
+        ("opus", {"auto"}),
+        ("opus-5.0", {"none", "auto"}),
+        ("opus-4.6", {"none", "auto", "fixed"}),
+    ],
 )
 def test_the_cli_offers_what_claude_takes_and_no_tier(
     model: str,
@@ -1127,7 +1156,7 @@ def test_the_cli_offers_what_claude_takes_and_no_tier(
         ("opus", (), {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}),
         ("opus", (("cache_ttl_sec", 300.0),), {"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}),
         (
-            "opus",
+            "opus-5.0",
             (("thinking_budget", "none"),),
             {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h", "CLAUDE_CODE_DISABLE_THINKING": "1"},
         ),
@@ -1429,17 +1458,6 @@ def _calls(
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {}},
         {"type": "message_stop"},
     )
-
-
-async def _answered(
-    challenge: str,
-    state: str,
-    *,
-    show: Callable[[str], object],
-) -> tuple[str, str]:
-    """Stand in for the browser: it brings back a code at once."""
-    del challenge, state, show
-    return "the-code", "http://localhost:1/callback"
 
 
 def _read(path: Path) -> str:

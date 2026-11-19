@@ -175,6 +175,37 @@ async def test_reasoning_and_tier_changes_are_applied_and_reported(
 
 
 @pytest.mark.asyncio
+async def test_an_effort_too_high_for_thinking_off_turns_thinking_on(
+    tmp_path: Path,
+) -> None:
+    capped = replace(
+        _capability("capped"),
+        thinking_off_max_effort="low",
+        default=replace(_capability("capped").default, thinking_budget="auto"),
+    )
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, capability=capped)},
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["scripted"]["capped"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(agent)
+    tool = AgentSelf(team=team)
+    await _patch(tool, tmp_path, {"budget": "none", "effort": "low"})
+
+    text = await _patch(tool, tmp_path, {"effort": "high"})
+
+    assert text.splitlines() == [
+        "thinking_budget: none -> auto",
+        "thinking_effort: low -> high",
+    ]
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'low'"):
+        _ = await _patch(tool, tmp_path, {"effort": "high", "budget": "none"})
+
+
+@pytest.mark.asyncio
 async def test_when_long_calls_wake_is_patched_and_reported(tmp_path: Path) -> None:
     _, agent, tool = _setup(tmp_path)
 

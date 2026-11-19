@@ -427,12 +427,15 @@ def test_the_provider_lists_its_models_and_resolves_roles() -> None:
 
 
 def test_the_api_serves_google_s_current_models_under_their_ids() -> None:
-    """As ai.google.dev's pricing and deprecations pages list them on 2026-10-27.
+    """As ai.google.dev's pricing and deprecations pages list them on 2026-11-18.
 
     ``gemini-3.7-flash`` and ``gemini-3.5-flash`` only route to 3.8 and 3.6 now.
     """
     served = {name: Google.models()[name].wire_model_id for name in Google.models()}
     assert served == {
+        "gemini-neon-4.0": "gemini-4-neon",
+        "gemini-hydrogen-4.0": "gemini-4-hydrogen",
+        "gemini-carbon-4.0": "gemini-4-carbon",
         "gemini-argon-4.0": "gemini-4-argon",
         "gemini-pro-3.1": "gemini-3.1-pro-preview",
         "gemini-pro-2.5": "gemini-2.5-pro",

@@ -202,7 +202,7 @@ async def test_every_setting_a_row_offers_changes_what_is_sent(
             sent: dict[object, set[str]] = {value: set[str]() for value in values}
             for base in (capability.default, committed):
                 for value in values:
-                    model.settings = base.with_value(field, value)
+                    model.settings = capability.with_choices(base, {field: value})
                     sent[value].add(await _sent(model, request))
             same = [v for v in values if sum(sent[v] == s for s in sent.values()) > 1]
             if same:
@@ -862,6 +862,32 @@ async def test_a_successor_adopts_the_settings_and_takes_a_named_effort() -> Non
     )
     with pytest.raises(ValueError, match="thinking_effort='low' is not offered"):
         await successor(provider.__getitem__, "narrow+low", current=current)
+
+
+@pytest.mark.asyncio
+async def test_a_named_effort_turns_thinking_on_where_it_cannot_be_off() -> None:
+    prices = PriceCatalog(window=1_000)
+    capped = ModelCapability(
+        model_id="capped-1.0",
+        limits=ModelLimits(max_request_tokens=1_000),
+        prices=prices,
+        thinking_effort=frozenset({"high", "max"}),
+        thinking_budget=frozenset({"none", "auto"}),
+        thinking_off_max_effort="high",
+        default=ModelSettings(
+            thinking_effort="high",
+            thinking_budget="auto",
+            context_size=prices["fullcontext"],
+        ),
+    )
+    provider = ScriptedProvider(models=ModelTable(rows=(capped,)))
+    current = provider["capped"]
+    current.settings = replace(current.settings, thinking_budget="none")
+    after = await successor(provider.__getitem__, "capped+maxthink", current=current)
+    assert (after.settings.thinking_effort, after.settings.thinking_budget) == (
+        "max",
+        "auto",
+    )
 
 
 @pytest.mark.asyncio

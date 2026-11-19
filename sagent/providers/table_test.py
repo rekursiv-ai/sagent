@@ -638,13 +638,14 @@ reference:
   thinking: {effort: [none], budget: [none], output: [none]}
 profiles:
   base:
-    knowledge_cutoff: May 2025
+    knowledge_cutoff: '2025-05'
     thinking: {effort: [none, high], budget: [none, auto], output: [none, text]}
 models:
   - model_id: example-1.0
     wire_model_id: vendor-example
     profile: base
     effort_as_level: true
+    thinking_off_max_effort: low
     thinking: {effort: [none, low, high], budget: [none, auto], output: [none, text]}
     prices:
       - {request: 1.0, response: 2.0, cache_write: 0.0, cache_write_1h: 0.0,
@@ -674,7 +675,7 @@ providers:
     row = table["default"]
     assert row.wire_model_id == "vendor-example"
     assert row.approx_chars_per_token == 3.5
-    assert row.knowledge_cutoff == "May 2025"
+    assert row.knowledge_cutoff == "2025-05"
     assert row.limits.max_request_tokens == 1000
     # The section's ``thinking`` replaces only the axes it names.
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
@@ -683,6 +684,7 @@ providers:
         {"none", "text"},
     )
     assert row.effort_as_level
+    assert row.thinking_off_max_effort == "low"
     assert row.retries_internally
     assert row.account_auth
     assert row.service_tier == {"auto", "default", "priority"}
@@ -741,6 +743,89 @@ def test_the_default_effort_layers_like_any_field(
         },
     )
     assert _load(path)["example"].default.thinking_effort == effort
+
+
+@pytest.mark.parametrize("cutoff", ["2025-05", "2026-05-18"])
+def test_a_cutoff_is_iso_at_the_precision_the_vendor_publishes(
+    tmp_path: Path,
+    cutoff: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
+    assert _load(path)["example"].knowledge_cutoff == cutoff
+
+
+@pytest.mark.parametrize("cutoff", ["May 2025", "2025-13", "2026-02-30", "2025"])
+def test_a_cutoff_in_any_other_form_is_refused(tmp_path: Path, cutoff: str) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
+    with pytest.raises(ValueError, match="knowledge_cutoff"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("layer", "where"),
+    [
+        ("profile", "profile 'p'"),
+        ("model", "model 'example-1.0'"),
+        ("section", "section 'vendor'"),
+        ("entry", "section 'vendor'"),
+    ],
+)
+def test_a_limits_override_must_restate_each_limit_below_it(
+    tmp_path: Path,
+    layer: str,
+    where: str,
+) -> None:
+    """``limits`` replaces whole, so a limit left out would silently become 0."""
+    short = {"max_request_tokens": 500}
+    whole = {"max_request_tokens": 500, "max_image_edge_px": 2048}
+    reference = {
+        "limits": {"max_request_tokens": 1000, "max_image_edge_px": 2048},
+        "thinking": _THINKING,
+    }
+
+    def written(limits: dict[str, int]) -> Path:
+        given = {"limits": limits}
+        return _write(
+            tmp_path / f"{layer}.yaml",
+            _model(profile="p") | (given if layer == "model" else {}),
+            vendor=(given if layer == "section" else {})
+            | ({"models": {"example-1.0": given}} if layer == "entry" else {}),
+            extra={
+                "reference": reference,
+                "profiles": {"p": given if layer == "profile" else {}},
+            },
+        )
+
+    message = (
+        f"{where} restates no max_image_edge_px of the limits below it;"
+        " state it, 0 for none."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(written(short))
+    row = _load(written(whole))["example"]
+    assert (row.limits.max_request_tokens, row.limits.max_image_edge_px) == (500, 2048)
+
+
+def test_a_row_starting_with_thinking_off_above_its_cap_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model()
+        | {
+            "thinking_off_max_effort": "low",
+            "thinking_effort_default": "high",
+            "thinking_budget_default": "none",
+        },
+        extra={
+            "reference": {"limits": {"max_request_tokens": 1000}, "thinking": _EVERY},
+        },
+    )
+    message = (
+        "thinking_budget='none' is not offered by example-1.0 at thinking_effort='high'"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _load(path)
 
 
 def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
@@ -976,7 +1061,8 @@ def test_a_catalog_that_breaks_a_rule_is_rejected(
     ],
 )
 def test_a_negative_limit_is_rejected(tmp_path: Path, limit: str) -> None:
-    path = _write(tmp_path / "x.yaml", _model(limits={limit: -1}))
+    restated = {"max_request_tokens": 1000, limit: -1}
+    path = _write(tmp_path / "x.yaml", _model(limits=restated))
     with pytest.raises(ValueError, match="negative limit"):
         _load(path)
 

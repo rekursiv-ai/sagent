@@ -398,6 +398,11 @@ def test_gemini_3_sends_a_thinking_level(effort: ThinkingEffort, level: str) -> 
     assert config == {"includeThoughts": True, "thinkingLevel": level}
 
 
+def test_gemini_4_neon_s_most_effort_is_xhigh() -> None:
+    config = _thinking("gemini-neon-4.0", budget="auto", effort="xhigh")
+    assert config == {"includeThoughts": False, "thinkingLevel": "xhigh"}
+
+
 def test_gemini_3s_least_effort_is_minimal() -> None:
     config = _thinking("gemini-flash-lite-3.5", budget="auto", effort="min")
     assert config == {"includeThoughts": False, "thinkingLevel": "minimal"}
@@ -459,7 +464,7 @@ def test_gemini_2_5_with_no_effort_is_sent_a_zero_budget(
 
 @pytest.mark.parametrize(
     ("as_level", "effort"),
-    [(True, "max"), (True, "xhigh"), (True, "none")],
+    [(True, "max"), (True, "none")],
 )
 def test_an_effort_the_wire_cannot_say_is_refused(
     as_level: bool,

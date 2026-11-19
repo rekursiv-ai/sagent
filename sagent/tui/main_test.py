@@ -65,7 +65,7 @@ from sagent.model.scripted import (
     call,
     reply,
 )
-from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
@@ -2250,14 +2250,14 @@ async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
     offline_daemon: AsyncMock,
 ) -> None:
     """``claude`` renews a named login only in its own ``CLAUDE_CONFIG_DIR``."""
-    beside = ClaudeLogin.default_path().with_name(".credentials-work.json")
+    beside = AnthropicCLI.default_login_path().with_name(".credentials-work.json")
     beside.parent.mkdir(parents=True)
     beside.write_text("{}")
     flags = _flags("--ephemeral", "--tools", "Read")
     async with main.opened(flags, given=(), interactive=False, use_daemon=False):
         pass
     assert not beside.exists()
-    named = Logins(ClaudeLogin.default_path(), own_directory=True).path("work")
+    named = Logins(AnthropicCLI.default_login_path(), own_directory=True).path("work")
     assert named.read_text() == "{}"
     del script, offline_daemon
 

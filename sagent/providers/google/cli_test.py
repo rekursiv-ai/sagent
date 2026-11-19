@@ -9,7 +9,7 @@ from functools import partial
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import asyncio
 import os
@@ -22,7 +22,6 @@ from treekle import PlainTree, json_dumps, json_loads
 import pytest
 import pytest_asyncio
 
-from sagent.lib.posix.child import Child
 from sagent.model.cost import (
     PriceCatalog,
     PriceCondition,
@@ -96,62 +95,27 @@ async def agy_stream(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("headless", [True, False])
 @pytest.mark.parametrize(
-    "status",
-    [0, 7, None],
-    ids=["success", "failure", "cancelled"],
+    ("given", "browser"),
+    [({"headless": True}, False), ({"headless": False}, True), ({}, True)],
+    ids=["headless", "browser", "default"],
 )
-async def test_native_login_waits_in_the_child_context_before_reporting_status(
+async def test_login_is_agy_s_own_sign_in_at_sagent_s_prompt(
     monkeypatch: pytest.MonkeyPatch,
-    headless: bool,
-    status: int | None,
+    given: dict[str, bool],
+    browser: bool,
 ) -> None:
-    waiting = asyncio.Event()
-    finished = asyncio.Future[int]()
-
-    async def wait() -> int:
-        waiting.set()
-        return await finished
-
-    waited = AsyncMock(side_effect=wait)
-    child = Mock(process=Mock(wait=waited))
-    entered = AsyncMock(return_value=child)
-    exited = AsyncMock(return_value=None)
-    started = AsyncMock(
-        return_value=MagicMock(__aenter__=entered, __aexit__=exited),
+    """``agy`` opens no browser of its own, so one opens here unless headless."""
+    signed_in = AsyncMock()
+    monkeypatch.setattr(cli, "cli_sign_in", signed_in)
+    await GoogleCLI(resources=Mock()).login(**given)
+    signed_in.assert_awaited_once_with(
+        "agy",
+        "acp",
+        "--login",
+        browser=browser,
+        grace_sec=0.0,
     )
-    monkeypatch.setattr(Child, "start", started)
-    provider = GoogleCLI(resources=Mock())
-    running = asyncio.create_task(provider.login(headless=headless))
-    try:
-        await waiting.wait()
-        started.assert_awaited_once_with("agy", "acp", "--login")
-        entered.assert_awaited_once_with()
-        waited.assert_awaited_once_with()
-        exited.assert_not_awaited()
-        assert not running.done()
-        if status is None:
-            running.cancel()
-            with pytest.raises(asyncio.CancelledError) as raised:
-                await running
-            exited.assert_awaited_once()
-            assert exited.await_args is not None
-            assert exited.await_args.args[:2] == (asyncio.CancelledError, raised.value)
-        else:
-            finished.set_result(status)
-            if status:
-                with pytest.raises(
-                    AuthError,
-                    match=r"^agy sign-in failed \(exit 7\)\.$",
-                ):
-                    await running
-            else:
-                await running
-            exited.assert_awaited_once_with(None, None, None)
-    finally:
-        running.cancel()
-        await asyncio.gather(running, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,12 @@ import time
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import RESERVED, ChildSpec, Team
-from sagent.model.capability import ThinkingBudget, ThinkingEffort, ThinkingOutput
+from sagent.model.capability import (
+    ModelSettingName,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
+)
 from sagent.model.types import Request
 from sagent.providers.catalog import counterpart, successor
 from sagent.runtime import types
@@ -713,15 +718,16 @@ class AgentSpawn:
             current=current,
             model_cache=parent.model_cache,
         )
+        given: dict[ModelSettingName, object | None] = {
+            "thinking_effort": effort,
+            "thinking_budget": budget,
+            "thinking_output": output,
+        }
         try:
-            settings = model.settings
-            if effort is not None:
-                settings = replace(settings, thinking_effort=effort)
-            if budget is not None:
-                settings = replace(settings, thinking_budget=budget)
-            if output is not None:
-                settings = replace(settings, thinking_output=output)
-            model.settings = settings
+            model.settings = model.capability.with_choices(
+                model.settings,
+                {name: value for name, value in given.items() if value is not None},
+            )
         except ValueError:
             await model.aclose()
             raise

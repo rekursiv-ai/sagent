@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import base64
@@ -117,8 +118,7 @@ def encode(
             }
             for tool in request.tools
         ]
-    if settings.thinking_budget != "none":
-        body["thinking"] = _thinking(settings, reply=reply)
+    body["thinking"] = _thinking(settings, reply=reply)
     if settings.thinking_output == "redacted":
         betas.append("redact-thinking-2026-02-12")
     edits = _context_edits(settings=settings, cache_expired=cache_expired)
@@ -381,14 +381,14 @@ def to_exception(
     status: int,
     *,
     body: object,
-    headers: Mapping[str, str] | None = None,
+    headers: Mapping[str, str] = MappingProxyType({}),
 ) -> Exception:
     """Return the exception an error reply, or an in-stream ``error`` event, means.
 
     Args:
       status: The HTTP status; ``0`` for an in-stream event.
       body: The reply's JSON, or its text when it was not JSON.
-      headers: The reply's headers, which may advise a wait.
+      headers: The reply's headers, which may advise a wait; none for an event.
 
     Returns:
       error: The most specific exception that fits.
@@ -412,9 +412,9 @@ def to_exception(
         return BillingError(text)
     if status in (401, 403) or kind in ("authentication_error", "permission_error"):
         return AuthError(text)
-    wait_sec = _retry_after(headers or {}, rate_limited=status == 429)
+    wait_sec = _retry_after(headers, rate_limited=status == 429)
     if status == 429 or kind == "rate_limit_error":
-        lower = {key.lower(): value for key, value in (headers or {}).items()}
+        lower = {key.lower(): value for key, value in headers.items()}
         return RateLimitedError(
             text,
             retry_after_sec=wait_sec,
@@ -595,6 +595,9 @@ def _cache_mark(settings: ModelSettings) -> dict[str, object]:
 
 
 def _thinking(settings: ModelSettings, *, reply: int) -> dict[str, object]:
+    # Omitting ``thinking`` is not off: Claude 5 models think adaptively unasked.
+    if settings.thinking_budget == "none":
+        return {"type": "disabled"}
     if settings.thinking_budget == "auto":
         thinking: dict[str, object] = {"type": "adaptive"}
     else:

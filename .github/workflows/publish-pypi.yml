@@ -34,7 +34,7 @@ jobs:
       - name: Validate built package
         run: |
           uv run python -c "import sagent; print(sagent.__file__)"
-          uv run python sagent/scripts/check_wheel.py
+          uv run python -m sagent.scripts.check_wheel
 
       # sagent tracks wesearch's main branch via [tool.uv.sources], so nothing
       # before this point proves the published dependency floor is sufficient.

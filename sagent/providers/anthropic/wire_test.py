@@ -632,12 +632,21 @@ def test_a_fixed_budget_never_falls_below_the_api_floor() -> None:
     }
 
 
+def test_no_budget_turns_thinking_off() -> None:
+    # Omitting ``thinking`` leaves Claude 5 models thinking adaptively; only
+    # ``disabled`` stops it, and it takes no ``display``.
+    _, settings = _model()
+    settings = replace(settings, thinking_budget="none", thinking_output="text")
+    body, betas = _encode([UserMessage(content="q")], settings=settings)
+    assert body["thinking"] == {"type": "disabled"}
+    assert "context-management-2025-06-27" not in betas
+
+
 def test_effort_is_sent_as_output_config() -> None:
     _, settings = _model()
     settings = replace(settings, thinking_budget="none", thinking_effort="high")
     body, _ = _encode([UserMessage(content="q")], settings=settings)
     assert body["output_config"] == {"effort": "high"}
-    assert "thinking" not in body
     # A model that takes no effort (the 4.5 Sonnet and Haiku) is told none.
     body, _ = _encode(
         [UserMessage(content="q")],

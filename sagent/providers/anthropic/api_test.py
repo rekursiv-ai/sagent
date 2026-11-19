@@ -595,12 +595,12 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
 @pytest.mark.parametrize(
     ("model_id", "cutoff"),
     [
-        ("fable-5.2", "June 2026"),
-        ("fable-5.1", "June 2026"),
-        ("opus-5.0", "May 2026"),
-        ("opus-4.6", "May 2025"),
-        ("sonnet-4.6", "August 2025"),
-        ("haiku-4.5", "February 2025"),
+        ("fable-5.2", "2026-06"),
+        ("fable-5.1", "2026-06"),
+        ("opus-5.0", "2026-05"),
+        ("opus-4.6", "2025-05"),
+        ("sonnet-4.6", "2025-08"),
+        ("haiku-4.5", "2025-02"),
     ],
 )
 def test_every_row_states_its_published_cutoff(model_id: str, cutoff: str) -> None:
@@ -687,9 +687,14 @@ def test_small_is_haikus_cheaper_band_and_opus_has_none() -> None:
 @pytest.mark.parametrize(
     ("model_id", "budget"),
     [
-        # ``enabled`` is rejected from 4.7 on: adaptive only.
-        ("fable-5.2", {"none", "auto"}),
-        ("fable-5.1", {"none", "auto"}),
+        # ``enabled`` is rejected from 4.7 on: adaptive only. Fable, Mythos, and
+        # the 5.5 models also reject ``disabled``: thinking cannot be turned off.
+        ("fable-5.2", {"auto"}),
+        ("fable-5.1", {"auto"}),
+        ("opus-5.5", {"auto"}),
+        ("sonnet-5.5", {"auto"}),
+        ("haiku-5.5", {"none", "auto"}),
+        ("opus-5.0", {"none", "auto"}),
         ("opus-4.8", {"none", "auto"}),
         ("opus-4.6", {"none", "auto", "fixed"}),
         # The 4.5 generation rejects ``adaptive``.
@@ -702,6 +707,20 @@ def test_each_generation_offers_its_measured_budget_modes(
     budget: set[ThinkingBudget],
 ) -> None:
     assert Anthropic.models()[model_id].thinking_budget == budget
+
+
+def test_thinking_off_is_capped_at_high_effort_only_where_claude_caps_it() -> None:
+    capped = {
+        model_id: row.thinking_off_max_effort
+        for model_id, row in Anthropic.models().items()
+        if row.thinking_off_max_effort is not None
+    }
+    assert capped == {"opus-5.0": "high", "haiku-5.5": "high"}
+    opus = Anthropic.models()["opus-5.0"]
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        opus.check(
+            replace(opus.default, thinking_effort="xhigh", thinking_budget="none"),
+        )
 
 
 def test_xhigh_effort_is_a_4_7_and_later_level() -> None:
@@ -730,7 +749,8 @@ def test_image_limits_and_tokenizer_follow_the_generation(
     assert row.limits.max_image_edge_px == edge_px
     # 10 MB base64-encoded on the wire is 7.5 MB raw.
     assert row.limits.max_image_bytes == 7_500_000
-    assert row.limits.max_request_bytes == 32 * 1024 * 1024
+    # The first-party Messages API takes 128 MB; 32 MB is the cloud platforms'.
+    assert row.limits.max_request_bytes == 128 * 1024 * 1024
 
 
 def test_the_api_offers_both_cache_lifetimes_and_retries_itself() -> None:

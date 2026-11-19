@@ -662,7 +662,13 @@ def _thinking(
     if capability.thinking_effort == frozenset({"none"}):
         return config
     if capability.effort_as_level:
-        levels = {"min": "minimal", "low": "low", "medium": "medium", "high": "high"}
+        levels = {
+            "min": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+        }
         # Gemini 3 accepts ``thinkingBudget`` only for backwards compatibility.
         if effort not in levels:
             raise ValueError(f"Effort {effort!r} has no Gemini thinkingLevel.")

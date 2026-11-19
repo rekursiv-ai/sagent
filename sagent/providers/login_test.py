@@ -420,6 +420,30 @@ async def test_a_directory_lock_left_stale_is_taken_over(tmp_path: Path) -> None
     assert not lock.exists()
 
 
+def test_a_directory_lock_exactly_as_old_as_stale_is_kept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / ".oauth_refresh.lock"
+    lock.mkdir()
+    os.utime(lock, (1_000.0, 1_000.0))
+    monkeypatch.setattr(time, "time", lambda: 1_060.0)
+    with pytest.raises(FileExistsError):
+        login._take(lock, 60.0)
+    assert lock.is_dir()
+
+
+def test_a_directory_lock_gone_as_it_is_judged_is_still_held_by_another(
+    tmp_path: Path,
+) -> None:
+    """Its holder released it between the refusal and the look at its age."""
+    lock = tmp_path / ".oauth_refresh.lock"
+    # A dangling link refuses ``mkdir`` as a held lock would, yet has no age.
+    lock.symlink_to(tmp_path / "released")
+    with pytest.raises(FileExistsError):
+        login._take(lock, 60.0)
+
+
 @pytest.mark.asyncio
 async def test_a_directory_lock_is_kept_fresh_while_held(
     tmp_path: Path,
@@ -551,6 +575,22 @@ def test_a_login_kept_elsewhere_than_its_file_is_known_by_its_lock(
     assert logins.accounts() == ("work",)
 
 
+@pytest.mark.asyncio
+async def test_a_login_added_where_no_file_holds_it_is_known_by_its_directory(
+    tmp_path: Path,
+) -> None:
+    """As ``claude`` signs in to the macOS Keychain: its directory holds no login file."""
+    logins = Logins(tmp_path / ".tool" / "auth.json", own_directory=True)
+    await logins.added("work")
+    assert logins.accounts() == ()
+    (tmp_path / ".tool-work").mkdir()
+    assert logins.accounts() == ("work",)
+    # Kept in one file per account, a login with no file is gone.
+    beside = Logins(tmp_path / "beside" / "auth.json")
+    await beside.added("work")
+    assert beside.accounts() == ()
+
+
 def test_listing_the_accounts_moves_nothing(tmp_path: Path) -> None:
     beside = Logins(tmp_path / ".tool" / "auth.json")
     own = Logins(beside.default, own_directory=True)
@@ -586,6 +626,17 @@ def test_a_login_kept_beside_the_default_moves_into_a_directory_of_its_own(
     # Moved by another process meanwhile, it is not moved again.
     login._move_in(beside.path("gone"), own.path("gone"))
     assert not own.path("gone").exists()
+
+
+def test_a_login_moves_into_a_directory_the_tool_already_made(tmp_path: Path) -> None:
+    """``claude`` makes ``~/.claude-work`` before any login is saved there."""
+    beside = Logins(tmp_path / ".tool" / "auth.json")
+    own = Logins(beside.default, own_directory=True)
+    _save(beside, "default")
+    beside.path("work").write_text("work")
+    own.path("work").parent.mkdir()
+    own.move_in()
+    assert own.path("work").read_text() == "work"
 
 
 def test_a_login_kept_in_one_file_has_nothing_to_move(tmp_path: Path) -> None:

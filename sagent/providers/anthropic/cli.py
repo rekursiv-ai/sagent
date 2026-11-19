@@ -36,7 +36,7 @@ from sagent.model import image
 from sagent.model.exceptions import ContextOverflowError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
-from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.cli_login import cli_sign_in
 from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import account_key, retried
@@ -98,6 +98,15 @@ class AnthropicCLI(HasModels, AsyncResource):
     aliases: ClassVar[tuple[str, ...]] = ("acli",)
     package: ClassVar[ModuleType] = anthropic
 
+    sign_in_grace_sec: ClassVar[float] = 1.0
+    """How long a failed sign-in's last words are waited for: the browser
+    ``claude`` starts may hold its output open past its exit."""
+
+    gate_section: ClassVar[str] = "claude"
+    """What every call billed to a Claude login is paced under, whichever
+    provider makes it: through the API or through ``claude``, one account's
+    limits are one."""
+
     def __init__(
         self,
         *,
@@ -109,8 +118,12 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._logins = Logins(ClaudeLogin.default_path(), own_directory=True)
-        self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
+        self._logins = Logins(self.default_login_path(), own_directory=True)
+
+    @classmethod
+    def default_login_path(cls) -> Path:
+        """Return the file ``claude`` keeps its login in, off macOS."""
+        return Path("~/.claude/.credentials.json").expanduser()
 
     @property
     def name(self) -> str:
@@ -154,8 +167,25 @@ class AnthropicCLI(HasModels, AsyncResource):
         return self._account
 
     async def login(self, *, headless: bool = False) -> None:
-        """Sign in through the browser, or with a code pasted from it."""
-        await self._login.sign_in(headless=headless)
+        """Sign in through ``claude``'s own sign-in: in the browser, or with a pasted code.
+
+        Args:
+          headless: Open no browser. Otherwise ``claude`` opens one itself, at a
+            loopback server of its own that ends the sign-in with no code to paste.
+
+        """
+        env = await self.environment()
+        if headless:
+            env["BROWSER"] = "true"
+        await cli_sign_in(
+            "claude",
+            "auth",
+            "login",
+            "--claudeai",
+            env=env,
+            browser=False,
+            grace_sec=self.sign_in_grace_sec,
+        )
         await self._logins.added(self._account)
 
     async def environment(self) -> dict[str, str]:
@@ -298,7 +328,7 @@ class AnthropicCLIModel(AsyncResource):
 
         """
         key = account_key(
-            ClaudeLogin.gate_section,
+            AnthropicCLI.gate_section,
             model=self.capability.model_id,
             account=self.provider.account or "default",
         )
@@ -417,8 +447,8 @@ class AnthropicCLIModel(AsyncResource):
 
         ``claude`` takes its thinking budget and cache lifetime only from its
         environment, and the provider's drops every ``CLAUDE_CODE_`` variable, so
-        these are set after. A budget is as the API is asked it: none omits
-        thinking, ``auto`` is ``claude``'s own adaptive thinking, and ``fixed``
+        these are set after. A budget is as the API is asked it: none turns
+        thinking off, ``auto`` is ``claude``'s own adaptive thinking, and ``fixed``
         is half the reply's room (``claude`` holds it to at least 1,024).
 
         Returns:
@@ -655,7 +685,7 @@ class _Claude:
         if stdout is None:
             raise ValueError("claude was started without stdout")
         # The window last reported, and when it resets, as the API's headers say.
-        unified: dict[str, str] | None = None
+        unified: dict[str, str] = {}
         while True:
             # A model that goes quiet this long has dropped the turn.
             raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)
@@ -790,7 +820,7 @@ def _unified_headers(event: dict[str, object]) -> dict[str, str]:
     return headers
 
 
-def _failure(event: dict[str, object], *, headers: dict[str, str] | None) -> Exception:
+def _failure(event: dict[str, object], *, headers: dict[str, str]) -> Exception:
     """Return the exception a failed ``result`` event means."""
     text = str(event.get("result") or event.get("errors") or event)
     reason = event.get("terminal_reason")
