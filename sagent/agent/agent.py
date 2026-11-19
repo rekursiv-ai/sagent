@@ -519,10 +519,18 @@ class Agent(AsyncResource):
         for model in retired:
             await model.aclose()
 
+    # The runtime publishes a halt before it stops anything, so what was at work is
+    # still at work here. The record is the journal's alone: a resume never reads
+    # it, so the model is not told.
     def _observe(self, event: types.RuntimeEvent) -> None:
-        """Write the session, start each window afresh, and hold the caps."""
+        """Write the session, note a halt that stopped work, start windows, hold caps."""
         if isinstance(event, types.SaveSession):
             self._session.persist()
+        elif isinstance(event, types.Halt) and self.runtime.at_work:
+            self._session.persist()
+            self._session.journal.append(
+                UncategorizedRecord(timestamp=now_timestamp(), kind="interrupted"),
+            )
         elif isinstance(event, (types.CompactComplete, types.ClearComplete)):
             self.runtime.tool_context.files.forget()
             self._return_home()

@@ -291,7 +291,7 @@ def _walk(
                 label=label,
                 branch=branch,
                 text=f"{'● ' if label == focused else ''}{label}",
-                state="busy" if _busy(agent) else "idle",
+                state="busy" if agent.runtime.at_work else "idle",
                 detail=f"${agent.spend_usd:.2f}",
             ),
         )
@@ -319,9 +319,3 @@ def _walk(
             now=now,
             out=out,
         )
-
-
-def _busy(agent: Agent) -> bool:
-    """Return whether ``agent`` is calling its model, compacting, or running tools."""
-    rt = agent.runtime
-    return rt.model_call is not None or rt.compact_task is not None or bool(rt.cohort)

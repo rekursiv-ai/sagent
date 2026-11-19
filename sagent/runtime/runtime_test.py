@@ -1659,8 +1659,8 @@ def test_a_halt_waits_for_the_user_whatever_else_arrives(actions: list[str]) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_halted_cohort_the_user_resumes_never_completes() -> None:
-    """Halt keeps the cohort; the redirect that follows detaches it, uncompleted."""
+async def test_a_halt_detaches_the_running_cohort() -> None:
+    """Halt answers each running call with a stub; the calls run on, waited on by none."""
     tool = Gated(hold=True)
     async with Harness(
         reply(calls=[call("echo", "t1")]),
@@ -1672,10 +1672,14 @@ async def test_a_halted_cohort_the_user_resumes_never_completes() -> None:
         h.push(Halt())
         await h.seen(Halt)
         await spin()
-        assert h.runtime.cohort == {"t1"}
+        assert (h.runtime.cohort, h.runtime.running_tools) == (set(), {})
+        assert h.runtime.jobs["t1"].state == "detached"
+        (stub,) = h.results("t1")
+        assert (stub.text(), stub.state) == (Markers().detached, "pending")
+        assert len(h.requests()) == 1
         h.push(_user("resume"))
         await h.seen(ModelIdle)
-        assert set(h.runtime.detached) == {"t1"}
+    assert h.said(1) == ["go", "resume"]
     assert h.count(CohortStarted) == 1
     assert h.count(CohortComplete) == 0
 
@@ -3184,11 +3188,13 @@ async def test_a_cancelled_stream_is_published_before_the_halt_is_handled() -> N
 
 
 @pytest.mark.asyncio
-async def test_halt_leaves_running_tools_their_slot() -> None:
+async def test_a_call_ending_while_halted_arrives_after_the_resume() -> None:
+    """Its stub keeps the slot; the result waits for the user, then arrives forward."""
     tool = Gated(hold=True, output="real")
     async with Harness(
         reply(calls=[call("echo", "t1")]),
         reply("resumed"),
+        reply("saw it"),
         tools=[tool],
     ) as h:
         h.push(_user("go"))
@@ -3197,10 +3203,12 @@ async def test_halt_leaves_running_tools_their_slot() -> None:
         await h.seen(Halt)
         tool.release.set()
         await spin()
-        assert h.results("t1") == []
+        assert [r.state for r in h.results("t1")] == ["pending"]
+        assert (_arrival(h, "t1"), len(h.requests())) == ([], 1)
         h.push(_user("resume"))
-        await h.seen(ModelIdle)
-    assert [r.text() for r in h.results("t1")] == ["real"]
+        await h.until(lambda: bool(_arrival(h, "t1")))
+        await h.seen(AgentIdle)
+    assert [r.text() for r in _arrival(h, "t1")] == ["real"]
     assert h.said(1) == ["go", "resume"]
 
 
@@ -4215,6 +4223,22 @@ async def test_dispatch_predicates_by_state() -> None:
         rt.push(_user("release"))
         tool.release.set()
         await h.seen(ModelIdle)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_streaming_compacting_or_waiting_on_a_call_is_at_work() -> None:
+    rt = Harness().runtime
+    task = asyncio.create_task(_forever())
+    seen = [rt.at_work]
+    rt.model_call = task
+    seen.append(rt.at_work)
+    rt.model_call, rt.compact_task = None, task
+    seen.append(rt.at_work)
+    rt.compact_task = None
+    rt.cohort.add("t1")
+    seen.append(rt.at_work)
+    task.cancel()
+    assert seen == [False, True, True, True]
 
 
 @pytest.mark.asyncio

@@ -374,6 +374,50 @@ def _halted(agent: Agent, request: Request) -> Response:
     return reply(calls=[call("Nope")])
 
 
+def _interrupts(journal: Journal) -> int:
+    return sum(
+        isinstance(r, UncategorizedRecord) and r.kind == "interrupted"
+        for r in journal.history()
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_halt_that_stops_work_is_journaled_and_never_read_back(
+    tmp_path: Path,
+) -> None:
+    """The journal says the turn was interrupted; a resume does not tell the model."""
+    journal = RecordingJournal()
+    provider = ScriptedProvider()
+    _, agent = _agent(tmp_path, provider=provider, journal=journal)
+    provider.replies.append(lambda request: _halted(agent, request))
+    async with agent:
+        with pytest.raises(asyncio.CancelledError):
+            _ = await agent.send("go")
+    assert _interrupts(journal) == 1
+    assert isinstance(_own(journal)[-1], UncategorizedRecord)
+
+    provider = ScriptedProvider(replies=[reply("answered")])
+    _, resumed = _agent(tmp_path, provider=provider, journal=journal)
+    async with resumed:
+        _ = await resumed.send("next")
+    (asked,) = provider.requests
+    assert _texts(asked.records) == ["go\n\nnext"]
+    assert not any(isinstance(r, UncategorizedRecord) for r in asked.records)
+
+
+@pytest.mark.asyncio
+async def test_a_halt_of_an_idle_agent_journals_nothing(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, reply("hello"), journal=journal)
+    seen = _Seen()
+    async with agent:
+        _ = await agent.send("hi")
+        agent.runtime.observers.append(seen)
+        agent.runtime.halt()
+        await seen.until(lambda: seen.count(types.Halt) > 0)
+    assert _interrupts(journal) == 0
+
+
 @pytest.mark.asyncio
 async def test_a_turn_needs_an_open_agent(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path)

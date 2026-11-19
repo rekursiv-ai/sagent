@@ -681,11 +681,7 @@ def _editor(event: KeyPressEvent) -> None:
 
 def _interrupt(runtime: Runtime, event: KeyPressEvent) -> None:
     """Halt a busy agent, and abandon the line to history; never exit."""
-    if (
-        runtime.model_call is not None
-        or runtime.compact_task is not None
-        or runtime.cohort
-    ):
+    if runtime.at_work:
         runtime.halt()
     event.current_buffer.reset(append_to_history=True)
 
