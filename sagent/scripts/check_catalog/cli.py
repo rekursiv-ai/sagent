@@ -38,11 +38,11 @@ from sagent.scripts.check_catalog.sources import (
 if TYPE_CHECKING:
     from types import ModuleType
 
-    import httpx
+    import httpx2
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")
+    httpx2 = lazy_import("httpx2")
 
 
 def main() -> int:
@@ -175,14 +175,14 @@ class _Check(Protocol):
 def _fetch(url: str, *, unreachable: dict[str, str]) -> str:
     """Return ``url``'s body as text, a PDF's as its pages' text."""
     try:
-        response = httpx.get(
+        response = httpx2.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 sagent-catalog-check"},
             follow_redirects=True,
             timeout=60.0,
         )
         response.raise_for_status()
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         unreachable[url] = str(e)
         return ""
     body = response.content
