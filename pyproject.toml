@@ -765,7 +765,6 @@ project-excludes = [
     "**/third_party/",
     "typings/",
     "**/.export/typings/",
-    "website/rekursiv-ai.github.io/_site/",
 ]
 search-path = ["typings"]
 # Pinned beside the config: an interpreter found through a symlinked home splits
