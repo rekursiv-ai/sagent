@@ -250,13 +250,13 @@ class Logins:
     def _accounts(self, family: _Family) -> tuple[str, ...]:
         """Return ``accounts``, as ``family`` orders those added."""
         if self.own_directory:
-            # A login the macOS Keychain holds leaves only the lock its save took.
+            # A login the macOS Keychain holds leaves no file but a lock or its directory.
             folder, lock = self.default.parent, self.default.with_suffix(".lock").name
             names = {
                 found.parent.name.removeprefix(f"{folder.name}-")
                 for kept in (self.default.name, lock)
                 for found in folder.parent.glob(f"{folder.name}-*/{kept}")
-            }
+            } | {a for a in family.added if self.path(a).parent.is_dir()}
         else:
             names = set(self._beside())
         saved = {n for n in names if _ACCOUNT.fullmatch(n)}

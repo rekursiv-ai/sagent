@@ -242,6 +242,12 @@ def test_encode_offers_the_tools_and_gates_which_may_be_called() -> None:
     assert "tools" not in _encode(Request(allowed=frozenset({"Read"})))
 
 
+def test_the_least_effort_is_sent_as_openai_names_it() -> None:
+    """OpenAI's ``minimal`` is sagent's ``min``; ``min`` itself is a 400."""
+    body = _encode(Request(), "gpt-5.0", thinking_effort="min")
+    assert body["reasoning"] == {"effort": "minimal", "summary": "auto"}
+
+
 def test_encode_asks_for_reasoning_at_the_effort_chosen() -> None:
     # ``none`` is said, not left out: left out, the model reasons at its default.
     stopped = _encode(Request(), thinking_effort="none", thinking_output="text")

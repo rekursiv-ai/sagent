@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  text = environment(Path.cwd(), knowledge_cutoff="June 2026")
+  text = environment(Path.cwd(), knowledge_cutoff="2026-06")
 """
 
 from __future__ import annotations
@@ -28,7 +28,8 @@ def environment(cwd: Path, *, knowledge_cutoff: str | None = None) -> str:
 
     Args:
       cwd: The working directory, which the git state is read from.
-      knowledge_cutoff: The model's published cutoff, or ``None`` to omit it.
+      knowledge_cutoff: The model's published cutoff, ISO 8601 (``2026-06``), or
+        ``None`` to omit it.
 
     Returns:
       text: The git state, platform, shell, OS, and cutoff lines.

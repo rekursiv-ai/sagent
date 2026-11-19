@@ -1,14 +1,11 @@
-#!/bin/sh
-# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
-# fmt: off
-'''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
-Validate the Sagent wheel.
+"""Validate the Sagent wheel.
 
 The set of modules that must ship is derived from the source tree and the
-build config in ``pyproject.toml`` -- no hand-maintained file list.
-'''
-# fmt: on
+build config in ``pyproject.toml`` -- no hand-maintained file list. Run from
+the package root, beside ``dist/``:
+
+  python -m sagent.scripts.check_wheel
+"""
 
 from __future__ import annotations
 
@@ -125,8 +122,3 @@ def _entry_points_name(names: frozenset[str]) -> str | None:
         if name.endswith(".dist-info/entry_points.txt"):
             return name
     return None
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-# vim: ft=python

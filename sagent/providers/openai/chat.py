@@ -110,11 +110,7 @@ def encode(
     # ``none`` is said, not left out: left out, the model reasons at its default.
     if capability.thinking_effort != frozenset({"none"}):
         body["reasoning_effort"] = (
-            "minimal"
-            if effort == "min"
-            else "high"
-            if effort in ("xhigh", "max")
-            else effort
+            "high" if effort in ("xhigh", "max") else wire.effort(effort)
         )
     if settings.service_tier != "auto":
         body["service_tier"] = settings.service_tier

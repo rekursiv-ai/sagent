@@ -41,6 +41,8 @@ from sagent.session.types import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from sagent.model.capability import ThinkingEffort
+
 
 @pytest.fixture
 def now(monkeypatch: pytest.MonkeyPatch) -> float:
@@ -79,6 +81,17 @@ async def _lines(*lines: str) -> AsyncIterator[str]:
 def test_gpt_5_6_on_reasons_over_every_turn(model_id: str) -> None:
     assert wire.gpt_6(model_id)
     assert not wire.gpt_6(model_id.upper())
+
+
+@pytest.mark.parametrize(
+    ("effort", "named"),
+    [("min", "minimal"), ("low", "low"), ("max", "max")],
+)
+def test_an_effort_is_sent_as_openai_names_it(
+    effort: ThinkingEffort,
+    named: str,
+) -> None:
+    assert wire.effort(effort) == named
 
 
 @pytest.mark.asyncio

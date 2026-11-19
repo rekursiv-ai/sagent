@@ -423,6 +423,24 @@ async def test_an_inherited_thinking_takes_the_closest_on_each_axis() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_effort_too_high_for_thinking_off_turns_thinking_on() -> None:
+    capped = replace(
+        _WIDE,
+        thinking_off_max_effort="high",
+        default=replace(_WIDE.default, thinking_budget="auto"),
+    )
+    owner = _owner(capped)
+    await _apply(owner, "model.thinking.budget", "none")
+    assert await _apply(owner, "model.thinking.effort", "max") == "max"
+    assert _value(owner, "model.thinking") == "effort=max budget=auto output=none"
+    await _apply(owner, "model.thinking", "effort=high budget=none")
+    said = await _inherit(owner, "model.thinking.effort", "max")
+    assert (said, _value(owner, "model.thinking.budget")) == ("max", "auto (default)")
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        await _apply(owner, "model.thinking", "effort=max budget=none")
+
+
+@pytest.mark.asyncio
 async def test_a_model_without_reasoning_inherits_none() -> None:
     owner, _, _ = _model("narrow")
     assert (await _inherit(owner, "model.thinking.effort", "max")).startswith("none")

@@ -140,6 +140,13 @@ All notable sagent changes are documented here. This project follows
   with it. A daemon that fails mid-request is answered for by the files.
 - A provider's `events` takes the `model` asked; `gate_key(model)` names what
   each call is paced by.
+- `anthropic-cli` and `google-cli` sign in through the vendor CLI's own
+  sign-in, `claude auth login` and `agy acp --login`, at sagent's `Code:`
+  prompt. The CLI exchanges the code and keeps the login; sagent shows the
+  address it prints and passes it the code. Headless, no browser opens; else
+  `claude` opens its own and finishes with no code to paste, and for `agy`
+  sagent opens one. A refused sign-in says the CLI's last line. A named account
+  `claude` signs in to the macOS Keychain is listed by its directory.
 
 ## 0.2.3 - 2026-11-06
 

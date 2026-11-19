@@ -90,7 +90,7 @@ def encode(
     ):
         body["reasoning"] = {"effort": "none"}
     elif settings.thinking_effort != "none":
-        reasoning: dict[str, object] = {"effort": settings.thinking_effort}
+        reasoning: dict[str, object] = {"effort": wire.effort(settings.thinking_effort)}
         if settings.thinking_output == "text":
             reasoning["summary"] = "auto"
         if wire.gpt_6(capability.model_id):

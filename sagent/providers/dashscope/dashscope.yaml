@@ -45,6 +45,7 @@ profiles:
     limits:
       max_request_tokens: 1_000_000
       max_response_tokens: 65_536
+      max_image_bytes: 14_000_000
       truncates_at_context: true
     thinking:
       effort: [none, low, medium, xhigh]
@@ -57,6 +58,7 @@ profiles:
     limits:
       max_request_tokens: 1_000_000
       max_response_tokens: 65_536
+      max_image_bytes: 14_000_000
       truncates_at_context: true
     thinking:
       effort: [low, medium, xhigh]
@@ -67,6 +69,7 @@ profiles:
     limits:
       max_request_tokens: 262_144
       max_response_tokens: 65_536
+      max_image_bytes: 14_000_000
       truncates_at_context: true
 
   instruct:
@@ -75,6 +78,7 @@ profiles:
     limits:
       max_request_tokens: 262_144
       max_response_tokens: 65_536
+      max_image_bytes: 14_000_000
       truncates_at_context: true
     thinking:
       effort: [none]
@@ -85,6 +89,7 @@ profiles:
     limits:
       max_request_tokens: 262_144
       max_response_tokens: 32_768
+      max_image_bytes: 14_000_000
       truncates_at_context: true
     thinking:
       effort: [min, low, medium, high, xhigh, max]
@@ -97,6 +102,7 @@ profiles:
     limits:
       max_request_tokens: 1_000_000
       max_response_tokens: 32_768
+      max_image_bytes: 14_000_000
       truncates_at_context: true
 
 models:

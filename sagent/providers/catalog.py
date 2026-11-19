@@ -24,6 +24,7 @@ import re
 
 from sagent.model.capability import (
     ModelCapability,
+    ModelSettingName,
     ModelSettings,
 )
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
@@ -639,18 +640,18 @@ async def recall(
 def _apply(model: Model, tags: ModelTags) -> None:
     """Apply the effort, tier and choices ``tags`` name to ``model``; raise if unoffered."""
     capability = model.capability
-    settings = model.settings
+    choices: dict[ModelSettingName, object] = {}
     if tags.effort is not None:
-        settings = replace(settings, thinking_effort=tags.effort)
+        choices["thinking_effort"] = tags.effort
     if tags.service_tier is not None:
-        settings = replace(settings, service_tier=tags.service_tier)
+        choices["service_tier"] = tags.service_tier
     # ``ModelTags.parse`` admits only the choices a line spells.
     for name, typed in tags.choices.items():
         try:
-            settings = settings.with_value(name, capability.parse_value(name, typed))
+            choices[name] = capability.parse_value(name, typed)
         except ValueError as e:
             raise ValueError(f"{name.removeprefix('thinking_')}: {e}") from e
-    model.settings = settings
+    model.settings = capability.with_choices(model.settings, choices)
 
 
 async def _built(catalog: CatalogProtocol, line: str) -> Model:

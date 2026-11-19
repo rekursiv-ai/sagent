@@ -1,4 +1,4 @@
-"""Tests for ``scripts.check_wheel``: the wheel's modules and console scripts."""
+"""Tests for ``check_wheel``: the wheel's modules and console scripts."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import zipfile
 
 import pytest
 
-from sagent.scripts import check_wheel
+from sagent.scripts.check_wheel import cli
 
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ def _main_error(
     monkeypatch.chdir(tmp_path)
     _write_sagent_wheel(tmp_path, files)
     with pytest.raises(SystemExit) as raised:
-        _ = check_wheel.main()
+        _ = cli.main()
     return str(raised.value)
 
 
@@ -89,7 +89,7 @@ class TestCheckWheel:
         monkeypatch.chdir(tmp_path)
         _write_sagent_wheel(tmp_path, _BASE_FILES)
 
-        assert check_wheel.main() == 0
+        assert cli.main() == 0
 
     def test_a_gitignored_module_is_not_required(
         self,
@@ -104,7 +104,7 @@ class TestCheckWheel:
         (tmp_path / "sagent" / "generated").mkdir()
         (tmp_path / "sagent" / "generated" / "x.py").write_text("")
 
-        assert check_wheel.main() == 0
+        assert cli.main() == 0
 
 
 class TestCheckWheelErrors:
@@ -114,7 +114,7 @@ class TestCheckWheelErrors:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "dist").mkdir()
         with pytest.raises(SystemExit) as raised:
-            _ = check_wheel.main()
+            _ = cli.main()
         assert str(raised.value) == "uv build produced no Sagent wheel"
 
     def test_rejects_two_wheels_rather_than_guessing_the_fresh_one(
@@ -127,7 +127,7 @@ class TestCheckWheelErrors:
         _write_sagent_wheel(tmp_path, _BASE_FILES)
         _write_wheel(tmp_path / "dist" / "sagent-0.9.0-py3-none-any.whl", {})
         with pytest.raises(SystemExit) as raised:
-            _ = check_wheel.main()
+            _ = cli.main()
         assert str(raised.value) == (
             "dist/ must hold exactly one Sagent wheel; found"
             " sagent-0.1.0-py3-none-any.whl, sagent-0.9.0-py3-none-any.whl"
@@ -144,7 +144,7 @@ class TestCheckWheelErrors:
         monkeypatch.chdir(tmp_path)
         _write_sagent_wheel(tmp_path, files)
         with pytest.raises(configparser.ParsingError):
-            _ = check_wheel.main()
+            _ = cli.main()
 
     def test_a_percent_in_another_script_is_read_as_written(
         self,
@@ -155,7 +155,7 @@ class TestCheckWheelErrors:
         files = _BASE_FILES | {"sagent-0.1.0.dist-info/entry_points.txt": entry_points}
         monkeypatch.chdir(tmp_path)
         _write_sagent_wheel(tmp_path, files)
-        assert check_wheel.main() == 0
+        assert cli.main() == 0
 
     def test_missing_modules_are_comma_joined(
         self,
@@ -213,7 +213,7 @@ def test_a_build_config_without_excludes_expects_every_module(
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a_test.py").write_text("")
 
-    assert check_wheel.expected_modules() == frozenset({"pkg/a_test.py"})
+    assert cli.expected_modules() == frozenset({"pkg/a_test.py"})
 
 
 @pytest.mark.parametrize(
@@ -235,7 +235,7 @@ def test_a_build_config_without_packages_expects_no_modules(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "pyproject.toml").write_text(pyproject)
-    assert check_wheel.expected_modules() == frozenset()
+    assert cli.expected_modules() == frozenset()
 
 
 if __name__ == "__main__":

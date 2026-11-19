@@ -20,22 +20,32 @@ reference:
   limits:
     max_request_tokens: 1_000_000
     max_response_tokens: 128_000
-    max_request_bytes: 33_554_432
+    max_request_bytes: 134_217_728
     max_image_edge_px: 2_576
     max_image_bytes: 7_500_000
     truncates_at_context: true
+  # Claude 5.5 and Fable/Mythos models reject ``thinking: disabled``; see the
+  # ``thinking_off`` profile for those that take it.
   thinking:
     effort: [low, medium, high, xhigh, max]
-    budget: [none, auto]
+    budget: [auto]
     output: [none, text, redacted]
 
 profiles:
+  # ``disabled`` is taken at any effort, but Opus 5 and Haiku 5.5 take it only
+  # at ``high`` or below (``thinking_off_max_effort``); above, it is a 400.
+  thinking_off:
+    thinking:
+      effort: [low, medium, high, xhigh, max]
+      budget: [none, auto]
+      output: [none, text, redacted]
+
   extended:
     approx_chars_per_token: 3.12
     limits:
       max_request_tokens: 1_000_000
       max_response_tokens: 128_000
-      max_request_bytes: 33_554_432
+      max_request_bytes: 134_217_728
       max_image_edge_px: 1_568
       max_image_bytes: 7_500_000
       truncates_at_context: true
@@ -50,7 +60,7 @@ profiles:
     limits:
       max_request_tokens: 200_000
       max_response_tokens: 64_000
-      max_request_bytes: 33_554_432
+      max_request_bytes: 134_217_728
       max_image_edge_px: 1_568
       max_image_bytes: 7_500_000
       truncates_at_context: true
@@ -66,7 +76,7 @@ profiles:
     limits:
       max_request_tokens: 200_000
       max_response_tokens: 64_000
-      max_request_bytes: 33_554_432
+      max_request_bytes: 134_217_728
       max_image_edge_px: 1_568
       max_image_bytes: 7_500_000
       truncates_at_context: true
@@ -79,7 +89,7 @@ models:
 - model_id: fable-5.2
   wire_model_id: claude-fable-5-2
   thinking_effort_default: medium
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 8.0
@@ -96,7 +106,7 @@ models:
 
 - model_id: fable-5.1
   wire_model_id: claude-fable-5-1
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 10.0
@@ -107,7 +117,7 @@ models:
 
 - model_id: fable-5.0
   wire_model_id: claude-fable-5
-  knowledge_cutoff: January 2026
+  knowledge_cutoff: '2026-01'
   prices:
   - service_tier: auto
     request: 10.0
@@ -118,7 +128,7 @@ models:
 
 - model_id: mythos-5.2
   wire_model_id: claude-mythos-5-2
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 8.0
@@ -135,7 +145,7 @@ models:
 
 - model_id: mythos-5.1
   wire_model_id: claude-mythos-5-1
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 10.0
@@ -146,7 +156,7 @@ models:
 
 - model_id: mythos-5.0
   wire_model_id: claude-mythos-5
-  knowledge_cutoff: January 2026
+  knowledge_cutoff: '2026-01'
   prices:
   - service_tier: auto
     request: 10.0
@@ -158,7 +168,7 @@ models:
 - model_id: opus-5.5
   wire_model_id: claude-opus-5-5
   thinking_effort_default: medium
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 4.0
@@ -175,7 +185,9 @@ models:
 
 - model_id: opus-5.0
   wire_model_id: claude-opus-5
-  knowledge_cutoff: May 2026
+  profile: thinking_off
+  thinking_off_max_effort: high
+  knowledge_cutoff: '2026-05'
   prices:
   - service_tier: auto
     request: 5.0
@@ -192,7 +204,8 @@ models:
 
 - model_id: opus-4.8
   wire_model_id: claude-opus-4-8
-  knowledge_cutoff: January 2026
+  profile: thinking_off
+  knowledge_cutoff: '2026-01'
   prices:
   - service_tier: auto
     request: 5.0
@@ -209,8 +222,9 @@ models:
 
 - model_id: opus-4.7
   wire_model_id: claude-opus-4-7
+  profile: thinking_off
   thinking_effort_default: xhigh
-  knowledge_cutoff: January 2026
+  knowledge_cutoff: '2026-01'
   prices:
   - service_tier: auto
     request: 5.0
@@ -222,7 +236,7 @@ models:
 - model_id: opus-4.6
   wire_model_id: claude-opus-4-6
   profile: extended
-  knowledge_cutoff: May 2025
+  knowledge_cutoff: '2025-05'
   prices:
   - service_tier: auto
     request: 5.0
@@ -234,7 +248,7 @@ models:
 - model_id: opus-4.5
   wire_model_id: claude-opus-4-5
   profile: extended_200k
-  knowledge_cutoff: May 2025
+  knowledge_cutoff: '2025-05'
   prices:
   - service_tier: auto
     request: 5.0
@@ -246,7 +260,7 @@ models:
 - model_id: sonnet-5.5
   wire_model_id: claude-sonnet-5-5
   thinking_effort_default: medium
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 2.0
@@ -264,7 +278,8 @@ models:
 
 - model_id: sonnet-5.0
   wire_model_id: claude-sonnet-5
-  knowledge_cutoff: January 2026
+  profile: thinking_off
+  knowledge_cutoff: '2026-01'
   prices:
   - service_tier: auto
     request: 2.0
@@ -276,7 +291,7 @@ models:
 - model_id: sonnet-4.6
   wire_model_id: claude-sonnet-4-6
   profile: extended
-  knowledge_cutoff: August 2025
+  knowledge_cutoff: '2025-08'
   prices:
   - service_tier: auto
     request: 3.0
@@ -288,7 +303,7 @@ models:
 - model_id: sonnet-4.5
   wire_model_id: claude-sonnet-4-5
   profile: fixed
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 3.0
@@ -299,8 +314,10 @@ models:
 
 - model_id: haiku-5.5
   wire_model_id: claude-haiku-5-5
+  profile: thinking_off
+  thinking_off_max_effort: high
   thinking_effort_default: medium
-  knowledge_cutoff: June 2026
+  knowledge_cutoff: '2026-06'
   prices:
   - service_tier: auto
     request: 0.1
@@ -319,7 +336,7 @@ models:
 - model_id: haiku-4.5
   wire_model_id: claude-haiku-4-5
   profile: fixed
-  knowledge_cutoff: February 2025
+  knowledge_cutoff: '2025-02'
   prices:
   - service_tier: auto
     request: 1.0

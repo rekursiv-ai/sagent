@@ -21,8 +21,9 @@ reference:
   # No image limits: Gemini tiles a large image server-side (768x768 tiles) and
   # documents no per-image cap, only the whole request's bytes; a client
   # resize would spend detail to save nothing.
-  # Input and output are limited apart (inputTokenLimit, outputTokenLimit), so no
-  # maxOutputTokens is refused for the input it follows.
+  # Gemini 3 and 2.5 limit input and output apart (inputTokenLimit,
+  # outputTokenLimit), so no maxOutputTokens is refused for the input it follows.
+  # Gemini 4 shares one window between them; its rows say so.
   limits:
     max_request_tokens: 1_048_576
     max_response_tokens: 65_536
@@ -42,6 +43,13 @@ profiles:
       budget: [auto]
       output: [none, text]
 
+  # Gemini 4 Neon and Hydrogen add ``xhigh`` and start at ``high``.
+  levels_xhigh:
+    thinking:
+      effort: [low, medium, high, xhigh]
+      budget: [auto]
+      output: [none, text]
+
   token_budgets:
     effort_as_level: false
     thinking:
@@ -50,11 +58,75 @@ profiles:
       output: [none, text]
 
 models:
+# One window for input and output: an output cap past what the input leaves is
+# cut to fit, not refused.
+- model_id: gemini-neon-4.0
+  wire_model_id: gemini-4-neon
+  profile: levels_xhigh
+  knowledge_cutoff: '2026-03'
+  limits: &gemini_4
+    max_request_tokens: 1_048_576
+    max_context_tokens: 1_048_576
+    max_response_tokens: 65_536
+    max_request_bytes: 104_857_600
+    truncates_at_context: true
+  prices:
+  - service_tier: auto
+    request: 3.0
+    response: 15.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.15
+
+- model_id: gemini-hydrogen-4.0
+  wire_model_id: gemini-4-hydrogen
+  profile: levels_xhigh
+  knowledge_cutoff: '2026-03'
+  limits: *gemini_4
+  prices:
+  - service_tier: auto
+    request: 1.5
+    response: 7.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+
+# Implicit caching only; the introductory rates double on 2026-12-01.
+- model_id: gemini-carbon-4.0
+  wire_model_id: gemini-4-carbon
+  profile: no_minimal
+  thinking_effort_default: medium
+  knowledge_cutoff: '2026-03'
+  limits: *gemini_4
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: auto
+    effective_date: '2026-12-01'
+    request: 4.0
+    response: 20.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+
 # Implicit caching only; the introductory rates double on 2026-12-01.
 - model_id: gemini-argon-4.0
   wire_model_id: gemini-4-argon
   profile: no_minimal
   thinking_effort_default: medium
+  knowledge_cutoff: '2026-03'
+  # One window for input and output: an output cap past what the input leaves
+  # is cut to fit, not refused.
+  limits:
+    max_request_tokens: 1_048_576
+    max_context_tokens: 1_048_576
+    max_response_tokens: 65_536
+    max_request_bytes: 104_857_600
+    truncates_at_context: true
   prices:
   - service_tier: auto
     request: 2.0
@@ -73,7 +145,7 @@ models:
 - model_id: gemini-pro-3.1
   wire_model_id: gemini-3.1-pro-preview
   profile: no_minimal
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 2.0
@@ -92,12 +164,14 @@ models:
 - model_id: gemini-pro-2.5
   wire_model_id: gemini-2.5-pro
   profile: token_budgets
-  knowledge_cutoff: January 2025
-  # 2.5 Pro thinks whatever is asked; a budget of 0 is Flash's alone.
+  knowledge_cutoff: '2025-01'
+  # 2.5 Pro thinks whatever is asked; a budget of 0 is Flash's alone, and budget
+  # ``none`` would only send no config and leave it thinking.
   thinking:
     effort: [min, low, medium, high, xhigh, max]
-    budget: [none, auto, fixed]
+    budget: [auto, fixed]
     output: [none, text]
+  # From 2026-12-01 requests route to gemini-3.8-flash and bill at its rates.
   prices:
   - service_tier: auto
     request: 1.25
@@ -112,11 +186,26 @@ models:
     cache_write: 0.0
     cache_write_1h: 0.0
     cache_read: 0.25
+  - service_tier: auto
+    effective_date: '2026-12-01'
+    request: 0.75
+    response: 3.75
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+  - service_tier: auto
+    effective_date: '2027-01-01'
+    request: 1.5
+    response: 7.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.15
 
 - model_id: gemini-flash-3.8
   wire_model_id: gemini-3.8-flash
   profile: no_minimal
   thinking_effort_default: medium
+  knowledge_cutoff: '2026-03'
   prices:
   - service_tier: auto
     request: 0.75
@@ -135,6 +224,7 @@ models:
 - model_id: gemini-flash-3.6
   wire_model_id: gemini-3.6-flash
   thinking_effort_default: medium
+  knowledge_cutoff: '2026-03'
   prices:
   - service_tier: auto
     request: 0.75
@@ -152,7 +242,7 @@ models:
 
 - model_id: gemini-flash-3.0
   wire_model_id: gemini-3-flash-preview
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 0.5
@@ -164,7 +254,7 @@ models:
 - model_id: gemini-flash-2.5
   wire_model_id: gemini-2.5-flash
   profile: token_budgets
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 0.3
@@ -176,6 +266,7 @@ models:
 - model_id: gemini-flash-lite-3.5
   wire_model_id: gemini-3.5-flash-lite
   thinking_effort_default: min
+  knowledge_cutoff: '2026-03'
   prices:
   - service_tier: auto
     request: 0.3
@@ -187,7 +278,7 @@ models:
 - model_id: gemini-flash-lite-3.1
   wire_model_id: gemini-3.1-flash-lite
   thinking_effort_default: min
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 0.25
@@ -202,7 +293,7 @@ models:
   # "Model does not think" unless given a budget.
   thinking_effort_default: none
   thinking_budget_default: none
-  knowledge_cutoff: January 2025
+  knowledge_cutoff: '2025-01'
   prices:
   - service_tier: auto
     request: 0.1
@@ -216,6 +307,9 @@ providers:
     sends: [thinking_effort, thinking_budget, thinking_output]
     retries_internally: true
     models:
+      gemini-neon-4.0:
+      gemini-hydrogen-4.0:
+      gemini-carbon-4.0:
       gemini-argon-4.0:
       gemini-pro-3.1:
       gemini-pro-2.5:

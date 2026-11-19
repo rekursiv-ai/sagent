@@ -217,24 +217,25 @@ def _setup(
     tools: Sequence[_Tool] = (),
     other: Sequence[Reply] = (),
     send: bool = False,
+    capability: Callable[[str], ModelCapability] = _capability,
 ) -> _Setup:
     catalog = ModelCatalog(
         factories={
             "scripted": partial(
                 ScriptedProvider,
                 replies=replies,
-                capability=_capability("scripted"),
+                capability=capability("scripted"),
             ),
             "other": partial(
                 ScriptedProvider,
                 replies=other,
-                capability=_capability("other"),
+                capability=capability("other"),
             ),
         },
     )
     team = Team(catalog=catalog)
     parent = Agent(
-        model=ScriptedProvider(capability=_capability("scripted"))["scripted"],
+        model=ScriptedProvider(capability=capability("scripted"))["scripted"],
         tools=[
             _Tool(name="Read"),
             _Tool(name="Grep"),
@@ -778,6 +779,28 @@ async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> 
         await asyncio.wait_for(wait.stopped.wait(), timeout=5)
         assert list(setup.team) == ["Agent", "Agent_0"]
     assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
+
+
+@pytest.mark.asyncio
+async def test_a_child_told_an_effort_too_high_for_thinking_off_thinks(
+    tmp_path: Path,
+) -> None:
+    """The effort asked for stands; the budget carried from the parent yields."""
+
+    def capped(model_id: str) -> ModelCapability:
+        return replace(_capability(model_id), thinking_off_max_effort="low")
+
+    setup = _setup(tmp_path, reply("ready"), capability=capped)
+    setup.parent.model.settings = replace(
+        setup.parent.model.settings,
+        thinking_effort="low",
+    )
+    async with setup.team:
+        result = await _spawn(setup, tmp_path, {"prompt": "go", "effort": "high"})
+        child = setup.team["Agent_0"].model.settings
+
+    assert result.is_error is False
+    assert (child.thinking_effort, child.thinking_budget) == ("high", "auto")
 
 
 @pytest.mark.asyncio

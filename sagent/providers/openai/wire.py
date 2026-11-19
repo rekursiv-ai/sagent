@@ -52,13 +52,14 @@ from sagent.session.types import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 
-    from sagent.model.capability import ModelLimits
+    from sagent.model.capability import ModelLimits, ThinkingEffort
     from sagent.model.types import Request
     from sagent.session.types import Attachment, SessionRecord
 
 
 __all__ = [
     "cache_key",
+    "effort",
     "events",
     "flatten",
     "gpt_6",
@@ -158,6 +159,11 @@ def image_url(attachment: Attachment, *, limits: ModelLimits) -> str | None:
         max_edge_px=limits.max_image_edge_px,
         max_bytes=limits.max_image_bytes,
     )
+
+
+def effort(effort: ThinkingEffort) -> str:
+    """Return ``effort`` as OpenAI names it: ``min`` is ``minimal``."""
+    return "minimal" if effort == "min" else effort
 
 
 def gpt_6(model_id: str) -> bool:

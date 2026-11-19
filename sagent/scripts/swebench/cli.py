@@ -1,9 +1,4 @@
-#!/bin/sh
-# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
-# fmt: off
-'''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
-Run SWE-bench Verified with sagent, Claude Code, and Codex; grade and compare them.
+"""Run SWE-bench Verified with sagent, Claude Code, and Codex; grade and compare them.
 
 Each agent solves each task alone, headless, in a fresh checkout at the task's
 base commit, and its patch is what it changed there. Grading runs the SWE-bench
@@ -22,13 +17,12 @@ The flags name the experiment's directory, so the same flags always find it;
 sagent-noskills is sagent without its Skill tool, and joins the same report.
 
 Examples:
-  sh sagent/scripts/swebench.py
-  sh sagent/scripts/swebench.py --agent sagent-noskills
-  sh sagent/scripts/swebench.py report
-  sh sagent/scripts/swebench.py --agent sagent --instance django__django-11099
+  python -m sagent.scripts.swebench
+  python -m sagent.scripts.swebench --agent sagent-noskills
+  python -m sagent.scripts.swebench report
+  python -m sagent.scripts.swebench --agent sagent --instance django__django-11099
 
-'''
-# fmt: on
+"""
 
 from __future__ import annotations
 
@@ -56,6 +50,8 @@ from sagent.session.types import TokenUsage
 
 
 _CWD: Final[Path] = Path(__file__).resolve().parent
+
+_SAGENT_MAIN: Final = _CWD.parents[1] / "__main__.py"
 _DOCKER_SOCKET: Final = Path("/var/run/docker.sock")
 _DEVNULL: Final = Path(os.devnull)
 _OUT: Final = Path("/opt/scratch/artifacts/sagent/swebench")
@@ -210,7 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+        description=(__doc__ or "").strip(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -508,11 +504,10 @@ def command(
     """
     chosen = ["--model", model] if model is not None else []
     if agent in ("sagent", "sagent-noskills"):
-        main_py = _CWD.parent / "__main__.py"
         tools = ["--tools", *_NO_SKILL_TOOLS] if agent == "sagent-noskills" else []
         return [
             "sh",
-            str(main_py),
+            str(_SAGENT_MAIN),
             "--session",
             str(log / "session.jsonl"),
             "--effort",
@@ -991,8 +986,3 @@ def _tasks(
 def _predicted(out: Path) -> list[Agent]:
     """Return each agent with predictions under ``out``."""
     return [a for a in AGENTS if (out / a / "predictions.jsonl").exists()]
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-# vim: ft=python

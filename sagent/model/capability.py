@@ -17,7 +17,7 @@ from sagent.model.cost import PriceCatalog, ServiceTier
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
 
 __all__ = [
@@ -232,6 +232,8 @@ class ModelCapability:
     model_id: str = ""
     wire_model_id: str = ""
     knowledge_cutoff: str | None = None
+    """ISO 8601 at the precision the vendor publishes: ``2026-06`` or ``2026-05-18``."""
+
     tokenizer: str | None = None
     """Declared tokenizer identity; omitted identities are local to provider/model."""
 
@@ -239,6 +241,9 @@ class ModelCapability:
     limits: ModelLimits = field(default_factory=ModelLimits)
     prices: PriceCatalog = field(default_factory=PriceCatalog)
     effort_as_level: bool = False
+    thinking_off_max_effort: ThinkingEffort | None = None
+    """The highest effort at which ``thinking_budget='none'`` is taken; ``None``, any."""
+
     retries_internally: bool = False
     account_auth: bool = False
 
@@ -257,6 +262,12 @@ class ModelCapability:
         """
         for name in model_setting_names():
             _check_offered(self.model_id, name, settings.value(name), self.values(name))
+        if self._thinking_off_refused(settings):
+            raise ValueError(
+                f"thinking_budget='none' is not offered by {self.model_id or 'this model'}"
+                f" at thinking_effort={settings.thinking_effort!r};"
+                f" allowed: thinking_effort up to {self.thinking_off_max_effort!r}",
+            )
         size = settings.context_size
         if size != self.prices[size.tokens or size.context_name]:
             whole = self.prices.sizes()[-1].display_name
@@ -310,6 +321,33 @@ class ModelCapability:
             raise ValueError(f"{text!r} is not one of: {texts}")
         return hits[0]
 
+    def with_choices(
+        self,
+        settings: ModelSettings,
+        choices: Mapping[ModelSettingName, object],
+    ) -> ModelSettings:
+        """Return ``settings`` with ``choices`` made; what they conflict with yields.
+
+        Thinking off at an effort too high to take it: a budget chosen lowers the
+        effort to the highest that takes it; otherwise thinking turns on, at the
+        default budget, or else the least committing one offered. Two choices
+        that conflict stand, for ``check`` to refuse.
+
+        Args:
+          settings: The settings the choices are made on.
+          choices: Each value chosen, by setting.
+
+        Returns:
+          settings: The choices made, unchecked.
+
+        Raises:
+          ValueError: A value is no value of its setting's type.
+
+        """
+        for name, value in choices.items():
+            settings = settings.with_value(name, value)
+        return self._settled(settings, chosen=choices.keys())
+
     def fit(
         self,
         settings: ModelSettings,
@@ -318,8 +356,9 @@ class ModelCapability:
     ) -> ModelSettings:
         """Return ``settings`` as this model takes them.
 
-        Each choice this model offers is kept, the rest are its defaults. A size
-        ``was`` named stays named; a size counted stays that count, within the window.
+        Each choice this model offers is kept, the rest are its defaults; what
+        conflicts yields as ``with_choices`` says. A size ``was`` named stays
+        named; a size counted stays that count, within the window.
 
         Args:
           settings: Choices made on ``was``.
@@ -332,7 +371,7 @@ class ModelCapability:
         d = self.default
         size = settings.context_size
         named = was.prices[size.context_name] == size
-        return ModelSettings(
+        fitted = ModelSettings(
             thinking_effort=_kept(
                 settings.thinking_effort,
                 self.thinking_effort,
@@ -365,6 +404,39 @@ class ModelCapability:
             ),
             context_size=self.prices[size.context_name if named else size.tokens],
             pruning=settings.pruning,
+        )
+        return self._settled(fitted, chosen=())
+
+    def _settled(
+        self,
+        settings: ModelSettings,
+        *,
+        chosen: Collection[ModelSettingName],
+    ) -> ModelSettings:
+        """Return ``settings`` with what conflicts with ``chosen`` yielded."""
+        cap = self.thinking_off_max_effort
+        if cap is None or not self._thinking_off_refused(settings):
+            return settings
+        budget_chosen = "thinking_budget" in chosen
+        if budget_chosen and "thinking_effort" in chosen:
+            return settings
+        if budget_chosen:
+            return replace(settings, thinking_effort=cap)
+        ladder: tuple[ThinkingBudget, ...] = literal_members(ThinkingBudget)
+        thinks = [
+            b
+            for b in (self.default.thinking_budget, *ladder)
+            if b != "none" and b in self.thinking_budget
+        ]
+        return replace(settings, thinking_budget=thinks[0]) if thinks else settings
+
+    def _thinking_off_refused(self, settings: ModelSettings) -> bool:
+        """Return whether ``settings`` turn thinking off above the effort that may."""
+        if settings.thinking_budget != "none" or self.thinking_off_max_effort is None:
+            return False
+        ladder: tuple[ThinkingEffort, ...] = literal_members(ThinkingEffort)
+        return ladder.index(settings.thinking_effort) > ladder.index(
+            self.thinking_off_max_effort,
         )
 
 

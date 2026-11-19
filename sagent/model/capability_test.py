@@ -16,6 +16,8 @@ from sagent.model.capability import (
     ModelSettingName,
     ModelSettings,
     PruningPolicy,
+    ThinkingBudget,
+    ThinkingEffort,
     literal_members,
     model_setting_names,
     typed_text,
@@ -131,6 +133,106 @@ def test_check_names_what_is_not_offered_and_what_is(
         _row().check(settings)
 
 
+def test_thinking_off_is_refused_above_the_effort_that_allows_it() -> None:
+    # Anthropic's Opus 5 and Haiku 5.5 take ``thinking: disabled`` only at
+    # ``high`` effort or below; above it the API answers 400.
+    row = replace(
+        _row(),
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        thinking_off_max_effort="high",
+    )
+    row.check(replace(row.default, thinking_effort="high", thinking_budget="none"))
+    row.check(replace(row.default, thinking_effort="xhigh", thinking_budget="auto"))
+    with pytest.raises(
+        ValueError,
+        match="thinking_budget='none' is not offered by m at thinking_effort='xhigh';"
+        " allowed: thinking_effort up to 'high'",
+    ):
+        row.check(replace(row.default, thinking_effort="xhigh", thinking_budget="none"))
+
+
+def _capped() -> ModelCapability:
+    """Return a row taking thinking off at ``high`` effort or below, on by default."""
+    row = _row()
+    return replace(
+        row,
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        thinking_off_max_effort="high",
+        default=replace(row.default, thinking_budget="auto"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "choices", "after"),
+    [
+        # What is chosen now stands; what it conflicts with yields.
+        (("xhigh", "auto"), {"thinking_budget": "none"}, ("high", "none")),
+        (("high", "none"), {"thinking_effort": "xhigh"}, ("xhigh", "auto")),
+        (("low", "none"), {"thinking_effort": "high"}, ("high", "none")),
+        (("xhigh", "none"), {"thinking_output": "text"}, ("xhigh", "auto")),
+        (
+            ("low", "auto"),
+            {"thinking_effort": "xhigh", "thinking_budget": "none"},
+            ("xhigh", "none"),
+        ),
+    ],
+    ids=["budget-chosen", "effort-chosen", "within-cap", "neither-chosen", "both"],
+)
+def test_with_choices_keeps_what_is_chosen_and_yields_what_it_conflicts_with(
+    before: tuple[ThinkingEffort, ThinkingBudget],
+    choices: dict[ModelSettingName, object],
+    after: tuple[ThinkingEffort, ThinkingBudget],
+) -> None:
+    row = _capped()
+    effort, budget = before
+    settings = replace(row.default, thinking_effort=effort, thinking_budget=budget)
+    chosen = row.with_choices(settings, choices)
+    assert (chosen.thinking_effort, chosen.thinking_budget) == after
+    assert chosen.thinking_output == choices.get("thinking_output", "none")
+
+
+def test_a_budget_that_must_yield_turns_thinking_on_though_off_by_default() -> None:
+    row = replace(_capped(), default=replace(_capped().default, thinking_budget="none"))
+    off = replace(row.default, thinking_effort="high")
+    assert row.with_choices(off, {"thinking_effort": "xhigh"}).thinking_budget == "auto"
+    always_off = replace(row, thinking_budget=frozenset({"none"}))
+    stuck = always_off.with_choices(off, {"thinking_effort": "xhigh"})
+    assert stuck.thinking_budget == "none"
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        always_off.check(stuck)
+
+
+def test_with_choices_on_an_uncapped_row_is_each_value_set() -> None:
+    row = _row()
+    chosen = row.with_choices(
+        replace(row.default, thinking_budget="none"),
+        {"thinking_effort": "high", "service_tier": "priority"},
+    )
+    assert chosen == replace(
+        row.default,
+        thinking_effort="high",
+        thinking_budget="none",
+        service_tier="priority",
+    )
+    with pytest.raises(ValueError, match="is no choice"):
+        row.with_choices(row.default, {"cache_ttl_sec": "soon"})
+
+
+def test_fit_turns_thinking_on_where_its_effort_cannot_turn_it_off() -> None:
+    row = replace(
+        _row(),
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        default=replace(_row().default, thinking_budget="auto"),
+    )
+    capped = replace(row, thinking_off_max_effort="high")
+    off = replace(row.default, thinking_effort="xhigh", thinking_budget="none")
+    fitted = capped.fit(off, was=row)
+    assert (fitted.thinking_effort, fitted.thinking_budget) == ("xhigh", "auto")
+    capped.check(fitted)
+    within = replace(off, thinking_effort="high")
+    assert capped.fit(within, was=row).thinking_budget == "none"
+
+
 def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
     row = _row()
     other = replace(
@@ -209,6 +311,20 @@ def test_a_model_with_no_name_is_this_model(
 ) -> None:
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         ModelCapability(prices=PriceCatalog(window=100)).check(settings)
+
+
+def test_a_model_with_no_name_is_this_model_where_thinking_cannot_be_off() -> None:
+    row = ModelCapability(
+        thinking_effort=frozenset({"low", "high"}),
+        thinking_off_max_effort="low",
+        prices=PriceCatalog(window=100),
+    )
+    message = (
+        "thinking_budget='none' is not offered by this model at"
+        " thinking_effort='high'; allowed: thinking_effort up to 'low'"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        row.check(ModelSettings(thinking_effort="high"))
 
 
 def test_a_tier_priced_flat_keeps_the_size_another_tier_bands() -> None:
