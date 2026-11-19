@@ -7,7 +7,7 @@ from datetime import date
 
 import sys
 
-import httpx
+import httpx2
 import pypdfium2 as pdfium
 import pytest
 
@@ -89,14 +89,14 @@ def test_an_unreachable_page_leaves_its_facts_unstated_and_fails_the_run(
             for url in ("https://down", "https://up", "https://down")
         ]
 
-    def get(url: str, **kwargs: object) -> httpx.Response:
+    def get(url: str, **kwargs: object) -> httpx2.Response:
         del kwargs
         if url == "https://down":
-            raise httpx.ConnectTimeout("handshake timed out")
-        return httpx.Response(200, content=b"a", request=httpx.Request("GET", url))
+            raise httpx2.ConnectTimeout("handshake timed out")
+        return httpx2.Response(200, content=b"a", request=httpx2.Request("GET", url))
 
     monkeypatch.setattr(cli, "_checks", lambda: {"anthropic": (anthropic, fetching)})
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx2, "get", get)
     monkeypatch.setattr(sys, "argv", ["cli.py"])
     assert cli.main() == 1
     assert capsys.readouterr().out == (
@@ -283,7 +283,7 @@ def _fake_get(
     *,
     status: int = 200,
 ) -> list[tuple[str, str, bool, float]]:
-    """Replace ``httpx.get`` with one answering ``body``; return what it was asked."""
+    """Replace ``httpx2.get`` with one answering ``body``; return what it was asked."""
     sent: list[tuple[str, str, bool, float]] = []
 
     def get(
@@ -292,11 +292,11 @@ def _fake_get(
         headers: dict[str, str],
         follow_redirects: bool,
         timeout: float,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         sent.append((url, headers["User-Agent"], follow_redirects, timeout))
-        return httpx.Response(status, content=body, request=httpx.Request("GET", url))
+        return httpx2.Response(status, content=body, request=httpx2.Request("GET", url))
 
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx2, "get", get)
     return sent
 
 
