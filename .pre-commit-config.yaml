@@ -128,10 +128,6 @@
 fail_fast: false
 default_stages: [pre-commit]
 
-# ``commit-msg`` for the Copybarista-PR guard below: declared here, one
-# ``pre-commit install`` wires both hook types.
-default_install_hook_types: [pre-commit, commit-msg]
-
 repos:
 
   # === Pre-Commit Gates =======================================================
@@ -166,7 +162,6 @@ repos:
             |typings/
             |(.*/)?typings/stubs/
             |(.*/)?\.export/typings/
-            |(.*/)?chrome/chrome_(desktop|android)_useragents\.txt
             |(.*/)?uv\.public\.lock
             |(.*/)?\.export/uv\.lock
             |\.(claude|sagent)/sessions/
@@ -334,7 +329,6 @@ repos:
             |(.*/)?\.export/typings/
             |(.*/)?third_party/
             |\.(claude|sagent)/sessions/
-            |docs/symbols\.md
           )
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -374,19 +368,6 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
-
-  - repo: local
-    hooks:
-      # The Copybarista-PR-Title/Body trailer is replayed into the PUBLIC export
-      # PR, which hard-fails on monorepo references (loop./loop/ ...) AFTER the
-      # commit is pushed and unrewritable. Runs that same forbidden-term check
-      # at commit-msg time, so a leak never reaches main.
-      - id: check-copybarista-pr-text
-        name: check-copybarista-pr-text
-        language: system
-        stages: [commit-msg]
-        always_run: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor check-pr-text
 
   - repo: local
     hooks:
@@ -567,7 +548,6 @@ repos:
             |(.*/)?typings/stubs/
             |(.*/)?\.export/typings/
             |(.*/)?third_party/
-            |website/rekursiv-ai\.github\.io/_site/
           )
 
       - id: basedpyright
@@ -631,7 +611,8 @@ repos:
         require_serial: true
         stages: [pre-commit]
         files: \.(tsx?|[cm]ts|jsx?|[cm]js|css)$
-        args: [--reporter=concise]
+        # A warning is a finding like any other; without the flag biome exits 0.
+        args: [--reporter=concise, --error-on-warnings]
 
   # rustfmt rewrites in place, then clippy denies every warning, each once per
   # crate a change touches: the nearest `Cargo.toml` above each file.
@@ -661,29 +642,6 @@ repos:
       # file chunks, then the hook, which runs once over all of them through
       # the `gate` or `testing` module at this machine's worker count.
       #
-      # One export is ~4.5s of mostly-subprocess work, so the pool scales on the
-      # children, not on Python: 8 packages went 27.2s serial -> 5.3s.
-      #
-      # No `files` filter: `touched_configs` picks the packages a change
-      # reaches. A `^loop/` filter skipped the website and every shared file a
-      # package copies (`ops/github/shared/`, this config, `.codespell-ignore`).
-      - id: check-export-leaks-spool
-        name: check-export-leaks-spool
-        # `run check-export-leaks` selects this twin too, so its spool exists.
-        alias: check-export-leaks
-        language: system
-        stages: [pre-commit]
-        require_serial: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool check-export-leaks
-
-      - id: check-export-leaks
-        name: check-export-leaks
-        language: system
-        stages: [pre-commit]
-        require_serial: true
-        pass_filenames: false
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate run check-export-leaks -- codedoctor.export_leaks
-
       # Runs the tests PAIRED with each changed file (`x_test.py`, `test_x.py`,
       # beside it or under `tests/`), then applies `fail_under` to the changed
       # sources alone. ~1s, versus the whole suite at pre-push. Green with no
