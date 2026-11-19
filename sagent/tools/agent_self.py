@@ -329,7 +329,8 @@ def _refuse_unknown(value: Mapping[str, PlainTree], kind: type, *, where: str) -
 # A schedule that is off is patched from the default one: knobs alone turn it on.
 def _knobbed(schedule: WakeSchedule | None, knobs: _Knobs) -> WakeSchedule | None:
     """Return ``schedule`` with ``knobs`` set; ``None`` when they turn it off."""
-    if knobs.get("off", False):
+    # A missing ``off`` read as ``False`` or ``None`` is falsy either way.
+    if knobs.get("off", False):  # pragma: no mutate
         return None
     base = WakeSchedule() if schedule is None else schedule
     return WakeSchedule(

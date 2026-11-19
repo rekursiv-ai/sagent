@@ -51,8 +51,9 @@ async def cli_sign_in(
       browser: Open the address in the user's browser too; ``False`` where the
         CLI opens one itself, or none would reach the user.
       show: Where the address is shown.
-      grace_sec: How long a failed CLI's last words are waited for, never to
-        the end: a browser it started may hold its pipes open past its exit.
+      grace_sec: How long a failed CLI's last words are waited for after it
+        exits; positive, for its output may still be unread. Bounded, for a
+        browser it started may hold its pipes open past its exit.
 
     Raises:
       AuthError: The CLI exited non-zero; its last line says why.

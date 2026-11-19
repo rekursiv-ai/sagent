@@ -164,10 +164,24 @@ def test_a_model_a_vendor_lists_and_the_catalog_lacks_is_a_mismatch() -> None:
         ("Claude Opus 4.6", f"{docs}/build-with-claude/thinking.md"),
     }
     gpt = "https://developers.openai.com/api/docs/pricing.md"
+    # Audio, realtime, and dated snapshots are listed too, and are no text model.
     extra = (
-        "| gpt-4o-mini-tts | $0.60 | $12.00 | - |\n"
-        "| gpt-4o-2024-08-06 | $2.50 | $10.00 | $1.25 |\n"
-        "| o3 | $2.00 | $8.00 | $0.50 |\n"
+        "".join(
+            f"| {m} | $0.60 | $12.00 | - |\n"
+            for m in (
+                "gpt-4o-mini-tts",
+                "gpt-audio",
+                "gpt-image-2",
+                "gpt-realtime-2",
+                "gpt-transcribe",
+                "gpt-live-1",
+                "gpt-4o-diarize",
+                "gpt-4o-translate",
+                "gpt-4o-whisper",
+                "gpt-4o-2024-08-06",
+            )
+        )
+        + "| o3 | $2.00 | $8.00 | $0.50 |\n"
     )
     prices = _openai_prices().replace(
         "| gpt-4o | $2.50 | $10.00 | $1.25 |\n",
@@ -178,10 +192,64 @@ def test_a_model_a_vendor_lists_and_the_catalog_lacks_is_a_mismatch() -> None:
         ("o3", gpt),
     }
     gemini = "https://aistudio.google.com/docs/thinking.md"
-    assert _uncatalogued(_google(_flash(), _gemini_page())) == {
+    # An image model reasons too, but answers no chat.
+    image = "| gemini-3.1-flash-lite-image | On (minimal) | minimal, high |\n"
+    thinking = _GEMINI_THINKING + image
+    assert _uncatalogued(_google(_flash(), _gemini_page(), thinking=thinking)) == {
         ("gemini-3.8-flash", gemini),
         ("gemini-2.5-flash-lite", gemini),
     }
+
+
+def test_every_row_s_model_counts_as_catalogued_not_only_the_last() -> None:
+    docs = "https://developers.openai.com/api/docs"
+    older = _sol(model_id="sol-5.0", wire="gpt-4o")
+    pages = {
+        f"{docs}/pricing.md": _openai_prices(),
+        f"{docs}/guides/prompt-caching.md": _OPENAI_CACHING,
+        f"{docs}/models/gpt-6.1-sol.md": _openai_page(),
+        f"{docs}/models/gpt-4o.md": _openai_page().replace("gpt-6.1-sol", "gpt-4o"),
+    }
+    # The price table lists both rows' models.
+    findings = check_openai(
+        ModelTable(rows=(_sol(), older)),
+        fetch=lambda url: pages[url],
+        today=date(2026, 11, 18),
+    )
+    assert _uncatalogued(findings) == set()
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("anthropic", "Claude Mythos Preview"), ("google", "gemini-3-pro-preview")],
+)
+def test_a_model_left_out_on_purpose_is_waived_with_its_reason(
+    provider: str,
+    model: str,
+) -> None:
+    if provider == "anthropic":
+        thinking = (
+            _CLAUDE_THINKING + f"| {model} | Adaptive thinking | Adaptive thinking"
+            " | Extended thinking | 400 error | 400 error |\n"
+        )
+        findings = _anthropic(_haiku(), _claude_page(), thinking=thinking)
+    else:
+        thinking = _GEMINI_THINKING + f"| {model} | On (high) | low, high |\n"
+        findings = _google(_flash(), _gemini_page(), thinking=thinking)
+    (left,) = [f for f in findings if f.model_id == model]
+    assert (left.provider, left.field, left.status, left.waiver) == (
+        provider,
+        "catalogued",
+        "waived",
+        waivers()[provider, model, "catalogued"],
+    )
+
+
+def test_an_unreachable_model_page_leaves_the_vendor_s_list_unchecked() -> None:
+    """With a page's title unknown, its model cannot be told from one left out."""
+    findings = _anthropic(_haiku(), "")
+    absent = {f.model_id: f.status for f in findings if f.field == "catalogued"}
+    assert absent == {"Claude Opus 4.6": "unstated", "Claude Haiku 5.5": "unstated"}
 
 
 def test_a_claude_page_that_agrees_yields_every_fact_ok() -> None:
@@ -495,6 +563,11 @@ def test_a_price_column_neither_read_nor_known_unread_is_refused() -> None:
             "| Short context 30m write | Short context 12h write |",
         )
         .replace("| $0.10 | $2.50 |", "| $0.10 | $2.50 | $5.00 |")
+        .replace(
+            "| Long context 30m write |",
+            "| Long context 30m write | Long context 12h write |",
+        )
+        .replace("| $0.20 | $5.00 |", "| $0.20 | $5.00 | $10.00 |")
     )
     assert _status(
         _openai(_sol(), _openai_page(), twelve),
@@ -1133,11 +1206,12 @@ def _google(
     *,
     extra: Mapping[str, str] | None = None,
     prices: str = _GEMINI_PRICES,
+    thinking: str = _GEMINI_THINKING,
     today: date = date(2026, 11, 18),
 ) -> list[Finding]:
     docs = "https://aistudio.google.com/docs"
     pages = {
-        f"{docs}/thinking.md": _GEMINI_THINKING,
+        f"{docs}/thinking.md": thinking,
         f"{docs}/pricing.md": prices,
         f"{docs}/models/{row.wire_model_id}.md": page,
         **(extra or {}),
@@ -1200,8 +1274,9 @@ def _status(findings: list[Finding], field: str) -> tuple[str, str | None, str]:
 def _uncatalogued(findings: list[Finding]) -> set[tuple[str, str]]:
     """Return each model a vendor lists and the catalog lacks, with where it is listed."""
     absent = {f for f in findings if f.field == "catalogued"}
-    assert {(f.catalog, f.source, f.status) for f in absent} <= {
-        ("absent", "listed", "mismatch"),
+    providers = {f.provider for f in findings if f.field != "catalogued"}
+    assert {(f.provider, f.catalog, f.source, f.status) for f in absent} <= {
+        (provider, "absent", "listed", "mismatch") for provider in providers
     }
     return {(f.model_id, f.url) for f in absent}
 

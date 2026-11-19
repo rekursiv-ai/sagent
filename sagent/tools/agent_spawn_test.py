@@ -33,6 +33,7 @@ from sagent.model.scripted import (
     call,
     reply,
 )
+from sagent.model.types import Response
 from sagent.providers.catalog import CachedModel, ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
@@ -42,6 +43,7 @@ from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
     AgentSpawnResult,
     AgentToAgentMessage,
+    AssistantMessage,
     ContextClear,
     SystemMessage,
     ToolResult,
@@ -55,6 +57,7 @@ from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
 from sagent.tools.types import (
+    Stream,
     ToolContext,
     ToolOutput,
     ToolStreamingResult,
@@ -65,7 +68,7 @@ from sagent.tools.types import (
 
 if TYPE_CHECKING:
     from sagent.agent.types import Factory, Journal, Shrinker
-    from sagent.model.types import Request, Response
+    from sagent.model.types import Request
     from sagent.providers.types import ProviderFactory, ProviderResources
 
 
@@ -617,6 +620,51 @@ async def test_a_spawn_says_what_its_child_says_and_calls_as_it_works(
     assert result.stdout == ("looking\n", "Read\n", "three TODOs\n")
     assert seen == list(result.stdout)
     assert result.text() == "three TODOs"
+
+
+@dataclass(slots=True, kw_only=True)
+class _Summed(_Tool):
+    """A tool whose summary names its argument, over two lines."""
+
+    @override
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        return f"{self.name} {arguments['x']}\nand more"
+
+
+def test_a_call_is_written_as_the_first_line_of_its_tool_s_summary() -> None:
+    """An unknown tool by its name; an empty text not at all."""
+    written: list[str] = []
+
+    class _Written(Stream[str]):
+        @override
+        def write(self, item: str) -> None:
+            written.append(item)
+
+    say = agent_spawn._Say(stdout=_Written(), tools={"Sum": _Summed(name="Sum")})
+    response = Response(
+        records=(
+            AssistantMessage(content=""),
+            call("Sum", "c1", x="7"),
+            call("Gone", "c2"),
+        ),
+        tokens=TokenCount(),
+        spend=TokenCost(),
+        stop_reason="tool_use",
+    )
+
+    say(types.ModelResponseComplete(response=response))
+
+    assert written == ["Sum 7\n", "Gone\n"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_keeps_its_parent_s_own_agent_send(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"), send=True)
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go"})
+        child = setup.team["Agent_0"]
+
+    assert child.tools["AgentSend"] is setup.parent.tools["AgentSend"]
 
 
 @pytest.mark.asyncio

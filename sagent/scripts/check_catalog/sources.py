@@ -172,8 +172,14 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
             ),
         }
         findings += _findings("anthropic", row, url=url, facts=facts)
-    # The thinking guide's table names every model the API serves.
-    return findings + _uncatalogued("anthropic", set(budgets) - names, url=guide)
+    # The thinking guide's table names every model the API serves; a page that
+    # names no model leaves each one it lists maybe that one.
+    return findings + _uncatalogued(
+        "anthropic",
+        set(budgets) - names,
+        url=guide,
+        known="" not in names,
+    )
 
 
 def check_openai(table: ModelTable, *, fetch: Fetch, today: date) -> list[Finding]:
@@ -361,7 +367,14 @@ def _waiver(provider: str, model: str, field: str) -> str:
     return known.get((provider, model, field)) or known.get((provider, "*", field), "")
 
 
-def _uncatalogued(provider: str, models: set[str], *, url: str) -> list[Finding]:
+# Each is unstated where the catalog's own models are not ``known`` by name.
+def _uncatalogued(
+    provider: str,
+    models: set[str],
+    *,
+    url: str,
+    known: bool = True,
+) -> list[Finding]:
     """Return one finding per model the vendor lists at ``url`` and the catalog lacks."""
     return [
         Finding(
@@ -369,7 +382,7 @@ def _uncatalogued(provider: str, models: set[str], *, url: str) -> list[Finding]
             model_id=model,
             field="catalogued",
             catalog="absent",
-            source="listed",
+            source="listed" if known else None,
             url=url,
             waiver=_waiver(provider, model, "catalogued"),
         )
@@ -575,7 +588,9 @@ def _claude_image_edge(
     if version is None:
         return None
     later, other = edges
-    return later if (int(version[1]), int(version[2] or 0)) >= (4, 7) else other
+    # A missing minor read as 0 or 1 falls the same side of 4.7: (4, 0) and (4, 1).
+    minor = int(version[2] or 0)  # pragma: no mutate
+    return later if (int(version[1]), minor) >= (4, 7) else other
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -810,10 +825,11 @@ def _openai_cache_ttl(
     if extended is None:
         return None
     version = re.match(r"gpt-(\d+)(?:\.(\d+))?", model)
-    # GPT-5.6 and later keep at least 30 minutes, listed or not.
+    # GPT-5.6 and later keep at least 30 minutes, listed or not. A missing minor
+    # read as 0 or 1 falls the same side of 5.6: (5, 0) and (5, 1).
     recent = version is not None and (
         int(version[1]),
-        int(version[2] or 0),
+        int(version[2] or 0),  # pragma: no mutate
     ) >= (5, 6)
     return frozenset({1800.0 if recent or model in extended else 300.0})
 
@@ -837,7 +853,8 @@ def _openai_efforts(page: str) -> tuple[frozenset[str] | None, str | None]:
     default = _match(r"\b(\w+) \(default\)", listed)
     return (
         frozenset(names.get(level, level) for level in levels),
-        None if default is None else names.get(default, default),
+        # ``names.get(None, None)`` is ``None`` too.
+        None if default is None else names.get(default, default),  # pragma: no mutate
     )
 
 

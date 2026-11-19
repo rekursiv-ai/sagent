@@ -102,6 +102,9 @@ class GoogleCLI(HasModels, AsyncResource):
     aliases: ClassVar[tuple[str, ...]] = ("gcli",)
     package: ClassVar[ModuleType] = google
 
+    sign_in_grace_sec: ClassVar[float] = 1.0
+    """How long a failed sign-in's last words are waited for after ``agy`` exits."""
+
     def __init__(
         self,
         *,
@@ -144,7 +147,13 @@ class GoogleCLI(HasModels, AsyncResource):
           headless: Open no browser. ``agy`` opens none itself, so one opens here.
 
         """
-        await cli_sign_in("agy", "acp", "--login", browser=not headless, grace_sec=0.0)
+        await cli_sign_in(
+            "agy",
+            "acp",
+            "--login",
+            browser=not headless,
+            grace_sec=self.sign_in_grace_sec,
+        )
 
     @override
     async def aclose(self) -> None:
