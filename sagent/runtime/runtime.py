@@ -13,8 +13,8 @@ Tool calls run in one of two registries:
 
 A call goes to ``detached`` when the model asks for ``background`` or
 ``delay``, when the first wake finds it running, or when the user interrupts
-its cohort: a message, ``Compact``, or ``Clear``. ``Kill`` cancels calls in
-either.
+its cohort: a message, ``Halt``, ``Compact``, or ``Clear``. ``Kill`` cancels
+calls in either.
 
 A call the model waits on wakes it on the schedule ``detach_schedule`` gives its
 tool: the first wake detaches each call of the cohort that wakes the model,
@@ -35,9 +35,9 @@ stopping.
 What the user sends while the model streams is answered next: the reply's calls
 start, detached, and their results arrive later.
 
-``Halt`` stops the model and waits for the user's next message. Meanwhile the
-inbox holds every event back except the verbs, ``Halt``, ``Kill``, ``Clear``,
-and ``Compact``, and the compaction they start.
+``Halt`` stops the model, detaches the cohort, and waits for the user's next
+message. Meanwhile the inbox holds every event back except the verbs, ``Halt``,
+``Kill``, ``Clear``, and ``Compact``, and the compaction they start.
 
 A failed model call stops the turn one of two ways. A failure that may pass
 (``RetryableError``, under ``persistent_retry``) suspends it: ``ModelCallSuspended``,
@@ -638,14 +638,16 @@ class Runtime:
 
     # Background work does not hold the model back: the gate waits on the cohort only.
     @property
-    def _engine_quiescent(self) -> bool:
-        """True when no streaming, compaction, or open tool batch is in flight."""
-        return not self.cohort and self.model_call is None and self.compact_task is None
+    def at_work(self) -> bool:
+        """True while a model call streams, a compaction runs, or a waited-on call runs."""
+        return bool(
+            self.cohort or self.model_call is not None or self.compact_task is not None,
+        )
 
     @property
     def _ready_to_advance(self) -> bool:
-        """True when the engine is quiescent and the inbox waits for nothing."""
-        return self._engine_quiescent and not self.inbox.gate_armed
+        """True when nothing is at work and the inbox waits for nothing."""
+        return not self.at_work and not self.inbox.gate_armed
 
     @property
     def model(self) -> Model:
@@ -739,7 +741,7 @@ class Runtime:
         self.inbox.push_back(event)
 
     def halt(self) -> None:
-        """Stop the model call; tool calls keep running."""
+        """Stop the model call; the calls it waited on are detached and keep running."""
         self.push(Halt())
 
     # Only while stopped: a ``Retry`` queued otherwise reads as input waiting
@@ -1587,7 +1589,7 @@ class Runtime:
                 )
 
     def _on_halt(self, item: Halt, *, later: Sequence[RuntimeEvent]) -> bool:
-        """Cancel the model call and any compaction; return whether ``later`` now waits for the user."""
+        """Cancel the model call and any compaction, detach the cohort; return whether ``later`` now waits for the user."""
         self.publish(item)
         logger.debug(
             "runtime halt: model_call=%s compact_task=%s "
@@ -1601,12 +1603,15 @@ class Runtime:
             len(self._mid_stream_queue),
         )
         self._cancel_model_and_compaction()
+        # Waited on, a call's result would be held behind the wait for the user, so
+        # the agent would look busy until the user wrote. Detached, the calls run on
+        # and their results arrive after the user's next message.
+        self._stop_all_tools(mode="detach")
         # The user took the turn over: what a failure waited for no longer calls
         # the model.
         self._end_suspension()
         self._failed = False  # pragma: no mutate[truthiness]
-        # Tools keep running. What the user typed during the stream is what the
-        # runtime would wait for.
+        # What the user typed during the stream is what the runtime would wait for.
         if self._drain_mid_stream_queue():
             return False
         self.inbox.push_front(Await.user(), *later)
@@ -1933,7 +1938,7 @@ class Runtime:
 
     async def _advance(self) -> None:
         """Run what a batch leaves due: scheduled work, staged input, a model call."""
-        if self._scheduled and self._engine_quiescent:
+        if self._scheduled and not self.at_work:
             scheduled = self._scheduled
             self._scheduled = []
             for work in scheduled:
@@ -1956,7 +1961,7 @@ class Runtime:
         # Staged input waits until the model is done, not merely between
         # rounds: a tool result still to answer means it is not.
         if (
-            self._engine_quiescent
+            not self.at_work
             and not self._should_call_model()
             and (self._queued or self._deferred)
         ):

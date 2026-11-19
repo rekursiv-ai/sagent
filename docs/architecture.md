@@ -30,7 +30,7 @@ Consequences:
 - There is no polling. An idle agent is blocked on its inbox, consuming zero CPU; the wake is purely event-driven.
 - A message the user sends while the model streams is answered next: the reply's calls start detached, and their results arrive later.
 
-`Halt` stops the model call and waits for the user's next message; tool calls keep running. Meanwhile the inbox holds back every event except `Halt`, `Kill`, `Clear`, and `Compact`.
+`Halt` stops the model call and waits for the user's next message. The calls the model waited on are detached: they keep running, and their results arrive after that message. Meanwhile the inbox holds back every event except `Halt`, `Kill`, `Clear`, and `Compact`. A halt that stopped work is journaled as an `UncategorizedRecord` of kind `interrupted`, which a resume never reads.
 
 ## Session records
 

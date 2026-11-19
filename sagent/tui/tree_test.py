@@ -30,9 +30,7 @@ if TYPE_CHECKING:
 @dataclass(slots=True, kw_only=True)
 class _Runtime:
     jobs: dict[str, SimpleNamespace] = field(default_factory=dict[str, SimpleNamespace])
-    cohort: set[str] = field(default_factory=set[str])
-    model_call: object = None
-    compact_task: object = None
+    at_work: bool = False
 
 
 class _Agent(MagicMock):
@@ -85,10 +83,10 @@ def test_each_agent_follows_its_parent_depth_first_with_the_shown_one_marked() -
     assert {r.call_id for r in shown} == {""}
 
 
-def test_an_agent_calling_its_model_or_compacting_alone_is_busy() -> None:
+def test_an_agent_at_work_alone_is_busy() -> None:
     team = _team()
-    team["kid"].runtime.model_call = object()
-    team["other"].runtime.compact_task = object()
+    team["kid"].runtime.at_work = True
+    team["other"].runtime.at_work = True
     assert [r.state for r in rows(team, focused="kid", now=0.0)] == [
         "idle",
         "busy",
@@ -121,7 +119,7 @@ def test_a_last_child_s_job_hangs_from_a_blank_stem_and_never_runs_backwards() -
 def test_a_busy_agent_lists_its_jobs_but_not_its_spawns() -> None:
     team = _team()
     del team.agents["grand"], team.agents["other"]
-    team["Agent"].runtime.cohort = {"w1", "s1"}
+    team["Agent"].runtime.at_work = True
     team["Agent"].runtime.jobs = {
         call_id: SimpleNamespace(
             call=ToolCall(call_id=call_id, name=name, arguments={"on": "tests"}),
