@@ -4,7 +4,6 @@
 
 [project]
 name = "sagent"
-version = "0.2.3"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -60,6 +59,7 @@ dependencies = [
     # remote tools: the tool server's self-signed certificate
     "cryptography>=50.0.2",
 ]
+dynamic = ["version"]
 
 [project.scripts]
 sagent = "sagent.tui.main:main"
@@ -166,7 +166,7 @@ Issues = "https://github.com/rekursiv-ai/sagent/issues"
 Changelog = "https://github.com/rekursiv-ai/sagent/releases"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -177,6 +177,9 @@ exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/pr
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.pytest.ini_options]
 python_files = ["*_test.py", "test_*.py"]
