@@ -117,3 +117,12 @@ agent = Agent(model=model, max_spend_usd=1.00)
 ```
 
 Once cumulative cost reaches the cap, the turn halts and `send()` raises `BudgetExhaustedError` instead of making another paid call.
+
+### Anthropic signed thinking
+
+Compaction replaces the conversation prefix. Anthropic thinking blocks retained
+from that prefix no longer have valid bindings. The compacted active context
+therefore omits those thinking blocks, including redacted blocks, while retaining
+the summary, assistant text, tool calls and results, and usage accounting.
+Original journal records remain available. New thinking generated after
+compaction is preserved normally.

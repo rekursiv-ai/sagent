@@ -3584,6 +3584,44 @@ async def test_verification_preserves_the_retained_head_summary_boundary(
         ) in _instruction(request)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["anthropic", "anthisub", "openai"])
+async def test_compaction_does_not_rebind_anthropic_thinking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+) -> None:
+    provider = ScriptedProvider(name=provider_name)
+    agent = Agent(model=provider["scripted"], tool_context=ToolContext(cwd=tmp_path))
+    compactor = SummaryCompactor(agent)
+    tool = ToolCall(call_id="read", name="Read", arguments={"path": "example.txt"})
+    result = ToolResult(call_id="read", state="done", stdout=("retained evidence",))
+    response = Response(
+        records=(Thinking(content="sealed reasoning", encrypted="signature"), tool),
+        tokens=TokenCount(request=5),
+        spend=TokenCost(request=0.1),
+        stop_reason="tool_use",
+    )
+    summary = UserMessage(content="summary of the replaced prefix")
+    redacted = Thinking(encrypted="redacted-block")
+    payload = (summary, redacted, response, result)
+    monkeypatch.setattr(
+        compactor, "_summarize", AsyncMock(return_value=(payload, "summary", "", 3))
+    )
+    splice = await _compact(compactor, agent, ())
+    if provider_name == "openai":
+        assert splice.payload == payload
+        assert splice.preserved_tail_count == 3
+    else:
+        assert splice.payload == (summary, replace(response, records=(tool,)), result)
+        assert splice.preserved_tail_count == 2
+        retained = splice.payload[1]
+        assert isinstance(retained, Response)
+        assert retained.tokens == response.tokens
+        assert retained.spend == response.spend
+    assert len(response.records) == 2  # Original journal response is not mutated.
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 
