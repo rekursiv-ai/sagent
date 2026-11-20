@@ -22,6 +22,7 @@ from fnmatch import fnmatch
 from functools import cache
 from pathlib import Path
 from typing import Final, cast, override
+from urllib import parse
 
 import atexit
 import configparser
@@ -88,6 +89,7 @@ class Wheel:
 
         """
         pyproject = _pyproject(self.project)
+        locked = _locked_commits(self.project)
         indexes = [
             url
             for index in cast(
@@ -108,15 +110,20 @@ class Wheel:
             *(("--index-strategy", "unsafe-best-match") if indexes else ()),
             "--with",
             str(self.path),
-            # A sibling the package tracks by git may not be on PyPI yet.
+            # A sibling the package tracks by git may not be on PyPI yet. It goes in at
+            # the commit the lock pins, which `uv sync` already built; at the branch,
+            # uv fetches and builds it again, 3 s of every package's CI.
             *(
                 part
                 for name, source in _table(pyproject, "tool", "uv", "sources").items()
                 if isinstance(source, dict) and "git" in source
                 for part in (
                     "--with",
-                    f"{name} @ git+{source['git']}"
-                    + (f"@{source['branch']}" if "branch" in source else ""),
+                    _git_requirement(
+                        name,
+                        cast(dict[str, str], source),
+                        locked=locked,
+                    ),
                 )
             ),
             "python",
@@ -305,6 +312,37 @@ def _pyproject(project: Path) -> dict[str, object]:
         dict[str, object],
         tomllib.loads((project / "pyproject.toml").read_bytes().decode()),
     )
+
+
+def _locked_commits(project: Path) -> dict[tuple[str, str], str]:
+    """Return the commit ``project``'s ``uv.lock`` pins, by package name and git URL."""
+    lock = project / "uv.lock"
+    if not lock.is_file():
+        return {}
+    packages = cast(
+        list[dict[str, object]],
+        tomllib.loads(lock.read_bytes().decode())["package"],
+    )
+    commits: dict[tuple[str, str], str] = {}
+    for package in packages:
+        git = _table(package, "source").get("git")
+        if isinstance(git, str):
+            # ``<url>?branch=main#<commit>``: the query names the ref it tracks.
+            url = parse.urlsplit(git)
+            repository = f"{url.scheme}://{url.netloc}{url.path}"
+            commits[str(package["name"]), repository] = url.fragment
+    return commits
+
+
+def _git_requirement(
+    name: str,
+    source: dict[str, str],
+    *,
+    locked: dict[tuple[str, str], str],
+) -> str:
+    """Return ``name``'s requirement at its locked commit, else its source's branch."""
+    ref = locked.get((name, source["git"]), source.get("branch"))
+    return f"{name} @ git+{source['git']}" + ("" if ref is None else f"@{ref}")
 
 
 def _table(document: dict[str, object], *keys: str) -> dict[str, object]:

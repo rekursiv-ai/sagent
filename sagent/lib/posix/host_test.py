@@ -12,6 +12,7 @@ import contextlib
 import functools
 import json
 import os
+import selectors
 import shutil
 import signal
 import stat
@@ -923,6 +924,30 @@ class _HeldOpen(_FakeTerminal):
         return 3
 
 
+class _Running(_FakeTerminal):
+    """A child that runs until terminated, then reports SIGTERM's status."""
+
+    def __init__(self) -> None:
+        super().__init__(pid=123)
+        self._ended = asyncio.Event()
+
+    @override
+    async def output(self) -> AsyncIterator[bytes]:
+        yield b"ready\r\n"
+        _ = await self._ended.wait()
+
+    @override
+    async def terminate(self) -> None:
+        await super().terminate()
+        self._ended.set()
+
+    @override
+    async def wait(self) -> int:
+        _ = await super().wait()
+        _ = await self._ended.wait()
+        return 128 + signal.SIGTERM
+
+
 class _UnservedHost(Host):
     """A host that skips listening and pumping; counts how often it would."""
 
@@ -1002,7 +1027,7 @@ class TestChildExit:
         async def run() -> int:
             return await asyncio.wait_for(host.serve(), 5.0)
 
-        assert asyncio.run(run()) == 3
+        assert asyncio.run(run(), loop_factory=_JumpingLoop) == 3
         assert (short_dir / "log").read_bytes() == b"bye"
 
 
@@ -1011,20 +1036,20 @@ class TestUnattended:
 
     def test_no_client_for_the_limit_stops_the_child(self, short_dir: Path) -> None:
         async def run() -> int:
-            async with _hosted(_SLEEPER, short_dir, unattended_sec=0.05) as (
+            async with _hosted(_Running(), short_dir, unattended_sec=0.05) as (
                 _,
                 serving,
             ):
                 return await asyncio.wait_for(serving, 5.0)
 
-        assert asyncio.run(run()) != 0
+        assert asyncio.run(run(), loop_factory=_JumpingLoop) != 0
 
     def test_a_connected_client_keeps_it_and_its_leaving_starts_the_clock(
         self,
         short_dir: Path,
     ) -> None:
         async def run() -> tuple[bool, int]:
-            async with _hosted(_SLEEPER, short_dir, unattended_sec=0.2) as (
+            async with _hosted(_Running(), short_dir, unattended_sec=0.2) as (
                 spec,
                 serving,
             ):
@@ -1034,17 +1059,55 @@ class TestUnattended:
                 writer.close()
                 return kept, await asyncio.wait_for(serving, 5.0)
 
-        kept, status = asyncio.run(run())
+        kept, status = asyncio.run(run(), loop_factory=_JumpingLoop)
         assert kept
         assert status != 0
 
     def test_none_never_stops_it(self, short_dir: Path) -> None:
         async def run() -> bool:
-            async with _hosted(_SLEEPER, short_dir) as (_, serving):
-                await asyncio.wait({serving}, timeout=0.3)
+            async with _hosted(_Running(), short_dir) as (_, serving):
+                await asyncio.wait({serving}, timeout=3600)
                 return serving.done()
 
-        assert not asyncio.run(run())
+        assert not asyncio.run(run(), loop_factory=_JumpingLoop)
+
+
+class _JumpingSelector(selectors.DefaultSelector):
+    """A selector that skips a wait no file can end, counting the time it skipped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.skipped_sec = 0.0
+
+    @override
+    def select(
+        self,
+        timeout: float | None = None,
+    ) -> list[tuple[selectors.SelectorKey, int]]:
+        ready = super().select(0)
+        if ready or timeout == 0:
+            return ready
+        if timeout is None:
+            return super().select(None)
+        self.skipped_sec += timeout
+        return []
+
+
+class _JumpingLoop(asyncio.SelectorEventLoop):
+    """An event loop whose clock jumps to its next timer once nothing else can run.
+
+    Every file it watches is this process's own socket or pipe, ready the moment
+    the other end writes; so a wait no file ends is only a timer's, and it costs
+    no wall time. A real child's output would arrive late, so none may run here.
+    """
+
+    def __init__(self) -> None:
+        self._jumps = _JumpingSelector()
+        super().__init__(self._jumps)
+
+    @override
+    def time(self) -> float:
+        return super().time() + self._jumps.skipped_sec
 
 
 class _RecordingTransport(asyncio.WriteTransport):
