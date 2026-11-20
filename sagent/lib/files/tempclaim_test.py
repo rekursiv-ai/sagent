@@ -115,7 +115,7 @@ def test_a_killed_owners_claim_is_swept_by_the_next_claim(tmp_path: Path) -> Non
         text=True,
     )
     assert owner.stdout is not None
-    orphan = Path(cast(str, owner.stdout.readline()).strip())  # ty: ignore[redundant-cast] -- Basedpyright's typeshed types Popen.stdout as IO[Any].
+    orphan = Path(cast(str, owner.stdout.readline()).strip())  # ty: ignore[redundant-cast] -- Basedpyright's typeshed types Popen.stdout as IO[Any].  # pyrefly: ignore[redundant-cast] -- Basedpyright's typeshed types Popen.stdout as IO[Any].
     owner.kill()
     owner.communicate(timeout=30)
     assert orphan.is_dir()
