@@ -501,14 +501,22 @@ async def test_a_close_cancelled_midway_still_stops_the_server(
 @pytest.mark.asyncio
 async def test_a_provider_dropped_without_closing_stops_its_server(bare: Path) -> None:
     _install(bare, _LIVES)
-    async with _Served(_Http()) as shared:
-        local = LlamaCpp(resources=shared, model_path="/m.gguf")
-        await local.endpoint()
-        process = local._process
-        assert process is not None
-        del local
-        gc.collect()
-        assert await asyncio.wait_for(process.wait(), timeout=5.0) == -signal.SIGTERM
+    # Frozen, the session's heap is left out of the collection below, which then
+    # reads only what this test made: a whole worker's heap took 0.4s on CI.
+    gc.freeze()
+    try:
+        async with _Served(_Http()) as shared:
+            local = LlamaCpp(resources=shared, model_path="/m.gguf")
+            await local.endpoint()
+            process = local._process
+            assert process is not None
+            del local
+            gc.collect()
+            assert (
+                await asyncio.wait_for(process.wait(), timeout=5.0) == -signal.SIGTERM
+            )
+    finally:
+        gc.unfreeze()
 
 
 @pytest.mark.asyncio

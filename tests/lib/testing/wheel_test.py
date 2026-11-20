@@ -213,6 +213,35 @@ def test_run_installs_only_the_wheel_and_its_git_sources(tmp_path: Path) -> None
     assert argv[-4:] == ["python", "-P", "-c", "import demo"]
 
 
+def test_run_installs_a_git_source_at_the_commit_its_lock_pins(tmp_path: Path) -> None:
+    """``uv sync`` built that commit already; the branch would be fetched and built."""
+    root = _project(tmp_path)
+    (root / "uv.lock").write_text(
+        _LOCK_ENTRY.format(name="helper", git="example/helper?branch=main#c0ffee")
+        # The same name from another repository is not the source's commit.
+        + _LOCK_ENTRY.format(name="helper", git="example/fork?branch=main#bad")
+        + _LOCK_ENTRY.format(name="pinned", git="example/pinned#5eed")
+        + '[[package]]\nname = "demo-pkg"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+
+    argv = Wheel(path=tmp_path / "demo.whl", project=root).argv("pass")
+
+    assert [argv[i + 1] for i, part in enumerate(argv) if part == "--with"][1:] == [
+        "helper @ git+https://github.com/example/helper@c0ffee",
+        "pinned @ git+https://github.com/example/pinned@5eed",
+    ]
+
+
+_LOCK_ENTRY = """\
+[[package]]
+name = "{name}"
+version = "1.0"
+source = {{ git = "https://github.com/{git}" }}
+
+"""
+
+
 def test_run_uses_the_project_indexes(tmp_path: Path) -> None:
     """A project that pins torch to a CPU index resolves it there, as its lock does."""
     root = _project(

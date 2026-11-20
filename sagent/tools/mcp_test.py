@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
 import asyncio
 import base64
@@ -15,10 +15,8 @@ import contextlib
 import fcntl
 import json
 import logging
-import os
 import re
 import stat
-import subprocess
 import sys
 import threading
 
@@ -32,6 +30,7 @@ from treekle import PlainTree, json_loads
 import mcp.types as mcp_types
 import pytest
 
+from sagent.lib.testing.import_graph import Counted, import_graph
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.providers.testing import refuse_browsers
 from sagent.providers.tool_server import McpToolServer
@@ -55,7 +54,11 @@ from sagent.tools.mcp import (
 from sagent.tools.mcp_auth import McpTokenStorage
 from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext, settled
+from sagent.tui import main
 
+
+_THIS: Final[Path] = Path(__file__).resolve()
+_CWD: Final[Path] = _THIS.parent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -84,23 +87,21 @@ def _write(path: Path, servers_: dict[str, object]) -> None:
 
 
 def test_starting_sagent_imports_no_mcp() -> None:
-    """A session with no server never loads the SDK; a fresh interpreter proves it."""
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys, sagent.tui.main; "
-                "print(sorted(m for m in sys.modules if m.partition('.')[0] == 'mcp'))"
-            ),
-        ],
-        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    """A session with no server never loads the SDK, read from source.
 
-    assert probe.stdout == "[]\n"
+    The walk follows the imports that run when sagent's main is imported, as a fresh
+    interpreter would; the SDK is imported lazily, on first use.
+    """
+    graph = import_graph(
+        [main.__name__],
+        path=[str(_THIS.parents[__name__.count(".")]), *sys.path],
+        follow=lambda name: name.partition(".")[0] == __name__.partition(".")[0],
+        counted=Counted.IMPORT_TIME,
+    )
+    reached = {*graph, *(name for names in graph.values() for name in names)}
+
+    assert mcp.__name__ in reached
+    assert sorted(name for name in reached if name.partition(".")[0] == "mcp") == []
 
 
 def test_a_command_entry_runs_a_local_server(tmp_path: Path) -> None:
