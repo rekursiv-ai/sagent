@@ -177,8 +177,7 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
     it has no result to wait for, and wakes the model when it has news."""
 
     due_after: type[ModelIdle | AgentIdle] | None = None
-    """What the result of the call, run apart, waits for before the model reads it,
-    as a message's ``due_after`` says; ``None`` for the next round, which it starts."""
+    """What a result run apart waits for; ``None`` for the next round."""
 
     def __post_init__(self) -> None:
         self.result.add_done_callback(self._end_streams)

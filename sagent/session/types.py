@@ -843,8 +843,7 @@ class SystemMessage:
     attachments: tuple[Attachment, ...] = ()
     subtype: str | None = None
     call_id: str | None = None
-    """The call a former ``wake`` note was news of; a resume reads it as that call's
-    news (``agent._as_today``). ``None`` for a note about no call."""
+    """The call an old journal's ``wake`` note was news of; ``None`` for none."""
 
     due_after: type[AgentIdle | ModelIdle] | None = None
     """As ``UserMessage.due_after``."""

@@ -37,6 +37,7 @@ from sagent.runtime.tape import (
     mask_contains_ref,
     mask_ranges_overlap,
     merge_mask_ranges,
+    sent_records,
     splice_safe_repair,
     unpaired_call_ids,
 )
@@ -1383,6 +1384,27 @@ def test_splice_safe_repair_output_is_a_valid_context(
     history: list[ModelContextEvent],
 ) -> None:
     validate_context(splice_safe_repair(history))
+
+
+def test_a_request_is_sent_each_turn_s_records_and_a_call_s_later_messages_as_text() -> (
+    None
+):
+    """A provider takes one result per call; what came later is the user's to read."""
+    turn = _turn("go", ["c0"], signed=False)
+    stub = ToolMessage(call_id="c0", state="pending", shown="[detached]")
+    late = ToolMessage(
+        call_id="c0",
+        state="done",
+        stdout=("ok",),
+        result=UncategorizedToolResult(),
+    )
+    user = _user("u")
+
+    sent = sent_records([user, turn, stub, late])
+
+    assert sent[: 1 + len(turn.records) + 1] == [user, *turn.records, stub]
+    assert [type(r) for r in sent[1 + len(turn.records) + 1 :]] == [UserMessage]
+    assert "ok" in "".join(r.content or "" for r in sent if isinstance(r, UserMessage))
 
 
 def test_repair_drops_a_result_here_of_an_id_answered_elsewhere_and_called_here() -> (

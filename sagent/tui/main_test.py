@@ -3666,7 +3666,9 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
 def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
     """A reader can tell the stand-in from the result that replaces it."""
     tools = {"Read": Read()}
-    stub = ToolMessage(call_id="1", state="pending", stdout=("[detached]",))
+    stub = ToolMessage(call_id="1", state="pending", shown="[detached]")
+    # What a call run apart wrote since: pending too, but no stand-in.
+    news = ToolMessage(call_id="1", state="pending", stdout=("half way",))
     real = ToolMessage(
         call_id="1",
         state="done",
@@ -3680,6 +3682,14 @@ def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
             "content": "[detached]",
             "is_error": None,
             "stub": "pending",
+        },
+    ]
+    assert main._records(news, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "half way",
+            "is_error": None,
         },
     ]
     assert main._records(real, tools=tools) == [
