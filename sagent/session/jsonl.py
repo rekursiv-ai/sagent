@@ -34,6 +34,8 @@ from sagent.session.types import (
     ContextClear,
     IncompleteRecord,
     SessionRecord,
+    record_classes,
+    renamed_records,
     stored_plain,
     stored_record,
 )
@@ -250,10 +252,24 @@ def rename_records(path: Path, *, dry_run: bool = False) -> int:
         os.close(fd)
 
 
-# A ``py/object`` tag naming a class by a name a record's type once had.
+# A ``py/object`` tag naming a class by a name a record's type once had: a tool
+# call's former record, or a renamed record class's former name once the class
+# bears its new one.
 _FORMER: Final = re.compile(
     rb'"py/object":\s*"(?:'
-    + b"|".join(re.escape(name.encode()) for name in sorted(FORMER_RESULT_KINDS))
+    + b"|".join(
+        re.escape(name.encode())
+        for name in sorted(
+            {
+                *FORMER_RESULT_KINDS,
+                *(
+                    old
+                    for old, new in renamed_records().items()
+                    if new in record_classes()
+                ),
+            },
+        )
+    )
     + rb')"',
 )
 

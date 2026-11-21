@@ -62,7 +62,7 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.session.jsonl import JsonlJournal, read_record
 from sagent.session.types import (
     RemoteToolResult,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools import remote
@@ -177,7 +177,7 @@ async def test_listing_compares_remote_digests_without_connecting(
     listing = "gpu1  up\n  same as here: Read\n  differs here, ask its schema: Write\n  only there, ask its schema: Train"
     assert (await settled(tool.call(context, {}))).text() == listing
     one = await settled(tool.call(context, {"endpoint": "gpu1"}))
-    assert one == ToolResult(
+    assert one == ToolMessage(
         call_id="",
         state="done",
         stdout=(listing,),
@@ -220,7 +220,7 @@ async def test_schemas_are_asked_only_when_the_local_digest_differs(
         shown = await settled(
             tool.call(ToolContext(), {"endpoint": "gpu1", "tool": name}),
         )
-        assert shown == ToolResult(
+        assert shown == ToolMessage(
             call_id="",
             state="done",
             stdout=(
@@ -239,7 +239,7 @@ async def test_tool_dispatch_forwards_identity_window_and_the_result(
     endpoint: Endpoint,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = ToolResult(
+    result = ToolMessage(
         call_id="c",
         state="done",
         stdout=("there",),
@@ -281,7 +281,7 @@ async def test_calls_are_correlated_and_acknowledged_at_the_endpoint(
     endpoint._writer = connection.writer
     endpoint.tools = {"Read": "d"}
     sent = connection.sent
-    result = ToolResult(
+    result = ToolMessage(
         call_id="r",
         state="done",
         stdout=("there",),
@@ -322,7 +322,7 @@ async def test_what_a_call_says_there_is_said_here_while_it_runs(
     session = RemoteSession([])
     session._endpoints = [endpoint]
     tool = RemoteTool(remote=session)
-    result = ToolResult(call_id="", state="done", result=UncategorizedToolResult())
+    result = ToolMessage(call_id="", state="done", result=UncategorizedToolResult())
     said: list[tuple[str, object]] = []
     async with asyncio.TaskGroup() as tasks:
         calling = tasks.create_task(
@@ -444,7 +444,7 @@ async def test_goodbye_cancels_every_pending_call(
     connection: _Connection,
     connected: bool,
 ) -> None:
-    pending = asyncio.Future[ToolResult]()
+    pending = asyncio.Future[ToolMessage]()
     endpoint._pending["r"] = pending
     endpoint._writer = connection.writer if connected else None
     endpoint.bye()
@@ -460,7 +460,7 @@ async def test_goodbye_cancels_every_pending_call(
 async def test_welcome_retains_only_calls_the_server_still_holds(
     endpoint: Endpoint,
 ) -> None:
-    kept, lost = asyncio.Future[ToolResult](), asyncio.Future[ToolResult]()
+    kept, lost = asyncio.Future[ToolMessage](), asyncio.Future[ToolMessage]()
     endpoint._pending.update(kept=kept, lost=lost)
     endpoint._welcome(_welcome(calls=("kept",), tools={"Read": "d"}))
     assert endpoint.name == "gpu1"
@@ -586,7 +586,7 @@ async def test_a_connection_drop_fails_descriptions_but_preserves_calls(
     address = socket_address(tmp_path / "daemon.sock")
     endpoint = _endpoint_on(team, local_link(address))
     description = asyncio.Future[ToolSpec | None]()
-    pending = asyncio.Future[ToolResult]()
+    pending = asyncio.Future[ToolMessage]()
     endpoint._describing["d"] = description
     endpoint._pending["r"] = pending
     monkeypatch.setattr(
@@ -736,9 +736,9 @@ async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
     missing = Note(id="lost", sender="w", recipient="gone", content="hi", kind="ask")
     result = Result(
         id="unknown",
-        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+        record=ToolMessage(call_id="", state="done", result=UncategorizedToolResult()),
     )
-    cancelled = asyncio.Future[ToolResult]()
+    cancelled = asyncio.Future[ToolMessage]()
     cancelled.cancel()
     endpoint._pending["cancelled"] = cancelled
     monkeypatch.setattr(
@@ -1123,10 +1123,10 @@ def _called(message: Message | None) -> str:
 
 _READ = ToolSpec.from_tool(Read())
 _TRAIN = ToolSpec(description="Train a model.", schema={"type": "object"})
-_DONE = ToolResult(call_id="", state="done", result=UncategorizedToolResult())
+_DONE = ToolMessage(call_id="", state="done", result=UncategorizedToolResult())
 
 
-async def _ran(endpoint: Endpoint) -> ToolResult:
+async def _ran(endpoint: Endpoint) -> ToolMessage:
     """Return what a ``Gate`` call there came to, less the id it went by."""
     record = await asyncio.wait_for(
         endpoint.call(agent="a", window="w", tool="Gate", arguments={}),
@@ -1686,7 +1686,7 @@ async def test_a_call_cancelled_as_the_server_forgets_it_leaves_the_endpoint_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calling: list[asyncio.Task[ToolResult]] = []
+    calling: list[asyncio.Task[ToolMessage]] = []
     granted = Endpoint._granted
     back = asyncio.Event()
 
@@ -2116,7 +2116,7 @@ async def test_the_session_records_a_call_by_the_models_id_and_its_id_on_the_wir
     (record,) = [
         r
         for r in map(read_record, path.read_bytes().splitlines())
-        if isinstance(r, ToolResult)
+        if isinstance(r, ToolMessage)
     ]
     assert (record.call_id, record.wire_id) == ("toolu_1", ids[0])
 

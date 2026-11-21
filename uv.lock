@@ -599,8 +599,8 @@ wheels = [
 
 [[package]]
 name = "codedoctor"
-version = "0.1.11.dev1+gf793666fa"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#f793666fa732dc862c2918669428409e35ef8c3e" }
+version = "0.1.12.dev1+gf5a9563ff"
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#f5a9563ff1c20b0971d1b6bee70b65c11f51ff2c" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rignore" },
@@ -3298,8 +3298,8 @@ wheels = [
 
 [[package]]
 name = "rekursiv-ai-typings"
-version = "0.1.23.dev1+g6c179131e"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#6c179131eb72b3be6dfa8d378b72b126e7cc7233" }
+version = "0.1.24"
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#eec1e7499f2d4ba9ddd94bcb8f0b0524f492bc20" }
 
 [[package]]
 name = "requests"
@@ -4337,23 +4337,23 @@ wheels = [
 
 [[package]]
 name = "treekle"
-version = "0.4.8"
+version = "0.4.9"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/37/75/1180eda5e02bb57f267c85932f0d367fe23758da8f6588812b52b2b1ba80/treekle-0.4.8.tar.gz", hash = "sha256:2e76e05070fa53719d5f2ad8f3e190d129b1f863d239af2f39a1e11fc776b03f", size = 383631, upload-time = "2026-11-20T17:43:33.705Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/76/d2973d59a564aa88ba78ebe97ce32a9de9b67973ee3b0d6bb04ae9d01aef/treekle-0.4.9.tar.gz", hash = "sha256:7e8afa076b02a9d0307d5e54699817048dca72cab97b0313b90a7be185418403", size = 383576, upload-time = "2026-11-20T20:38:09.759Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/bf/2bf2758f25ace5bb1a99962ea43fe33c7814d1d804e8f83dc7f506c1e832/treekle-0.4.8-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:293533b9d9a1e1dd001f3147e9a11d1f8b7130a058bab6026e09dbedaf5a018c", size = 1096542, upload-time = "2026-11-20T17:43:12.457Z" },
-    { url = "https://files.pythonhosted.org/packages/fe/bc/5e6b8143f47adae4a96f990d159ae6442989b0b9031b161816e3830ef910/treekle-0.4.8-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:31a6338c674a3f0be3e13e71acbc102d7c2340883a857ffcc73932a3c934ea44", size = 1030312, upload-time = "2026-11-20T17:43:14.103Z" },
-    { url = "https://files.pythonhosted.org/packages/35/8e/c9720c33990af6f600651943d2eca43f65fd12f6aa5fab31eb9aa2754adb/treekle-0.4.8-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:e5f5ced2788a2065a98f954f60bd420700ca479d38f53707fd61520f7db77a0d", size = 1042310, upload-time = "2026-11-20T17:43:15.557Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/1d/6bf58f039869dcf97ee74d715e254d227831ffb4de530e7c930c1b3c5c12/treekle-0.4.8-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a1aa1d6fc1d1a78705b228fd00b1f3bcf033edcf472b8e493cc5c812cc28c6be", size = 1095828, upload-time = "2026-11-20T17:43:16.783Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/f1/93ddd2b67fff69d1dc61eac546f9ba4b874b45dab85eddfafabddccd2b34/treekle-0.4.8-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:9f25f2e721f1f9529818b5767199b2dcb8d12652cef723f9f7929ed87dc6a728", size = 1094919, upload-time = "2026-11-20T17:43:19.379Z" },
-    { url = "https://files.pythonhosted.org/packages/bb/cb/85b5953001fd7ff94d89a4bf12875ead1e048f07844fbad9d090f5e305d8/treekle-0.4.8-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:2902516edcbfa6d92058986190c854214da6c5c21cfa7f5d54e06e9634c7273d", size = 1027052, upload-time = "2026-11-20T17:43:20.875Z" },
-    { url = "https://files.pythonhosted.org/packages/6b/54/817e55d01c6ccda2fc95b4ed8e177f2959097cd91dfdb66558fd89cb165f/treekle-0.4.8-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6bb92fde7c27e786180b544147a5bd3e9e62026bb4ba0c1dedeb24fcc710647d", size = 1040462, upload-time = "2026-11-20T17:43:22.144Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/f5/eee54910a9a813557a9c60eeefa0479ca152dea9274f182a700a6c4de85b/treekle-0.4.8-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ab7880276854dac521fed90568811860d63e75fbbd356e7dc5db6714e5612175", size = 1095828, upload-time = "2026-11-20T17:43:23.5Z" },
-    { url = "https://files.pythonhosted.org/packages/57/fd/5b4964fb927cd22a2e59f8847bc099197bfaba7d042b823279ae6c420b80/treekle-0.4.8-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:ad3b09fbf8caae7dbc315b8c6d3d7df211607c07caf75b089b4bd5f51fef6bdb", size = 853135, upload-time = "2026-11-20T17:43:26.072Z" },
-    { url = "https://files.pythonhosted.org/packages/64/90/d9a6180d7ab791d0c6836bd60ffabc367964f1e39b2683b886859b2202cf/treekle-0.4.8-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:6fa12fd2b7e006ebf7327362c6454d65545e4db713e3730571968a7cc4e01783", size = 810421, upload-time = "2026-11-20T17:43:27.361Z" },
-    { url = "https://files.pythonhosted.org/packages/d0/87/77bd99f4e4fa11eb8be1b73f8a55d179c571f9e3f040065d8b4e197d328a/treekle-0.4.8-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6fb972d549e894c9bf90b4dfa3759f0c8f1aa5b84cf18206f8656bec9d37b155", size = 824820, upload-time = "2026-11-20T17:43:29.01Z" },
-    { url = "https://files.pythonhosted.org/packages/86/bf/7c6a3116be4fb12f0d4d25ecf10f40dbf9f953ddda392622856635c8d387/treekle-0.4.8-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f4dac210d0e2969db78b34c3fe8dc0552bf285bc7b8e8c5476185f6055011aa", size = 860168, upload-time = "2026-11-20T17:43:30.306Z" },
-    { url = "https://files.pythonhosted.org/packages/11/19/1d182a8dfb4d1ea85f8575b70c5434d89cf42d2b621d8da822e26fcf321f/treekle-0.4.8-py3-none-any.whl", hash = "sha256:32eb3e9392f2562343586371bb7f6922c405cec08e68b76923fa832c90e1773f", size = 75367, upload-time = "2026-11-20T17:43:32.725Z" },
+    { url = "https://files.pythonhosted.org/packages/78/06/9a5147fbfb09be64405644016ba899e3774595bc84625b4d6899611b8aea/treekle-0.4.9-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:1cb60878996caa867e87faed144c083b6c16b3d658ba5aab71c44e6339142163", size = 1088092, upload-time = "2026-11-20T20:37:44.342Z" },
+    { url = "https://files.pythonhosted.org/packages/31/4a/94523a95df121ff3c57d3c595a113e421e352796aac647f75792e37edc0b/treekle-0.4.9-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:1e3812e3721220bc069dbaf1019b0c6cd3109c2ce500e667b761158c9d4e0229", size = 1034723, upload-time = "2026-11-20T20:37:46.009Z" },
+    { url = "https://files.pythonhosted.org/packages/56/46/a1003136e80a4a6f0da6ec37d320bb4e52b6057bf888dab71648b1784913/treekle-0.4.9-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:8b25f9b5544b0f1662d30526861f9b4d7626210d6b0ecb7ce8bc7b0a11f99182", size = 1042129, upload-time = "2026-11-20T20:37:47.515Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/44/7592359b3d3158f053152e7e6002c17c05b5cbadb07130510e178293e9be/treekle-0.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:cb4d18beb4c8087f6bc848293b0af74cfc8d219ea18891fbe99bb8d459077edf", size = 1095775, upload-time = "2026-11-20T20:37:48.981Z" },
+    { url = "https://files.pythonhosted.org/packages/69/dd/c6c6c68649feac13cd2d33c55e1c583b3e51fc85031f28a1f3487297ebb9/treekle-0.4.9-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:d6718e360d78baaea2abaf5f2af0fedb49e51068d7e271cfd7fc0d7815ab010f", size = 1086951, upload-time = "2026-11-20T20:37:53.167Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/3b/7302bd14a26e40aa967f7d793ac1d56c201ab1915e1b57c15fc7a5792a87/treekle-0.4.9-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3479eec168d930e49a49c1cb82da0d6912b2d159fc0b22fb9b028c03e4c88af9", size = 1031604, upload-time = "2026-11-20T20:37:54.812Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/28/6da017f6050cc2b24717873d09a5c5327bdcf01604702cee3f6cd159b057/treekle-0.4.9-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:319ca6c4e87aac24e84b1bb3c457fedf792c95b2f0c49c878796493d6beffe3f", size = 1039673, upload-time = "2026-11-20T20:37:56.524Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/45/c5bed629793a6875fe67ae85d133d981b1ad95ba1c4e3bdd9e4dc505d851/treekle-0.4.9-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:65996ab909eab332728e9d25ce24bb2ca68137aa0c5187972dec2db4a0e88396", size = 1095611, upload-time = "2026-11-20T20:37:58.112Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/fc/c2650b60afd4afd0a6afccb67324204a16876744fbc4557bfd30a9a2cf83/treekle-0.4.9-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:2a621faec7863311f6f8d370987ce7bc707cdbed325066a5e82d0e5585b12232", size = 853089, upload-time = "2026-11-20T20:38:01.126Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/46/de8027f0af5ed8b2baa59d07cb6916f923c9affd5461810c394d685a366e/treekle-0.4.9-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:2e98e2567b77fb1fb39d04d4309637dd0167cfbbcb2aa6006f9b1a20e350064f", size = 811432, upload-time = "2026-11-20T20:38:02.723Z" },
+    { url = "https://files.pythonhosted.org/packages/17/1e/ba4815482704f22f47523817e3b26f86d3ea13c2f1c6b7d4c6c97e71cecf/treekle-0.4.9-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9649efe19303600a66fdd9fcecd58c63a3e9f6e534c57976ac0dbc967e164960", size = 824854, upload-time = "2026-11-20T20:38:04.086Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/a7/44090f3f19ccd376e694e844fa00a9cb6cd9761125d12de7a8b9d241d4f5/treekle-0.4.9-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:258e02a32ab721a91a524556249086491ace0613632471242c95c78a8c14f991", size = 860222, upload-time = "2026-11-20T20:38:05.486Z" },
+    { url = "https://files.pythonhosted.org/packages/40/7b/4fc0cf316d5db2a51b03b9450572b63d361490c848ffc17487d19a00b0e9/treekle-0.4.9-py3-none-any.whl", hash = "sha256:887146586d4d8bb1edd22ece95b783c464d434581262cc0c43dad39a733463ec", size = 75367, upload-time = "2026-11-20T20:38:08.417Z" },
 ]
 
 [[package]]
@@ -4640,8 +4640,8 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.20.dev5+g68bc5fbbc"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#68bc5fbbcae6b3a47e14176a492b933115728abe" }
+version = "0.1.20.dev6+g145aaf5dc"
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#145aaf5dc1ce1e2b08a79717a700308397dd4c03" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

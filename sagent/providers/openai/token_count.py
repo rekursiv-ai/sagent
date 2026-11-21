@@ -20,7 +20,7 @@ from treekle import json_dumps, mutable
 
 from sagent.model import image
 from sagent.providers.openai import wire
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
+from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 
 
 if TYPE_CHECKING:
@@ -180,7 +180,7 @@ def _texts(request: Request) -> Iterator[str]:
         elif isinstance(record, ToolCall):
             yield record.name
             yield json_dumps(mutable(record.arguments))
-        elif isinstance(record, ToolResult):
+        elif isinstance(record, ToolMessage):
             yield record.text()
 
 
@@ -189,7 +189,7 @@ def _attachments(request: Request) -> Iterator[Attachment]:
         said = wire.user_content(record)
         if said is not None:
             yield from said[1]
-        elif isinstance(record, ToolResult):
+        elif isinstance(record, ToolMessage):
             yield from record.attachments
 
 

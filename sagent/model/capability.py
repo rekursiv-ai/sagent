@@ -246,6 +246,8 @@ class ModelCapability:
 
     retries_internally: bool = False
     account_auth: bool = False
+    keeps_user_turns_apart: bool = False
+    """Whether the API keeps adjacent user turns apart instead of joining them."""
 
     def check(self, settings: ModelSettings) -> None:
         """Raise unless this model offers every choice in ``settings``, its size too.

@@ -56,6 +56,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, Protocol, override
 
 import asyncio
@@ -72,8 +73,13 @@ from sagent.providers.types import HasLogins, Provider
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
+    Failed,
+    ModelIdle,
+    Succeeded,
     SystemMessage,
     ToolCall,
     UncategorizedRecord,
@@ -832,7 +838,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             return
         # Only members are owed or sent to: one that leaves is forgotten as it goes.
         self._members[recipient].agent.runtime.push(
-            AgentToAgentMessage(sender=sender, recipient=recipient, content=content),
+            AgentMessage(sender=sender, recipient=recipient, content=content),
         )
 
 
@@ -850,8 +856,11 @@ class _Dun:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Nudge, answer for the agent, or tell its parent, as ``event`` calls for."""
-        if isinstance(event, types.ModelResponseComplete):
-            records = event.response.records
+        ended = (
+            event.outcome if isinstance(event, types.ModelResponseCompleted) else None
+        )
+        if isinstance(ended, Succeeded):
+            records = ended.value.records
             said = "".join(
                 r.content or "" for r in records if isinstance(r, AssistantMessage)
             )
@@ -863,25 +872,28 @@ class _Dun:
             self._worked = True
             return
         if isinstance(event, UserMessage) or (
-            isinstance(event, AgentToAgentMessage) and event.sender == "user"
+            isinstance(event, AgentMessage) and event.sender == "user"
         ):
             self.team.wake(self.label)
             return
         owed = self.team.owes(self.label)
-        if isinstance(event, types.ModelResponseError):
-            self._ended(f"[{self.label} failed] {describe(event.exception)}", owed)
-        elif isinstance(event, types.ModelResponseCancelled):
+        stopped = event.outcome if isinstance(event, ModelIdle) else None
+        if isinstance(stopped, Failed):
+            self._ended(f"[{self.label} failed] {describe(stopped.exception)}", owed)
+        elif isinstance(stopped, Cancelled):
             self._ended(f"[{self.label} halted]", owed)
         # The run goes on after the wait: nothing it owes is answered for it. No
         # spawn's result tells of the wait, so a spawned child's parent is told too.
-        elif isinstance(event, types.ModelCallSuspended) and event.opens_a_quota_wait:
+        elif (
+            isinstance(event, types.ModelResponseSuspended) and event.opens_a_quota_wait
+        ):
             self._tell_parent(
-                f"[{self.label} waiting until {local_time(event.until)}]"
+                f"[{self.label} waiting until {local_time(event.retry_at)}]"
                 f" {describe(event.exception)}",
                 owed,
                 spawn_tells=False,  # pragma: no mutate[truthiness]
             )
-        elif isinstance(event, types.AgentIdle) and self._worked:
+        elif isinstance(event, AgentIdle) and self._worked:
             self._worked = False  # pragma: no mutate[truthiness]
             last, self._last_call = self._last_call, None
             self._idled(owed, last)
@@ -1084,20 +1096,21 @@ class _Precedence:
                 quiet=quiet,
             )
 
-    async def after_failure(self, exc: BaseException) -> float | None:
+    async def after_failure(self, exc: BaseException) -> Mapping[str, datetime]:
         """Move off a login that spent a window, or that a move found signed out.
 
         Args:
           exc: Why the model in use failed its call.
 
         Returns:
-          wake: With every login spent, when the first resets, which the call
-            waits for; else ``None``.
+          resets: With every login spent, when each resets; the call waits for
+            the first. Empty otherwise.
 
         """
+        none: dict[str, datetime] = {}
         taken = self._logins()
         if taken is None:
-            return None
+            return none
         logins, seat = taken
         now = time.time()
         if isinstance(exc, AuthError) and seat.serving != self._chosen_login():
@@ -1114,16 +1127,10 @@ class _Precedence:
                 Spent(window=window, model=model, until=until),
             )
         else:
-            return None
+            return none
         if await self._move(logins, seat, window=window, until=until):
-            return None
-        resets = await asyncio.to_thread(self._resets, logins, seat, now=now)
-        if not resets:
-            return None
-        self._agent.runtime.publish(
-            types.LoginsSpent(provider=self._agent.model.provider.name, resets=resets),
-        )
-        return resets[0][1]
+            return none
+        return await asyncio.to_thread(self._resets, logins, seat, now=now)
 
     # A model the user picks is theirs: one from the catalog signs in as their
     # account, whatever login the one it replaced had moved to.
@@ -1166,14 +1173,14 @@ class _Precedence:
         seat: _Seat,
         *,
         now: float,
-    ) -> tuple[tuple[str, float], ...]:
-        """Return each login's reset, soonest first."""
+    ) -> dict[str, datetime]:
+        """Return each spent login's reset, soonest first."""
         resets = (
-            (account, spent.until)
+            (account, datetime.fromtimestamp(spent.until, UTC))
             for account, spent in self._ranked(logins, seat, now=now)
             if spent is not None
         )
-        return tuple(sorted(resets, key=lambda reset: reset[1]))
+        return dict(sorted(resets, key=lambda reset: reset[1]))
 
     # The same provider, model and choices, so no settings cached for another model
     # apply; a login that cannot is passed over until the user switches.
@@ -1219,11 +1226,13 @@ class _Precedence:
                 agent.runtime.publish(
                     types.LoginSwitched(
                         provider=provider,
-                        was=seat.serving,
-                        now=account,
-                        window=window,
-                        until=until,
-                        first=ranked[0][0],
+                        from_login=seat.serving,
+                        to_login=account,
+                        spent_window=window,
+                        spent_window_resets_at=datetime.fromtimestamp(until, UTC)
+                        if until
+                        else None,
+                        first_login_in_order=ranked[0][0],
                     ),
                 )
             seat.serving = account

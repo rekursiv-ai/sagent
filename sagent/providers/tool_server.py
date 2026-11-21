@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import uvicorn
 
     from sagent.providers.types import ToolMount
-    from sagent.session.types import ToolResult
+    from sagent.session.types import ToolMessage
     from sagent.tools.types import Tool
 else:
     from wrapt import lazy_import
@@ -111,7 +111,7 @@ class McpMount:
             held = self._unreported.pop(0)
         return ToolCall(call_id=held.call_id, name=held.name, arguments=held.arguments)
 
-    async def answer(self, call: ToolCall, result: ToolResult) -> None:
+    async def answer(self, call: ToolCall, result: ToolMessage) -> None:
         """Complete the waiting call that ``call`` describes with ``result``.
 
         A CLI's call carries no id, so it is matched by name and arguments.
@@ -347,7 +347,7 @@ class _Held:
     reply: asyncio.Future[mcp_types.CallToolResult]
 
 
-def _reply(result: ToolResult) -> mcp_types.CallToolResult:
+def _reply(result: ToolMessage) -> mcp_types.CallToolResult:
     """Return ``result`` as an MCP ``tools/call`` reply, with its images."""
     blocks: list[mcp_types.ContentBlock] = [
         mcp_types.TextContent(text=result.text()),

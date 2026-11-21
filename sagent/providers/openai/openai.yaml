@@ -1175,6 +1175,9 @@ providers:
     # minutes; earlier models with extended retention keep about as long.
     cache_ttl_sec: [1800.0]
     retries_internally: true
+    # Measured 2026-11-19, Chat Completions and Responses: two adjacent user turns
+    # count 4 tokens more than the same text in one, so each stays its own.
+    keeps_user_turns_apart: true
     models:
       astra-6.2:
       sol-6.2:

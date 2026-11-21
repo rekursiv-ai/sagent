@@ -80,31 +80,31 @@ class RuntimeSettings:
         ]
 
     def _detach(self) -> str:
-        default = self.runtime.detach_schedule.default
-        text = "off" if default is None else default.text()
+        default = self.runtime.wake_schedules.default
+        text = "off" if default is None else str(default)
         return f"{text} (default)" if default == WakeSchedule() else text
 
     async def _set_detach(self, args: str) -> str:
         default = WakeSchedule() if args == "default" else wake_schedule(args)
-        self.runtime.detach_schedule = replace(
-            self.runtime.detach_schedule,
+        self.runtime.wake_schedules = replace(
+            self.runtime.wake_schedules,
             default=default,
         )
         return self._detach()
 
     def _tool_detach(self, tool: str) -> str:
-        tools = self.runtime.detach_schedule.tools
-        if tool not in tools:
+        per_tool = self.runtime.wake_schedules.per_tool
+        if tool not in per_tool:
             return "default"
-        own = tools[tool]
-        return "off" if own is None else own.text()
+        own = per_tool[tool]
+        return "off" if own is None else str(own)
 
     async def _set_tool_detach(self, tool: str, args: str) -> str:
-        schedule = self.runtime.detach_schedule
-        tools = {k: v for k, v in schedule.tools.items() if k != tool}
+        schedule = self.runtime.wake_schedules
+        per_tool = {k: v for k, v in schedule.per_tool.items() if k != tool}
         if args != "default":
-            tools[tool] = wake_schedule(args)
-        self.runtime.detach_schedule = replace(schedule, tools=tools)
+            per_tool[tool] = wake_schedule(args)
+        self.runtime.wake_schedules = replace(schedule, per_tool=per_tool)
         return self._tool_detach(tool)
 
     def _retry(self) -> str:
@@ -135,12 +135,16 @@ def wake_schedule(args: str) -> WakeSchedule | None:
         return None
     words = [w for w in re.split(r"[\s,]+", args.strip()) if w]
     try:
-        first, growth, max_gap = (float(w.removesuffix("s")) for w in words)
+        first, gap_growth, max_gap = (float(w.removesuffix("s")) for w in words)
     except ValueError:
         raise SettingError(
             f"{args!r} is not FIRST GROWTH MAX_GAP, off, or default",
         ) from None
     try:
-        return WakeSchedule(first_sec=first, growth=growth, max_gap_sec=max_gap)
+        return WakeSchedule(
+            first_gap_sec=first,
+            gap_growth=gap_growth,
+            max_gap_sec=max_gap,
+        )
     except ValueError as e:
         raise SettingError(str(e)) from None

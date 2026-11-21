@@ -41,11 +41,12 @@ from sagent.model.exceptions import (
 )
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     ContextClear,
+    SessionContext,
     SystemMessage,
-    TurnContext,
     UserMessage,
+    labeled_text,
 )
 
 
@@ -125,17 +126,13 @@ def user_content(record: SessionRecord) -> tuple[str, tuple[Attachment, ...]] | 
 
     """
     match record:
-        case UserMessage(content=text, attachments=attachments):
-            return text or "", attachments
-        case AgentToAgentMessage(content=text, sender=sender, attachments=attachments):
-            body = text or ""
-            return (f"[from {sender}]: {body}" if sender is not None else body), (
-                attachments
-            )
+        # Whoever is named is named: another agent, or a person not the session's user.
+        case UserMessage() | AgentMessage():
+            return labeled_text(record), record.attachments
         # A harness note is no one's turn; it rides the user side, marked.
         case SystemMessage(content=str() as text) if text:
             return f"<system-reminder>\n{text}\n</system-reminder>", ()
-        case TurnContext() if record.text():
+        case SessionContext() if record.text():
             return f"<system-reminder>\n{record.text()}\n</system-reminder>", ()
         case _:
             return None

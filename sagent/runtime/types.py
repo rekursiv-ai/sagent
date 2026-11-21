@@ -1,288 +1,532 @@
-"""Runtime event vocabulary.
+"""What the runtime is asked, and what it is doing.
 
-The history is session records; one model turn is the ``Response`` it came in.
-Everything else here is an event the runtime takes from its inbox or publishes.
+A ``RuntimeRequest`` goes into the inbox and asks the runtime to act; each ends
+once, told as its ``...Completed(outcome)``. A ``RuntimeState`` is what the runtime
+publishes. A
+request's ``sender`` is who asks; ``None`` is the session's own user.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from datetime import datetime
+from types import MappingProxyType
+from typing import Literal, Protocol, override
 
-import asyncio
 import math
 
+from sagent.model.cost import TokenCost
 from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.session.types import (
-    AgentToAgentMessage,
-    Attachment,
+    AgentIdle,
+    AgentMessage,
+    ModelIdle,
+    Outcome,
+    SessionContext,
     SystemMessage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
 )
 
 
 __all__ = [
-    "AgentIdle",
-    "AgentSendDeferredMessage",
-    "AgentSendQueuedMessage",
-    "Charged",
-    "ChildDoneEvent",
+    "AgentMessageCompleted",
     "ChildEvent",
-    "Clear",
-    "ClearComplete",
-    "CohortComplete",
-    "CohortStarted",
-    "Compact",
-    "CompactComplete",
-    "CompactFailed",
-    "CompactStarted",
     "CompactionSplice",
-    "Detach",
-    "DetachSchedule",
-    "DetachedResult",
-    "Halt",
     "Job",
-    "Kill",
-    "LazyEvent",
     "LoginSwitched",
-    "LoginsSpent",
-    "Markers",
-    "ModelCallStarted",
-    "ModelCallSuspended",
     "ModelContextEvent",
-    "ModelIdle",
-    "ModelResponseCancelled",
-    "ModelResponseComplete",
-    "ModelResponseError",
-    "ModelResponsePartial",
-    "ModelResponseThinking",
-    "Quit",
-    "Retry",
+    "ModelHalt",
+    "ModelHaltCompleted",
+    "ModelMessage",
+    "ModelMessageCompleted",
+    "ModelResponseCompleted",
+    "ModelResponseStarted",
+    "ModelResponseSuspended",
+    "ModelResponseTextStreamed",
+    "ModelResponseThinkingStreamed",
+    "ModelRetry",
+    "ModelRetryCompleted",
+    "NextWake",
     "RuntimeEvent",
-    "SaveSession",
-    "Scheduled",
-    "Skipped",
-    "StatusChanged",
-    "UserDeferredMessage",
-    "UserQueuedMessage",
-    "Wake",
+    "RuntimeRequest",
+    "RuntimeState",
+    "SessionClear",
+    "SessionClearCompleted",
+    "SessionCompact",
+    "SessionCompactCompleted",
+    "SessionCompactStarted",
+    "SessionCompacted",
+    "SessionContextUpdate",
+    "SessionContextUpdateCompleted",
+    "SessionPrune",
+    "SessionPruneCompleted",
+    "SessionQuit",
+    "SessionQuitCompleted",
+    "SessionRecordAppended",
+    "SessionSaveDue",
+    "SessionSpendCharged",
+    "SessionSummary",
+    "SessionSummaryCompleted",
+    "SessionTitleChanged",
+    "Stubs",
+    "SystemMessageCompleted",
+    "ToolCallCompleted",
+    "ToolCohortCompleted",
+    "ToolCohortStarted",
+    "ToolDetach",
+    "ToolDetachCompleted",
+    "ToolHalt",
+    "ToolHaltCompleted",
+    "ToolMessageCompleted",
+    "ToolWakeSchedules",
+    "UserMessageCompleted",
     "WakeSchedule",
-    "labeled_agent_send_text",
     "wire_role",
 ]
 
 
-def labeled_agent_send_text(entry: AgentToAgentMessage) -> str:
-    """Return ``entry``'s text prefixed with its ``[from <sender>]: `` label.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelHalt:
+    """Stop the model's reply; the calls it waited on run on, detached."""
 
-    Args:
-      entry: A message from another agent.
-
-    Returns:
-      text: The text, labeled once; a labeled text is returned as it is.
-
-    """
-    prefix = f"[from {entry.sender}]: "
-    text = entry.content or ""
-    return text if text.startswith(prefix) else f"{prefix}{text}"
+    timestamp: datetime | None = None
+    sender: str | None = None
 
 
-# Code tells a pending or cancelled call's record by ``ToolResult.state``, never by
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelMessage:
+    """What the model replied."""
+
+    timestamp: datetime | None = None
+    response: Response
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelRetry:
+    """Call the model again for the turn a failure stopped."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionClear:
+    """Stop the model and every tool, and wipe the history."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionCompact:
+    """Replace the history with a summary of it."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+    summary_must_keep: str = ""
+    trigger: Literal["auto", "manual"] = "manual"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionContextUpdate:
+    """Put ``context`` in force."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+    context: SessionContext
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionPrune:
+    """Replace the output of each named call with a stub."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+    call_ids: tuple[str, ...]
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionQuit:
+    """End the session."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolDetach:
+    """Stop waiting on a call and its group; they run on."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+    call_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolHalt:
+    """Stop a call; ``None`` stops every one."""
+
+    timestamp: datetime | None = None
+    sender: str | None = None
+    call_id: str | None = None
+
+
+type RuntimeRequest = (
+    AgentMessage
+    | ModelHalt
+    | ModelMessage
+    | ModelRetry
+    | SessionClear
+    | SessionCompact
+    | SessionContextUpdate
+    | SessionPrune
+    | SessionQuit
+    | SystemMessage
+    | ToolCall
+    | ToolDetach
+    | ToolHalt
+    | ToolMessage
+    | UserMessage
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentMessageCompleted:
+    """An agent's message was answered, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildEvent:
+    """What a child agent did, under its label."""
+
+    label: str
+    event: RuntimeEvent
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LoginSwitched:
+    """The model moved to another login of its provider: off a spent one, or back."""
+
+    provider: str
+    from_login: str
+    to_login: str
+    spent_window: str = ""
+    spent_window_resets_at: datetime | None = None
+    first_login_in_order: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelHaltCompleted:
+    """The model's reply was stopped, or there was none to stop."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelMessageCompleted:
+    """The model's reply was taken in, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseCompleted:
+    """A model call ended; it says nothing of the turn."""
+
+    outcome: Outcome[Response]
+    chars_streamed_before_cancel: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseStarted:
+    """A model call began."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseSuspended:
+    """A model call failed in a way that may pass; the turn waits, then calls again."""
+
+    exception: RetryableError
+    retry_at: datetime
+    failures_in_a_row: int
+    provider: str = ""
+    reset_at_by_login: Mapping[str, datetime] = MappingProxyType({})
+
+    # The rest are a backoff's waits, minutes at most: telling each would wake
+    # whoever is told every few seconds of an outage.
+    @property
+    def opens_a_quota_wait(self) -> bool:
+        """Whether this is the first wait of a spent quota, which may last days."""
+        return (
+            isinstance(self.exception, RateLimitedError) and self.failures_in_a_row == 1
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseTextStreamed:
+    """Text the model wrote, as it streams."""
+
+    text: str
+    response_record_index: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseThinkingStreamed:
+    """Reasoning the model wrote, as it streams."""
+
+    text: str
+    response_record_index: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelRetryCompleted:
+    """The model was called again, or no failure had stopped a turn."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionClearCompleted:
+    """The history was wiped, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionCompacted:
+    """What a compaction did to the history."""
+
+    masked_tokens: int = 0
+    replacement_tokens: int = 0
+    replacement_entries: int = 0
+    summary_fallback_reason: str = ""
+    entries_kept_verbatim: int = 0
+
+    @classmethod
+    def from_splice(cls, splice: CompactionSplice) -> SessionCompacted:
+        """Return what a compactor's splice did.
+
+        Args:
+          splice: The splice the compactor returned.
+
+        Returns:
+          compacted: Every field read off ``splice``.
+
+        """
+        return cls(
+            masked_tokens=splice.masked_tokens,
+            replacement_tokens=splice.replacement_tokens,
+            replacement_entries=len(splice.replacement),
+            summary_fallback_reason=splice.summary_fallback_reason,
+            entries_kept_verbatim=splice.entries_kept_verbatim,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionCompactCompleted:
+    """A compaction ended; unless it succeeded, the tape is as it was."""
+
+    outcome: Outcome[SessionCompacted]
+    tape_len_before: int = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionCompactStarted:
+    """A compaction began."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionContextUpdateCompleted:
+    """A context was put in force, or was not."""
+
+    outcome: Outcome[SessionContext]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionPruneCompleted:
+    """The named outputs were replaced, or were not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionQuitCompleted:
+    """The session ended."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionSaveDue:
+    """The session is consistent: observers may persist it."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionSpendCharged:
+    """Spend counted against the agent that its own replies did not bring."""
+
+    spend: TokenCost
+    label: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionRecordAppended:
+    """A request was written to the log."""
+
+    record: RuntimeRequest
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionSummary:
+    """What a span of the log was about."""
+
+    record_span: range
+    text: str
+    text_embedding: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionSummaryCompleted:
+    """A span of the log was summarized, or was not."""
+
+    outcome: Outcome[SessionSummary]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionTitleChanged:
+    """The agent set the session's title, as the terminal shows it."""
+
+    title: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemMessageCompleted:
+    """The harness's message was answered, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallCompleted:
+    """A tool call ended."""
+
+    outcome: Outcome[ToolMessage]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCohortCompleted:
+    """The wait on a reply's calls ended: every result came, or it was called off."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCohortStarted:
+    """The model began to wait on a reply's calls."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolDetachCompleted:
+    """A call was answered with a stub and runs on, or was not."""
+
+    outcome: Outcome[ToolMessage]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolHaltCompleted:
+    """A call was stopped, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolMessageCompleted:
+    """A tool call's message was answered, or was not."""
+
+    outcome: Outcome[None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserMessageCompleted:
+    """A person's message was answered, or was not."""
+
+    outcome: Outcome[None]
+
+
+type RuntimeState = (
+    AgentIdle
+    | AgentMessageCompleted
+    | ChildEvent
+    | LoginSwitched
+    | ModelHaltCompleted
+    | ModelIdle
+    | ModelMessageCompleted
+    | ModelResponseCompleted
+    | ModelResponseStarted
+    | ModelResponseSuspended
+    | ModelResponseTextStreamed
+    | ModelResponseThinkingStreamed
+    | ModelRetryCompleted
+    | SessionClearCompleted
+    | SessionCompactCompleted
+    | SessionCompactStarted
+    | SessionContextUpdateCompleted
+    | SessionPruneCompleted
+    | SessionQuitCompleted
+    | SessionRecordAppended
+    | SessionSaveDue
+    | SessionSpendCharged
+    | SessionSummaryCompleted
+    | SessionTitleChanged
+    | SystemMessageCompleted
+    | ToolCallCompleted
+    | ToolCohortCompleted
+    | ToolCohortStarted
+    | ToolDetachCompleted
+    | ToolHaltCompleted
+    | ToolMessageCompleted
+    | UserMessageCompleted
+)
+
+
+type RuntimeEvent = RuntimeRequest | RuntimeState
+
+
+# Code tells a pending or cancelled call's record by ``ToolMessage.state``, never by
 # this text, so the words may change, and a tool's output that happens to match
 # them is never mistaken for a placeholder.
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Markers:
+class Stubs:
     """What the runtime writes into the context for the calls it answers itself."""
 
     detached: str = (
         "[detached: tool still running; real result arrives in a later message]"
     )
-    """A detached call's result; the real one arrives later, as a ``delivery`` turn."""
-
     cancelled: str = "[cancelled: tool killed before completion; no result will follow]"
-    """A killed call's result."""
-
-    running: str = "[Running in background: "
-    """How a backgrounded call's result starts: ``<running><tool> as job <id>]``."""
-
-    delivery: str = "BackgroundTask"
-    """The tool a detached call's real result is delivered under, as a ``foreground``
-    of the call: what the model would call to wait for it, so a copy is a real call."""
-
-    arrived: str = "DetachedArrived"
-    """What deliveries were once made under; none runs it, as journals may hold it."""
-
-    arrival: str = ":detached"
-    """What the delivering call's id adds to the detached call's."""
-
-    mimic: str = "DetachedArrived:mimic:"
-    """How a call the model made under a delivery's id is renamed: ``<mimic><n>``."""
-
-    note: str = (
-        "Note on detached calls: a tool call detached to the background (it ran"
-        " long, or a message arrived while it ran) is answered at once with a"
-        " stub. When it finishes, its result is delivered to you as a"
-        " `BackgroundTask` foreground call of that job, made for you. Call"
-        " `BackgroundTask` foreground yourself only to wait for a job."
-    )
-    """What the system prompt tells the model about deliveries."""
+    pruned: str = "[pruned: old tool output removed to keep the context small]"
+    background_prefix: str = "[Running in background: "
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CompactStarted:
-    """Compaction task has been spawned."""
+class NextWake:
+    """When a long call next wakes the model."""
 
-
-class CompactionSplice(Protocol):
-    """What a compaction returns, as ``CompactComplete.from_override`` reads it."""
-
-    @property
-    def payload(self) -> tuple[ModelContextEvent, ...]:
-        """The entries the splice puts in the context."""
-        ...
-
-    @property
-    def token_before(self) -> int:
-        """Tokens of what the splice replaces."""
-        ...
-
-    @property
-    def token_after(self) -> int:
-        """Tokens of what it puts in their place."""
-        ...
-
-    @property
-    def fallback_reason(self) -> str:
-        """Why the summary fell back to keeping history, if it did."""
-        ...
-
-    @property
-    def preserved_tail_count(self) -> int:
-        """How many recent entries the fallback kept verbatim."""
-        ...
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CompactComplete:
-    """Compaction task finished."""
-
-    token_before: int = 0
-    token_after: int = 0
-    payload_entries: int = 0
-    fallback_reason: str = ""
-    """Why the summary fell back to keeping history; ``""`` when it did not."""
-
-    preserved_tail_count: int = 0
-    """Recent entries kept verbatim beside the summary."""
-
-    @classmethod
-    def from_override(cls, override: CompactionSplice) -> CompactComplete:
-        """Return the completion event for a compactor's splice.
-
-        Args:
-          override: The splice the compactor returned.
-
-        Returns:
-          completion: Every field read off ``override``.
-
-        """
-        return cls(
-            token_before=override.token_before,
-            token_after=override.token_after,
-            payload_entries=len(override.payload),
-            fallback_reason=override.fallback_reason,
-            preserved_tail_count=override.preserved_tail_count,
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CompactFailed:
-    """Compaction raised; the tape is as it was."""
-
-    exception: BaseException
-    tape_len: int
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class UserQueuedMessage:
-    """The user's input, held until the model is done with the current turn."""
-
-    text: str
-    attachments: tuple[Attachment, ...] = ()
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class UserDeferredMessage:
-    """The user's input, held until queued input has been answered too."""
-
-    text: str
-    attachments: tuple[Attachment, ...] = ()
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AgentSendQueuedMessage:
-    """An agent's input, held until the model is done with the current turn."""
-
-    sender: str
-    text: str
-    attachments: tuple[Attachment, ...] = ()
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AgentSendDeferredMessage:
-    """An agent's input, held until queued input has been answered too."""
-
-    sender: str
-    text: str
-    attachments: tuple[Attachment, ...] = ()
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Quit:
-    """Shut down the agent."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Halt:
-    """Cancel model call, wait for user. Tools keep running."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Clear:
-    """Cancel the model and every tool, wipe history, wait for the user."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ClearComplete:
-    """Published after the runtime finishes processing a ``Clear``."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Kill:
-    """Cancel one or all tool tasks."""
-
-    call_id: str | None = None
-    """The call to cancel; ``None`` for all."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Detach:
-    """Answer a call the model waits on, and its group, with a stub; let them run on."""
-
-    call_id: str
-    """A call of the group to detach."""
+    delay_sec: float
+    fires_even_without_new_output: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WakeSchedule:
     """When a long call wakes the model: early, then less often, as a person glances.
 
-    The gap to the next wake is ``max(first_sec, growth * elapsed)``: a wake so
+    The gap to the next wake is ``max(first_gap_sec, gap_growth * elapsed)``: a wake so
     timed fires only when the call wrote something since the model last looked.
     ``max_gap_sec`` and the prompt cache's deadline cap the gap; a capped wake
     fires regardless, so a quiet call is still seen and the cache stays warm.
@@ -292,30 +536,31 @@ class WakeSchedule:
 
     """
 
-    first_sec: float = 15.0
-    """The first wake, and the shortest gap."""
-
-    growth: float = 1.0
-    """The next gap as a multiple of the time the call has run: ``1`` doubles the
-    time each wake, ``0`` keeps the gap at ``first_sec``."""
-
+    first_gap_sec: float = 15.0
+    gap_growth: float = 1.0
     max_gap_sec: float = 300.0
-    """The longest the model goes without a look."""
 
     def __post_init__(self) -> None:
         for name, value in (
-            ("first_sec", self.first_sec),
+            ("first_gap_sec", self.first_gap_sec),
             ("max_gap_sec", self.max_gap_sec),
         ):
             if not (math.isfinite(value) and value > 0):
                 raise ValueError(
                     f"{name} must be a number of seconds above 0, got {value}.",
                 )
-        if not (math.isfinite(self.growth) and self.growth >= 0):
-            raise ValueError(f"growth must be a number at least 0, got {self.growth}.")
+        if not (math.isfinite(self.gap_growth) and self.gap_growth >= 0):
+            raise ValueError(
+                f"gap_growth must be a number at least 0, got {self.gap_growth}.",
+            )
 
-    def gap(self, elapsed_sec: float, *, cache_left_sec: float) -> tuple[float, bool]:
-        """Return the seconds to the next wake, and whether it fires without new output.
+    def delay_sec_until_next_wake(
+        self,
+        elapsed_sec: float,
+        *,
+        cache_left_sec: float,
+    ) -> NextWake:
+        """Return when the next wake comes, and whether it fires without new output.
 
         Args:
           elapsed_sec: How long the call has run.
@@ -323,277 +568,64 @@ class WakeSchedule:
             ``math.inf`` when it does not bound the wait.
 
         Returns:
-          gap: Seconds until the wake.
-          forced: Whether a cap set it, so it fires whatever the call wrote.
+          next_wake: Its delay; a cap set it when it fires without new output.
 
         """
-        paced = max(self.first_sec, self.growth * elapsed_sec)
+        paced = max(self.first_gap_sec, self.gap_growth * elapsed_sec)
         cap = min(cache_left_sec, self.max_gap_sec)
-        return min(paced, cap), cap <= paced
+        return NextWake(
+            delay_sec=min(paced, cap),
+            fires_even_without_new_output=cap <= paced,
+        )
 
-    def text(self) -> str:
-        """Return the knobs as a setting takes them: ``15s 1 300s``."""
-        return f"{self.first_sec:g}s {self.growth:g} {self.max_gap_sec:g}s"
+    @override
+    def __str__(self) -> str:
+        """Return the schedule as the setting takes it: ``15s 1 300s``."""
+        return f"{self.first_gap_sec:g}s {self.gap_growth:g} {self.max_gap_sec:g}s"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class DetachSchedule:
+class ToolWakeSchedules:
     """How each tool's long calls wake the model; ``None`` never wakes, nor detaches."""
 
     default: WakeSchedule | None = WakeSchedule()
-    """Each tool's, but those ``tools`` names."""
-
-    tools: Mapping[str, WakeSchedule | None] = field(
+    per_tool: Mapping[str, WakeSchedule | None] = field(
         default_factory=dict[str, "WakeSchedule | None"],
     )
-    """A tool's own, by name, over ``default``."""
-
-    def of(self, tool: str) -> WakeSchedule | None:
-        """Return how the tool named ``tool`` wakes the model."""
-        return self.tools.get(tool, self.default)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Wake:
-    """A long call's wake time came: show the model what it wrote since it last looked."""
-
-    call_id: str
-    forced: bool
-    """Whether a cap set the time, so it fires whatever the call wrote."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelCallStarted:
-    """Model streaming call has been spawned."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelResponsePartial:
-    """Streaming text chunk from the model."""
-
-    text: str
-    record: int = 0
-    """The index in the reply's records of the record the text joins."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelResponseThinking:
-    """Streaming thinking chunk from the model."""
-
-    text: str
-    record: int = 0
-    """The index in the reply's records of the record the reasoning joins."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelResponseComplete:
-    """Model finished streaming."""
-
-    response: Response
-    generation: int = -1
-    """The model call that answered; a stale one's reply is dropped."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelResponseCancelled:
-    """Model call was cancelled mid-stream."""
-
-    output_chars_estimate: int = 0
-    """Characters streamed before the cancel."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelResponseError:
-    """A model call failed past retrying, such as on expired credentials.
-
-    The turn waits for the user, a new model, or a ``Retry``.
-    """
-
-    exception: BaseException
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelCallSuspended:
-    """A model call failed in a way that may pass; the turn waits, then calls again.
-
-    It calls again at ``until``, or sooner on the user's message, a new model, or
-    a ``Retry``. Unlike ``ModelResponseError``, the turn has not ended.
-    """
-
-    exception: RetryableError
-    until: float
-    """When the next call goes, in seconds since the epoch."""
-
-    attempt: int
-    """Failures in a row, this one counted; a ``Retry`` starts them again."""
-
-    # The rest are a backoff's waits, minutes at most: telling each would wake
-    # whoever is told every few seconds of an outage.
-    @property
-    def opens_a_quota_wait(self) -> bool:
-        """Whether this is the first wait of a spent quota, which may last days."""
-        return isinstance(self.exception, RateLimitedError) and self.attempt == 1
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Retry:
-    """Call the model now for the turn a failure stopped; nothing when none did.
-
-    What may get past the failure sends it: a new model, account, or sign-in.
-    """
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelIdle:
-    """Model finished with no tool calls."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AgentIdle:
-    """Agent has fully drained: about to block on inbox with no work."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CohortStarted:
-    """Tool cohort has been spawned."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class DetachedResult:
-    """A previously-detached tool completed."""
-
-    result: ToolResult
+class CompactionSplice(Protocol):
+    """What a compaction returns, as ``SessionCompacted.from_splice`` reads it."""
 
     @property
-    def call_id(self) -> str:
-        """Return the result's call ID."""
-        return self.result.call_id
+    def replacement(self) -> tuple[ModelContextEvent, ...]:
+        """The entries the splice puts in the context."""
+        ...
 
+    @property
+    def masked_tokens(self) -> int:
+        """Tokens of what the splice replaces."""
+        ...
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LazyEvent:
-    """A result held until the next event that drives a model round: none of its own."""
+    @property
+    def replacement_tokens(self) -> int:
+        """Tokens of what it puts in their place."""
+        ...
 
-    payload: ToolResult
+    @property
+    def summary_fallback_reason(self) -> str:
+        """Why the summary fell back to keeping history, if it did."""
+        ...
 
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CohortComplete:
-    """All tool results for the current cohort have arrived."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Compact:
-    """Trigger context compaction."""
-
-    args: str = ""
-    """What the summary must keep."""
-
-    trigger: Literal["auto", "manual"] = "manual"
-    """Whether the runtime started it, or someone asked for it."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SaveSession:
-    """Signals observers to persist session state."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class StatusChanged:
-    """Agent ``status`` field was updated."""
-
-    text: str
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ChildEvent:
-    """An event of a child agent, under its label."""
-
-    label: str
-    inner: RuntimeEvent
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ChildDoneEvent:
-    """A child agent finished: how long it ran, and what it used."""
-
-    label: str
-    elapsed: float
-    tokens: int
-    """Every token the child's model calls read and wrote."""
-
-    cost: float
-    """What the child's model calls cost, in dollars."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Charged:
-    """Spend counted against the agent that its own replies did not bring."""
-
-    usd: float
-    by: str
-    """Who spent it: a child's label, or this agent's own for a compaction."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LoginSwitched:
-    """The model moved to another login of its provider: off a spent one, or back."""
-
-    provider: str
-    was: str
-    """The login left: ``default``, or a named account."""
-
-    now: str
-    """The login the next call signs in as."""
-
-    window: str = ""
-    """The window ``was`` spent, as ``5-hour``, or ``signed out``; ``""`` when ``was``
-    was not left for a failure: back after a reset, or as the order says."""
-
-    until: float = 0.0
-    """When that window resets, in seconds since the epoch; ``0`` when unknown."""
-
-    first: str = ""
-    """The first login in the order: ``now`` itself, unless ``now`` stands in for it."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LoginsSpent:
-    """Every login of the provider has spent the window the model needs."""
-
-    provider: str
-    resets: tuple[tuple[str, float], ...]
-    """Each login and when it resets, soonest first."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Skipped:
-    """A directive or skill file left unread, such as for frontmatter that will not parse."""
-
-    text: str
-    """Which file, and why; what the user is shown."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Scheduled:
-    """Work to run at the runtime's next safe point, between turns."""
-
-    work: Callable[[], Awaitable[None]]
-    """What to run once nothing is streaming, compacting, or gating the model."""
-
-    done: asyncio.Future[None]
-    """Resolved when ``work`` returns, or set to what it raised."""
+    @property
+    def entries_kept_verbatim(self) -> int:
+        """How many recent entries the fallback kept verbatim."""
+        ...
 
 
 type ModelContextEvent = (
-    UserMessage
-    | AgentToAgentMessage
-    | Response
-    | ToolResult
-    | SystemMessage
-    | TurnContext
+    UserMessage | AgentMessage | Response | ToolMessage | SystemMessage | SessionContext
 )
-"""One entry of the conversation history; a ``SystemMessage`` or ``TurnContext`` is no one's turn."""
 
 
 def wire_role(entry: ModelContextEvent) -> str | None:
@@ -607,57 +639,11 @@ def wire_role(entry: ModelContextEvent) -> str | None:
           model turn, ``None`` for a tool result or a harness note.
 
     """
-    if isinstance(entry, (UserMessage, AgentToAgentMessage)):
+    if isinstance(entry, (UserMessage, AgentMessage)):
         return "user"
     if isinstance(entry, Response):
         return "assistant"
     return None
-
-
-type RuntimeEvent = (
-    Quit
-    | Halt
-    | Clear
-    | ClearComplete
-    | Kill
-    | Detach
-    | Wake
-    | UserMessage
-    | AgentToAgentMessage
-    | SystemMessage
-    | UserQueuedMessage
-    | UserDeferredMessage
-    | AgentSendQueuedMessage
-    | AgentSendDeferredMessage
-    | ModelCallStarted
-    | ModelResponsePartial
-    | ModelResponseThinking
-    | ModelResponseComplete
-    | ModelResponseCancelled
-    | ModelResponseError
-    | ModelCallSuspended
-    | LoginSwitched
-    | LoginsSpent
-    | Retry
-    | ModelIdle
-    | AgentIdle
-    | CohortStarted
-    | ToolResult
-    | DetachedResult
-    | LazyEvent
-    | CohortComplete
-    | Compact
-    | CompactStarted
-    | CompactComplete
-    | CompactFailed
-    | SaveSession
-    | StatusChanged
-    | ChildEvent
-    | ChildDoneEvent
-    | Charged
-    | Scheduled
-    | Skipped
-)
 
 
 class Job(Protocol):
@@ -669,19 +655,18 @@ class Job(Protocol):
         ...
 
     @property
-    def started(self) -> float:
-        """When it was asked for, in seconds since the epoch."""
+    def elapsed_sec(self) -> float:
+        """How long since the model asked for it, by ``call.timestamp``."""
         ...
 
     @property
-    def state(
-        self,
-    ) -> Literal[
-        "running",
-        "sleeping",
-        "detached",
-    ]:
+    def status(self) -> Literal["running", "sleeping", "detached"]:
         """Where it is: the model waits on ``running``, not on ``sleeping`` or ``detached``."""
+        ...
+
+    @property
+    def runs_until_stopped(self) -> bool:
+        """Whether it ends only when it is stopped, as its tool said once it started."""
         ...
 
     def cancel(self) -> None:

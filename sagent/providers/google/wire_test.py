@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, tzinfo
+from pathlib import Path
 from typing import TYPE_CHECKING, Self, override
 from unittest.mock import Mock, call
 
@@ -30,16 +31,16 @@ from sagent.model.types import Request, TextChunk
 from sagent.providers.google import wire
 from sagent.providers.google.api import Google
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -164,7 +165,7 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
             extra={"thoughtSignature": "sig-a"},
         ),
         ToolCall(call_id="c2", name="Bash", arguments={"cmd": "pwd"}),
-        ToolResult(
+        ToolMessage(
             call_id="c1",
             state="done",
             stdout=(
@@ -173,7 +174,7 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
             ),
             result=UncategorizedToolResult(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="c2",
             state="done",
             stdout=("denied",),
@@ -216,7 +217,7 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
 
 def test_a_result_whose_call_is_gone_is_named_by_its_id() -> None:
     contents = _contents(
-        ToolResult(
+        ToolMessage(
             call_id="lost",
             state="done",
             stdout=("x",),
@@ -228,7 +229,7 @@ def test_a_result_whose_call_is_gone_is_named_by_its_id() -> None:
 
 def test_an_empty_error_result_gets_no_error_mark() -> None:
     contents = _contents(
-        ToolResult(
+        ToolMessage(
             call_id="c",
             state="done",
             result=UncategorizedToolResult(exit_code=1),
@@ -241,8 +242,8 @@ def test_harness_notes_ride_the_user_side_as_reminders() -> None:
     contents = _contents(
         SystemMessage(content="mind the tests"),
         SystemMessage(content=""),
-        TurnContext(cwd="/w", model="gemini"),
-        TurnContext(),
+        SessionContext(cwd=Path("/w"), model="gemini"),
+        SessionContext(),
         UserMessage(content="go"),
     )
     assert contents == [
@@ -262,9 +263,9 @@ def test_harness_notes_ride_the_user_side_as_reminders() -> None:
 
 def test_another_agents_words_are_attributed() -> None:
     contents = _contents(
-        AgentToAgentMessage(sender="lead", content="status?"),
-        AgentToAgentMessage(sender="lead"),
-        AgentToAgentMessage(content=None),
+        AgentMessage(sender="lead", content="status?"),
+        AgentMessage(sender="lead"),
+        AgentMessage(content=None),
     )
     assert contents == [
         {
@@ -278,6 +279,16 @@ def test_another_agents_words_are_attributed() -> None:
     ]
 
 
+def test_another_persons_words_are_attributed_as_an_agents_are() -> None:
+    contents = _contents(
+        UserMessage(sender="bob", content="hi"),
+        UserMessage(content="mine"),
+    )
+    assert contents == [
+        {"role": "user", "parts": [{"text": "[from user bob]: hi"}, {"text": "mine"}]},
+    ]
+
+
 def test_another_agents_and_a_cleared_historys_images_are_shrunk_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,7 +297,7 @@ def test_another_agents_and_a_cleared_historys_images_are_shrunk_too(
     capability = _capability(limits=ModelLimits(max_image_edge_px=2))
     attachments = (Attachment(mime_descriptor="image/png", data=b"image"),)
     contents = _contents(
-        AgentToAgentMessage(sender="lead", attachments=attachments),
+        AgentMessage(sender="lead", attachments=attachments),
         ContextClear(history=(UserMessage(attachments=attachments),)),
         capability=capability,
     )
@@ -309,7 +320,7 @@ def test_a_context_clear_sends_its_summary_then_its_history() -> None:
             summary="We fixed it.",
             history=(
                 ToolCall(call_id="c", name="Read", arguments={}),
-                ToolResult(
+                ToolMessage(
                     call_id="c",
                     state="done",
                     stdout=("text",),

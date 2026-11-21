@@ -25,7 +25,7 @@ from sagent.model.cost import ServiceTier
 from sagent.providers.catalog import counterpart, successor
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
-from sagent.runtime.types import DetachSchedule, WakeSchedule
+from sagent.runtime.types import ToolWakeSchedules, WakeSchedule
 from sagent.session.types import AgentSelfResult
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
@@ -92,8 +92,8 @@ class AgentSelf:
         ] = None
         detach: Annotated[
             Mapping[str, PlainTree] | None,
-            "When long calls wake you: {default: KNOBS, tools: {TOOL: KNOBS}};"
-            " KNOBS is {first_sec, growth, max_gap_sec} or {off: true}.",
+            "When long calls wake you: {default: KNOBS, per_tool: {TOOL: KNOBS}};"
+            " KNOBS is {first_gap_sec, gap_growth, max_gap_sec} or {off: true}.",
         ] = None
         diagnostics: Annotated[bool, "Report your model, settings, and limits."] = False
         catalog: Annotated[
@@ -172,7 +172,7 @@ class AgentSelf:
             schedule = (
                 None
                 if a.detach is None
-                else _scheduled(agent.runtime.detach_schedule, a.detach)
+                else _scheduled(agent.runtime.wake_schedules, a.detach)
             )
         except ValueError:
             # The agent owns the models assigned to it; one never assigned is ours.
@@ -204,13 +204,13 @@ class AgentSelf:
         )
         target.settings = planned
         if schedule is not None:
-            agent.runtime.detach_schedule = schedule
+            agent.runtime.wake_schedules = schedule
             lines.append(f"detach: {_schedule_text(schedule)}")
         if a.peer_messaging is not None:
             self.team.set_peer_messaging(label, a.peer_messaging)
             lines.append(f"peer_messaging: {'on' if a.peer_messaging else 'off'}")
         if a.status is not None:
-            agent.runtime.publish(types.StatusChanged(text=a.status))
+            agent.runtime.publish(types.SessionTitleChanged(title=a.status))
             lines.append(f"status: {a.status}")
         if a.diagnostics:
             lines.extend(_diagnostics(agent, label=label))
@@ -273,8 +273,8 @@ def _planned(
 class _Knobs(TypedDict):
     """One wake schedule as the model patches it: knobs left out keep their value."""
 
-    first_sec: NotRequired[float]
-    growth: NotRequired[float]
+    first_gap_sec: NotRequired[float]
+    gap_growth: NotRequired[float]
     max_gap_sec: NotRequired[float]
     off: NotRequired[bool]
 
@@ -283,32 +283,32 @@ class _Detach(TypedDict):
     """A ``detach`` patch: the default schedule, and tools' own."""
 
     default: NotRequired[_Knobs]
-    tools: NotRequired[dict[str, _Knobs]]
+    per_tool: NotRequired[dict[str, _Knobs]]
 
 
 def _scheduled(
-    schedule: DetachSchedule,
+    schedule: ToolWakeSchedules,
     patch: Mapping[str, PlainTree],
-) -> DetachSchedule:
+) -> ToolWakeSchedules:
     """Return ``schedule`` with ``patch``; raise, changing nothing, if it does not fit."""
     detach = from_plain(dict(patch), _Detach)
     _refuse_unknown(patch, _Detach, where="detach")
-    default_knobs, tools_knobs = patch.get("default"), patch.get("tools")
+    default_knobs, per_tool_knobs = patch.get("default"), patch.get("per_tool")
     if isinstance(default_knobs, Mapping):
         _refuse_unknown(default_knobs, _Knobs, where="detach.default")
-    if isinstance(tools_knobs, Mapping):
-        for tool, knobs in tools_knobs.items():
+    if isinstance(per_tool_knobs, Mapping):
+        for tool, knobs in per_tool_knobs.items():
             if isinstance(knobs, Mapping):
-                _refuse_unknown(knobs, _Knobs, where=f"detach.tools.{tool}")
+                _refuse_unknown(knobs, _Knobs, where=f"detach.per_tool.{tool}")
     default = (
         _knobbed(schedule.default, detach["default"])
         if "default" in detach
         else schedule.default
     )
-    tools = dict(schedule.tools)
-    for tool, knobs in detach.get("tools", {}).items():
-        tools[tool] = _knobbed(tools.get(tool, default), knobs)
-    return DetachSchedule(default=default, tools=tools)
+    per_tool = dict(schedule.per_tool)
+    for tool, knobs in detach.get("per_tool", {}).items():
+        per_tool[tool] = _knobbed(per_tool.get(tool, default), knobs)
+    return ToolWakeSchedules(default=default, per_tool=per_tool)
 
 
 # Treekle reads a TypedDict's own keys and leaves others be; a misspelled knob would
@@ -334,17 +334,17 @@ def _knobbed(schedule: WakeSchedule | None, knobs: _Knobs) -> WakeSchedule | Non
         return None
     base = WakeSchedule() if schedule is None else schedule
     return WakeSchedule(
-        first_sec=float(knobs.get("first_sec", base.first_sec)),
-        growth=float(knobs.get("growth", base.growth)),
+        first_gap_sec=float(knobs.get("first_gap_sec", base.first_gap_sec)),
+        gap_growth=float(knobs.get("gap_growth", base.gap_growth)),
         max_gap_sec=float(knobs.get("max_gap_sec", base.max_gap_sec)),
     )
 
 
-def _schedule_text(schedule: DetachSchedule) -> str:
+def _schedule_text(schedule: ToolWakeSchedules) -> str:
     """Return ``schedule`` as ``15s 1 300s; Bash off``: the default, then each tool's."""
     return "; ".join(
-        f"{name}{' ' if name else ''}{'off' if s is None else s.text()}"
-        for name, s in (("", schedule.default), *sorted(schedule.tools.items()))
+        f"{name}{' ' if name else ''}{'off' if s is None else str(s)}"
+        for name, s in (("", schedule.default), *sorted(schedule.per_tool.items()))
     )
 
 

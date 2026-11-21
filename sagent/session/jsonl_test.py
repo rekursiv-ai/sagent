@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, call
 
@@ -30,7 +31,7 @@ from sagent.session.types import (
     ReadResult,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UserMessage,
 )
 
@@ -53,7 +54,7 @@ async def test_a_record_is_stored_as_one_line_its_fields_in_order(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "s.jsonl"
-    record = UserMessage(timestamp="t", content="hi")
+    record = UserMessage(timestamp=datetime(2026, 11, 19, tzinfo=UTC), content="hi")
     async with JsonlJournal(path) as journal:
         journal.append(record)
     (line,) = path.read_bytes().splitlines(keepends=True)
@@ -68,10 +69,24 @@ async def test_a_record_is_stored_as_one_line_its_fields_in_order(
 def test_a_line_written_with_every_field_reads_the_same() -> None:
     """Journals written before defaults were left out still resume."""
     line = (
-        b'{"py/object": "UserMessage", "context_id": null, "timestamp": "t",'
+        b'{"py/object": "UserMessage", "context_id": null,'
+        b' "timestamp": "2026-11-19T00:00:00+00:00",'
         b' "content": "hi", "attachments": [], "extra": {}}'
     )
-    assert read_record(line) == UserMessage(timestamp="t", content="hi")
+    assert read_record(line) == UserMessage(
+        timestamp=datetime(2026, 11, 19, tzinfo=UTC),
+        content="hi",
+    )
+
+
+def test_a_line_s_time_is_written_back_as_the_line_spelled_it() -> None:
+    """A journal written before a time was a ``datetime`` is rewritten byte for byte."""
+    for spelled in ("2026-11-19T02:03:04-08:00", "2026-11-19T10:03:04.000Z", "soon"):
+        line = (
+            b'{"py/object": "UserMessage", "timestamp": "%b", "content": "hi",'
+            b' "extra": {}}\n' % spelled.encode()
+        )
+        assert record_line(read_record(line)) == line
 
 
 def test_a_line_naming_openai_s_reasoning_in_extra_reads_its_sealer() -> None:
@@ -529,7 +544,7 @@ def test_a_journal_s_former_record_names_are_renamed_and_the_rest_kept_byte_for_
     path = tmp_path / "session.jsonl"
     # ``ReadResult`` is a result class now and was a record's name before: a line
     # that holds the result class is current and must be kept.
-    current = ToolResult(call_id="r", state="done", result=ReadResult(path="/a.py"))
+    current = ToolMessage(call_id="r", state="done", result=ReadResult(path="/a.py"))
     kept = record_line(UserMessage(content="hi")) + record_line(current)
     old = b'{"py/object": "ShellCommandResult", "call_id": "c", "stdout": "x"}\n'
     older = b'{"py/object": "FileReadResult", "call_id": "d", "path": "/a.py"}\n'
@@ -545,10 +560,10 @@ def test_a_journal_s_former_record_names_are_renamed_and_the_rest_kept_byte_for_
         kept
         + unread
         + record_line(
-            ToolResult(call_id="c", state="done", stdout=("x",), result=BashResult()),
+            ToolMessage(call_id="c", state="done", stdout=("x",), result=BashResult()),
         )
         + record_line(
-            ToolResult(call_id="d", state="done", result=ReadResult(path="/a.py")),
+            ToolMessage(call_id="d", state="done", result=ReadResult(path="/a.py")),
         )
         + b"torn\n"
     )

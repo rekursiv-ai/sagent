@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime, timedelta, timezone
 from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
@@ -62,13 +63,15 @@ from sagent.host.wire import (
     received,
 )
 from sagent.session.types import (
+    AgentIdle,
     AgentSpawnResult,
     Attachment,
     EditResult,
     LineSpan,
+    ModelIdle,
     ReadResult,
     Splice,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
     WebFetchResult,
@@ -148,7 +151,7 @@ _TOKEN = secrets.token_urlsafe(16)
         Peers(labels=("a_0", "a_1")),
         Result(
             id="1",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 stdout=("hi\n",),
@@ -157,7 +160,7 @@ _TOKEN = secrets.token_urlsafe(16)
         ),
         Result(
             id="2",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 stdout=(
@@ -170,7 +173,7 @@ _TOKEN = secrets.token_urlsafe(16)
         ),
         Result(
             id="3",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 wire_id="3",
                 state="done",
@@ -179,7 +182,7 @@ _TOKEN = secrets.token_urlsafe(16)
         ),
         Result(
             id="4",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 stdout=("3\tx\n", LineSpan(start=3, count=1)),
@@ -188,7 +191,7 @@ _TOKEN = secrets.token_urlsafe(16)
         ),
         Result(
             id="5",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 stdout=("t\nu\ns", WebSearchHit(url="u", title="t", snippet="s")),
@@ -198,7 +201,7 @@ _TOKEN = secrets.token_urlsafe(16)
         *(
             Result(
                 id="6",
-                record=ToolResult(call_id="", state="done", result=tool_result),
+                record=ToolMessage(call_id="", state="done", result=tool_result),
             )
             for tool_result in (
                 WriteResult(path="/r/a.py", content="x"),
@@ -235,7 +238,7 @@ async def test_a_message_is_one_line() -> None:
     line = encoded(
         Result(
             id="1",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 stdout=("a\nb",),
@@ -329,7 +332,7 @@ _CALL = Call(
 )
 _RESULT = Result(
     id="1",
-    record=ToolResult(
+    record=ToolMessage(
         call_id="",
         state="done",
         stdout=(Attachment(mime_descriptor="image/png", data=b"\x00"),),
@@ -344,7 +347,7 @@ _ADDED: Final = {"py/object": "AddedByANewerSagent", "deep": [1, "x"]}
 
 type _Plain = dict[str, object]
 
-_RECORD_PLAIN: Final = {"py/object": "ToolResult", "call_id": "", "state": "done"}
+_RECORD_PLAIN: Final = {"py/object": "ToolMessage", "call_id": "", "state": "done"}
 """A result as a line holds it, with nothing written."""
 
 
@@ -388,7 +391,7 @@ def _with_added(message: Message, at: Callable[[_Plain], _Plain]) -> bytes:
         (
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="done",
                     stdout=(Splice(after="x"),),
@@ -418,7 +421,7 @@ def test_what_a_message_is_written_as_is_unchanged() -> None:
         b'"tool": "Bash", "arguments": {"py/dict": {"command": "ls"}}, '
         b'"address_book": ["a"]}\n'
     )
-    # Version 2: ``Result.record`` is declared ``ToolResult``, so it carries no tag.
+    # Version 2: ``Result.record`` is declared ``ToolMessage``, so it carries no tag.
     assert encoded(_RESULT) == (
         b'{"py/object": "Result", "id": "1", "record": {'
         b'"call_id": "", "state": "done", "stdout": [{"py/object": "Attachment", '
@@ -442,7 +445,7 @@ def test_a_field_of_plain_data_is_kept_whatever_it_holds() -> None:
         {"record": {"py/object": "ResultOfANewerSagent", "call_id": ""}},
         {
             "record": {
-                "py/object": "ToolResult",
+                "py/object": "ToolMessage",
                 "call_id": "",
                 "state": "done",
                 "stdout": [{"py/object": "AttachmentOfANewerSagent"}],
@@ -451,6 +454,8 @@ def test_a_field_of_plain_data_is_kept_whatever_it_holds() -> None:
         {"record": {**_RECORD_PLAIN, "stdout": 5}},
         {"record": {**_RECORD_PLAIN, "stdout": [5]}},
         {"record": {**_RECORD_PLAIN, "stdout": {}}},
+        {"record": {**_RECORD_PLAIN, "due_after": {"py/object": "AgentIdle"}}},
+        {"id": {"py/object": "ModelIdle", "outcome": {"py/object": "Cancelled"}}},
     ],
 )
 def test_an_unknown_kind_or_class_or_a_misshapen_line_is_refused(
@@ -514,9 +519,46 @@ def test_a_result_line_reads_back_with_each_result_class(
 ) -> None:
     message = Result(
         id="1",
-        record=ToolResult(call_id="", state="done", result=kind()),
+        record=ToolMessage(call_id="", state="done", result=kind()),
     )
     assert decoded(encoded(message)) == message
+
+
+def test_a_result_line_reads_back_with_its_record_s_time() -> None:
+    """A host stamps a result with its own clock, offset and all."""
+    when = datetime(2026, 11, 19, 2, 3, 4, tzinfo=timezone(timedelta(hours=-8)))
+    message = Result(
+        id="1",
+        record=ToolMessage(call_id="", state="done", timestamp=when),
+    )
+    line = encoded(message)
+    assert b'"timestamp": "2026-11-19T02:03:04-08:00"' in line
+    assert decoded(line) == message
+
+
+@pytest.mark.parametrize(
+    ("when", "spelled"),
+    [
+        (None, "soon"),
+        (datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC), "2026-11-19T10:03:04.000Z"),
+    ],
+    ids=["no-time", "another-spelling"],
+)
+def test_a_result_line_reads_back_a_time_its_record_keeps_as_another_spelled_it(
+    when: datetime | None,
+    spelled: str,
+) -> None:
+    """A converted record's time may be none, or spelled as no clock here spells one."""
+    record = ToolMessage(
+        call_id="",
+        state="done",
+        timestamp=when,
+        extra={"$timestamp_as_written": spelled},
+    )
+    assert decoded(encoded(Result(id="1", record=record))) == Result(
+        id="1",
+        record=record,
+    )
 
 
 def test_a_result_line_from_a_host_running_older_code_reads_as_the_record_now() -> None:
@@ -536,7 +578,7 @@ def test_a_result_line_from_a_host_running_older_code_reads_as_the_record_now() 
 
     assert decoded(line) == Result(
         id="1",
-        record=ToolResult(
+        record=ToolMessage(
             call_id="c",
             state="done",
             stdout=("1\tx\n",),
@@ -548,7 +590,7 @@ def test_a_result_line_from_a_host_running_older_code_reads_as_the_record_now() 
 def test_a_record_s_result_is_checked_field_by_field() -> None:
     message = Result(
         id="1",
-        record=ToolResult(call_id="", state="done", result=ReadResult(path="/a")),
+        record=ToolMessage(call_id="", state="done", result=ReadResult(path="/a")),
     )
     plain = cast("_Plain", json.loads(encoded(message)))
     record = cast("_Plain", plain["record"])
@@ -578,12 +620,13 @@ _MESSAGES = Message.__value__  # pyright: ignore[reportAny] -- Typeshed types an
 
 _LINE_CLASSES: Final = [
     *cast("tuple[type, ...]", get_args(_MESSAGES)),
-    *record_classes().values(),
+    *(kind for kind in record_classes().values() if kind not in (AgentIdle, ModelIdle)),
     ToolSpec,
     GatePolicy,
     Admission,
 ]
-"""Every class a line may name."""
+"""Every class a line may hold a value of. A line names an idle state only as a
+class, in ``due_after``; one sent as a value is refused where any field holds it."""
 
 
 @pytest.mark.parametrize("kind", _LINE_CLASSES)

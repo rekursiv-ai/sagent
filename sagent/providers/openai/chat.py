@@ -37,7 +37,7 @@ from sagent.session.types import (
     AssistantMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
 )
 
 
@@ -379,7 +379,7 @@ def _messages(
             turn = None
             _flush(messages, images=images)
             messages.append(_user(*said, limits=limits))
-        elif isinstance(record, ToolResult):
+        elif isinstance(record, ToolMessage):
             turn = None
             messages.append(_result(record, ids=ids))
             images.extend(
@@ -515,7 +515,7 @@ def _user(
     return {"role": "user", "content": blocks}
 
 
-def _result(result: ToolResult, *, ids: dict[str, str]) -> dict[str, object]:
+def _result(result: ToolMessage, *, ids: dict[str, str]) -> dict[str, object]:
     text = result.text()
     return {
         "role": "tool",

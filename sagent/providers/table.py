@@ -609,6 +609,7 @@ class _CapabilityProfile:
     manage_context_server_side: frozenset[bool] = frozenset({False, True})
     retries_internally: bool = False
     account_auth: bool = False
+    keeps_user_turns_apart: bool = False
     service_tier: frozenset[ServiceTier] | None = None
     """Tiers offered; ``None`` offers every tier the row prices."""
 
@@ -716,6 +717,7 @@ def _model(
         manage_context_server_side=row.manage_context_server_side,
         retries_internally=row.retries_internally,
         account_auth=row.account_auth,
+        keeps_user_turns_apart=row.keeps_user_turns_apart,
         default=ModelSettings(
             thinking_effort=_lowest(
                 "thinking_effort",

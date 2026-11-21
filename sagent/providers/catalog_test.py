@@ -163,7 +163,7 @@ def test_every_row_budgets_replies_with_its_documented_context_limits(
             system_prompt="",
             tool_context=ToolContext(cwd=tmp_path),
         )
-        agent.runtime.append_history(reply(tokens=TokenCount(request=used)))
+        agent.runtime.tape.append_history(reply(tokens=TokenCount(request=used)))
         room = SummaryCompactor(agent).reply_room()
         if limits.truncates_at_context is True or limits.max_request_tokens <= 0:
             assert room == 0, row

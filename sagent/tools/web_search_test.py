@@ -18,7 +18,7 @@ from wesearch.types.errors import BotDetectionError, CooldownError
 import pytest
 
 from sagent.session.types import (
-    ToolResult,
+    ToolMessage,
     WebSearchHit,
     WebSearchResult,
 )
@@ -94,7 +94,7 @@ def test_websearch_describes_itself() -> None:
 async def test_a_search_returns_each_hit(searches: Searches) -> None:
     tool = WebSearch()
     result = await settled(tool.call(_CONTEXT, {"query": "python"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=(
@@ -185,7 +185,7 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
                 {"query": "q", key: [domain]},
             ),
         )
-        assert result == ToolResult(
+        assert result == ToolMessage(
             call_id="",
             state="done",
             stderr=(f"Not a hostname: {domain!r}.",),
@@ -198,7 +198,7 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
 async def test_no_hits_says_so(searches: Searches) -> None:
     searches.hits = ()
     result = await settled(WebSearch().call(_CONTEXT, {"query": "q"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("(no results)",),
@@ -240,7 +240,7 @@ async def test_a_failed_search_says_why(
 ) -> None:
     searches.error = error
     result = await settled(WebSearch().call(_CONTEXT, {"query": "q"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=(message,),

@@ -27,7 +27,7 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.session.types import (
     AssistantMessage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -225,7 +225,7 @@ async def test_each_request_in_a_window_extends_the_one_before(tmp_path: Path) -
         "Read",
         "Note",
     ], "the cd to where the shell stood is dropped, and its cat read"
-    ran = [r for r in first[-1].records if isinstance(r, ToolResult)]
+    ran = [r for r in first[-1].records if isinstance(r, ToolMessage)]
     assert [r.text().strip() for r in ran if r.call_id in ("b1", "b2")] == ["in", "out"]
     added = [str(r) for r in first[-1].records]
     assert any("pkg rule" in r for r in added), "a rule read below the root is added"

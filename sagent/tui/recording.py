@@ -8,7 +8,7 @@ Typical usage example:
 
   printer = RecordingPrinter()
   Scrollback(printer, tools=agent.tools).show(record)
-  assert printer.said == [("call", "Read a.py")]
+  assert printer.printed == [("call", "Read a.py")]
 """
 
 from __future__ import annotations
@@ -33,13 +33,13 @@ else:
 
 
 __all__ = [
+    "PrintedEntry",
     "RecordingPrinter",
-    "Said",
 ]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Said:
+class PrintedEntry:
     """One thing a printer was asked to write."""
 
     kind: Literal[
@@ -90,7 +90,7 @@ class RecordingPrinter(ConsolePrinter):
             ),
             show_thinking=show_thinking,
         )
-        self.entries: list[Said] = []
+        self.entries: list[PrintedEntry] = []
 
     @property
     def text(self) -> str:
@@ -98,57 +98,57 @@ class RecordingPrinter(ConsolePrinter):
         return self._out.getvalue()
 
     @property
-    def said(self) -> list[tuple[str, str]]:
+    def printed(self) -> list[tuple[str, str]]:
         """Return each entry's kind and text, in order."""
-        return [(said.kind, said.text) for said in self.entries]
+        return [(entry.kind, entry.text) for entry in self.entries]
 
     @property
     def displays(self) -> list[ToolDisplay]:
         """Return the display of each call and output, in order."""
-        return [said.display for said in self.entries if said.display is not None]
+        return [entry.display for entry in self.entries if entry.display is not None]
 
     @property
     def cuts(self) -> list[tuple[int, int] | None]:
         """Return the lines each diff kept, in order."""
-        return [said.lines for said in self.entries if said.kind == "diff"]
+        return [entry.lines for entry in self.entries if entry.kind == "diff"]
 
     @override
     def line(self, text: str) -> None:
         super().line(text)
-        self.entries.append(Said(kind="line", text=text))
+        self.entries.append(PrintedEntry(kind="line", text=text))
 
     @override
     def note(self, text: str, *, lead: str = "", prose: bool = False) -> None:
         super().note(text, lead=lead, prose=prose)
-        self.entries.append(Said(kind="note", text=lead + text))
+        self.entries.append(PrintedEntry(kind="note", text=lead + text))
 
     @override
     def user(self, text: str) -> None:
         super().user(text)
-        self.entries.append(Said(kind="user", text=text))
+        self.entries.append(PrintedEntry(kind="user", text=text))
 
     @override
     def agent(self, sender: str, recipient: str | None, text: str) -> None:
         super().agent(sender, recipient, text)
         to = "me" if recipient is None else recipient
-        self.entries.append(Said(kind="agent", text=f"{sender}→{to}: {text}"))
+        self.entries.append(PrintedEntry(kind="agent", text=f"{sender}→{to}: {text}"))
 
     @override
     def markdown(self, text: str) -> None:
         super().markdown(text)
-        self.entries.append(Said(kind="markdown", text=text))
+        self.entries.append(PrintedEntry(kind="markdown", text=text))
 
     @override
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
         super().thinking(text, opens=opens, closes=closes)
         shown = f"{'[' * opens}{text}{']' * closes}"
-        self.entries.append(Said(kind="thinking", text=shown))
+        self.entries.append(PrintedEntry(kind="thinking", text=shown))
 
     @override
     def call(self, header: Header) -> None:
         super().call(header)
         self.entries.append(
-            Said(kind="call", text=header.label, display=header.display),
+            PrintedEntry(kind="call", text=header.label, display=header.display),
         )
 
     @override
@@ -160,7 +160,7 @@ class RecordingPrinter(ConsolePrinter):
         header: Header | None = None,
     ) -> None:
         super().output(text, display=display, header=header)
-        self.entries.append(Said(kind="output", text=text, display=display))
+        self.entries.append(PrintedEntry(kind="output", text=text, display=display))
 
     @override
     def diff(
@@ -172,19 +172,21 @@ class RecordingPrinter(ConsolePrinter):
         header: Header | None = None,
     ) -> None:
         super().diff(diff, path=path, lines=lines, header=header)
-        self.entries.append(Said(kind="diff", text=f"{path}\n{diff}", lines=lines))
+        self.entries.append(
+            PrintedEntry(kind="diff", text=f"{path}\n{diff}", lines=lines),
+        )
 
     @override
     def error(self, text: str) -> None:
         super().error(text)
-        self.entries.append(Said(kind="error", text=text))
+        self.entries.append(PrintedEntry(kind="error", text=text))
 
     @override
     def failed(self, text: str, *, header: Header | None = None) -> None:
         super().failed(text, header=header)
-        self.entries.append(Said(kind="failed", text=text))
+        self.entries.append(PrintedEntry(kind="failed", text=text))
 
     @override
     def halt(self, text: str) -> None:
         super().halt(text)
-        self.entries.append(Said(kind="halt", text=text))
+        self.entries.append(PrintedEntry(kind="halt", text=text))

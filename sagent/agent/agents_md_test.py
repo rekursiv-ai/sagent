@@ -286,18 +286,8 @@ def test_a_window_keeps_each_file_it_skipped_where_it_was_reached(
     at_start = list(window.skipped)
     window.found([tmp_path / "sub"], [], given=set())
 
-    assert at_start == [
-        (
-            f"Skipping {root.resolve()}: its frontmatter will not parse:"
-            f" {root.resolve()}, line 3: the key 'a' is given twice."
-        ),
-    ]
-    assert window.skipped[1:] == [
-        (
-            f"Skipping {nested.resolve()}: its frontmatter will not parse:"
-            f" {nested.resolve()}, line 3: the key 'b' is given twice."
-        ),
-    ]
+    assert at_start == [root.resolve()]
+    assert window.skipped[1:] == [nested.resolve()]
 
 
 @pytest.mark.parametrize("meta", ["- a\n- b", "just words", "42"])
@@ -773,9 +763,7 @@ def test_a_window_keeps_what_it_skipped_in_every_tier_and_include(
 
     _ = window.start()
 
-    assert [line.split(":")[0] for line in window.skipped] == [
-        f"Skipping {p.resolve()}" for p in (included, managed, top, user)
-    ]
+    assert window.skipped == [p.resolve() for p in (included, managed, top, user)]
 
 
 @pytest.mark.parametrize("where", ["AGENTS.md", "rules/r.md"])
@@ -856,7 +844,7 @@ def test_a_directory_is_read_once_a_window(
         seen: set[str],
         config: AgentsMdConfig,
         *,
-        skipped: list[str],
+        skipped: list[Path],
     ) -> list[agents_md._File]:
         read.append(d)
         return real(d, seen, config, skipped=skipped)

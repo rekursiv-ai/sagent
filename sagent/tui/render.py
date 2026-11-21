@@ -21,6 +21,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
@@ -44,16 +45,23 @@ from sagent.model.exceptions import (
 from sagent.runtime import types
 from sagent.runtime.exceptions import UserFacingError, describe, local_time
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
+    AgentSpawnResult,
     AssistantMessage,
+    Cancelled,
     EditResult,
+    Failed,
+    ModelIdle,
+    Outcome,
     Splice,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UserMessage,
     WriteResult,
+    labeled_text,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.status import count, elapsed
@@ -66,6 +74,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.model.types import Response
     from sagent.tools.types import Tool
     from sagent.tui.diff import splice_diff, write_diff
     from sagent.tui.markdown import stable_boundary
@@ -100,7 +109,7 @@ class Scrollback:
       printer: Where scrollback goes.
       tools: The agent's tools, whose summaries label calls and whose
         displays size results.
-      markers: What the runtime names the calls it answers itself.
+      stubs: What the runtime names the calls it answers itself.
       flush_chars: Held text past which it renders unfinished, as an unclosed
         fence would otherwise hold it all round.
       home: Where sagent was started; a call's path below it shows relative
@@ -113,14 +122,14 @@ class Scrollback:
         printer: Printer,
         *,
         tools: Mapping[str, Tool],
-        markers: types.Markers | None = None,
+        stubs: types.Stubs | None = None,
         flush_chars: int = 64 * 1024,
         home: Path | None = None,
     ) -> None:
         self.printer = printer
         self.tools = tools
         self.home = home
-        self.markers = markers if markers is not None else types.Markers()
+        self.stubs = stubs if stubs is not None else types.Stubs()
         self.flush_chars = flush_chars
         self.shown = 0
         """Messages, replies, and results drawn: what a replay's footer counts."""
@@ -156,7 +165,7 @@ class Scrollback:
         if isinstance(record, ToolCall):
             return True
         return (
-            isinstance(record, ToolResult)
+            isinstance(record, ToolMessage)
             and record.state == "pending"
             and any(h.key == _key(record.call_id) for h in self._held)
         )
@@ -167,24 +176,19 @@ class Scrollback:
             match event:
                 case (
                     UserMessage()
-                    | AgentToAgentMessage()
+                    | AgentMessage()
                     | SystemMessage()
-                    | ToolResult()
-                    | types.ModelResponsePartial()
-                    | types.ModelResponseThinking()
-                    | types.ModelResponseComplete()
-                    | types.ModelResponseCancelled()
-                    | types.ModelResponseError()
-                    | types.ModelCallSuspended()
+                    | ToolMessage()
+                    | types.ModelResponseTextStreamed()
+                    | types.ModelResponseThinkingStreamed()
+                    | types.ModelResponseCompleted()
+                    | types.ModelResponseSuspended()
+                    | ModelIdle()
                     | types.LoginSwitched()
-                    | types.LoginsSpent()
-                    | types.CompactStarted()
-                    | types.CompactComplete()
-                    | types.CompactFailed()
-                    | types.DetachedResult()
+                    | types.SessionCompactStarted()
+                    | types.SessionCompactCompleted()
                     | types.ChildEvent()
-                    | types.ChildDoneEvent()
-                    | types.Skipped()
+                    | types.SessionContextUpdateCompleted()
                 ):
                     self.show(event)
                 # Whatever comes after a turn and its stubs, such as its calls
@@ -204,91 +208,101 @@ class Scrollback:
         p = self.printer
         if isinstance(
             given,
-            (types.ModelResponsePartial, types.ModelResponseThinking),
-        ) and not self._reaches(given.record):
+            (types.ModelResponseTextStreamed, types.ModelResponseThinkingStreamed),
+        ) and not self._reaches(given.response_record_index):
             return
         # A record or a turn's records say for themselves whether they print.
-        if not isinstance(
+        replied = isinstance(given, types.ModelResponseCompleted) and isinstance(
+            given.outcome,
+            Succeeded,
+        )
+        if not replied and not isinstance(
             given,
             (
-                types.ModelResponseComplete,
-                types.DetachedResult,
                 UserMessage,
-                AgentToAgentMessage,
+                AgentMessage,
                 AssistantMessage,
                 Thinking,
                 ToolCall,
-                ToolResult,
+                ToolMessage,
             ),
         ):
             self.show_held()
         match given:
-            case types.ModelResponsePartial(text=text):
+            case types.ModelResponseTextStreamed(text=text):
                 self._delta("reply", text)
-            case types.ModelResponseThinking(text=text):
+            case types.ModelResponseThinkingStreamed(text=text):
                 if p.show_thinking:
                     self._delta("thinking", text)
             # A child's work does not end the reply being streamed.
-            case types.ChildEvent(label=label, inner=inner):
+            case types.ChildEvent(label=label, event=inner):
                 self._child(label, inner)
-            case types.ChildDoneEvent():
-                p.note(
-                    f"[{given.label} done: {elapsed(given.elapsed)},"
-                    f" {count(given.tokens)} tokens, ${given.cost:.2f}]",
-                )
-            case types.ModelResponseComplete(response=response):
-                for index, record in enumerate(response.records):
-                    self._record(record, index=index)
-                self._end()
-            case types.DetachedResult(result=result):
-                self._record(result)
-            case types.ModelResponseCancelled():
-                self._end()
-                p.note("[interrupted]")
-            case types.ModelResponseError(exception=exception):
-                self._end()
-                p.error(error_text(exception))
-                p.halt(_halt_text(exception))
+            case types.ModelResponseCompleted(outcome=outcome):
+                self._replied(outcome)
+            case ModelIdle(outcome=outcome):
+                self._stopped(outcome)
             # What to do is said once; each failure after says only why.
-            case types.ModelCallSuspended(attempt=attempt):
+            case types.ModelResponseSuspended(failures_in_a_row=failures):
                 self._end()
+                if given.reset_at_by_login:
+                    p.note(logins_spent_text(given))
                 p.error(suspended_text(given))
-                if attempt == 1:
+                if failures == 1:
                     p.halt(
                         "agent waiting -- /account or /model to switch now,"
                         " or type to retry now",
                     )
-            case types.LoginSwitched() | types.LoginsSpent():
+            case types.LoginSwitched():
                 self._flush()
                 p.note(login_text(given))
-            case types.CompactStarted():
+            case types.SessionCompactStarted():
                 self._flush()
                 p.note("[compacting history…]")
-            case types.CompactComplete():
+            case types.SessionCompactCompleted(outcome=outcome):
                 self._flush()
-                p.note(_compacted(given))
-            case types.CompactFailed(exception=exception):
-                self._flush()
-                p.note(f"[compaction failed: {error_text(exception)}]")
-            case types.Skipped(text=text):
-                self._flush()
-                p.error(text)
+                p.note(_compacted(outcome))
+            case types.SessionContextUpdateCompleted(
+                outcome=Succeeded(value=context),
+            ):
+                for path in context.skipped_instruction_files:
+                    self._flush()
+                    p.error(f"Skipping {path}: see the log for why.")
+            case types.SessionContextUpdateCompleted():
+                pass
             case CommandOutput(text=text, tone=tone, command=command):
                 self._flush()
                 said = f"[{command}] {text}" if command else text
                 {"line": p.line, "note": p.note, "error": p.error}[tone](said)
             case (
                 UserMessage()
-                | AgentToAgentMessage()
+                | AgentMessage()
                 | SystemMessage()
                 | AssistantMessage()
                 | Thinking()
                 | ToolCall()
-                | ToolResult()
+                | ToolMessage()
             ):
                 self._record(given)
             case _:
                 assert_never(given)
+
+    # A call that ends without a reply says nothing of its turn: a compaction
+    # cancels one, and a failure may be got past, and the turn goes on.
+    def _replied(self, outcome: Outcome[Response]) -> None:
+        """Print a model call's reply, record by record; end what streamed of it."""
+        if isinstance(outcome, Succeeded):
+            for index, record in enumerate(outcome.value.records):
+                self._record(record, index=index)
+        self._end()
+
+    def _stopped(self, outcome: Outcome[None]) -> None:
+        """Print how a turn that stopped short did: interrupted, or why it failed."""
+        p = self.printer
+        if isinstance(outcome, Cancelled):
+            p.note("[interrupted]")
+        elif isinstance(outcome, Failed):
+            p.error(error_text(outcome.exception))
+            p.halt(_halt_text(outcome.exception))
 
     def _record(self, record: Record, *, index: int | None = None) -> None:
         """Print one record: a live turn's, at ``index``, or a replayed journal's."""
@@ -297,37 +311,23 @@ class Scrollback:
         if not self._holds(record):
             self.show_held()
         match record:
-            case UserMessage(content=content):
-                text = content or ""
-                if _delivers(text):
-                    return
+            case UserMessage():
+                labeled = labeled_text(record)
                 self._flush()
-                p.user(text)
+                p.user(labeled)
                 self.shown += 1
             # What the user sent by ``/send`` shows as that command does.
-            case AgentToAgentMessage(sender="user", content=content):
+            case AgentMessage(sender="user", content=content):
                 self._flush()
                 p.note(f"[/send] user→me: {content or ''}")
                 self.shown += 1
-            case AgentToAgentMessage(sender=sender, content=content):
+            case AgentMessage(sender=sender, content=content):
                 self._flush()
                 p.agent(sender or "agent", recipient=None, text=content or "")
                 self.shown += 1
-            case SystemMessage(
-                subtype="wake",
-                call_id=str() as call_id,
-                content=str() as content,
-            ) if (header := self._calls.get(_key(call_id))) is not None:
-                self._flush()
-                head, _, news = content.partition("\n")
-                name = self._names[header.key]
-                # The model's note names the call by the id BackgroundTask takes.
-                head = head.replace(f"{name} {call_id} ", f"{self._job(header)} ", 1)
-                p.output(head, display=_NOTED, header=header)
-                p.output(news, display=header.display, header=header)
             # A note that drives the model shows, so the user sees why it spoke;
             # one that only informs it, as a reminder does, stays out of the way.
-            case SystemMessage(subtype="wake" | "nudge", content=str() as content):
+            case SystemMessage(subtype="nudge", content=str() as content):
                 self._flush()
                 p.note(content)
             case SystemMessage():
@@ -345,21 +345,35 @@ class Scrollback:
                     self._flush()
                     p.markdown(text)
                 self.shown += bool(text.strip())
-            case ToolCall(call_id=call_id):
-                # A delivery draws only its result, under the call it answers.
-                if call_id.endswith(self.markers.arrival):
-                    return
+            case ToolCall():
                 self._flush()
                 header = call_header(record, tools=self.tools, home=self.home)
                 self._held.append(header)
                 self._calls[header.key] = header
                 self._names[header.key] = record.name
-            case ToolResult():
+            case ToolMessage():
                 self._flush()
-                call_id = record.call_id.removesuffix(self.markers.arrival)
-                header = self._calls.get(_key(call_id))
+                header = self._calls.get(_key(record.call_id))
+                # News of a call this scrollback never labelled shows, so the user
+                # sees why the model spoke.
+                if header is None and record.state == "pending":
+                    p.note(record.text())
+                    return
                 if header is None:
                     self._orphaned(record)
+                    return
+                # A detached call's later news shows under its label, named by its
+                # number, as BackgroundTask names it.
+                if record.state == "pending" and header.key in self._jobs:
+                    head, _, news = record.text().partition("\n")
+                    name = self._names[header.key]
+                    head = head.replace(
+                        f"{name} {record.call_id} ",
+                        f"{self._job(header)} ",
+                        1,
+                    )
+                    p.output(head, display=_NOTED, header=header)
+                    p.output(news, display=header.display, header=header)
                     return
                 # A detached call is numbered under its label; its result, when it
                 # lands, is shown under the label again with the same number. A
@@ -376,6 +390,13 @@ class Scrollback:
                     p.output(f"[undetached; {job}]", display=_NOTED, header=header)
                 show_result(p, record, header=header)
                 self.shown += 1
+                # A spawn another harness logged names no child, and says nothing of
+                # what it used.
+                if (
+                    isinstance(spawned := record.result, AgentSpawnResult)
+                    and spawned.agent_id is not None
+                ):
+                    p.note(_spawn_done(spawned))
             case _:
                 assert_never(record)
 
@@ -392,9 +413,12 @@ class Scrollback:
         """Print one event of the child ``label``."""
         p = self.printer
         while isinstance(event, types.ChildEvent):
-            label, event = event.label, event.inner
-        if isinstance(event, types.ModelResponseComplete):
-            for record in event.response.records:
+            label, event = event.label, event.event
+        ended = (
+            event.outcome if isinstance(event, types.ModelResponseCompleted) else None
+        )
+        if isinstance(ended, Succeeded):
+            for record in ended.value.records:
                 if (
                     isinstance(record, AssistantMessage)
                     and (text := record.content or "").strip()
@@ -409,28 +433,32 @@ class Scrollback:
                     )
                     self._calls[header.key] = header
                     p.call(header)
-        elif isinstance(event, ToolResult) and event.state != "pending":
-            call_id = event.call_id.removesuffix(self.markers.arrival)
-            header = self._calls.get(_key(call_id, label))
+        elif isinstance(event, ToolMessage) and event.state != "pending":
+            header = self._calls.get(_key(event.call_id, label))
             if header is None:
                 self._orphaned(event, agent=label)
                 return
             del self._calls[header.key]
             if event.is_error:
                 p.failed(f"{label}: {_without_reminders(event.text())}", header=header)
-        elif isinstance(event, types.ModelResponseError):
-            p.error(f"{label}: {error_text(event.exception)}")
-        elif isinstance(event, types.ModelCallSuspended):
+        elif isinstance(event, ModelIdle) and isinstance(
+            event.outcome,
+            Failed,
+        ):
+            p.error(f"{label}: {error_text(event.outcome.exception)}")
+        elif isinstance(event, types.ModelResponseSuspended):
+            if event.reset_at_by_login:
+                p.note(logins_spent_text(event), lead=f"{label}: ")
             p.error(f"{label}: {suspended_text(event)}")
-        elif isinstance(event, (types.LoginSwitched, types.LoginsSpent)):
+        elif isinstance(event, types.LoginSwitched):
             p.note(login_text(event), lead=f"{label}: ")
-        elif isinstance(event, AgentToAgentMessage):
+        elif isinstance(event, AgentMessage):
             p.agent(event.sender or "agent", recipient=label, text=event.content or "")
 
     # The runtime hides a result with no call from the model
     # (``Runtime._repair_history_record_orphans``); under the call printed last it
     # would read as that call's. Only its failure shows, at the indent.
-    def _orphaned(self, result: ToolResult, *, agent: str = "") -> None:
+    def _orphaned(self, result: ToolMessage, *, agent: str = "") -> None:
         """Print a result whose call this scrollback never saw: a failure, at the indent."""
         if not result.is_error:
             return
@@ -585,7 +613,7 @@ def stamped(
 
 def show_result(
     printer: Printer,
-    result: ToolResult,
+    result: ToolMessage,
     *,
     header: Header,
 ) -> None:
@@ -641,11 +669,12 @@ def error_text(error: BaseException) -> str:
 
     """
     if isinstance(error, RateLimitedError) and error.retry_after_sec > 0:
-        return f"{_why(error)}. Resets {_when(time.time() + error.retry_after_sec)}."
+        resets = datetime.fromtimestamp(time.time() + error.retry_after_sec, UTC)
+        return f"{_why(error)}. Resets {_when(resets)}."
     return str(error) if isinstance(error, UserFacingError) else describe(error)
 
 
-def suspended_text(event: types.ModelCallSuspended) -> str:
+def suspended_text(event: types.ModelResponseSuspended) -> str:
     """Return why the model call waits, and until when.
 
     Args:
@@ -655,59 +684,73 @@ def suspended_text(event: types.ModelCallSuspended) -> str:
       text: Such as ``Weekly limit reached. Resumes Sat Oct 31 06:00:00 (1d 22h 3m 5s).``
 
     """
-    return f"{_why(event.exception)}. Resumes {_when(event.until)}."
+    return f"{_why(event.exception)}. Resumes {_when(event.retry_at)}."
 
 
-def login_text(event: types.LoginSwitched | types.LoginsSpent) -> str:
+def logins_spent_text(event: types.ModelResponseSuspended) -> str:
+    """Return that every login of the provider is spent, and when each resets.
+
+    Args:
+      event: A suspension whose ``reset_at_by_login`` is not empty.
+
+    Returns:
+      text: Such as ``[no anthropic login has quota: default Sat Oct 31 ...]``.
+
+    """
+    resets = ", ".join(f"{a} {_when(at)}" for a, at in event.reset_at_by_login.items())
+    return f"[no {event.provider} login has quota: {resets}]"
+
+
+def login_text(event: types.LoginSwitched) -> str:
     """Return what a login switch says: why it left a login, and which signs in now.
 
     Args:
-      event: The switch, or the news that every login is spent.
+      event: The switch.
 
     Returns:
       text: Such as ``[default spent (5-hour, resets ...); now on personal]``.
 
     """
-    if isinstance(event, types.LoginsSpent):
-        resets = ", ".join(f"{a} {_when(until)}" for a, until in event.resets)
-        return f"[no {event.provider} login has quota: {resets}]"
-    if not event.window:
-        where = "first in order" if event.now == event.first else "first with quota"
-        return f"[on {event.now}, {where}]"
-    if not event.until:
-        return f"[{event.was} {event.window}; now on {event.now}]"
+    if not event.spent_window:
+        where = (
+            "first in order"
+            if event.to_login == event.first_login_in_order
+            else "first with quota"
+        )
+        return f"[on {event.to_login}, {where}]"
+    if event.spent_window_resets_at is None:
+        return f"[{event.from_login} {event.spent_window}; now on {event.to_login}]"
     return (
-        f"[{event.was} spent ({event.window}, resets {_when(event.until)});"
-        f" now on {event.now}]"
+        f"[{event.from_login} spent ({event.spent_window}, resets"
+        f" {_when(event.spent_window_resets_at)}); now on {event.to_login}]"
     )
 
 
 # The date, as ``date`` prints it, stays true however late the line is read; the
 # wait reads as the status line's countdown does.
-def _when(at: float) -> str:
+def _when(at: datetime) -> str:
     """Return ``at`` as ``Sat Oct 31 06:00:00 (1d 22h 3m 5s)``."""
-    return f"{local_time(at)} ({elapsed(max(0.0, at - time.time()))})"
+    return f"{local_time(at)} ({elapsed(max(0.0, at.timestamp() - time.time()))})"
 
 
-# The runtime tapes this before a detached call's result, to give the model a turn
-# boundary (``Runtime._append_detached_arrival``), and never publishes it: drawn on
-# replay, it would show a message no live session showed.
-def _delivers(text: str) -> bool:
-    """Return whether ``text`` is the runtime's note that a detached call finished."""
-    return re.fullmatch(r"\[detached tool .+ completed\]", text) is not None
-
-
-def _compacted(event: types.CompactComplete) -> str:
-    """Return the note for a finished compaction."""
-    if not event.fallback_reason:
+def _compacted(outcome: Outcome[types.SessionCompacted]) -> str:
+    """Return the note for a compaction that ended."""
+    match outcome:
+        case Cancelled():
+            return "[compaction cancelled]"
+        case Failed(exception=exception):
+            return f"[compaction failed: {error_text(exception)}]"
+        case Succeeded(value=did):
+            pass
+    if not did.summary_fallback_reason:
         return (
-            f"[compaction complete: ~{event.token_before} →"
-            f" ~{event.token_after} tokens, {event.payload_entries} entries]"
+            f"[compaction complete: ~{did.masked_tokens} →"
+            f" ~{did.replacement_tokens} tokens, {did.replacement_entries} entries]"
         )
-    entry = "entry" if event.preserved_tail_count == 1 else "entries"
+    entry = "entry" if did.entries_kept_verbatim == 1 else "entries"
     return (
-        f"[compaction fallback: {event.fallback_reason}; preserved"
-        f" {event.preserved_tail_count} tail {entry}]"
+        f"[compaction fallback: {did.summary_fallback_reason}; preserved"
+        f" {did.entries_kept_verbatim} tail {entry}]"
     )
 
 
@@ -791,3 +834,12 @@ def _why(error: RetryableError) -> str:
     if isinstance(error, DisconnectedError):
         return "Disconnected"
     return "Service unavailable"
+
+
+def _spawn_done(spawned: AgentSpawnResult) -> str:
+    """Return what a spawned child used: ``[c done: 1m 5s, 12K tokens, $0.43]``."""
+    spend = 0.0 if spawned.spend is None else spawned.spend.total
+    return (
+        f"[{spawned.agent_id} done: {elapsed(spawned.duration_sec or 0.0)},"
+        f" {count(spawned.tokens or 0)} tokens, ${spend:.2f}]"
+    )

@@ -42,16 +42,17 @@ from sagent.providers.resources import SharedResources
 from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
+    labeled_text,
 )
 from sagent.types import AsyncResource
 
@@ -288,14 +289,14 @@ class AnthropicCLIModel(AsyncResource):
         attachments = [
             attachment
             for record in request.records
-            if isinstance(record, (UserMessage, AgentToAgentMessage, ToolResult))
+            if isinstance(record, (UserMessage, AgentMessage, ToolMessage))
             for attachment in record.attachments
         ]
         bare = [
             record.attached(())
-            if isinstance(record, ToolResult)
+            if isinstance(record, ToolMessage)
             else replace(record, attachments=())
-            if isinstance(record, (UserMessage, AgentToAgentMessage))
+            if isinstance(record, (UserMessage, AgentMessage))
             else record
             for record in request.records
         ]
@@ -593,24 +594,24 @@ class _Claude:
                 record,
                 (
                     UserMessage,
-                    AgentToAgentMessage,
+                    AgentMessage,
                     SystemMessage,
-                    TurnContext,
+                    SessionContext,
                     AssistantMessage,
                     Thinking,
                     ToolCall,
-                    ToolResult,
+                    ToolMessage,
                     ContextClear,
                 ),
             )
         ]
         if self.held:
             answered = {
-                record.call_id for record in unseen if isinstance(record, ToolResult)
+                record.call_id for record in unseen if isinstance(record, ToolMessage)
             }
             # A note that arrives with the results waits for the next user line.
             results = [
-                r for r in unseen if not isinstance(r, (SystemMessage, TurnContext))
+                r for r in unseen if not isinstance(r, (SystemMessage, SessionContext))
             ]
             exact = len(answered) == len(results) and answered == {
                 c.call_id for c in self.held
@@ -619,7 +620,7 @@ class _Claude:
         if unseen and all(
             isinstance(
                 record,
-                (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext),
+                (UserMessage, AgentMessage, SystemMessage, SessionContext),
             )
             for record in unseen
         ):
@@ -647,7 +648,7 @@ class _Claude:
         calls = {call.call_id: call for call in self.held}
         try:
             for result in results:
-                if isinstance(result, ToolResult):
+                if isinstance(result, ToolMessage):
                     await mount.answer(
                         calls[result.call_id],
                         _shrunk(result, limits=limits),
@@ -656,7 +657,7 @@ class _Claude:
             return False  # A call the CLI never made, as for a tool it lacks.
         # The calls stay held until ``saw`` records the turn they continue.
         self.waiting += tuple(
-            r for r in results if isinstance(r, (SystemMessage, TurnContext))
+            r for r in results if isinstance(r, (SystemMessage, SessionContext))
         )
         return True
 
@@ -734,7 +735,7 @@ def _content(
     attachments = [
         attachment
         for record in records
-        if isinstance(record, (UserMessage, AgentToAgentMessage))
+        if isinstance(record, (UserMessage, AgentMessage))
         for attachment in record.attachments
     ]
     return wire.content("\n\n".join(lines), attachments, limits=limits)
@@ -742,10 +743,10 @@ def _content(
 
 def _new_lines(records: Sequence[SessionRecord]) -> list[str]:
     """Return what a user line carries for each new record that says anything."""
-    return [line for record in records if (line := _said(record))]
+    return [line for record in records if (line := _prompt_line(record))]
 
 
-def _shrunk(result: ToolResult, *, limits: ModelLimits) -> ToolResult:
+def _shrunk(result: ToolMessage, *, limits: ModelLimits) -> ToolMessage:
     """Return ``result`` with each image shrunk to ``limits``, as the API path does."""
     return result.attached(
         [_shrunk_attachment(a, limits=limits) for a in result.attachments],
@@ -772,16 +773,16 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
                 lines.extend(_transcript(history))
             case ContextClear(history=history):
                 lines.extend(_transcript(history))
-            case UserMessage(content=str() as text) if text:
-                lines.append(f"User: {text}")
-            case AgentToAgentMessage(content=str() as text, sender=str() as sender) if (
-                text
-            ):
-                lines.append(f"Agent {sender}: {text}")
-            case AgentToAgentMessage(content=str() as text) if text:
-                lines.append(f"Agent: {text}")
-            case SystemMessage() | TurnContext():
-                if note := _said(record):
+            # Labeled as a running process hears it (``_prompt_line``).
+            case (
+                UserMessage(content=str() as text)
+                | AgentMessage(
+                    content=str() as text,
+                )
+            ) if text:
+                lines.append(f"User: {_prompt_line(record)}")
+            case SystemMessage() | SessionContext():
+                if note := _prompt_line(record):
                     lines.append(note)
             case AssistantMessage(content=str() as text) if text:
                 lines.append(f"Assistant: {text}")
@@ -789,7 +790,7 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
                 lines.append(
                     f"Assistant called {name} as {call_id}: {json_dumps(mutable(arguments))}",
                 )
-            case ToolResult():
+            case ToolMessage():
                 lines.append(f"{record.call_id} returned: {record.text()}")
             case _:
                 continue
@@ -836,15 +837,12 @@ def _failure(event: dict[str, object], *, headers: dict[str, str]) -> Exception:
     )
 
 
-def _said(record: SessionRecord) -> str:
+def _prompt_line(record: SessionRecord) -> str:
     """Return what a new user line carries for ``record``: words, or a reminder."""
-    if isinstance(record, UserMessage):
-        return record.content or ""
-    if isinstance(record, AgentToAgentMessage):
-        body = record.content or ""
-        return f"[from {record.sender}]: {body}" if record.sender is not None else body
+    if isinstance(record, UserMessage | AgentMessage):
+        return labeled_text(record)
     if isinstance(record, SystemMessage) and record.content is not None:
         return f"<system-reminder>\n{record.content}\n</system-reminder>"
-    if isinstance(record, TurnContext) and record.text():
+    if isinstance(record, SessionContext) and record.text():
         return f"<system-reminder>\n{record.text()}\n</system-reminder>"
     return ""

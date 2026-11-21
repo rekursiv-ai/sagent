@@ -185,7 +185,7 @@ class Skill:
         ]
         visited: set[Path] = set()
         stamps: list[tuple[Path, _Stamp]] = []
-        skipped: list[str] = []
+        skipped: list[Path] = []
         found: dict[str, SkillInfo] = {}
         for root, source in roots:
             for info in _skills_under(root, source, visited, stamps, skipped):
@@ -197,14 +197,14 @@ class Skill:
         )
         return list(found.values())
 
-    def skipped(self, context: ToolContext) -> tuple[str, ...]:
-        """Return why each skill visible from where the agent started was left unread.
+    def skipped(self, context: ToolContext) -> tuple[Path, ...]:
+        """Return each skill visible from where the agent started that was left unread.
 
         Args:
           context: The calling agent's state; its ``origin`` finds the skills.
 
         Returns:
-          skipped: One line per ``SKILL.md`` whose frontmatter will not parse.
+          skipped: Each ``SKILL.md`` whose frontmatter will not parse.
 
         """
         self.discover(context.origin)
@@ -291,7 +291,7 @@ def _skills_under(
     source: Source,
     visited: set[Path],
     stamps: list[tuple[Path, _Stamp]],
-    skipped: list[str],
+    skipped: list[Path],
 ) -> Iterator[SkillInfo]:
     """Yield every skill below ``root``, depth first, in name order; stamp each path read."""
     # Stamped before reading: a write landing between them then shows as a change.
@@ -328,7 +328,11 @@ def _subdirs(directory: Path) -> list[Path]:
         return []
 
 
-def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | None:
+def _load(
+    directory: Path,
+    source: Source,
+    skipped: list[Path],
+) -> SkillInfo | None:
     """Return the skill ``directory/SKILL.md`` holds; ``None`` for none or a bad one."""
     path = directory / "SKILL.md"
     try:
@@ -341,9 +345,8 @@ def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | No
     try:
         meta, body = frontmatter(raw, source=str(path))
     except yaml.YAMLError as e:
-        why = f"Skipping skill {path}: its frontmatter will not parse: {e}"
-        logger.warning(why)
-        skipped.append(why)
+        logger.warning("Skipping skill %s: its frontmatter will not parse: %s", path, e)
+        skipped.append(path)
         return None
     try:
         name = from_plain(meta.get("name"), str, default=None) or directory.name
@@ -380,5 +383,5 @@ class _Scan:
 
     skills: tuple[SkillInfo, ...]
     stamps: tuple[tuple[Path, _Stamp], ...]
-    skipped: tuple[str, ...]
-    """Why each ``SKILL.md`` left unread was."""
+    skipped: tuple[Path, ...]
+    """Each ``SKILL.md`` left unread: its frontmatter would not parse."""

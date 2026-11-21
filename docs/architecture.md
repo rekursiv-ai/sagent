@@ -30,7 +30,7 @@ Consequences:
 - There is no polling. An idle agent is blocked on its inbox, consuming zero CPU; the wake is purely event-driven.
 - A message the user sends while the model streams is answered next: the reply's calls start detached, and their results arrive later.
 
-`Halt` stops the model call and waits for the user's next message. The calls the model waited on are detached: they keep running, and their results arrive after that message. Meanwhile the inbox holds back every event except `Halt`, `Kill`, `Clear`, and `Compact`. A halt that stopped work is journaled as an `UncategorizedRecord` of kind `interrupted`, which a resume never reads.
+`ModelHalt` stops the model call and waits for the user's next message, or answers at once what they typed as the reply streamed. The calls the model waited on are detached: they keep running, and their results arrive after that message. Meanwhile the inbox holds back every event except `ModelHalt`, `ToolHalt`, `SessionClear`, and `SessionCompact`. A halt that stopped work is journaled as an `UncategorizedRecord` of kind `interrupted`, which a resume never reads.
 
 ## Session records
 
@@ -47,9 +47,9 @@ Tool calls run in one of two registries:
 - `cohort`: the calls the next model call waits on.
 - `detached`: calls already answered by a stub; each one's real result is delivered later as a new turn, so nothing the model has read is rewritten.
 
-A call is detached when the model asks for `background` or `delay`, when its first wake finds it running, or when the user interrupts its cohort.
+A call is detached when the model asks for `background` or `delay`, when its first wake finds it running, or when the user interrupts its cohort. The agent is idle only once each detached call has delivered its result, but for a call whose tool says it runs until it is stopped: that one has no result to wait for, and wakes the model when it has news.
 
-A long call wakes the model on its tool's schedule (`/runtime.detach`): first after 15 s, then each time the call has run twice as long, at most every 5 minutes and before the prompt cache lapses. The first wake detaches each call of the cohort that wakes the model, each stub showing what its call wrote so far, and a call whose tool wakes no one is waited for; each later one tells an idle model what the call wrote since it last looked. The result shows only what the model has not read, and the journal keeps all of it.
+A long call wakes the model on its tool's schedule (`/runtime.detach`): first after 15 s, then each time the call has run twice as long, at most every 5 minutes and before the prompt cache lapses. The first wake detaches each call of the cohort that wakes the model, each stub showing what its call wrote so far, and a call whose tool wakes no one is waited for; each later one tells an idle model what the call wrote since it last looked. The result shows only what the model has not read, and the journal keeps all of it. A call that sets `wake_every` wakes the model at that period instead, whatever its tool's schedule or the cache's age, and whether or not it wrote; a background call that sets it is woken for too.
 
 ## Agent coordination triad
 
@@ -76,6 +76,8 @@ Sagent separates three related concerns:
 - Pruning and result bounds: dropping old tool results (`Pruner`) and cutting large ones to fit.
 
 This keeps long sessions usable without making providers or tools know about storage details.
+
+A compaction, a prune, a clear and a person's message are each a request (`SessionCompact`, `SessionPrune`, `SessionClear`, `UserMessage`) that ends once, told as its `...Completed`: done, refused, dropped by a clear, or cancelled at a halt or a quit. `await runtime.ask(request)` returns how the request it was given ended, not another's. A compaction asked for while one runs is held and runs after it.
 
 ## Surfaces
 

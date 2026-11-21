@@ -19,7 +19,7 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import MessageKind, Team
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AgentSendResult, AgentToAgentMessage
+from sagent.session.types import AgentMessage, AgentSendResult
 from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -244,8 +244,8 @@ async def test_a_reply_settles_what_was_owed_and_creates_no_debt(
     )
 
     assert (team.owes("helper"), team.owes("Agent")) == ({}, {})
-    assert [m for m in _inbox(team, "Agent") if isinstance(m, AgentToAgentMessage)] == [
-        AgentToAgentMessage(sender="helper", recipient="Agent", content="all green"),
+    assert [m for m in _inbox(team, "Agent") if isinstance(m, AgentMessage)] == [
+        AgentMessage(sender="helper", recipient="Agent", content="all green"),
     ]
 
 
@@ -295,7 +295,7 @@ async def test_a_root_that_may_spawn_starts_its_watcher_to_reach_its_parent(
         told = [
             m.content or ""
             for m in (*watcher.session, *_inbox(team, "watcher"))
-            if isinstance(m, AgentToAgentMessage)
+            if isinstance(m, AgentMessage)
         ]
         assert told[0].startswith("<skill name='watch' source='builtin'>")
         assert told[1:] == ["hold me to the goal", "and"]
@@ -368,7 +368,7 @@ async def test_a_message_reaches_the_inbox_signed_by_its_sender(tmp_path: Path) 
     assert result.is_error is False
     assert result.result == AgentSendResult(to="bob")
     assert _inbox(team, "bob") == [
-        AgentToAgentMessage(sender="Agent", recipient="bob", content="look at a.py"),
+        AgentMessage(sender="Agent", recipient="bob", content="look at a.py"),
     ]
 
 
@@ -402,7 +402,7 @@ async def test_an_unnamed_sender_signs_as_unknown_and_is_never_itself(
 
     assert result.text() == "Delivered to unknown."
     (message,) = _inbox(team, "unknown")
-    assert isinstance(message, AgentToAgentMessage)
+    assert isinstance(message, AgentMessage)
     assert message.sender == "unknown"
 
 
@@ -466,7 +466,7 @@ async def test_a_delayed_message_reaches_whoever_holds_the_label_then(
     assert result.text() == "Scheduled for bob in 5s."
     assert delay == 5
     assert new.runtime.inbox.drain_nowait() == [
-        AgentToAgentMessage(
+        AgentMessage(
             sender="Agent",
             recipient="bob",
             content="[delayed 5s] check back",
@@ -503,7 +503,7 @@ async def test_a_delayed_reply_settles_the_debt_when_sent_not_when_it_lands(
     deliver(*args)
 
     assert _inbox(team, "bob") == [
-        AgentToAgentMessage(
+        AgentMessage(
             sender="Agent",
             recipient="bob",
             content="[delayed 5s] done",

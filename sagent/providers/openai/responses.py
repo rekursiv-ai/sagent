@@ -31,7 +31,7 @@ from sagent.model.cost import TokenCount
 from sagent.model.exceptions import DisconnectedError
 from sagent.model.types import Response, TextChunk
 from sagent.providers.openai import wire
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
+from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 
 
 if TYPE_CHECKING:
@@ -303,7 +303,7 @@ def _input(
                         "status": "completed",
                     },
                 )
-            case ToolResult():
+            case ToolMessage():
                 items.append(
                     {
                         "type": "function_call_output",
@@ -337,7 +337,7 @@ def _user(
     return {"role": "user", "content": [*blocks, *images]}
 
 
-def _output(result: ToolResult, *, limits: ModelLimits) -> object:
+def _output(result: ToolMessage, *, limits: ModelLimits) -> object:
     """Return a tool result's output: its text, or its text and images."""
     text = result.text()
     if result.is_error and text:

@@ -26,13 +26,18 @@ from sagent.agent.team import Team
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
     ContextCompaction,
+    Failed,
+    ModelIdle,
+    SessionContext,
+    Succeeded,
     SystemMessage,
     ToolCall,
-    TurnContext,
     UserMessage,
 )
 
@@ -72,12 +77,18 @@ def lines(
     out: list[str] = []
     for n, record in enumerate(records, start):
         match record:
-            case UserMessage(content=said):
-                out.append(f"> user: {said or ''}")
-            case AgentToAgentMessage(sender=sender, content=said):
-                out.append(f"> {sender}: {said or ''}")
-            case AssistantMessage(content=str() as said) if said:
-                out.append(f"{label}: {said}")
+            case UserMessage(sender=None, content=content):
+                out.append(f"> user: {content or ''}")
+            case (
+                UserMessage(sender=sender, content=content)
+                | AgentMessage(
+                    sender=sender,
+                    content=content,
+                )
+            ):
+                out.append(f"> {sender}: {content or ''}")
+            case AssistantMessage(content=str() as content) if content:
+                out.append(f"{label}: {content}")
             case ToolCall(name=name, arguments=arguments):
                 tool = tools.get(name)
                 out.append(
@@ -88,10 +99,10 @@ def lines(
             # Record 0 opens every session; it changes nothing.
             case ContextClear(summary=summary) if n > 0:
                 out.append(f"r{n} [{'clear' if summary is None else 'summary'}]")
-            case TurnContext():
+            case SessionContext():
                 out.append(f"r{n} [settings: {_settings(record)}]")
-            case SystemMessage(subtype=subtype, content=said):
-                out.append(f"r{n} [{subtype or 'system'}] {_short(said)}")
+            case SystemMessage(subtype=subtype, content=content):
+                out.append(f"r{n} [{subtype or 'system'}] {_short(content)}")
             case _:
                 continue
     return out
@@ -117,32 +128,42 @@ class Feed:
     # idles has queued the wake by now.
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Send what is new when ``event`` calls for it."""
-        if isinstance(event, types.ModelResponseComplete):
+        ended = (
+            event.outcome if isinstance(event, types.ModelResponseCompleted) else None
+        )
+        if isinstance(ended, Succeeded):
             self.worked = True
             return
-        if isinstance(event, types.ModelResponseError):
-            self.pending.append(f"[failed] {describe(event.exception)}")
-        elif isinstance(event, types.ModelResponseCancelled):
+        stopped = event.outcome if isinstance(event, ModelIdle) else None
+        if isinstance(stopped, Failed):
+            self.pending.append(f"[failed] {describe(stopped.exception)}")
+        elif isinstance(stopped, Cancelled):
             self.pending.append("[halted]")
-        elif isinstance(event, types.ModelCallSuspended):
+        elif isinstance(event, types.ModelResponseSuspended):
             if not event.opens_a_quota_wait:
                 return
             self.pending.append(
-                f"[waiting until {local_time(event.until)}]"
+                f"[waiting until {local_time(event.retry_at)}]"
                 f" {describe(event.exception)}",
             )
-        elif isinstance(event, types.AgentIdle):
+        elif isinstance(event, AgentIdle):
             agent = self.team.get(self.watched)
             # Woken again at once, as by a nudge: what it did goes, not the idle.
             if agent is not None and not agent.runtime.inbox.empty():
                 self.send()
                 return
             if self.worked:
-                self.worked = False
+                self.worked = False  # pragma: no mutate[truthiness]
                 self.pending.append(
                     f"[idle: {self.watched} does nothing until messaged]",
                 )
-        elif not isinstance(event, (types.CompactComplete, types.ClearComplete)):
+        elif not (
+            isinstance(event, types.SessionClearCompleted)
+            or (
+                isinstance(event, types.SessionCompactCompleted)
+                and isinstance(event.outcome, Succeeded)
+            )
+        ):
             return
         self.send()
 
@@ -177,7 +198,7 @@ class Feed:
             return
         watched = f"[watch]\n{chr(10).join(new)}" if new else ""
         team[self.watcher].runtime.push(
-            AgentToAgentMessage(
+            AgentMessage(
                 sender=self.watched,
                 recipient=self.watcher,
                 content="\n\n".join(p for p in (before, watched) if p),
@@ -185,9 +206,10 @@ class Feed:
         )
 
 
-def _settings(record: TurnContext) -> str:
+def _settings(record: SessionContext) -> str:
     """Return what ``record`` set, such as ``model=opus, effort=high``."""
     named = {
+        "user": record.user,
         "model": record.model,
         "effort": record.effort,
         "cwd": record.cwd,

@@ -20,6 +20,9 @@ import time
 
 from sagent.model.cost import TokenCount
 from sagent.runtime import types
+from sagent.session.types import (
+    Succeeded,
+)
 
 
 if TYPE_CHECKING:
@@ -71,42 +74,45 @@ class Status:
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Count ``event`` toward the totals."""
         now = time.monotonic()
-        if isinstance(event, types.ModelCallStarted):
+        if isinstance(event, types.ModelResponseStarted):
             self._call, self._streamed = now, 0
-        elif isinstance(event, types.ModelResponsePartial):
+        elif isinstance(event, types.ModelResponseTextStreamed):
             self._streamed += len(event.text)
         # A suspended call has ended too: the wait is the runtime's, not the call's.
         elif isinstance(
             event,
-            (
-                types.ModelResponseComplete,
-                types.ModelResponseCancelled,
-                types.ModelResponseError,
-                types.ModelCallSuspended,
-            ),
+            (types.ModelResponseCompleted, types.ModelResponseSuspended),
         ):
-            if isinstance(event, types.ModelResponseComplete):
-                tokens = event.response.tokens
+            if isinstance(event, types.ModelResponseCompleted) and isinstance(
+                event.outcome,
+                Succeeded,
+            ):
+                response = event.outcome.value
+                tokens = response.tokens
                 self.tokens += tokens
-                self.spend += event.response.spend.total
+                self.spend += response.spend.total
                 self.held = tokens.prompt + tokens.response
             if self._call is not None:
                 self.seconds += now - self._call
             self._call = None
-        elif isinstance(event, types.CohortStarted):
+        elif isinstance(event, types.ToolCohortStarted):
             self._tools = now
-        elif isinstance(event, types.CompactStarted):
+        elif isinstance(event, types.ToolCohortCompleted):
+            self._tools = None
+        elif isinstance(event, types.SessionCompactStarted):
             self._compact = now
-        elif isinstance(event, (types.CompactComplete, types.CompactFailed)):
+        elif isinstance(event, types.SessionCompactCompleted):
             self._compact = None
-            if isinstance(event, types.CompactComplete) and event.token_after:
-                self.held = event.token_after
-        elif isinstance(event, types.ClearComplete):
+            if (
+                isinstance(event.outcome, Succeeded)
+                and event.outcome.value.replacement_tokens
+            ):
+                self.held = event.outcome.value.replacement_tokens
+        elif isinstance(event, types.SessionClearCompleted):
             self.held = 0
-        # A child's calls arrive here as they are charged; its ``ChildDoneEvent``
-        # repeats their sum.
-        elif isinstance(event, types.Charged):
-            self.spend += event.usd
+        # A child's calls arrive here as they are charged.
+        elif isinstance(event, types.SessionSpendCharged):
+            self.spend += event.spend.total
 
     def frame(self) -> str:
         """Return the status line, a spinner first while a call or a compaction runs.
@@ -135,9 +141,6 @@ class Status:
 
         """
         rt = self.runtime
-        # Detached or killed, calls leave the cohort without a ``CohortComplete``.
-        if not (rt.cohort or rt.running_tools):
-            self._tools = None
         if (
             not self.seconds
             and not self.spend
@@ -169,7 +172,7 @@ class Status:
             f" ({cached}{filled})"
             f" ${self.spend:.2f}"
         )
-        background = sum(job.state != "running" for job in rt.jobs.values())
+        background = sum(job.status != "running" for job in rt.jobs.values())
         reason = " ".join(
             part
             for part in (
@@ -196,7 +199,7 @@ class Status:
             return "waiting on tools."
         if running < self.wait_after_sec:
             return ""
-        if rt.running_tools or rt.cohort:
+        if rt.running_tools:
             return "waiting on tools."
         return "waiting on model."
 

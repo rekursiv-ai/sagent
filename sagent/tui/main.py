@@ -96,7 +96,13 @@ from sagent.session.projects import (
     project_dir,
     unused_session_path,
 )
-from sagent.session.types import ToolCall, ToolResult
+from sagent.session.types import (
+    Failed,
+    ModelIdle,
+    Succeeded,
+    ToolCall,
+    ToolMessage,
+)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
@@ -115,7 +121,12 @@ from sagent.tui.prompt import (
     prompt_text,
     repaint_on_change,
 )
-from sagent.tui.render import error_text, login_text, suspended_text
+from sagent.tui.render import (
+    error_text,
+    login_text,
+    logins_spent_text,
+    suspended_text,
+)
 from sagent.tui.slash import (
     Commands,
     apply_setting,
@@ -303,6 +314,7 @@ async def opened(
     *,
     given: Sequence[tuple[str, str]],
     interactive: bool,
+    user: str | None,
     use_daemon: bool = True,
     tools: Sequence[Tool] = (),
 ) -> AsyncGenerator[OpenAgent]:
@@ -313,6 +325,10 @@ async def opened(
       given: Each setting given as a flag, as :func:`parse_flags` returns it.
       interactive: Whether a person watches at a terminal: the welcome prints, logs
         go to the session's ``.log`` file, and a long rate limit is waited out.
+      user: Whose session it is, as the caller knows them from a sign-in of its
+        own; the model is told, and a message that names them needs no label.
+        ``None`` tells the model no name: sagent itself holds a model login, and no
+        identity of the person.
       use_daemon: Whether to start this machine's sagent daemon and link it, which
         carries messages between the agents of the sessions on this machine. Without,
         none is started and none is linked.
@@ -399,6 +415,7 @@ async def opened(
             journal=journal,
             tool_context=ToolContext(cwd=cwd, fetch_session=fetch),
             interactive=interactive,
+            user=user,
         )
         async with contextlib.AsyncExitStack() as stack:
             if journal is not None:
@@ -420,7 +437,7 @@ async def opened(
                     agent,
                     catalog=catalog,
                     team=team,
-                    say=_dropped,
+                    print_output=_dropped,
                     screen=screen,
                     panes=Panes(),
                     theme=theme,
@@ -999,7 +1016,8 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
     """Build the agent from ``flags`` and the settings ``given``; run it until done."""
     interactive = sys.stdin.isatty()
     try:
-        async with opened(flags, given=given, interactive=interactive) as o:
+        # Sagent holds a model login and no identity of the person at the terminal.
+        async with opened(flags, given=given, interactive=interactive, user=None) as o:
             with signals():
                 if interactive:
                     await run(
@@ -1039,7 +1057,7 @@ async def _action(argv: Sequence[str]) -> int:
     _logging(os.environ.get("SAGENT_LOG_LEVEL"), path=None, interactive=True)
     try:
         found = await _dispatch(
-            harvest(owners_without_agent(cwd=Path.cwd(), say=_print_to_shell)),
+            harvest(owners_without_agent(cwd=Path.cwd(), print_output=_print_to_shell)),
             argv,
         )
         return await _agent_action(argv) if found is None else found
@@ -1067,7 +1085,7 @@ async def _agent_action(argv: Sequence[str]) -> int:
         commands = Commands(
             agent,
             catalog=catalog,
-            say=_print_to_shell,
+            print_output=_print_to_shell,
             screen=screen,
             panes=Panes(),
         )
@@ -1111,7 +1129,11 @@ async def _dispatch(
             rest = tail if configure is None else await configure(action, tail)
             return (
                 0
-                if await apply_setting(action, shlex.join(rest), say=_print_to_shell)
+                if await apply_setting(
+                    action,
+                    shlex.join(rest),
+                    print_output=_print_to_shell,
+                )
                 else 1
             )
         if not any(a.name[:n] == named for a in actions):
@@ -1186,6 +1208,7 @@ def _agent(
     journal: JsonlJournal | None,
     tool_context: ToolContext,
     interactive: bool,
+    user: str | None,
 ) -> Agent:
     """Return the root agent ``flags`` describe, not yet opened."""
     audits = flags.compactor == "session-audit"
@@ -1214,6 +1237,7 @@ def _agent(
             additional_dirs=tuple(flags.add_dir),
             tiers=flags.directives,
         ),
+        user=user,
     )
 
 
@@ -1563,11 +1587,12 @@ def _records(
     tools: Mapping[str, Tool],
 ) -> list[dict[str, PlainTree]]:
     """Return ``event`` as stream-json records; none for an event not streamed."""
-    if isinstance(event, types.ModelResponsePartial):
+    if isinstance(event, types.ModelResponseTextStreamed):
         return [{"descriptor": "text/plain", "content": event.text}]
-    if isinstance(event, types.ModelResponseThinking):
+    if isinstance(event, types.ModelResponseThinkingStreamed):
         return [{"descriptor": "text/x-thinking", "content": event.text}]
-    if isinstance(event, types.ModelResponseComplete):
+    ended = event.outcome if isinstance(event, types.ModelResponseCompleted) else None
+    if isinstance(ended, Succeeded):
         return [
             {
                 "descriptor": "text/x-tool-label",
@@ -1576,34 +1601,39 @@ def _records(
                 if (tool := tools.get(call.name))
                 else call.name,
             }
-            for call in _calls(event.response)
+            for call in _calls(ended.value)
         ]
     # A detached call streams its stand-in, marked, then its result when it lands.
-    result = event.result if isinstance(event, types.DetachedResult) else event
-    if isinstance(result, ToolResult):
+    if isinstance(event, ToolMessage):
         return [
             {
                 "descriptor": "application/x-tool-result",
-                "call_id": result.call_id,
-                "content": result.text(),
-                "is_error": result.is_error or None,
+                "call_id": event.call_id,
+                "content": event.text(),
+                "is_error": event.is_error or None,
                 **(
-                    {"stub": result.state}
-                    if result.state in ("pending", "cancelled")
+                    {"stub": event.state}
+                    if event.state in ("pending", "cancelled")
                     else {}
                 ),
             },
         ]
-    if isinstance(event, types.ModelResponseError):
+    # A turn that failed, not a call: after a call that failed the turn may go on.
+    if isinstance(event, ModelIdle) and isinstance(event.outcome, Failed):
         return [
             {
                 "descriptor": "application/x-error",
-                "content": error_text(event.exception),
+                "content": error_text(event.outcome.exception),
             },
         ]
-    if isinstance(event, types.ModelCallSuspended):
-        return [{"descriptor": "text/x-notice", "content": suspended_text(event)}]
-    if isinstance(event, (types.LoginSwitched, types.LoginsSpent)):
+    if isinstance(event, types.ModelResponseSuspended):
+        notices = (
+            [logins_spent_text(event), suspended_text(event)]
+            if event.reset_at_by_login
+            else [suspended_text(event)]
+        )
+        return [{"descriptor": "text/x-notice", "content": n} for n in notices]
+    if isinstance(event, types.LoginSwitched):
         return [{"descriptor": "text/x-notice", "content": login_text(event)}]
     return []
 

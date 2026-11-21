@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -15,22 +16,19 @@ from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.runtime.tape import ContextSplice, TapeRef
 from sagent.runtime.types import (
-    CompactComplete,
-    DetachedResult,
-    DetachSchedule,
-    Markers,
-    ModelCallSuspended,
     ModelContextEvent,
+    ModelResponseSuspended,
+    NextWake,
+    SessionCompacted,
     WakeSchedule,
-    labeled_agent_send_text,
     wire_role,
 )
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
+    SessionContext,
     SystemMessage,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -51,68 +49,40 @@ def test_whatever_watches_a_call_fail_decides_about_a_suspended_one_too() -> Non
         str(path.relative_to(package))
         for path in package.rglob("*.py")
         if not path.name.endswith("_test.py")
-        and "ModelResponseError" in (text := path.read_text())
-        and "ModelCallSuspended" not in text
+        and "ModelResponseCompleted" in (text := path.read_text())
+        and "Failed" in text
+        and "ModelResponseSuspended" not in text
     }
-    assert unheard == {"agent/agent.py"}
+    # The pruner hears a call only when it replied; its ``Failed`` is a prune's.
+    assert unheard == {"agent/agent.py", "agent/pruner.py"}
 
 
-def test_agent_text_is_labeled_with_its_sender() -> None:
-    entry = AgentToAgentMessage(sender="reviewer", content="finding")
-    assert labeled_agent_send_text(entry) == "[from reviewer]: finding"
-
-
-def test_agent_text_is_labeled_once() -> None:
-    entry = AgentToAgentMessage(sender="reviewer", content="[from reviewer]: x")
-    assert labeled_agent_send_text(entry) == "[from reviewer]: x"
-
-
-def test_another_senders_label_is_not_mistaken_for_this_one() -> None:
-    entry = AgentToAgentMessage(sender="b", content="[from a]: x")
-    assert labeled_agent_send_text(entry) == "[from b]: [from a]: x"
-
-
-def test_agent_message_without_content_is_just_the_label() -> None:
-    assert labeled_agent_send_text(AgentToAgentMessage(sender="a")) == "[from a]: "
-
-
-def test_compact_complete_takes_every_field_from_the_override() -> None:
+def test_what_a_compaction_did_takes_every_field_from_the_override() -> None:
     override = ContextSplice(
         ref=TapeRef(session_id="s", ordinal=4),
         mask=(),
         insert_after=None,
-        payload=(UserMessage(content="summary"), _turn("ack")),
+        replacement=(UserMessage(content="summary"), _turn("ack")),
         strategy="summary",
-        token_before=900,
-        token_after=40,
-        fallback_reason="summary failed",
-        preserved_tail_count=3,
+        masked_tokens=900,
+        replacement_tokens=40,
+        summary_fallback_reason="summary failed",
+        entries_kept_verbatim=3,
     )
-    event = CompactComplete.from_override(override)
-    assert event == CompactComplete(
-        token_before=900,
-        token_after=40,
-        payload_entries=2,
-        fallback_reason="summary failed",
-        preserved_tail_count=3,
+    assert SessionCompacted.from_splice(override) == SessionCompacted(
+        masked_tokens=900,
+        replacement_tokens=40,
+        replacement_entries=2,
+        summary_fallback_reason="summary failed",
+        entries_kept_verbatim=3,
     )
-
-
-def test_detached_result_is_keyed_by_its_results_call() -> None:
-    result = ToolResult(
-        call_id="c7",
-        state="done",
-        stdout=("ok",),
-        result=UncategorizedToolResult(),
-    )
-    assert DetachedResult(result=result).call_id == "c7"
 
 
 @pytest.mark.parametrize(
     ("entry", "role"),
     [
         (UserMessage(content="u"), "user"),
-        (AgentToAgentMessage(sender="a", content="a"), "user"),
+        (AgentMessage(sender="a", content="a"), "user"),
         (
             Response(
                 records=(),
@@ -122,18 +92,16 @@ def test_detached_result_is_keyed_by_its_results_call() -> None:
             ),
             "assistant",
         ),
-        (ToolResult(call_id="c", state="done", result=UncategorizedToolResult()), None),
+        (
+            ToolMessage(call_id="c", state="done", result=UncategorizedToolResult()),
+            None,
+        ),
         (SystemMessage(content="n"), None),
-        (TurnContext(cwd="/x"), None),
+        (SessionContext(cwd=Path("/x")), None),
     ],
 )
 def test_wire_role(entry: ModelContextEvent, role: str | None) -> None:
     assert wire_role(entry) == role
-
-
-def test_the_system_note_names_the_tool_deliveries_come_under() -> None:
-    assert f"`{Markers().delivery}` foreground" in Markers().note
-    assert Markers().arrived not in Markers().note
 
 
 def _turn(text: str) -> Response:
@@ -146,7 +114,7 @@ def _turn(text: str) -> Response:
 
 
 @pytest.mark.parametrize(
-    ("exception", "attempt", "opens"),
+    ("exception", "failures", "opens"),
     [
         (RateLimitedError("spent"), 1, True),
         (RateLimitedError("spent"), 2, False),
@@ -155,15 +123,19 @@ def _turn(text: str) -> Response:
 )
 def test_only_a_first_rate_limit_opens_a_quota_wait(
     exception: RetryableError,
-    attempt: int,
+    failures: int,
     opens: bool,
 ) -> None:
-    suspended = ModelCallSuspended(exception=exception, until=0.0, attempt=attempt)
+    suspended = ModelResponseSuspended(
+        exception=exception,
+        retry_at=datetime(2026, 1, 1, tzinfo=UTC),
+        failures_in_a_row=failures,
+    )
     assert suspended.opens_a_quota_wait is opens
 
 
 @pytest.mark.parametrize(
-    ("elapsed", "cache_left", "gap", "forced"),
+    ("elapsed", "cache_left", "delay", "forced"),
     [
         (0.0, math.inf, 15.0, False),
         (15.0, math.inf, 15.0, False),
@@ -180,16 +152,22 @@ def test_only_a_first_rate_limit_opens_a_quota_wait(
 def test_a_wake_comes_early_then_less_often_but_within_the_cap_and_the_cache(
     elapsed: float,
     cache_left: float,
-    gap: float,
+    delay: float,
     forced: bool,
 ) -> None:
-    """Paced by growth it fires on new output only; capped, it fires regardless."""
-    assert WakeSchedule().gap(elapsed, cache_left_sec=cache_left) == (gap, forced)
+    """Paced by gap_growth it fires on new output only; capped, it fires regardless."""
+    assert WakeSchedule().delay_sec_until_next_wake(
+        elapsed,
+        cache_left_sec=cache_left,
+    ) == NextWake(delay_sec=delay, fires_even_without_new_output=forced)
 
 
 def test_a_wake_with_no_growth_comes_at_a_fixed_gap() -> None:
-    schedule = WakeSchedule(first_sec=10.0, growth=0.0, max_gap_sec=60.0)
-    assert [schedule.gap(t, cache_left_sec=math.inf)[0] for t in (0, 50, 500)] == [
+    schedule = WakeSchedule(first_gap_sec=10.0, gap_growth=0.0, max_gap_sec=60.0)
+    assert [
+        schedule.delay_sec_until_next_wake(t, cache_left_sec=math.inf).delay_sec
+        for t in (0, 50, 500)
+    ] == [
         10.0,
         10.0,
         10.0,
@@ -199,10 +177,16 @@ def test_a_wake_with_no_growth_comes_at_a_fixed_gap() -> None:
 @pytest.mark.parametrize(
     ("knobs", "message"),
     [
-        ({"first_sec": 0.0}, "first_sec must be a number of seconds above 0, got 0.0"),
-        ({"first_sec": math.nan}, "first_sec must be a number of seconds above 0"),
-        ({"growth": -1.0}, "growth must be a number at least 0, got -1.0"),
-        ({"growth": math.inf}, "growth must be a number at least 0, got inf"),
+        (
+            {"first_gap_sec": 0.0},
+            "first_gap_sec must be a number of seconds above 0, got 0.0",
+        ),
+        (
+            {"first_gap_sec": math.nan},
+            "first_gap_sec must be a number of seconds above 0",
+        ),
+        ({"gap_growth": -1.0}, "gap_growth must be a number at least 0, got -1.0"),
+        ({"gap_growth": math.inf}, "gap_growth must be a number at least 0, got inf"),
         ({"max_gap_sec": 0.0}, "max_gap_sec must be a number of seconds above 0"),
         ({"max_gap_sec": math.inf}, "max_gap_sec must be a number of seconds above 0"),
     ],
@@ -216,20 +200,11 @@ def test_a_wake_schedule_refuses_knobs_that_never_wake(
 
 
 def test_a_wake_schedule_says_its_knobs() -> None:
-    assert WakeSchedule().text() == "15s 1 300s"
-    assert WakeSchedule(first_sec=0.5, growth=2, max_gap_sec=60).text() == "0.5s 2 60s"
-
-
-def test_a_tool_without_an_override_wakes_as_the_default() -> None:
-    fast = WakeSchedule(first_sec=5.0)
-    schedule = DetachSchedule(
-        default=fast,
-        tools={"Bash": None, "Read": WakeSchedule()},
+    assert str(WakeSchedule()) == "15s 1 300s"
+    assert (
+        str(WakeSchedule(first_gap_sec=0.5, gap_growth=2, max_gap_sec=60))
+        == "0.5s 2 60s"
     )
-    assert schedule.of("Grep") is fast
-    assert schedule.of("Bash") is None
-    assert schedule.of("Read") == WakeSchedule()
-    assert DetachSchedule().of("Grep") == WakeSchedule()
 
 
 if __name__ == "__main__":

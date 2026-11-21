@@ -4,10 +4,10 @@ Two rent-or-buy decisions, each stated in its function's docstring. :func:`expir
 says which results are dead: unused long enough that keeping them has cost what
 fetching them again would. :func:`cut` says when dropping the dead pays for
 breaking the cache. :func:`superseded` and :func:`idle` feed the first,
-:func:`reads` and :func:`requests_left` the second, and :func:`saving` prices
+``reads`` and :func:`requests_left` the second, and :func:`saving` prices
 a chosen drop. A drop that keeps the context under the compaction trigger is taken
-instead of compacting. The AgentSession tool drops what the model chooses with
-:func:`drop`.
+instead of compacting. :func:`eligible` says which outputs the policy lets go; the
+runtime's ``drop`` splices in the stub.
 
 Typical usage example:
 
@@ -19,28 +19,34 @@ from __future__ import annotations
 
 from bisect import bisect
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import accumulate, takewhile
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+import asyncio
 import math
 import time
 
 from sagent.agent.compactor import SummaryCompactor, text
 from sagent.model.types import Response
 from sagent.runtime import types
-from sagent.runtime.tape import full_tape_mask, unpaired_call_ids
+from sagent.runtime.context import (
+    stubbed,
+)
 from sagent.session.types import (
     BashResult,
+    Cancelled,
     EditResult,
+    Failed,
     LineSpan,
     ReadResult,
-    SystemMessage,
+    Succeeded,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     WriteResult,
+    late_messages,
 )
 
 
@@ -50,17 +56,17 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.agent.types import Agent
-    from sagent.model.capability import PruningPolicy
+    from sagent.model.capability import ModelSettings, PruningPolicy
     from sagent.providers.types import Model
-    from sagent.runtime.runtime import Runtime
     from sagent.runtime.types import ModelContextEvent
 
 
 __all__ = [
     "Pruner",
     "Saving",
+    "client_policy",
     "cut",
-    "drop",
+    "eligible",
     "expired",
     "idle",
     "left_in",
@@ -84,18 +90,11 @@ class Pruner:
 
     Args:
       agent: Whose session it prunes.
-      stub: What a pruned result reads.
 
     """
 
-    def __init__(
-        self,
-        agent: Agent,
-        *,
-        stub: str = "[pruned: old tool output removed to keep the context small]",
-    ) -> None:
+    def __init__(self, agent: Agent) -> None:
         self._agent = agent
-        self._stub = stub
         # When the model last answered, by the monotonic clock; the cache's age.
         self._answered_at: float | None = None
         agent.runtime.observers.append(self._observe)
@@ -116,35 +115,67 @@ class Pruner:
         """
         if instructions:
             raise ValueError("A pruner takes no instructions.")
-
-        async def everything() -> None:
-            self._drop(self._eligible(self._context()))
-
-        await self._agent.runtime.schedule(everything)
+        runtime = self._agent.runtime
+        context = runtime.tape.context().messages
+        stub = runtime.stubs.pruned
+        chosen = set(
+            eligible(context, client_policy(self._agent.model.settings), stub=stub),
+        )
+        # A prune names calls, and stubs every output of each; a call run apart has
+        # several, so it is named only when the policy lets each of them go.
+        kept = {
+            entry.call_id
+            for i, entry in enumerate(context)
+            if isinstance(entry, ToolMessage)
+            and i not in chosen
+            and prunable(entry, stub=stub)
+        }
+        request = types.SessionPrune(
+            call_ids=tuple(
+                dict.fromkeys(
+                    output.call_id
+                    for i in sorted(chosen)
+                    if isinstance(output := context[i], ToolMessage)
+                    and output.call_id not in kept
+                ),
+            ),
+            reason="every output the policy lets go",
+        )
+        match await runtime.ask(request):
+            case Failed(exception=exc):
+                raise exc
+            case Cancelled():
+                raise asyncio.CancelledError
+            case Succeeded():
+                pass
 
     def prune(self) -> bool:
         """Drop the results whose reads have paid for their drop, if any; return whether one did."""
         chosen = self._plan()
-        self._drop(chosen)
+        self._agent.runtime.drop(chosen)
         return bool(chosen)
 
     def _observe(self, event: types.RuntimeEvent) -> None:
         """Note when the model answers: its prompt is cached from then."""
-        if isinstance(event, types.ModelResponseComplete):
+        if isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
             self._answered_at = time.monotonic()
 
     def _plan(self) -> list[int]:
         """Return the indices of the results to drop now; none when no drop saves."""
-        context = self._context()
-        policy = self._policy()
+        context = self._agent.runtime.tape.context().messages
+        model = self._agent.model
+        policy = client_policy(model.settings)
         if policy is None:
             return []
-        model = self._agent.model
         tokens = sizes(model, context)
         limit = limit_tokens(self._agent)
-        stub = len(self._stub) / model.capability.approx_chars_per_token
+        pruned = self._agent.runtime.stubs.pruned
+        stub = len(pruned) / model.capability.approx_chars_per_token
         priced = prices(model, prompt=int(sum(tokens)))
-        candidates = self._eligible(context)
+        candidates = eligible(context, policy, stub=pruned)
         # Past the trigger the choice is pruning or compacting, which loses more.
         dead = (
             candidates
@@ -170,40 +201,6 @@ class Pruner:
             cold=self._cold(),
         )
 
-    # An output is a tool's result, a detached call's stub holding what it wrote, or a
-    # wake's news of a long call.
-    def _eligible(self, context: Sequence[ModelContextEvent]) -> list[int]:
-        """Return the indices of the outputs the policy lets go, oldest first."""
-        policy = self._policy()
-        if policy is None:
-            return []
-        names = {
-            record.call_id: record.name
-            for entry in context
-            if isinstance(entry, Response)
-            for record in entry.records
-            if isinstance(record, ToolCall)
-        }
-        seen = reads(context)
-        outputs = [i for i, e in enumerate(context) if _output_text(e) is not None]
-        results = [i for i in outputs if isinstance(context[i], ToolResult)]
-        # The newest results are kept, however many wakes came since: a long
-        # call's news is no result. Clamped: a negative start counts from the
-        # end, so keeping more than there are would keep only the last few.
-        recent = set(results[max(0, len(results) - policy.keep_recent) :])
-        return [
-            i
-            for i in outputs
-            if i not in recent
-            # No reply has followed it: the model has not seen it yet.
-            and seen[i] > 0
-            and not (
-                isinstance(entry := context[i], ToolResult)
-                and names.get(entry.call_id) in policy.keep_tools
-            )
-            and prunable(entry, stub=self._stub)
-        ]
-
     def _cold(self) -> bool:
         """Return whether the prompt cache has outlived its lifetime since the last answer."""
         lifetime = self._agent.model.settings.cache_ttl_sec
@@ -214,23 +211,18 @@ class Pruner:
             and time.monotonic() - self._answered_at > lifetime
         )
 
-    def _drop(self, indices: Sequence[int]) -> None:
-        """Replace the results at ``indices`` with the stub, in one splice."""
-        drop(self._agent.runtime, indices, stub=self._stub)
 
-    def _policy(self) -> PruningPolicy | None:
-        """Return the policy to prune by; ``None`` when the server prunes, or none is set."""
-        settings = self._agent.model.settings
-        return None if settings.manage_context_server_side else settings.pruning
+def client_policy(settings: ModelSettings) -> PruningPolicy | None:
+    """Return the policy the client prunes by; ``None`` when the server prunes, or none is set.
 
-    def _context(self) -> Sequence[ModelContextEvent]:
-        return self._agent.runtime.context().messages
+    Args:
+      settings: The model's settings.
 
+    Returns:
+      policy: Which outputs may go.
 
-def sizes(model: Model, context: Sequence[ModelContextEvent]) -> list[float]:
-    """Return each entry's size in tokens, estimated from its characters."""
-    per = model.capability.approx_chars_per_token
-    return [len(text(entry)) / per for entry in context]
+    """
+    return None if settings.manage_context_server_side else settings.pruning
 
 
 def reads(context: Sequence[ModelContextEvent]) -> list[int]:
@@ -240,7 +232,7 @@ def reads(context: Sequence[ModelContextEvent]) -> list[int]:
       context: The entries.
 
     Returns:
-      reads: ``k``, as :func:`cut` takes it, one per entry.
+      reads: One count per entry.
 
     """
     out: list[int] = []
@@ -249,6 +241,81 @@ def reads(context: Sequence[ModelContextEvent]) -> list[int]:
         out.append(seen)
         seen += isinstance(entry, Response)
     return out[::-1]
+
+
+def prunable(entry: ModelContextEvent, *, stub: str) -> bool:
+    """Return whether ``entry`` is a tool's output that a stub makes shorter.
+
+    Args:
+      entry: A context entry.
+      stub: What a dropped output reads.
+
+    Returns:
+      prunable: Whether dropping it saves anything.
+
+    """
+    if not isinstance(entry, ToolMessage):
+        return False
+    (after,) = stubbed((entry,), (0,), stub=stub)
+    return len(text(after)) < len(text(entry))
+
+
+def eligible(
+    context: Sequence[ModelContextEvent],
+    policy: PruningPolicy | None,
+    *,
+    stub: str,
+) -> list[int]:
+    """Return the indices of the outputs ``policy`` lets go, oldest first.
+
+    Args:
+      context: The entries.
+      policy: Which outputs may go; ``None`` lets none go.
+      stub: What a dropped output reads.
+
+    Returns:
+      eligible: Positions in ``context``.
+
+    """
+    if policy is None:
+        return []
+    names = {
+        record.call_id: record.name
+        for entry in context
+        if isinstance(entry, Response)
+        for record in entry.records
+        if isinstance(record, ToolCall)
+    }
+    seen = reads(context)
+    outputs = [i for i, e in enumerate(context) if isinstance(e, ToolMessage)]
+    late = late_messages(context)
+    results = [
+        i
+        for i, e in enumerate(context)
+        if isinstance(e, ToolMessage) and not (i in late and e.state == "pending")
+    ]
+    # The newest results are kept, however many wakes came since: a long
+    # call's news is no result. Clamped: a negative start counts from the
+    # end, so keeping more than there are would keep only the last few.
+    recent = set(results[max(0, len(results) - policy.keep_recent) :])
+    return [
+        i
+        for i in outputs
+        if i not in recent
+        # No reply has followed it: the model has not seen it yet.
+        and seen[i] > 0
+        and not (
+            isinstance(entry := context[i], ToolMessage)
+            and names.get(entry.call_id) in policy.keep_tools
+        )
+        and prunable(entry, stub=stub)
+    ]
+
+
+def sizes(model: Model, context: Sequence[ModelContextEvent]) -> list[float]:
+    """Return each entry's size in tokens, estimated from its characters."""
+    per = model.capability.approx_chars_per_token
+    return [len(text(entry)) / per for entry in context]
 
 
 def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
@@ -270,7 +337,7 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     commands: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         entry = context[i]
-        if not isinstance(entry, ToolResult):
+        if not isinstance(entry, ToolMessage):
             continue
         tool_result = entry.result
         if isinstance(tool_result, ReadResult):
@@ -317,7 +384,7 @@ def idle(context: Sequence[ModelContextEvent]) -> list[int]:
         for _, reply in replies
     ]
     for i, entry in enumerate(context):
-        result = entry.result if isinstance(entry, ToolResult) else None
+        result = entry.result if isinstance(entry, ToolMessage) else None
         if not isinstance(result, (ReadResult, EditResult, WriteResult)):
             continue
         path = result.path
@@ -466,60 +533,6 @@ def prices(model: Model, *, prompt: int) -> tuple[float, float] | None:
     # A vendor that charges no write premium bills a rewrite as plain input.
     unit = rate.tokens_per_unit
     return rate.cache_read / unit, max(written, rate.request) / unit
-
-
-def prunable(entry: ModelContextEvent, *, stub: str) -> bool:
-    """Return whether ``entry`` is a tool's output that :func:`drop` makes shorter.
-
-    Args:
-      entry: A context entry.
-      stub: What a dropped output reads.
-
-    Returns:
-      prunable: Whether dropping it saves anything.
-
-    """
-    before = _output_text(entry)
-    if before is None or not isinstance(entry, ToolResult | SystemMessage):
-        return False
-    return len(_output_text(_pruned(entry, stub=stub)) or "") < len(before)
-
-
-def drop(runtime: Runtime, indices: Sequence[int], *, stub: str) -> None:
-    """Replace the context's tool outputs at ``indices`` with ``stub``, in one splice.
-
-    A detached call's stub, a killed call's, and a wake's news keep their first
-    line, which says which call it is and what became of it.
-
-    Args:
-      runtime: Whose context.
-      indices: Positions in ``runtime.context().messages``, each a tool's result
-        or a wake's news.
-      stub: What a dropped output reads.
-
-    Raises:
-      ValueError: An index is no tool output.
-
-    """
-    if not indices:
-        return
-    context = list(runtime.context().messages)
-    for i in indices:
-        entry = context[i]
-        if _output_text(entry) is None or not isinstance(
-            entry,
-            ToolResult | SystemMessage,
-        ):
-            raise ValueError(f"Entry {i} is no tool output.")
-        context[i] = _pruned(entry, stub=stub)
-    runtime.append_splice(
-        mask=full_tape_mask(runtime.tape),
-        payload=tuple(context),
-        strategy="prune",
-        paired_externally=unpaired_call_ids(context),
-        discards_content=True,
-    )
-    runtime.tool_context.files.forget()
 
 
 def requests_left(*, requests: int, prompt: float, first: float, limit: float) -> float:
@@ -746,31 +759,3 @@ def _strings(tree: PlainTree) -> Iterator[str]:
     elif isinstance(tree, Sequence):
         for value in tree:
             yield from _strings(value)
-
-
-# An output is a tool's result, a detached call's stub holding what it wrote so far, or
-# a wake's news of a long call.
-def _output_text(entry: ModelContextEvent) -> str | None:
-    """Return what the model reads of a tool's output; ``None`` for anything else."""
-    if isinstance(entry, ToolResult):
-        return entry.text()
-    if isinstance(entry, SystemMessage) and entry.subtype == "wake":
-        return entry.content or ""
-    return None
-
-
-# A stub's first line says the call runs on or was killed, and a wake's which call
-# it is and how long it has run; dropping the rest keeps that.
-def _pruned(
-    entry: ToolResult | SystemMessage,
-    *,
-    stub: str,
-) -> ToolResult | SystemMessage:
-    """Return ``entry`` reading ``stub`` in place of its output, its heading kept."""
-    if isinstance(entry, ToolResult):
-        if entry.state not in ("pending", "cancelled"):
-            return entry.restated(stub)
-        head = entry.text().partition("\n")[0]
-        return entry.restated(f"{head}\n{stub}")
-    head = (entry.content or "").partition("\n")[0]
-    return replace(entry, content=f"{head}\n{stub}")

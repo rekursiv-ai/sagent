@@ -3,7 +3,7 @@
 ``Tool.call`` returns a ``ToolStreamingResult`` at once. It has two streams, the
 tool's standard output and standard error, and a future of the tool's result: a
 dataclass with an ``exit_code``. The caller passes it to ``settled``, which
-reads the streams and returns the call's ``ToolResult`` record. A tool writes
+reads the streams and returns the call's ``ToolMessage`` record. A tool writes
 each item as it has it, such as each line a command prints, so a reader sees a
 long call's output while it runs. A result with ``shown`` says what the model
 reads instead of every item, such as a long output cut to its head and tail.
@@ -52,7 +52,7 @@ Typical usage example:
           )
 
   echo: Tool = Echo()
-  result = await settled(echo.call(context, {"text": "hi"}))  # A ``ToolResult``.
+  result = await settled(echo.call(context, {"text": "hi"}))  # A ``ToolMessage``.
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ from collections.abc import (
     Set as AbstractSet,
 )
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, NoneType, UnionType
 from typing import (
@@ -102,7 +103,7 @@ from wesearch.fetch import FetchSession
 from wesearch.fetch.session import default_session
 
 from sagent.runtime.exceptions import describe
-from sagent.session.types import ToolResult
+from sagent.session.types import AgentIdle, ModelIdle, ToolMessage
 
 
 if TYPE_CHECKING:
@@ -169,6 +170,15 @@ class ToolStreamingResult(Generic[Result_co, StreamOut_co, StreamErr_co]):
     """What the model reads instead of the items, such as a long output cut to
     its head and tail; set by the time ``result`` is. ``None``, or a ``None``
     view, shows the items themselves."""
+
+    runs_until_stopped: bool = False
+    """Whether the call ends only when it is stopped or fails, as one that watches
+    does. Run apart, it holds nothing back that waits for the agent to be idle:
+    it has no result to wait for, and wakes the model when it has news."""
+
+    due_after: type[ModelIdle | AgentIdle] | None = None
+    """What the result of the call, run apart, waits for before the model reads it,
+    as a message's ``due_after`` says; ``None`` for the next round, which it starts."""
 
     def __post_init__(self) -> None:
         self.result.add_done_callback(self._end_streams)
@@ -290,6 +300,8 @@ def whole_output[R, O, E](
     *,
     stdout: Stream[O] | None = None,
     stderr: Stream[E] | None = None,
+    runs_until_stopped: bool = False,
+    due_after: type[ModelIdle | AgentIdle] | None = None,
 ) -> ToolStreamingResult[R, O, E]:
     """Return a ``ToolOutput``, or the one a coroutine returns, as a ``ToolStreamingResult``.
 
@@ -299,6 +311,10 @@ def whole_output[R, O, E](
       stdout: Standard output, if the work writes to it as it goes; ``None``
         for work that has nothing until it returns.
       stderr: Standard error, likewise.
+      runs_until_stopped: Whether the work ends only when it is stopped or
+        fails, as ``ToolStreamingResult.runs_until_stopped`` says.
+      due_after: What the result waits for, as ``ToolStreamingResult.due_after``
+        says.
 
     Returns:
       streaming_result: Its streams get the output's items when the work
@@ -315,6 +331,8 @@ def whole_output[R, O, E](
         stdout=out,
         stderr=err,
         shown=shown,
+        runs_until_stopped=runs_until_stopped,
+        due_after=due_after,
     )
 
 
@@ -425,11 +443,11 @@ def write_fitting[T](
 
 @overload
 async def settled(
-    streaming_result: ToolStreamingResult[ToolResult, object, object],
+    streaming_result: ToolStreamingResult[ToolMessage, object, object],
     *,
     call_id: str = "",
     on_item: Callable[[Literal["stdout", "stderr"], object], object] = ...,
-) -> ToolResult: ...
+) -> ToolMessage: ...
 
 
 @overload
@@ -438,7 +456,7 @@ async def settled[R, O, E](
     *,
     call_id: str = "",
     on_item: Callable[[Literal["stdout", "stderr"], object], object] = ...,
-) -> ToolResult[R, O, E | str]: ...
+) -> ToolMessage[R, O, E | str]: ...
 
 
 async def settled(
@@ -448,7 +466,7 @@ async def settled(
     on_item: Callable[[Literal["stdout", "stderr"], object], object] = (
         lambda _stream, _item: None
     ),
-) -> ToolResult:
+) -> ToolMessage:
     """Read ``streaming_result`` to its end and return the call's record.
 
     This never raises for the tool's failure or for a cancel, so every call
@@ -499,11 +517,11 @@ async def settled(
     except Exception as error:  # noqa: BLE001 -- A tool's failure is the call's answer, not its runner's.
         state, errors = "failed", (describe(error),)
     else:
-        if isinstance(result, ToolResult):
+        if isinstance(result, ToolMessage):
             return replace(result, call_id=call_id)
         view = streaming_result.shown
         shown = None if view is None else view.result()
-        return ToolResult(
+        return ToolMessage(
             call_id=call_id,
             state="done",
             stdout=tuple(stdout),
@@ -519,7 +537,7 @@ async def settled(
     while not result_future.done():
         with contextlib.suppress(asyncio.CancelledError):
             _ = await asyncio.wait((result_future,))
-    return ToolResult(
+    return ToolMessage(
         call_id=call_id,
         state=state,
         stdout=tuple(stdout),
@@ -540,8 +558,8 @@ class Reminding(Protocol):
 class Skipping(Protocol):
     """A tool that reads the user's files and can leave one unread, such as a skill."""
 
-    def skipped(self, context: ToolContext) -> tuple[str, ...]:
-        """Return which files were left unread, and why; one line each."""
+    def skipped(self, context: ToolContext) -> tuple[Path, ...]:
+        """Return each file left unread; the log says why."""
         ...
 
 
@@ -1000,19 +1018,33 @@ def checked(value: object, hint: object, *, key: str) -> object:
         if not isinstance(value, AbstractSet):
             raise _misfit(key, "set", value)
         return frozenset(checked(v, args[0], key=key) for v in value)
+    # ``type[A | B]``: a class, one of those named or a subclass of one.
+    if origin is type:
+        named = _args(args[0]) if _is_union(get_origin(args[0])) else args
+        if isinstance(value, type) and issubclass(
+            value,
+            tuple(cast("type", k) for k in named),
+        ):
+            return value
+        raise _misfit(key, f"one of {[cast('type', k).__name__ for k in named]}", value)
     if _is_record(hint):
         return _checked_record(value, hint, key=key)
     if (
         (hint is bool and isinstance(value, bool))
         or (hint is str and isinstance(value, str))
         or (hint is bytes and isinstance(value, bytes))
+        or (hint is datetime and isinstance(value, datetime))
+        or (hint is Path and isinstance(value, Path))
     ):
         return value
     if hint is int and isinstance(value, int) and not isinstance(value, bool):
         return value
     if hint is float and isinstance(value, int | float) and not isinstance(value, bool):
         return float(value)
-    raise _misfit(key, "bytes" if hint is bytes else _schema(hint).get("type"), value)
+    # JSON spells none of these, so no schema names them: only a decoded record holds one.
+    if hint is bytes or hint is datetime or hint is Path:
+        raise _misfit(key, cast("type", hint).__name__, value)
+    raise _misfit(key, _schema(hint).get("type"), value)
 
 
 def _checked_member(value: object, args: tuple[object, ...], *, key: str) -> object:

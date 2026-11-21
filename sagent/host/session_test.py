@@ -40,11 +40,11 @@ from sagent.host.wire import (
 )
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.runtime.types import Markers
+from sagent.runtime.types import Stubs
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     SystemMessage,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools.agent_send import AgentSend
@@ -236,19 +236,19 @@ async def test_a_failure_and_an_unknown_tool_are_results(tmp_path: Path) -> None
     failed = await session._result(cast(Tool, tool), context, call=call)
     unstartable = Mock(spec=Read, call=Mock(side_effect=ValueError("no start")))
     never = await session._result(cast(Tool, unstartable), context, call=call)
-    assert never == ToolResult(
+    assert never == ToolMessage(
         call_id="",
         state="failed",
         stderr=("ValueError: no start",),
     )
     unknown = await session._result(None, context, call=replace(call, tool="Train"))
 
-    assert failed == ToolResult(
+    assert failed == ToolMessage(
         call_id="",
         state="failed",
         stderr=("ValueError: bad input",),
     )
-    assert unknown == ToolResult(
+    assert unknown == ToolMessage(
         call_id="",
         state="failed",
         stderr=("Unknown tool: Train",),
@@ -287,7 +287,7 @@ async def test_the_end_of_input_cancels_what_runs(
         writer.write_eof()
         cancelled = await _result(reader)
         assert (cancelled.id, cancelled.record.state) == ("1", "cancelled")
-        assert cancelled.record.shown == Markers().cancelled
+        assert cancelled.record.shown == Stubs().cancelled
         assert cleaned == [True]
 
 
@@ -396,7 +396,7 @@ async def test_a_note_from_the_caller_reaches_an_agent_here(
         assert [
             (m.sender, m.content)
             for m in team["w"].runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
+            if isinstance(m, AgentMessage)
         ] == [("x", "go")]
         assert caplog.messages == ["note from x to 'gone', who is not here"]
 
@@ -572,7 +572,7 @@ def test_handoff_buffers_results_and_agent_messages_until_resumed() -> None:
         encoded(
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="done",
                     stdout=("read",),
@@ -687,7 +687,7 @@ async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
         assert (await _result(reader)).id == "barrier"
         assert team.owes("caller#s") == {}
         told = kid.runtime.inbox.drain_nowait()
-        assert not [m for m in told if isinstance(m, AgentToAgentMessage)]
+        assert not [m for m in told if isinstance(m, AgentMessage)]
         assert [m for m in told if isinstance(m, SystemMessage)] == (
             [
                 SystemMessage(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, override
 from unittest.mock import (
@@ -18,6 +19,7 @@ from treekle import PlainTree
 
 import pytest
 
+from sagent.model.cost import TokenCost
 from sagent.model.exceptions import (
     AuthError,
     ContextOverflowError,
@@ -32,16 +34,23 @@ from sagent.model.scripted import call, reply
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
+    AgentSpawnResult,
     AssistantMessage,
     BashResult,
+    Cancelled,
     EditResult,
+    Failed,
     McpResult,
+    ModelIdle,
+    SessionContext,
     Splice,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
     WriteResult,
@@ -124,8 +133,10 @@ def _renderer(
     return Scrollback(printer, tools=_tools(), flush_chars=flush_chars), printer
 
 
-def _turn(*calls: ToolCall, text: str = "") -> types.ModelResponseComplete:
-    return types.ModelResponseComplete(response=reply(text, calls=calls))
+def _turn(*calls: ToolCall, text: str = "") -> types.ModelResponseCompleted:
+    return types.ModelResponseCompleted(
+        outcome=Succeeded(value=reply(text, calls=calls)),
+    )
 
 
 def _result(
@@ -134,15 +145,15 @@ def _result(
     *,
     is_error: bool = False,
     stub: Literal["pending", "cancelled"] | None = None,
-) -> ToolResult:
+) -> ToolMessage:
     if is_error:
-        return ToolResult(
+        return ToolMessage(
             call_id=call_id,
             state="done",
             stderr=(text,),
             result=UncategorizedToolResult(exit_code=1),
         )
-    return ToolResult(
+    return ToolMessage(
         call_id=call_id,
         state=stub or "done",
         stdout=(text,),
@@ -155,21 +166,59 @@ def _kind(value: object) -> str:
     return "" if isinstance(value, str) else type(value).__name__
 
 
+# Only the runtime knows whether a turn stopped: a compaction cancels a call, a
+# failure may be got past, and a halt or a clear of an agent at rest stops nothing.
+def test_a_turn_that_stopped_is_noted_and_a_call_that_ended_or_a_halt_asked_is_not() -> (
+    None
+):
+    render, printer = _renderer()
+    render(types.ModelHalt())
+    render(types.SessionClearCompleted(outcome=Succeeded(value=None)))
+    assert printer.printed == []
+    render(types.ModelResponseStarted())
+    render(types.ModelResponseTextStreamed(text="partial"))
+    render(types.ModelResponseCompleted(outcome=Cancelled()))
+    render(types.ModelResponseTextStreamed(text="more"))
+    render(
+        types.ModelResponseCompleted(outcome=Failed(exception=ValueError("x"))),
+    )
+    assert printer.printed == [("markdown", "partial"), ("markdown", "more")]
+    render(ModelIdle(outcome=Cancelled()))
+    assert printer.printed[2:] == [("note", "[interrupted]")]
+
+
+def test_what_a_halted_reply_had_said_is_printed_before_the_note() -> None:
+    render, printer = _renderer()
+    render(types.ModelResponseStarted())
+    render(types.ModelResponseTextStreamed(text="so far"))
+    render(types.ModelHalt())
+    render(types.ModelResponseCompleted(outcome=Cancelled()))
+    render(ModelIdle(outcome=Cancelled()))
+    assert printer.printed == [("markdown", "so far"), ("note", "[interrupted]")]
+
+
+def test_the_calls_a_halted_turn_waited_on_are_labelled_before_the_note() -> None:
+    render, printer = _renderer()
+    render(_turn(call("Echo", "1", text="a")))
+    render(ModelIdle(outcome=Cancelled()))
+    assert printer.printed == [("call", "Echo a"), ("note", "[interrupted]")]
+
+
 def test_a_block_renders_once_the_next_one_starts() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="first para"))
-    assert printer.said == []
-    render(types.ModelResponsePartial(text="\n\nsecond"))
-    assert printer.said == [("markdown", "first para")]
-    render(types.ModelResponsePartial(text=" para"))
-    assert printer.said == [("markdown", "first para")]
+    render(types.ModelResponseTextStreamed(text="first para"))
+    assert printer.printed == []
+    render(types.ModelResponseTextStreamed(text="\n\nsecond"))
+    assert printer.printed == [("markdown", "first para")]
+    render(types.ModelResponseTextStreamed(text=" para"))
+    assert printer.printed == [("markdown", "first para")]
 
 
 @pytest.mark.parametrize("block", ["ends X  ", "ends X"])
 def test_a_finished_block_keeps_all_but_its_final_newlines(block: str) -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text=f"{block}\n\n\nnext"))
-    assert printer.said == [("markdown", block)]
+    render(types.ModelResponseTextStreamed(text=f"{block}\n\n\nnext"))
+    assert printer.printed == [("markdown", block)]
 
 
 @pytest.mark.parametrize(
@@ -178,31 +227,31 @@ def test_a_finished_block_keeps_all_but_its_final_newlines(block: str) -> None:
 )
 def test_what_is_held_renders_when_anything_else_shows(held: str, shown: str) -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text=held))
+    render(types.ModelResponseTextStreamed(text=held))
     render(UserMessage(content="next"))
-    assert printer.said == [("markdown", shown), ("user", "next")]
+    assert printer.printed == [("markdown", shown), ("user", "next")]
 
 
 def test_nothing_held_renders_nothing() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="\n\n"))
-    render(types.CompactStarted())
-    assert printer.said == [("note", "[compacting history…]")]
+    render(types.ModelResponseTextStreamed(text="\n\n"))
+    render(types.SessionCompactStarted())
+    assert printer.printed == [("note", "[compacting history…]")]
 
 
 def test_blank_lines_between_blocks_render_once() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="a\n\n- b"))
-    render(types.ModelResponsePartial(text="\n\n- c\n\n\n\nd"))
-    assert printer.said == [("markdown", "a"), ("markdown", "- b\n\n- c")]
+    render(types.ModelResponseTextStreamed(text="a\n\n- b"))
+    render(types.ModelResponseTextStreamed(text="\n\n- c\n\n\n\nd"))
+    assert printer.printed == [("markdown", "a"), ("markdown", "- b\n\n- c")]
 
 
 def test_held_prose_past_the_cap_renders_only_its_whole_lines() -> None:
     render, printer = _renderer(flush_chars=10)
-    render(types.ModelResponsePartial(text="line one\nline tw"))
-    assert printer.said == [("markdown", "line one")]
-    render(types.ModelResponsePartial(text="o\n\nnext"))
-    assert printer.said == [("markdown", "line one"), ("markdown", "line two")]
+    render(types.ModelResponseTextStreamed(text="line one\nline tw"))
+    assert printer.printed == [("markdown", "line one")]
+    render(types.ModelResponseTextStreamed(text="o\n\nnext"))
+    assert printer.printed == [("markdown", "line one"), ("markdown", "line two")]
 
 
 @pytest.mark.parametrize("tail", ["", "z"], ids=["empty-tail", "held-tail"])
@@ -210,13 +259,13 @@ def test_held_text_past_the_cap_renders_unfinished(tail: str) -> None:
     markdown, note = Mock(), Mock()
     printer = Mock(spec=Printer, markdown=markdown, note=note, show_thinking=False)
     render = Scrollback(printer, tools={}, flush_chars=4)
-    render(types.ModelResponsePartial(text="```\n"))
+    render(types.ModelResponseTextStreamed(text="```\n"))
     markdown.assert_not_called()
-    render(types.ModelResponsePartial(text="y"))
+    render(types.ModelResponseTextStreamed(text="y"))
     markdown.assert_called_once_with("```\ny")
-    render(types.ModelResponsePartial(text=tail))
+    render(types.ModelResponseTextStreamed(text=tail))
     markdown.assert_called_once_with("```\ny")
-    render(types.CompactStarted())
+    render(types.SessionCompactStarted())
     assert markdown.call_args_list == [
         mock_call("```\ny"),
         *([mock_call(tail)] if tail else []),
@@ -227,15 +276,13 @@ def test_held_text_past_the_cap_renders_unfinished(tail: str) -> None:
 @pytest.mark.parametrize(
     "event",
     [
-        types.ModelIdle(),
-        types.AgentIdle(),
-        types.CohortStarted(),
-        types.ModelCallStarted(),
-        types.UserQueuedMessage(text="q"),
-        types.UserDeferredMessage(text="d"),
-        types.AgentSendQueuedMessage(sender="a", text="q"),
-        types.AgentSendDeferredMessage(sender="a", text="d"),
-        types.SaveSession(),
+        ModelIdle(outcome=Succeeded(value=None)),
+        types.ModelHalt(),
+        types.SessionClearCompleted(outcome=Succeeded(value=None)),
+        AgentIdle(),
+        types.ToolCohortStarted(),
+        types.ModelResponseStarted(),
+        types.SessionSaveDue(),
     ],
     ids=_kind,
 )
@@ -243,35 +290,35 @@ def test_events_with_nothing_to_show_neither_print_nor_flush(
     event: types.RuntimeEvent,
 ) -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="held"))
+    render(types.ModelResponseTextStreamed(text="held"))
     render(event)
-    assert printer.said == []
+    assert printer.printed == []
 
 
 def test_thinking_shows_only_while_the_printer_shows_it() -> None:
     render, printer = _renderer()
     printer.show_thinking = False
-    render(types.ModelResponseThinking(text="hidden"))
+    render(types.ModelResponseThinkingStreamed(text="hidden"))
     render(_turn(text="done"))
-    assert printer.said == [("markdown", "done")]
+    assert printer.printed == [("markdown", "done")]
 
 
 def test_thinking_heads_once_then_streams_by_block_and_closes_once() -> None:
     render, printer = _renderer()
     for word in ("\n", "first ", "para", "\n\nsecond", " para"):
-        render(types.ModelResponseThinking(text=word))
-    assert printer.said == [("thinking", "["), ("thinking", "\nfirst para\n\n")]
-    render(types.ModelResponsePartial(text="reply"))
-    assert printer.said[2:] == [("thinking", "second para]")]
+        render(types.ModelResponseThinkingStreamed(text=word))
+    assert printer.printed == [("thinking", "["), ("thinking", "\nfirst para\n\n")]
+    render(types.ModelResponseTextStreamed(text="reply"))
+    assert printer.printed[2:] == [("thinking", "second para]")]
 
 
 def test_thinking_a_notice_interrupts_reopens_under_a_new_heading() -> None:
     render, printer = _renderer()
-    render(types.ModelResponseThinking(text="before\n\n"))
-    render(types.CompactStarted())
-    render(types.ModelResponseThinking(text="after"))
-    render(types.ModelResponsePartial(text="reply"))
-    thinking = [s for k, s in printer.said if k == "thinking"]
+    render(types.ModelResponseThinkingStreamed(text="before\n\n"))
+    render(types.SessionCompactStarted())
+    render(types.ModelResponseThinkingStreamed(text="after"))
+    render(types.ModelResponseTextStreamed(text="reply"))
+    thinking = [s for k, s in printer.printed if k == "thinking"]
     assert thinking.count("[") == 2
     assert sum(s.endswith("]") for s in thinking) == 2
 
@@ -281,16 +328,18 @@ def test_word_sized_thinking_deltas_print_one_heading_and_the_joined_text() -> N
     render = Scrollback(printer, tools=_tools())
     words = [f"word{i} " for i in range(20)]
     for word in words:
-        render(types.ModelResponseThinking(text=word))
-    render(types.ModelResponsePartial(text="Answer.", record=1))
+        render(types.ModelResponseThinkingStreamed(text=word))
+    render(types.ModelResponseTextStreamed(text="Answer.", response_record_index=1))
     response = reply("Answer.")
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(Thinking(content="".join(words)), *response.records),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="end_turn",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(Thinking(content="".join(words)), *response.records),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="end_turn",
+                ),
             ),
         ),
     )
@@ -301,28 +350,35 @@ def test_word_sized_thinking_deltas_print_one_heading_and_the_joined_text() -> N
 def test_hidden_thinking_does_not_hold_back_the_reply_after_it() -> None:
     render, printer = _renderer()
     printer.show_thinking = False
-    render(types.ModelResponseThinking(text="hidden"))
-    render(types.ModelResponsePartial(text="a\n\nb", record=1))
-    assert printer.said == [("markdown", "a")]
+    render(types.ModelResponseThinkingStreamed(text="hidden"))
+    render(types.ModelResponseTextStreamed(text="a\n\nb", response_record_index=1))
+    assert printer.printed == [("markdown", "a")]
 
 
 def test_text_after_a_call_waits_to_print_after_the_call() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="Before.\n\nheld"))
-    render(types.ModelResponsePartial(text="After.\n\nnext", record=2))
-    assert printer.said == [("markdown", "Before.")]
+    render(types.ModelResponseTextStreamed(text="Before.\n\nheld"))
+    render(
+        types.ModelResponseTextStreamed(text="After.\n\nnext", response_record_index=2),
+    )
+    assert printer.printed == [("markdown", "Before.")]
     response = reply("Before.\n\nheld", calls=[call("Echo", "1", text="a")])
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(*response.records, AssistantMessage(content="After.\n\nnext")),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="tool_use",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(
+                        *response.records,
+                        AssistantMessage(content="After.\n\nnext"),
+                    ),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="tool_use",
+                ),
             ),
         ),
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("markdown", "Before."),
         ("markdown", "held"),
         ("call", "Echo a"),
@@ -332,52 +388,60 @@ def test_text_after_a_call_waits_to_print_after_the_call() -> None:
 
 def test_a_blank_thinking_stream_prints_nothing() -> None:
     render, printer = _renderer()
-    render(types.ModelResponseThinking(text=" \n"))
+    render(types.ModelResponseThinkingStreamed(text=" \n"))
     render(_turn(text="done"))
-    assert printer.said == [("markdown", "done")]
+    assert printer.printed == [("markdown", "done")]
 
 
 def test_streamed_thinking_is_not_printed_again_by_its_record() -> None:
     render, printer = _renderer()
-    render(types.ModelResponseThinking(text="hm"))
+    render(types.ModelResponseThinkingStreamed(text="hm"))
     response = reply("x")
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(Thinking(content="hm"), *response.records),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="end_turn",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(Thinking(content="hm"), *response.records),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="end_turn",
+                ),
             ),
         ),
     )
-    assert printer.said == [("thinking", "["), ("thinking", "hm]"), ("markdown", "x")]
+    assert printer.printed == [
+        ("thinking", "["),
+        ("thinking", "hm]"),
+        ("markdown", "x"),
+    ]
 
 
 def test_thinking_ends_the_reply_being_streamed_and_titles_do_not() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="held"))
-    render(types.StatusChanged(text="working"))
-    assert printer.said == []
-    render(types.ModelResponseThinking(text="hm"))
-    assert printer.said == [("markdown", "held"), ("thinking", "[")]
+    render(types.ModelResponseTextStreamed(text="held"))
+    render(types.SessionTitleChanged(title="working"))
+    assert printer.printed == []
+    render(types.ModelResponseThinkingStreamed(text="hm"))
+    assert printer.printed == [("markdown", "held"), ("thinking", "[")]
 
 
 def test_an_unstreamed_turn_prints_its_reasoning_and_reply_from_its_records() -> None:
     render, printer = _renderer()
     response = reply("**done**\n", calls=[call("Echo", "1", text="a")])
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(Thinking(content="because"), *response.records),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="tool_use",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(Thinking(content="because"), *response.records),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="tool_use",
+                ),
             ),
         ),
     )
-    render(types.CohortStarted())
-    assert printer.said == [
+    render(types.ToolCohortStarted())
+    assert printer.printed == [
         ("thinking", "[because]"),
         ("markdown", "**done**"),
         ("call", "Echo a"),
@@ -386,35 +450,47 @@ def test_an_unstreamed_turn_prints_its_reasoning_and_reply_from_its_records() ->
 
 def test_command_output_is_a_note_or_an_error() -> None:
     render, printer = _renderer()
-    render.show(types.ModelResponsePartial(text="held"))
+    render.show(types.ModelResponseTextStreamed(text="held"))
     render.show(CommandOutput(text="a", tone="note", command="/model"))
     render.show(CommandOutput(text="no such", tone="error"))
-    assert printer.said == [
+    assert printer.printed == [
         ("markdown", "held"),
         ("note", "[/model] a"),
         ("error", "no such"),
     ]
 
 
-def test_a_skipped_file_is_an_error_the_user_sees() -> None:
-    render, printer = _renderer()
-    render.show(types.Skipped(text="Skipping a.md: line 3."))
-    assert printer.said == [("error", "Skipping a.md: line 3.")]
+def _context_put_in_force(
+    skipped: tuple[Path, ...],
+) -> types.SessionContextUpdateCompleted:
+    return types.SessionContextUpdateCompleted(
+        outcome=Succeeded(
+            value=SessionContext(skipped_instruction_files=skipped),
+        ),
+    )
 
 
-@pytest.mark.parametrize("subtype", ["wake", "nudge"])
-def test_a_note_that_drives_the_model_is_shown_as_the_model_read_it(
-    subtype: str,
-) -> None:
+def test_each_file_a_context_skips_is_an_error_the_user_sees() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="held"))
+    render.show(_context_put_in_force((Path("a.md"), Path("b.md"))))
+    render.show(_context_put_in_force(()))
+    render.show(types.SessionContextUpdateCompleted(outcome=Cancelled()))
+    assert printer.printed == [
+        ("error", "Skipping a.md: see the log for why."),
+        ("error", "Skipping b.md: see the log for why."),
+    ]
+
+
+def test_a_note_that_drives_the_model_is_shown_as_the_model_read_it() -> None:
+    render, printer = _renderer()
+    render(types.ModelResponseTextStreamed(text="held"))
     render(
         SystemMessage(
             content="[talk t1 still running after 15s]\none",
-            subtype=subtype,
+            subtype="nudge",
         ),
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("markdown", "held"),
         ("note", "[talk t1 still running after 15s]\none"),
     ]
@@ -424,13 +500,13 @@ def test_a_note_that_drives_the_model_is_shown_as_the_model_read_it(
 def test_a_note_that_only_informs_the_model_is_not_shown(subtype: str | None) -> None:
     render, printer = _renderer()
     render.show(SystemMessage(content="cwd: /x", subtype=subtype))
-    assert printer.said == []
+    assert printer.printed == []
 
 
-def test_a_skipped_file_is_drawn_when_it_arrives() -> None:
+def test_a_skipped_file_is_drawn_when_its_context_is_put_in_force() -> None:
     render, printer = _renderer()
-    render(types.Skipped(text="Skipping a.md: line 3."))
-    assert printer.said == [("error", "Skipping a.md: line 3.")]
+    render(_context_put_in_force((Path("a.md"),)))
+    assert printer.printed == [("error", "Skipping a.md: see the log for why.")]
 
 
 class _Stranger:
@@ -445,7 +521,11 @@ class _Stranger:
     [
         cast("Shown", _Stranger()),
         # A record arrives by a known event, and fails where records are drawn.
-        types.DetachedResult(result=cast("ToolResult", _Stranger())),
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=replace(reply(), records=(cast("ToolCall", _Stranger()),)),
+            ),
+        ),
     ],
     ids=["event", "record"],
 )
@@ -453,14 +533,14 @@ def test_what_the_renderer_does_not_know_fails_rather_than_draws(given: Shown) -
     render, printer = _renderer()
     with pytest.raises(AssertionError, match="_Stranger"):
         render.show(given)
-    assert printer.said == []
+    assert printer.printed == []
 
 
 def test_a_child_says_its_text_and_calls_under_its_label() -> None:
     render, printer = _renderer()
     turn = _turn(call("Echo", text="hi"), call("Mystery"), text="looking")
-    render(types.ChildEvent(label="Agent_0", inner=turn))
-    assert printer.said == [
+    render(types.ChildEvent(label="Agent_0", event=turn))
+    assert printer.printed == [
         ("note", "Agent_0: looking"),
         ("call", "Agent_0: Echo hi"),
         ("call", "Agent_0: Mystery"),
@@ -471,40 +551,42 @@ def test_a_child_says_its_text_and_calls_under_its_label() -> None:
 def test_a_child_s_blank_text_says_nothing() -> None:
     render, printer = _renderer()
     response = reply("x")
-    blank = types.ModelResponseComplete(
-        response=type(response)(
-            records=(
-                AssistantMessage(content="  "),
-                AssistantMessage(),
-                Thinking(content="t"),
+    blank = types.ModelResponseCompleted(
+        outcome=Succeeded(
+            value=type(response)(
+                records=(
+                    AssistantMessage(content="  "),
+                    AssistantMessage(),
+                    Thinking(content="t"),
+                ),
+                tokens=response.tokens,
+                spend=response.spend,
+                stop_reason="end_turn",
             ),
-            tokens=response.tokens,
-            spend=response.spend,
-            stop_reason="end_turn",
         ),
     )
-    render(types.ChildEvent(label="c", inner=blank))
-    assert printer.said == []
+    render(types.ChildEvent(label="c", event=blank))
+    assert printer.printed == []
 
 
 def test_a_grandchild_is_shown_under_its_own_label() -> None:
     render, printer = _renderer()
     inner = types.ChildEvent(
         label="Agent_0_0",
-        inner=types.ModelResponseError(exception=ValueError("x")),
+        event=ModelIdle(outcome=Failed(exception=ValueError("x"))),
     )
-    render(types.ChildEvent(label="Agent_0", inner=inner))
-    assert printer.said == [("error", "Agent_0_0: ValueError: x")]
+    render(types.ChildEvent(label="Agent_0", event=inner))
+    assert printer.printed == [("error", "Agent_0_0: ValueError: x")]
 
 
 def test_a_child_s_results_show_only_when_they_fail() -> None:
     render, printer = _renderer()
     turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
-    render(types.ChildEvent(label="c", inner=turn))
-    render(types.ChildEvent(label="c", inner=_result("1", "fine", is_error=False)))
+    render(types.ChildEvent(label="c", event=turn))
+    render(types.ChildEvent(label="c", event=_result("1", "fine", is_error=False)))
     failed = _result("2", "bad<system-reminder>r</system-reminder>\n", is_error=True)
-    render(types.ChildEvent(label="c", inner=failed))
-    assert printer.said == [
+    render(types.ChildEvent(label="c", event=failed))
+    assert printer.printed == [
         ("call", "c: Echo a"),
         ("call", "c: Echo b"),
         ("failed", "c: bad"),
@@ -518,8 +600,8 @@ def _rows(printer: RecordingPrinter) -> list[str]:
 def test_a_child_s_failure_names_its_own_call_again() -> None:
     render, printer = _renderer()
     turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
-    render(types.ChildEvent(label="c", inner=turn))
-    render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
+    render(types.ChildEvent(label="c", event=turn))
+    render(types.ChildEvent(label="c", event=_result("1", "broke", is_error=True)))
     assert _rows(printer) == [
         "  c: Echo a",
         "  c: Echo b",
@@ -530,8 +612,8 @@ def test_a_child_s_failure_names_its_own_call_again() -> None:
 
 def test_a_child_s_failure_right_under_its_call_does_not_name_it_again() -> None:
     render, printer = _renderer()
-    render(types.ChildEvent(label="c", inner=_turn(call("Echo", "1", text="a"))))
-    render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
+    render(types.ChildEvent(label="c", event=_turn(call("Echo", "1", text="a"))))
+    render(types.ChildEvent(label="c", event=_result("1", "broke", is_error=True)))
     assert _rows(printer) == ["  c: Echo a", "    ✗ c: broke"]
 
 
@@ -543,8 +625,8 @@ def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
     assert render.shown == 1
     render(_result("9", "bad", is_error=True))
     assert render.shown == 2
-    render(types.ChildEvent(label="c", inner=_result("8", "worse", is_error=True)))
-    assert printer.said == [
+    render(types.ChildEvent(label="c", event=_result("8", "worse", is_error=True)))
+    assert printer.printed == [
         ("call", "Echo a"),
         ("output", "said a"),
         ("error", "bad"),
@@ -556,7 +638,7 @@ def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
 def test_a_result_that_shows_nothing_names_no_call_again() -> None:
     render, printer = _renderer()
     render(_turn(call("Hidden", "1"), call("Hidden", "2"), call("Echo", "3", text="c")))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     for call_id in ("1", "2"):
         render(_result(call_id, "x"))
     render(_result("3", "said c"))
@@ -566,10 +648,10 @@ def test_a_result_that_shows_nothing_names_no_call_again() -> None:
 def test_a_hidden_result_between_a_call_and_its_failure_names_no_call_again() -> None:
     render, printer = _renderer()
     render(_turn(call("Other", "1"), call("Echo", "2", text="b")))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     render(_result("1", "hidden"))
     render(_result("2", "bad", is_error=True))
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Other"),
         ("call", "Echo b"),
         ("output", "hidden"),
@@ -583,7 +665,7 @@ def test_show_result_puts_every_row_under_its_call() -> None:
     hidden = Header(key="1", label="Echo", display=ToolDisplay())
     show_result(printer, _result("1", "hidden"), header=hidden)
     show_result(printer, _result("1", "bad", is_error=True), header=_ECHO)
-    assert printer.said == [
+    assert printer.printed == [
         ("note", "x"),
         ("output", "hidden"),
         ("call", "Echo"),
@@ -597,7 +679,7 @@ def test_a_result_below_a_row_printed_past_scrollback_names_its_call_again(
 ) -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a")))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     match writer:
         case "agent":
             printer.agent("Agent_0", "user", "a question")
@@ -612,27 +694,30 @@ def test_a_child_s_failures_messages_and_suspensions_are_labelled(
 ) -> None:
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
+    failed = Failed(exception=ValueError("x"))
+    # A call of its that failed is its own business: its turn may go on.
     render(
         types.ChildEvent(
             label="c",
-            inner=types.ModelResponseError(exception=ValueError("x")),
+            event=types.ModelResponseCompleted(outcome=failed),
         ),
     )
+    render(types.ChildEvent(label="c", event=ModelIdle(outcome=failed)))
     render(
         types.ChildEvent(
             label="c",
-            inner=AgentToAgentMessage(sender="me", content="hi"),
+            event=AgentMessage(sender="me", content="hi"),
         ),
     )
-    render(types.ChildEvent(label="c", inner=AgentToAgentMessage()))
-    suspended = types.ModelCallSuspended(
+    render(types.ChildEvent(label="c", event=AgentMessage()))
+    suspended = types.ModelResponseSuspended(
         exception=RateLimitedError("spent", limit="weekly"),
-        until=_NOON + 5.0,
-        attempt=1,
+        retry_at=datetime.fromtimestamp(_NOON + 5.0, UTC),
+        failures_in_a_row=1,
     )
-    render(types.ChildEvent(label="c", inner=suspended))
-    render(types.ChildEvent(label="c", inner=UserMessage(content="ignored")))
-    assert printer.said == [
+    render(types.ChildEvent(label="c", event=suspended))
+    render(types.ChildEvent(label="c", event=UserMessage(content="ignored")))
+    assert printer.printed == [
         ("error", "c: ValueError: x"),
         ("agent", "me→c: hi"),
         ("agent", "agent→c: "),
@@ -642,29 +727,58 @@ def test_a_child_s_failures_messages_and_suspensions_are_labelled(
 
 def test_a_child_s_work_does_not_end_the_reply_being_streamed() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="held"))
+    render(types.ModelResponseTextStreamed(text="held"))
     render(
         types.ChildEvent(
             label="c",
-            inner=types.ModelResponseError(exception=ValueError("x")),
+            event=ModelIdle(outcome=Failed(exception=ValueError("x"))),
         ),
     )
-    render(types.ChildDoneEvent(label="c", elapsed=65.0, tokens=12_345, cost=0.426))
-    assert printer.said == [
-        ("error", "c: ValueError: x"),
-        ("note", "[c done: 1m 5s, 12K tokens, $0.43]"),
-    ]
+    assert printer.printed == [("error", "c: ValueError: x")]
+
+
+def test_a_spawn_s_result_says_what_its_child_used() -> None:
+    render, printer = _renderer()
+    render(_turn(call("AgentSpawn", "1", prompt="go")))
+    render(
+        ToolMessage(
+            call_id="1",
+            state="done",
+            stdout=("said",),
+            result=AgentSpawnResult(
+                agent_id="c",
+                tokens=12_345,
+                spend=TokenCost(request=0.426),
+                duration_sec=65.0,
+            ),
+        ),
+    )
+    assert printer.printed[-1] == ("note", "[c done: 1m 5s, 12K tokens, $0.43]")
+
+
+def test_a_spawn_another_harness_logged_says_nothing_of_a_child() -> None:
+    render, printer = _renderer()
+    render(_turn(call("AgentSpawn", "1", prompt="go")))
+    render(
+        ToolMessage(
+            call_id="1",
+            state="done",
+            stdout=("said",),
+            result=AgentSpawnResult(prompt="go"),
+        ),
+    )
+    assert [kind for kind, _ in printer.printed if kind == "note"] == []
 
 
 def test_messages_show_as_bars() -> None:
     render, printer = _renderer()
     render(UserMessage(content="hi"))
     render(UserMessage())
-    render(AgentToAgentMessage(sender="Agent_0", content="done"))
-    render(AgentToAgentMessage(sender="watcher", recipient="Agent", content="ok"))
-    render(AgentToAgentMessage())
-    render(AgentToAgentMessage(sender="user", recipient="Agent", content="ping"))
-    assert printer.said == [
+    render(AgentMessage(sender="Agent_0", content="done"))
+    render(AgentMessage(sender="watcher", recipient="Agent", content="ok"))
+    render(AgentMessage())
+    render(AgentMessage(sender="user", recipient="Agent", content="ping"))
+    assert printer.printed == [
         ("user", "hi"),
         ("user", ""),
         ("agent", "Agent_0→me: done"),
@@ -678,7 +792,7 @@ def test_a_turn_shows_its_calls_and_each_result_by_its_tool_s_display() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a"), call("Other", "2"), text="unstreamed"))
     render(_result("2", "said b"))
-    assert printer.said == [
+    assert printer.printed == [
         ("markdown", "unstreamed"),
         ("call", "Echo a"),
         ("call", "Other"),
@@ -690,19 +804,21 @@ def test_a_turn_shows_its_calls_and_each_result_by_its_tool_s_display() -> None:
 def test_a_call_prints_when_it_starts_before_any_result() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a"), call("Other", "2")))
-    assert printer.said == []
-    render(types.CohortStarted())
-    assert printer.said == [("call", "Echo a"), ("call", "Other")]
+    assert printer.printed == []
+    render(types.ToolCohortStarted())
+    assert printer.printed == [("call", "Echo a"), ("call", "Other")]
 
 
 @pytest.mark.parametrize(
     ("between", "said"),
     [
-        (types.CompactStarted(), ("note", "[compacting history…]")),
+        (types.SessionCompactStarted(), ("note", "[compacting history…]")),
         (
             types.ChildEvent(
                 label="kid",
-                inner=types.ModelResponseError(exception=ValueError("x")),
+                event=ModelIdle(
+                    outcome=Failed(exception=ValueError("x")),
+                ),
             ),
             ("error", "kid: ValueError: x"),
         ),
@@ -717,7 +833,7 @@ def test_a_result_below_anything_else_names_its_call_again(
     render(_turn(call("Echo", "1", text="a")))
     render(between)
     render(_result("1", "said a"))
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo a"),
         said,
         ("call", "Echo a"),
@@ -729,17 +845,19 @@ def test_a_result_after_its_turn_s_closing_text_names_its_call_again() -> None:
     render, printer = _renderer()
     response = reply("", calls=[call("Echo", "1", text="a")])
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(*response.records, AssistantMessage(content="Running.")),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="tool_use",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(*response.records, AssistantMessage(content="Running.")),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="tool_use",
+                ),
             ),
         ),
     )
     render(_result("1", "said a"))
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo a"),
         ("markdown", "Running."),
         ("call", "Echo a"),
@@ -750,24 +868,21 @@ def test_a_result_after_its_turn_s_closing_text_names_its_call_again() -> None:
 def test_a_detached_result_shows_like_any_other() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1")))
-    render(types.DetachedResult(result=_result("1", "late")))
-    assert printer.said[-1] == ("output", "late")
+    render(_result("1", "late"))
+    assert printer.printed[-1] == ("output", "late")
     assert printer.displays[-1] == _SHOWN
 
 
-@pytest.mark.parametrize("delivery", ["BackgroundTask", "DetachedArrived"])
-def test_a_taped_delivery_is_numbered_when_detached_and_again_when_it_lands(
-    delivery: str,
-) -> None:
+def test_a_detached_call_is_numbered_when_detached_and_again_when_its_result_lands() -> (
+    None
+):
     render, printer = _renderer()
     render.show(call("Echo", "1", text="a"))
     render.show(_result("1", "[detached]", stub="pending"))
     render.show(call("Echo", "2", text="b"))
     render.show(_result("2", "now"))
-    render.show(UserMessage(content="[detached tool 1 completed]"))
-    render.show(ToolCall(call_id="1:detached", name=delivery))
-    render.show(_result("1:detached", "late"))
-    assert printer.said == [
+    render.show(_result("1", "late"))
+    assert printer.printed == [
         ("call", "Echo a"),
         ("output", "[detached; Echo#1]"),
         ("call", "Echo b"),
@@ -783,16 +898,16 @@ def test_a_wake_shows_as_its_call_s_output_named_by_its_job() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "c9", text="a")))
     render(_result("c9", "[detached]", stub="pending"))
-    render(types.ModelCallStarted())
+    render(types.ModelResponseStarted())
     render(UserMessage(content="meanwhile"))
     render(
-        SystemMessage(
-            content="[Echo c9 still running after 30s]\nbeat 4\nbeat 5",
-            subtype="wake",
+        ToolMessage(
             call_id="c9",
+            state="pending",
+            stdout=("[Echo c9 still running after 30s]\nbeat 4\nbeat 5",),
         ),
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo a"),
         ("output", "[detached; Echo#1]"),
         ("user", "meanwhile"),
@@ -803,11 +918,50 @@ def test_a_wake_shows_as_its_call_s_output_named_by_its_job() -> None:
     assert printer.displays[-2:] == [_SHOWN, _tools()["Echo"].display]
 
 
+def test_a_wake_names_its_call_once_and_labels_what_it_wrote_when_it_has_no_head() -> (
+    None
+):
+    render, printer = _renderer()
+    render(_turn(call("Echo", "c9", text="a")))
+    render(_result("c9", "[detached]", stub="pending"))
+    render(types.ModelResponseStarted())
+    render(UserMessage(content="one"))
+    # Only the note's own naming of the call is its job's: a second is the call's words.
+    render(
+        ToolMessage(call_id="c9", state="pending", stdout=("[Echo c9 Echo c9 ]\nx",)),
+    )
+    render(UserMessage(content="two"))
+    render(ToolMessage(call_id="c9", state="pending", stdout=("\nbeat 4",)))
+    assert printer.printed[2:] == [
+        ("user", "one"),
+        ("call", "Echo a"),
+        ("output", "[Echo#1 Echo c9 ]"),
+        ("output", "x"),
+        ("user", "two"),
+        # An empty head draws no row, so what the call wrote is what labels it.
+        ("output", ""),
+        ("call", "Echo a"),
+        ("output", "beat 4"),
+    ]
+
+
+def test_a_detached_call_that_ends_cancelled_is_not_said_to_be_undetached() -> None:
+    render, printer = _renderer()
+    render(_turn(call("Echo", "1", text="a")))
+    render(types.ToolCohortStarted())
+    render(_result("1", "[detached]", stub="pending"))
+    render(_result("1", "stopped", stub="cancelled"))
+    assert [text for _, text in printer.printed if "detached" in text] == [
+        "[detached; Echo#1]",
+    ]
+    assert render.shown == 2
+
+
 def test_a_wake_for_a_call_scrollback_never_labelled_is_a_note() -> None:
     render, printer = _renderer()
     note = "[Echo c9 still running after 30s]\nbeat 4"
-    render.show(SystemMessage(content=note, subtype="wake", call_id="c9"))
-    assert printer.said == [("note", note)]
+    render.show(ToolMessage(call_id="c9", state="pending", stdout=(note,)))
+    assert printer.printed == [("note", note)]
 
 
 def test_a_second_detached_call_takes_the_next_number() -> None:
@@ -815,8 +969,8 @@ def test_a_second_detached_call_takes_the_next_number() -> None:
     render(_turn(call("Echo", "1", text="a"), call("Echo", "2", text="b")))
     render(_result("1", "[detached]", stub="pending"))
     render(_result("2", "[detached]", stub="pending"))
-    render(types.ModelCallStarted())
-    assert printer.said == [
+    render(types.ModelResponseStarted())
+    assert printer.printed == [
         ("call", "Echo a"),
         ("output", "[detached; Echo#1]"),
         ("call", "Echo b"),
@@ -828,10 +982,10 @@ def test_a_backgrounded_call_beside_a_running_one_is_labelled_once() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="slow"), call("Echo", "2", text="fast")))
     render(_result("1", "[Running in background: Echo as job 1]", stub="pending"))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     render(_result("2", "fast done"))
-    render(types.DetachedResult(result=_result("1", "slow done")))
-    assert printer.said == [
+    render(_result("1", "slow done"))
+    assert printer.printed == [
         ("call", "Echo slow"),
         ("output", "[detached; Echo#1]"),
         ("call", "Echo fast"),
@@ -846,21 +1000,38 @@ def test_a_backgrounded_call_beside_a_running_one_is_labelled_once() -> None:
 def test_a_call_detached_while_it_runs_is_numbered_under_its_label() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a")))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     render(_result("1", "[detached]", stub="pending"))
-    assert printer.said == [("call", "Echo a"), ("output", "[detached; Echo#1]")]
+    assert printer.printed == [("call", "Echo a"), ("output", "[detached; Echo#1]")]
     assert printer.displays[-1] == _SHOWN
+
+
+def test_a_person_who_is_not_the_session_s_user_is_shown_by_name() -> None:
+    render, printer = _renderer()
+    render(UserMessage(sender="bob", content="hi"))
+    render(UserMessage(content="mine"))
+    assert printer.printed == [("user", "[from user bob]: hi"), ("user", "mine")]
+
+
+def test_a_reply_that_says_nothing_leaves_the_last_turn_s_calls_held() -> None:
+    """A turn's records say for themselves whether they end the labels; none do."""
+    render, printer = _renderer()
+    render(_turn(call("Echo", "1", text="a")))
+    render(_turn())
+    assert printer.printed == []
+    render(types.ToolCohortStarted())
+    assert printer.printed == [("call", "Echo a")]
 
 
 def test_a_stub_for_an_earlier_call_labels_the_held_ones_first() -> None:
     render, printer = _renderer()
     render(UserMessage(content="go"))
     render(_turn(call("Echo", "1", text="a")))
-    render(types.CohortStarted())
+    render(types.ToolCohortStarted())
     render(_turn(call("Echo", "2", text="b")))
     render(_result("1", "[detached]", stub="pending"))
     assert render.shown == 2
-    assert printer.said == [
+    assert printer.printed == [
         ("user", "go"),
         ("call", "Echo a"),
         ("call", "Echo b"),
@@ -874,13 +1045,13 @@ def test_scrollback_names_paths_below_where_sagent_started() -> None:
     render = Scrollback(printer, tools={"Read": Read()}, home=Path("/r"))
     render(_turn(call("Read", "1", file_path="/r/a.py")))
     render(_result("1", "[detached]", stub="pending"))
-    render(types.CohortStarted())
-    render(types.CompactStarted())
-    render(types.DetachedResult(result=_result("1", "x")))
+    render(types.ToolCohortStarted())
+    render(types.SessionCompactStarted())
+    render(_result("1", "x"))
     render(
-        types.ChildEvent(label="kid", inner=_turn(call("Read", file_path="/r/b.py"))),
+        types.ChildEvent(label="kid", event=_turn(call("Read", file_path="/r/b.py"))),
     )
-    assert [said for kind, said in printer.said if kind == "call"] == [
+    assert [label for kind, label in printer.printed if kind == "call"] == [
         "Read a.py",
         "Read a.py",
         "kid: Read b.py",
@@ -890,13 +1061,13 @@ def test_scrollback_names_paths_below_where_sagent_started() -> None:
 def test_a_user_message_that_merely_mentions_a_delivery_still_shows() -> None:
     render, printer = _renderer()
     render.show(UserMessage(content="see [detached tool 1 completed] above"))
-    assert printer.said == [("user", "see [detached tool 1 completed] above")]
+    assert printer.printed == [("user", "see [detached tool 1 completed] above")]
 
 
 def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    write = ToolResult(
+    write = ToolMessage(
         call_id="1",
         state="done",
         stdout=("Wrote a.py.",),
@@ -908,7 +1079,7 @@ def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
     show_result(printer, write, header=replace(_ECHO, display=ToolDisplay()))
     show_result(
         printer,
-        ToolResult(
+        ToolMessage(
             call_id="2",
             state="done",
             stdout=("Wrote b.py.",),
@@ -916,7 +1087,7 @@ def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
         ),
         header=_ECHO,
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
@@ -928,26 +1099,61 @@ def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
 
 def test_cancellations_and_compactions_are_notes() -> None:
     render, printer = _renderer()
-    render(types.ModelResponseCancelled())
-    render(types.CompactStarted())
-    render(types.CompactComplete(token_before=900, token_after=100, payload_entries=4))
-    render(types.CompactComplete(fallback_reason="too big", preserved_tail_count=1))
-    render(types.CompactComplete(fallback_reason="too big", preserved_tail_count=3))
-    render(types.CompactFailed(exception=TimeoutError(), tape_len=1))
+    render(types.SessionCompactStarted())
     render(
-        types.CompactFailed(
-            exception=BudgetExhaustedError(total_cost_usd=2, max_budget_usd=1),
-            tape_len=1,
+        types.SessionCompactCompleted(
+            outcome=Succeeded(
+                value=types.SessionCompacted(
+                    masked_tokens=900,
+                    replacement_tokens=100,
+                    replacement_entries=4,
+                ),
+            ),
         ),
     )
-    assert printer.said == [
-        ("note", "[interrupted]"),
+    render(
+        types.SessionCompactCompleted(
+            outcome=Succeeded(
+                value=types.SessionCompacted(
+                    summary_fallback_reason="too big",
+                    entries_kept_verbatim=1,
+                ),
+            ),
+        ),
+    )
+    render(
+        types.SessionCompactCompleted(
+            outcome=Succeeded(
+                value=types.SessionCompacted(
+                    summary_fallback_reason="too big",
+                    entries_kept_verbatim=3,
+                ),
+            ),
+        ),
+    )
+    render(
+        types.SessionCompactCompleted(
+            outcome=Failed(exception=TimeoutError()),
+            tape_len_before=1,
+        ),
+    )
+    render(
+        types.SessionCompactCompleted(
+            outcome=Failed(
+                exception=BudgetExhaustedError(total_cost_usd=2, max_budget_usd=1),
+            ),
+            tape_len_before=1,
+        ),
+    )
+    render(types.SessionCompactCompleted(outcome=Cancelled(), tape_len_before=1))
+    assert printer.printed == [
         ("note", "[compacting history…]"),
         ("note", "[compaction complete: ~900 → ~100 tokens, 4 entries]"),
         ("note", "[compaction fallback: too big; preserved 1 tail entry]"),
         ("note", "[compaction fallback: too big; preserved 3 tail entries]"),
         ("note", "[compaction failed: TimeoutError]"),
         ("note", "[compaction failed: Budget exhausted: $2.00 >= $1.00]"),
+        ("note", "[compaction cancelled]"),
     ]
 
 
@@ -981,13 +1187,13 @@ def test_cancellations_and_compactions_are_notes() -> None:
     ],
     ids=_kind,
 )
-def test_a_model_error_shows_and_says_what_the_user_can_do(
+def test_a_turn_that_failed_shows_why_and_says_what_the_user_can_do(
     error: Exception,
     banner: str,
 ) -> None:
     render, printer = _renderer()
-    render(types.ModelResponseError(exception=error))
-    assert printer.said == [
+    render(ModelIdle(outcome=Failed(exception=error)))
+    assert printer.printed == [
         ("error", f"{type(error).__name__}: {error}"),
         ("halt", banner),
     ]
@@ -997,7 +1203,7 @@ def test_a_child_s_long_reply_hangs_under_its_label() -> None:
     """A child's words wrapped back to column 0, under its label, not its text."""
     printer = RecordingPrinter(width=30)
     render = Scrollback(printer, tools=_tools())
-    render(types.ChildEvent(label="Agent_0", inner=_turn(text="word " * 12)))
+    render(types.ChildEvent(label="Agent_0", event=_turn(text="word " * 12)))
     rows = _rows(printer)
     assert len(rows) > 1
     assert rows[0].startswith("Agent_0: word")
@@ -1017,8 +1223,8 @@ def test_a_printer_failure_is_logged_and_never_raised(
 
     render = Scrollback(_Broken(), tools=_tools())
     with caplog.at_level(logging.ERROR, logger="sagent.tui.render"):
-        render(types.CompactStarted())
-    assert caplog.messages == ["rendering CompactStarted failed"]
+        render(types.SessionCompactStarted())
+    assert caplog.messages == ["rendering SessionCompactStarted failed"]
 
 
 # Noon local, so a wait under 12 hours stays on the same day in any zone.
@@ -1072,8 +1278,14 @@ def test_a_suspension_shows_why_when_it_resumes_and_what_to_do(
     """The date as ``date`` prints it, and the wait as the status line does."""
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
-    render(types.ModelCallSuspended(exception=error, until=_NOON + wait_sec, attempt=1))
-    assert printer.said == [("error", reason), ("halt", _WAITING)]
+    render(
+        types.ModelResponseSuspended(
+            exception=error,
+            retry_at=datetime.fromtimestamp(_NOON + wait_sec, UTC),
+            failures_in_a_row=1,
+        ),
+    )
+    assert printer.printed == [("error", reason), ("halt", _WAITING)]
 
 
 @pytest.mark.parametrize(
@@ -1082,37 +1294,37 @@ def test_a_suspension_shows_why_when_it_resumes_and_what_to_do(
         (
             types.LoginSwitched(
                 provider="acli",
-                was="default",
-                now="personal",
-                window="5-hour",
-                until=_NOON + 3_600.0,
+                from_login="default",
+                to_login="personal",
+                spent_window="5-hour",
+                spent_window_resets_at=datetime.fromtimestamp(_NOON + 3_600.0, UTC),
             ),
             "[default spent (5-hour, resets Wed Oct 28 13:00:00 (1h 0m 0s)); now on personal]",
         ),
         (
             types.LoginSwitched(
                 provider="acli",
-                was="work",
-                now="default",
-                first="default",
+                from_login="work",
+                to_login="default",
+                first_login_in_order="default",
             ),
             "[on default, first in order]",
         ),
         (
             types.LoginSwitched(
                 provider="acli",
-                was="work",
-                now="personal",
-                first="default",
+                from_login="work",
+                to_login="personal",
+                first_login_in_order="default",
             ),
             "[on personal, first with quota]",
         ),
         (
             types.LoginSwitched(
                 provider="acli",
-                was="work",
-                now="default",
-                window="signed out",
+                from_login="work",
+                to_login="default",
+                spent_window="signed out",
             ),
             "[work signed out; now on default]",
         ),
@@ -1127,7 +1339,7 @@ def test_a_login_switch_says_why_and_what_signs_in_now(
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
     render(switched)
-    assert printer.said == [("note", note)]
+    assert printer.printed == [("note", note)]
 
 
 def test_every_login_spent_says_when_each_resets(
@@ -1136,35 +1348,45 @@ def test_every_login_spent_says_when_each_resets(
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
     render(
-        types.LoginsSpent(
+        types.ModelResponseSuspended(
+            exception=RateLimitedError("spent", limit="5-hour"),
+            retry_at=datetime.fromtimestamp(_NOON + 60.0, UTC),
+            failures_in_a_row=1,
             provider="acli",
-            resets=(("work", _NOON + 60.0), ("default", _NOON + 3_600.0)),
+            reset_at_by_login={
+                "work": datetime.fromtimestamp(_NOON + 60.0, UTC),
+                "default": datetime.fromtimestamp(_NOON + 3_600.0, UTC),
+            },
         ),
     )
-    assert printer.said == [
+    assert printer.printed[0] == (
+        "note",
         (
-            "note",
-            (
-                "[no acli login has quota: work Wed Oct 28 12:01:00 (1m 0s),"
-                " default Wed Oct 28 13:00:00 (1h 0m 0s)]"
-            ),
+            "[no acli login has quota: work Wed Oct 28 12:01:00 (1m 0s),"
+            " default Wed Oct 28 13:00:00 (1h 0m 0s)]"
         ),
-    ]
+    )
 
 
 def test_a_child_s_login_switch_is_noted_under_its_label() -> None:
     render, printer = _renderer()
     switched = types.LoginSwitched(
         provider="acli",
-        was="work",
-        now="default",
-        first="default",
+        from_login="work",
+        to_login="default",
+        first_login_in_order="default",
     )
-    render(types.ChildEvent(label="Agent_0", inner=switched))
-    spent = types.LoginsSpent(provider="acli", resets=(("work", _NOON),))
-    render(types.ChildEvent(label="Agent_0", inner=spent))
-    assert printer.said[0] == ("note", "Agent_0: [on default, first in order]")
-    assert printer.said[1][1].startswith("Agent_0: [no acli login has quota: work ")
+    render(types.ChildEvent(label="Agent_0", event=switched))
+    spent = types.ModelResponseSuspended(
+        exception=RateLimitedError("spent", limit="5-hour"),
+        retry_at=datetime.fromtimestamp(_NOON, UTC),
+        failures_in_a_row=1,
+        provider="acli",
+        reset_at_by_login={"work": datetime.fromtimestamp(_NOON, UTC)},
+    )
+    render(types.ChildEvent(label="Agent_0", event=spent))
+    assert printer.printed[0] == ("note", "Agent_0: [on default, first in order]")
+    assert printer.printed[1][1].startswith("Agent_0: [no acli login has quota: work ")
 
 
 def test_a_suspension_failing_again_says_why_without_the_banner(
@@ -1174,13 +1396,13 @@ def test_a_suspension_failing_again_says_why_without_the_banner(
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
     render(
-        types.ModelCallSuspended(
+        types.ModelResponseSuspended(
             exception=OverloadedError("busy"),
-            until=_NOON + 10.0,
-            attempt=2,
+            retry_at=datetime.fromtimestamp(_NOON + 10.0, UTC),
+            failures_in_a_row=2,
         ),
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("error", "Service overloaded. Resumes Wed Oct 28 12:00:10 (10s)."),
     ]
 
@@ -1288,20 +1510,20 @@ def test_a_tool_that_printed_and_failed_shows_as_a_failure_and_a_command_as_outp
     """A shell that ran a failing command did its job: what it printed is output."""
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    failed = ToolResult(
+    failed = ToolMessage(
         call_id="1",
         state="done",
         stdout=("no such page",),
         result=McpResult(server="srv", tool="get", exit_code=1),
     )
-    exited = ToolResult(
+    exited = ToolMessage(
         call_id="2",
         state="done",
         result=BashResult(command=("bash", "-c", "false"), exit_code=1),
     )
     show_result(printer, failed, header=_ECHO)
     show_result(printer, exited, header=_ECHO)
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo"),
         ("failed", "no such page"),
         ("output", "[exit 1]"),
@@ -1313,12 +1535,12 @@ def test_show_result_shows_a_failure_whatever_the_display() -> None:
     printer.call(_ECHO)
     hidden = replace(_ECHO, display=ToolDisplay())
     show_result(printer, _result("1", "bad", is_error=True), header=hidden)
-    assert printer.said == [("call", "Echo"), ("failed", "bad")]
+    assert printer.printed == [("call", "Echo"), ("failed", "bad")]
 
 
 def test_show_result_shows_an_edit_as_a_diff() -> None:
     printer = RecordingPrinter()
-    edit = ToolResult(
+    edit = ToolMessage(
         call_id="1",
         state="done",
         stdout=("Edited a.py.", Splice(before="x", after="y", start=2)),
@@ -1328,7 +1550,7 @@ def test_show_result_shows_an_edit_as_a_diff() -> None:
     show_result(printer, edit, header=_ECHO)
     show_result(
         printer,
-        ToolResult(
+        ToolMessage(
             call_id="2",
             state="done",
             stdout=("Edited b.py.",),
@@ -1336,14 +1558,14 @@ def test_show_result_shows_an_edit_as_a_diff() -> None:
         ),
         header=_ECHO,
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -2,1 +2,1 @@\n-x\n+y"),
         ("output", "Edited b.py."),
     ]
     pathless = replace(edit, call_id="3", result=EditResult())
     show_result(printer, pathless, header=_ECHO)
-    assert printer.said[-1] == ("diff", "\n@@ -2,1 +2,1 @@\n-x\n+y")
+    assert printer.printed[-1] == ("diff", "\n@@ -2,1 +2,1 @@\n-x\n+y")
 
 
 def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
@@ -1351,7 +1573,7 @@ def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
     printer.call(_ECHO)
     show_result(printer, _result("1", "[detached]", stub="pending"), header=_ECHO)
     show_result(printer, _result("1", "[cancelled]", stub="cancelled"), header=_ECHO)
-    assert printer.said == [("call", "Echo"), ("failed", "[cancelled]")]
+    assert printer.printed == [("call", "Echo"), ("failed", "[cancelled]")]
 
 
 @pytest.mark.parametrize(
@@ -1375,7 +1597,7 @@ def test_show_result_drops_reminders_meant_for_the_model(text: str, shown: str) 
     printer.call(_ECHO)
     show_result(
         printer,
-        ToolResult(
+        ToolMessage(
             call_id="1",
             state="done",
             stdout=(text,),
@@ -1383,7 +1605,7 @@ def test_show_result_drops_reminders_meant_for_the_model(text: str, shown: str) 
         ),
         header=_ECHO,
     )
-    assert printer.said == [("call", "Echo"), ("output", shown)]
+    assert printer.printed == [("call", "Echo"), ("output", shown)]
 
 
 def test_error_text_keeps_a_polished_message_and_names_any_other() -> None:
@@ -1400,13 +1622,13 @@ def test_a_wait_already_past_counts_down_from_zero(
     monkeypatch.setattr(time, "time", lambda: _NOON)
     render, printer = _renderer()
     render(
-        types.ModelCallSuspended(
+        types.ModelResponseSuspended(
             exception=OverloadedError("busy"),
-            until=_NOON - 5.0,
-            attempt=2,
+            retry_at=datetime.fromtimestamp(_NOON - 5.0, UTC),
+            failures_in_a_row=2,
         ),
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("error", "Service overloaded. Resumes Wed Oct 28 11:59:55 (0s)."),
     ]
 
@@ -1425,7 +1647,7 @@ def test_an_empty_write_says_it_wrote_and_a_pathless_one_still_diffs() -> None:
     printer.call(_ECHO)
     show_result(
         printer,
-        ToolResult(
+        ToolMessage(
             call_id="1",
             state="done",
             stdout=("Wrote c.py.",),
@@ -1435,7 +1657,7 @@ def test_an_empty_write_says_it_wrote_and_a_pathless_one_still_diffs() -> None:
     )
     show_result(
         printer,
-        ToolResult(
+        ToolMessage(
             call_id="2",
             state="done",
             stdout=("Wrote the file.",),
@@ -1443,35 +1665,22 @@ def test_an_empty_write_says_it_wrote_and_a_pathless_one_still_diffs() -> None:
         ),
         header=_ECHO,
     )
-    assert printer.said == [
+    assert printer.printed == [
         ("call", "Echo"),
         ("output", "Wrote c.py."),
         ("diff", "\n@@ -0,0 +1,1 @@\n+x"),
     ]
 
 
-def test_a_delivery_is_found_by_the_markers_the_scrollback_was_given() -> None:
-    printer = RecordingPrinter()
-    render = Scrollback(
-        printer,
-        tools=_tools(),
-        markers=types.Markers(arrival="@late"),
-    )
-    render(_turn(call("Echo", "1", text="a")))
-    render(types.CohortStarted())
-    render(_result("1@late", "late"))
-    assert printer.said == [("call", "Echo a"), ("output", "late")]
-
-
-def test_a_child_s_result_is_found_past_a_pending_stub_and_a_delivery() -> None:
+def test_a_child_s_result_is_found_past_a_pending_stub() -> None:
     render, printer = _renderer()
     turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
-    render(types.ChildEvent(label="c", inner=turn))
-    render(types.ChildEvent(label="c", inner=_result("1", "[x]", stub="pending")))
-    render(types.ChildEvent(label="c", inner=_result("1", "late", is_error=True)))
-    delivered = _result(f"2{types.Markers().arrival}", "later", is_error=True)
-    render(types.ChildEvent(label="c", inner=delivered))
-    assert [said for said in printer.said if said[0] != "call"] == [
+    render(types.ChildEvent(label="c", event=turn))
+    render(types.ChildEvent(label="c", event=_result("1", "[x]", stub="pending")))
+    render(types.ChildEvent(label="c", event=_result("1", "late", is_error=True)))
+    render(types.ChildEvent(label="c", event=_result("2", "[y]", stub="pending")))
+    render(types.ChildEvent(label="c", event=_result("2", "later", is_error=True)))
+    assert [entry for entry in printer.printed if entry[0] != "call"] == [
         ("failed", "c: late"),
         ("failed", "c: later"),
     ]
@@ -1479,10 +1688,10 @@ def test_a_child_s_result_is_found_past_a_pending_stub_and_a_delivery() -> None:
 
 def test_a_stream_closed_by_a_note_starts_afresh() -> None:
     render, printer = _renderer()
-    render(types.ModelResponsePartial(text="a"))
-    render(types.CompactStarted())
-    render(types.ModelResponsePartial(text="b\n\nc"))
-    assert printer.said == [
+    render(types.ModelResponseTextStreamed(text="a"))
+    render(types.SessionCompactStarted())
+    render(types.ModelResponseTextStreamed(text="b\n\nc"))
+    assert printer.printed == [
         ("markdown", "a"),
         ("note", "[compacting history…]"),
         ("markdown", "b"),
@@ -1506,19 +1715,19 @@ def test_held_text_past_the_cap_keeps_an_open_fence_whole(
 ) -> None:
     """Only a line that starts with a fence opens or closes one."""
     render, printer = _renderer(flush_chars=10)
-    render(types.ModelResponsePartial(text=held))
-    assert printer.said == [("markdown", shown)]
+    render(types.ModelResponseTextStreamed(text=held))
+    assert printer.printed == [("markdown", shown)]
 
 
 def test_each_message_and_reply_counts_toward_what_a_replay_shows() -> None:
     render, printer = _renderer()
     render(UserMessage(content="a"))
     render(UserMessage(content="b"))
-    render(AgentToAgentMessage(sender="user"))
-    render(AgentToAgentMessage(sender="Agent_0", content="c"))
+    render(AgentMessage(sender="user"))
+    render(AgentMessage(sender="Agent_0", content="c"))
     render(_turn(text="reply"))
     assert render.shown == 5
-    assert ("note", "[/send] user→me: ") in printer.said
+    assert ("note", "[/send] user→me: ") in printer.printed
 
 
 @pytest.mark.parametrize(
@@ -1533,51 +1742,55 @@ def test_a_thinking_record_prints_only_when_shown_and_said(
     render, printer = _renderer(show_thinking=show_thinking)
     response = reply("x")
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(Thinking(content=content), *response.records),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="end_turn",
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(Thinking(content=content), *response.records),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="end_turn",
+                ),
             ),
         ),
     )
-    assert printer.said == [("markdown", "x")]
+    assert printer.printed == [("markdown", "x")]
 
 
 def test_a_reply_keeps_its_trailing_spaces_and_a_wordless_one_prints_nothing() -> None:
     render, printer = _renderer()
     response = reply("x")
     render(
-        types.ModelResponseComplete(
-            response=type(response)(
-                records=(
-                    AssistantMessage(),
-                    AssistantMessage(content="tail X  \n"),
-                    AssistantMessage(content="ends X\n"),
+        types.ModelResponseCompleted(
+            outcome=Succeeded(
+                value=type(response)(
+                    records=(
+                        AssistantMessage(),
+                        AssistantMessage(content="tail X  \n"),
+                        AssistantMessage(content="ends X\n"),
+                    ),
+                    tokens=response.tokens,
+                    spend=response.spend,
+                    stop_reason="end_turn",
                 ),
-                tokens=response.tokens,
-                spend=response.spend,
-                stop_reason="end_turn",
             ),
         ),
     )
-    assert printer.said == [("markdown", "tail X  "), ("markdown", "ends X")]
+    assert printer.printed == [("markdown", "tail X  "), ("markdown", "ends X")]
     assert render.shown == 2
 
 
 def test_command_output_may_be_a_plain_line() -> None:
     render, printer = _renderer()
     render.show(CommandOutput(text="a", tone="line"))
-    assert printer.said == [("line", "a")]
+    assert printer.printed == [("line", "a")]
 
 
 def test_a_result_right_after_its_detached_label_names_its_call_once() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a")))
     render(_result("1", "[detached]", stub="pending"))
-    render(types.DetachedResult(result=_result("1", "late")))
-    assert printer.said == [
+    render(_result("1", "late"))
+    assert printer.printed == [
         ("call", "Echo a"),
         ("output", "[detached; Echo#1]"),
         ("output", "[undetached; Echo#1]"),

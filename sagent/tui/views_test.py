@@ -21,7 +21,11 @@ from sagent.agent.team import Team
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
-from sagent.session.types import AssistantMessage, UserMessage
+from sagent.session.types import (
+    AgentIdle,
+    AssistantMessage,
+    UserMessage,
+)
 from sagent.tui import views as views_module
 from sagent.tui.console import Title
 from sagent.tui.prompt import Navigation
@@ -68,7 +72,7 @@ async def _idle(agent: Agent) -> None:
     idle = asyncio.Event()
 
     def watch(event: types.RuntimeEvent) -> None:
-        if isinstance(event, types.AgentIdle):
+        if isinstance(event, AgentIdle):
             idle.set()
 
     agent.runtime.observers.append(watch)
@@ -498,7 +502,7 @@ async def test_a_view_is_built_on_its_own_agent_s_parts(
     assert view.status in kid.runtime.observers
     assert view.status.spend == kid.spend_usd
     assert view.scrollback.tools is kid.tools
-    assert view.scrollback.markers is kid.runtime.markers
+    assert view.scrollback.stubs is kid.runtime.stubs
     assert view.scrollback.home == kid.runtime.tool_context.origin
     assert view.deferred.runtime is kid.runtime
     assert view.deferred.panes is view.panes

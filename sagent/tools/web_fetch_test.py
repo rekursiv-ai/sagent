@@ -16,7 +16,7 @@ from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.session.types import ToolResult, WebFetchResult
+from sagent.session.types import ToolMessage, WebFetchResult
 from sagent.tools import web_fetch
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.types import ToolContext, settled
@@ -156,7 +156,7 @@ def test_anything_else_stays_a_shell_command(command: str) -> None:
 async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
     tool = WebFetch()
     result = await settled(tool.call(_CONTEXT, {"url": "https://example.com"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("page text\n",),
@@ -223,7 +223,7 @@ async def test_a_body_must_fit_the_method(
             {"url": "https://e.com", **arguments},
         ),
     )
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=(error,),
@@ -329,7 +329,7 @@ async def test_a_bot_block_says_how_to_clear_it(fetches: Fetches) -> None:
             {"url": "https://e.com"},
         ),
     )
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=(CloudflareChallengeError.explain("https://e.com"),),
@@ -350,7 +350,7 @@ async def test_a_failed_fetch_says_why(fetches: Fetches, error: Exception) -> No
     fetches.error = error
     tool = WebFetch()
     result = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=(f"Fetch failed: {error}",),

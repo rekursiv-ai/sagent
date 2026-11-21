@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, override
 from unittest.mock import Mock
 
@@ -23,15 +24,19 @@ from sagent.runtime import types
 from sagent.session.jsonl import read_record, record_line
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
+    Failed,
+    Outcome,
+    SessionContext,
     SessionResult,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -43,7 +48,6 @@ from sagent.tools.types import ToolContext, settled
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from treekle import PlainTree
 
@@ -96,18 +100,18 @@ def _setup(
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="c0", name="Read", arguments={"file_path": "a.py"}),
-        ToolResult(
+        ToolMessage(
             call_id="c0",
             state="done",
             stdout=("a" * 4_000,),
             result=UncategorizedToolResult(),
         ),
         ToolCall(call_id="c1", name="Grep"),
-        ToolResult(call_id="c1", state="cancelled", stdout=("b" * 400,)),
+        ToolMessage(call_id="c1", state="cancelled", stdout=("b" * 400,)),
         AssistantMessage(content="read it"),
-        AgentToAgentMessage(content="peer says", sender="Agent_0", recipient="Agent"),
+        AgentMessage(content="peer says", sender="Agent_0", recipient="Agent"),
         SystemMessage(content="a note"),
-        TurnContext(cwd="/w"),
+        SessionContext(cwd=Path("/w")),
     )
     return agent, tool
 
@@ -165,18 +169,20 @@ async def test_list_cuts_a_head_only_past_80_and_names_unknown_and_several_calls
     tmp_path: Path,
 ) -> None:
     agent, tool = _setup(tmp_path)
-    agent.runtime.append_clear()
+    agent.runtime.tape.append_clear()
     agent.session.append(
         UserMessage(content="x" * 80),
         UserMessage(content="y" * 81),
         ToolCall(call_id="c2", name="Read"),
         ToolCall(call_id="c3", name="Grep"),
-        ToolResult(
+        ToolMessage(call_id="c2", state="pending", stdout=("so far",)),
+        ToolMessage(
             call_id="gone",
             state="done",
             stdout=("orphan",),
             result=UncategorizedToolResult(),
         ),
+        UserMessage(content="hi", sender="bob"),
     )
 
     lines = (await _ask(tool, tmp_path, {"action": "list"})).splitlines()
@@ -185,7 +191,9 @@ async def test_list_cuts_a_head_only_past_80_and_names_unknown_and_several_calls
         f"#0 user message (80 chars): {'x' * 80}",
         f"#1 user message (81 chars): {'y' * 80}...",
         "#2 your turn, calling Read, Grep (4 chars): {}{}",
-        "#3 result of ? (6 chars): orphan",
+        "#3 pending result of Read (6 chars): so far",
+        "#4 result of ? (6 chars): orphan",
+        "#5 user message from bob (2 chars): hi",
     ]
 
 
@@ -212,7 +220,7 @@ async def test_list_says_what_each_entry_is_and_how_it_starts(tmp_path: Path) ->
 async def test_an_empty_context_says_so(tmp_path: Path) -> None:
     _, tool = _setup(tmp_path)
     agent = tool.team["Agent"]
-    agent.runtime.append_clear()
+    agent.runtime.tape.append_clear()
 
     assert await _ask(tool, tmp_path, {"action": "list"}) == "The context is empty."
 
@@ -239,7 +247,7 @@ async def test_read_gives_each_entry_whole_once(
     with pytest.raises(ValueError, match="invalid entry") as caught:
         await _ask(tool, tmp_path, {"action": "read", "ids": [2]})
     assert caught.value is failure
-    picked.assert_called_once_with(agent.runtime.context().messages, (2,))
+    picked.assert_called_once_with(agent.runtime.tape.context().messages, (2,))
 
 
 @pytest.mark.parametrize(
@@ -301,7 +309,7 @@ async def test_a_record_with_no_words_matches_nothing(tmp_path: Path) -> None:
         UncategorizedRecord(kind="note"),
     )
     agent, tool = _setup(tmp_path, journal=journal)
-    agent.runtime.append_clear()
+    agent.runtime.tape.append_clear()
 
     found = await _ask(tool, tmp_path, {"action": "search", "text": "x"})
 
@@ -319,9 +327,9 @@ async def test_search_without_a_journal_reads_the_session_kept_in_memory(
     settings = await _ask(tool, tmp_path, {"action": "search", "text": "/w"})
     result = await _ask(tool, tmp_path, {"action": "search", "text": "bbbb"})
 
-    assert found == "record 9, AgentToAgentMessage: ...peer says..."
-    assert settings == "record 11, TurnContext: ...Working directory: /w..."
-    assert result.startswith("record 6, ToolResult: ...bbbb")
+    assert found == "record 9, AgentMessage: ...peer says..."
+    assert settings == "record 11, SessionContext: ...Working directory: /w..."
+    assert result.startswith("record 6, ToolMessage: ...bbbb")
 
 
 @pytest.mark.asyncio
@@ -347,7 +355,7 @@ async def test_an_estimate_of_several_names_each(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     agent.session.append(
         ToolCall(call_id="c2", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="c2",
             state="done",
             stdout=("c" * 400,),
@@ -382,12 +390,12 @@ async def test_only_output_a_drop_would_shrink_can_be_pruned(
     agent, tool = _setup(tmp_path)
     agent.session.append(
         ToolCall(call_id="c2", name="Grep"),
-        ToolResult(call_id="c2", state="pending", shown="[running]"),
+        ToolMessage(call_id="c2", state="pending", shown="[running]"),
     )
-    entries = agent.runtime.context().messages
+    entries = agent.runtime.tape.context().messages
     at = {
         "not-a-result": 0,
-        **{e.state: i for i, e in enumerate(entries) if isinstance(e, ToolResult)},
+        **{e.state: i for i, e in enumerate(entries) if isinstance(e, ToolMessage)},
     }[which]
     with pytest.raises(
         ValueError,
@@ -399,32 +407,54 @@ async def test_only_output_a_drop_would_shrink_can_be_pruned(
 @pytest.mark.asyncio
 async def test_a_long_call_s_stub_and_news_can_be_pruned(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
-    news = SystemMessage(
-        content="[talk c2 running after 15s]\n" + "y" * 400,
-        subtype="wake",
+    news = ToolMessage(
+        call_id="c2",
+        state="pending",
+        stdout=("[talk c2 running after 15s]\n" + "y" * 400,),
     )
     agent.session.append(
         ToolCall(call_id="c2", name="Bash"),
-        ToolResult(call_id="c2", state="pending", shown="[detached]\n" + "x" * 400),
+        ToolMessage(call_id="c2", state="pending", shown="[detached]\n" + "x" * 400),
         AssistantMessage(content="waiting"),
         news,
         AssistantMessage(content="still"),
     )
-    entries = agent.runtime.context().messages
+    entries = agent.runtime.tape.context().messages
     picked = [i for i, e in enumerate(entries) if e in (news, entries[-4])]
     text = await _ask(tool, tmp_path, {"action": "prune", "ids": picked, "reason": "x"})
     assert text.startswith("Prune queued: x")
-    (queued,) = agent.runtime.inbox.drain_nowait()
-    assert isinstance(queued, types.Scheduled)
-    await queued.work()
-    stub = "[pruned: old tool output removed to keep the context small]"
-    stubbed, noted = (agent.runtime.context().messages[i] for i in picked)
-    assert isinstance(stubbed, ToolResult)
-    assert isinstance(noted, SystemMessage)
-    assert (stubbed.text(), noted.content) == (
-        f"[detached]\n{stub}",
-        f"[talk c2 running after 15s]\n{stub}",
+    assert agent.runtime.inbox.drain_nowait() == [
+        types.SessionPrune(sender="Agent", call_ids=("c2",), reason="x"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_estimate_of_one_output_of_a_long_call_names_every_one_dropped(
+    tmp_path: Path,
+) -> None:
+    """A prune names the call, so it drops each of its outputs: the estimate says so."""
+    agent, tool = _setup(tmp_path)
+    news = ToolMessage(
+        call_id="c2",
+        state="pending",
+        stdout=("[talk c2 running after 15s]\n" + "y" * 400,),
     )
+    agent.session.append(
+        ToolCall(call_id="c2", name="Bash"),
+        ToolMessage(call_id="c2", state="pending", shown="[detached]"),
+        AssistantMessage(content="waiting"),
+        news,
+        AssistantMessage(content="still"),
+        ToolMessage(call_id="c2", state="done", stdout=("z" * 400,)),
+        AssistantMessage(content="done"),
+    )
+    entries = agent.runtime.tape.context().messages
+    at = [i for i, e in enumerate(entries) if e is news]
+    late = len(entries) - 2
+
+    text = await _ask(tool, tmp_path, {"action": "estimate", "ids": at})
+
+    assert text.startswith(f"Dropping #{at[0]}, #{late} saves ")
 
 
 @pytest.mark.asyncio
@@ -456,19 +486,164 @@ async def test_a_prune_says_why_and_drops_after_the_call(
     # The drop is queued behind the result of the call the tool itself runs in.
     assert after == [streaming_result.result]
     # The tool ran outside a runtime call, so the event waits behind no result.
-    (queued,) = agent.runtime.inbox.drain_nowait()
-    assert isinstance(queued, types.Scheduled)
-    assert isinstance(queued.done, asyncio.Future)
-    assert not queued.done.done()
-    # The drop finds the result by its call, wherever it is by then.
-    agent.session.append(AssistantMessage(content="later"))
-    await queued.work()
-    results = {r.call_id: r for r in agent.session if isinstance(r, ToolResult)}
-    assert (
-        results["c0"].text()
-        == "[pruned: old tool output removed to keep the context small]"
+    # It names the call whose output the model listed.
+    assert agent.runtime.inbox.drain_nowait() == [
+        types.SessionPrune(sender="Agent", call_ids=("c0",), reason="the file is read"),
+    ]
+
+
+def _kid(
+    tool: AgentSession,
+    tmp_path: Path,
+    *,
+    compactor: Factory[Shrinker] = NoShrinker,
+) -> Agent:
+    """Return a child of ``Agent`` in ``tool``'s team, with one output to prune."""
+    kid = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        compactor=compactor,
     )
-    assert results["c1"].state == "cancelled"
+    _ = tool.team.join(kid, label="kid", parent="Agent")
+    kid.session.append(
+        UserMessage(content="go"),
+        ToolCall(call_id="k0", name="Read"),
+        ToolMessage(
+            call_id="k0",
+            state="done",
+            stdout=("k" * 4_000,),
+            result=UncategorizedToolResult(),
+        ),
+        AssistantMessage(content="read it"),
+    )
+    return kid
+
+
+# The child's model did not ask: it is told nothing. Whoever asked is told by the
+# call's own result, which waits for the prune to end.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "reply"),
+    [
+        (Succeeded(value=None), "Pruned: it is stale\nDropping #2 saves"),
+        (
+            Failed(exception=IndexError("list index out of range")),
+            "ValueError: The prune was not done: list index out of range",
+        ),
+        (
+            Cancelled(),
+            "ValueError: The prune was not done: the agent quit first.",
+        ),
+    ],
+    ids=["done", "failed", "the-child-quit"],
+)
+async def test_a_prune_of_a_child_s_session_waits_and_tells_who_asked_how_it_went(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Outcome[None],
+    reply: str,
+) -> None:
+    agent, tool = _setup(tmp_path)
+    kid = _kid(tool, tmp_path)
+    asked: list[types.RuntimeEvent] = []
+
+    async def ask(request: types.SessionPrune) -> Outcome[None]:
+        asked.append(request)
+        return outcome
+
+    monkeypatch.setattr(kid.runtime, "ask", ask)
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"agent": "kid", "action": "prune", "ids": [2], "reason": "it is stale"},
+        ),
+    )
+
+    assert result.is_error is not isinstance(outcome, Succeeded)
+    assert result.text().startswith(reply)
+    # It names who asked, and tells the child's model nothing.
+    assert asked == [
+        types.SessionPrune(sender="Agent", call_ids=("k0",), reason="it is stale"),
+    ]
+    assert agent.runtime.inbox.drain_nowait() == []
+    assert kid.runtime.inbox.drain_nowait() == []
+
+
+# As a prune of it does: one way to learn how an edit of another's session went.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "outcome", "reply", "asked_for"),
+    [
+        (
+            {"action": "clear"},
+            Succeeded(value=None),
+            "Cleared.",
+            types.SessionClear(sender="Agent"),
+        ),
+        (
+            {"action": "clear"},
+            Cancelled(),
+            "ValueError: The clear was not done: the agent quit first.",
+            types.SessionClear(sender="Agent"),
+        ),
+        (
+            {"action": "compact", "prompt": "keep it"},
+            Succeeded(
+                value=types.SessionCompacted(
+                    masked_tokens=9_000,
+                    replacement_tokens=90,
+                ),
+            ),
+            "Compacted (summary): ~9,000 to ~90 tokens.",
+            types.SessionCompact(sender="Agent", summary_must_keep="keep it"),
+        ),
+        (
+            {"action": "compact"},
+            Failed(exception=RuntimeError("model down")),
+            "ValueError: The compaction was not done: model down",
+            types.SessionCompact(sender="Agent"),
+        ),
+        (
+            {"action": "compact"},
+            Cancelled(),
+            "ValueError: The compaction was not done: it was stopped first.",
+            types.SessionCompact(sender="Agent"),
+        ),
+    ],
+    ids=["cleared", "clear-quit", "compacted", "compact-failed", "compact-stopped"],
+)
+async def test_a_clear_or_compaction_of_a_child_s_session_waits_and_tells_who_asked_how_it_went(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, PlainTree],
+    outcome: Outcome[types.SessionCompacted] | Outcome[None],
+    reply: str,
+    asked_for: types.SessionClear | types.SessionCompact,
+) -> None:
+    agent, tool = _setup(tmp_path)
+    kid = _kid(tool, tmp_path, compactor=SummaryCompactor)
+    asked: list[types.RuntimeEvent] = []
+
+    async def ask(
+        request: types.SessionClear | types.SessionCompact,
+    ) -> Outcome[types.SessionCompacted] | Outcome[None]:
+        asked.append(request)
+        return outcome
+
+    monkeypatch.setattr(kid.runtime, "ask", ask)
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"agent": "kid", **arguments},
+        ),
+    )
+
+    assert result.is_error is not isinstance(outcome, Succeeded)
+    assert result.text() == reply
+    assert asked == [asked_for]
+    assert agent.runtime.inbox.drain_nowait() == []
+    assert kid.runtime.inbox.drain_nowait() == []
 
 
 @pytest.mark.asyncio
@@ -487,9 +662,9 @@ async def test_compact_queues_a_compaction_in_the_style_asked(tmp_path: Path) ->
     second = agent.runtime.inbox.drain_nowait()
 
     assert plain == "Compaction queued (summary)."
-    assert first == [types.Compact(args="keep it")]
+    assert first == [types.SessionCompact(sender="Agent", summary_must_keep="keep it")]
     assert audit == "Compaction queued (session-audit)."
-    assert second == [types.Compact(args="")]
+    assert second == [types.SessionCompact(sender="Agent", summary_must_keep="")]
     compactor = agent.session.compactor
     assert isinstance(compactor, SummaryCompactor)
     assert compactor.style == "session-audit"
@@ -509,7 +684,7 @@ async def test_clear_queues_a_clear_after_the_call(tmp_path: Path) -> None:
 
     assert await _ask(tool, tmp_path, {"action": "clear"}) == "Clear queued."
     # The tool ran outside a runtime call, so the event waits behind no result.
-    assert agent.runtime.inbox.drain_nowait() == [types.Clear()]
+    assert agent.runtime.inbox.drain_nowait() == [types.SessionClear(sender="Agent")]
 
 
 @pytest.mark.asyncio
@@ -600,8 +775,8 @@ async def test_a_read_by_record_or_a_search_decodes_off_the_loop_from_the_first_
     read = await _ask(tool, tmp_path, {"action": "read", "records": [5, 3]})
     found = await _ask(tool, tmp_path, {"action": "search", "text": "peer"})
 
-    assert read.startswith("record 3, ToolResult:\naaaa")
-    assert found.startswith("record 9, AgentToAgentMessage")
+    assert read.startswith("record 3, ToolMessage:\naaaa")
+    assert found.startswith("record 9, AgentMessage")
     assert journal.reads == [(3, False), (0, False)]
 
 
@@ -621,6 +796,9 @@ async def test_a_read_by_record_holds_no_record_after_what_it_shows(
     agent, tool = _setup(tmp_path, journal=_Decoding())
     system_text = "z" * (1 << 16)
     agent.session.append(*(SystemMessage(content=system_text) for _ in range(16)))
+    # Read once first: what a first read sets up, a second does not, so the peak
+    # is what the read holds.
+    _ = await _ask(tool, tmp_path, {"action": "read", "records": [1]})
     tracemalloc.start()
     try:
         read = await _ask(tool, tmp_path, {"action": "read", "records": [1]})

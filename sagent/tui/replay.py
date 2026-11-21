@@ -13,12 +13,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UserMessage,
 )
 
@@ -49,12 +49,12 @@ def replay(agent: Agent, scrollback: Scrollback) -> None:
         match record:
             case (
                 UserMessage()
-                | AgentToAgentMessage()
+                | AgentMessage()
                 | SystemMessage()
                 | AssistantMessage()
                 | Thinking()
                 | ToolCall()
-                | ToolResult()
+                | ToolMessage()
             ):
                 scrollback.show(record)
             case _:

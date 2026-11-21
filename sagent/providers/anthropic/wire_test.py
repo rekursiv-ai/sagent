@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from itertools import pairwise
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -37,18 +38,18 @@ from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
     ContextState,
     IncompleteRecord,
+    SessionContext,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -64,7 +65,6 @@ from sagent.tools.types import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
-    from pathlib import Path
 
     from sagent.model.capability import ModelCapability, ThinkingBudget
     from sagent.model.cost import ServiceTier
@@ -281,13 +281,13 @@ def test_records_of_one_role_share_one_message() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="a", name="Echo", arguments={"text": "1"}),
             ToolCall(call_id="b", name="Echo", arguments={"text": "2"}),
-            ToolResult(
+            ToolMessage(
                 call_id="a",
                 state="done",
                 stdout=("1",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="b",
                 state="done",
                 stdout=("2",),
@@ -311,13 +311,13 @@ def test_tool_ids_are_renamed_consistently_within_a_request() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="fc_1", name="Echo", arguments={"text": "x"}),
             ToolCall(call_id="fc_2", name="Echo"),
-            ToolResult(
+            ToolMessage(
                 call_id="fc_2",
                 state="done",
                 stdout=("b",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="fc_1",
                 state="done",
                 stdout=("a",),
@@ -339,13 +339,13 @@ def test_a_tool_result_carries_its_error_flag_and_its_text() -> None:
             UserMessage(content="go"),
             ToolCall(call_id="a", name="Echo"),
             ToolCall(call_id="b", name="Echo"),
-            ToolResult(
+            ToolMessage(
                 call_id="a",
                 state="done",
                 stdout=("boom",),
                 result=UncategorizedToolResult(exit_code=1),
             ),
-            ToolResult(call_id="b", state="done", result=UncategorizedToolResult()),
+            ToolMessage(call_id="b", state="done", result=UncategorizedToolResult()),
         ],
     )
     failed, empty = _blocks(messages[2])
@@ -370,8 +370,8 @@ def test_a_harness_note_rides_the_user_side_as_a_reminder() -> None:
             SystemMessage(content="Saved."),
             SystemMessage(content=None),
             SystemMessage(content=""),
-            TurnContext(cwd="/work", model="opus"),
-            TurnContext(),
+            SessionContext(cwd=Path("/work"), model="opus"),
+            SessionContext(),
             AssistantMessage(content="ok"),
         ],
     )
@@ -400,14 +400,28 @@ def test_a_harness_note_rides_the_user_side_as_a_reminder() -> None:
     ]
 
 
+def test_a_person_who_is_not_the_session_s_user_is_named_as_an_agent_is() -> None:
+    messages = _messages(
+        [
+            UserMessage(sender="bob", content="hi"),
+            UserMessage(content="mine"),
+            AssistantMessage(content="ok"),
+        ],
+    )
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "[from user bob]: hi"},
+        {"type": "text", "text": "mine"},
+    ]
+
+
 def test_an_agents_message_is_the_user_side_naming_its_sender() -> None:
     png = _png(2, 2)
     messages = _messages(
         [
-            AgentToAgentMessage(sender="lead", content="status?"),
-            AgentToAgentMessage(content="unsigned"),
-            AgentToAgentMessage(),
-            AgentToAgentMessage(
+            AgentMessage(sender="lead", content="status?"),
+            AgentMessage(content="unsigned"),
+            AgentMessage(),
+            AgentMessage(
                 sender="lead",
                 attachments=(Attachment(mime_descriptor="image/png", data=png),),
             ),
@@ -498,7 +512,7 @@ def test_a_context_clear_sends_its_summary_then_its_history() -> None:
                 history=(
                     UserMessage(content="a"),
                     ToolCall(call_id="fc_9", name="Echo"),
-                    ToolResult(
+                    ToolMessage(
                         call_id="fc_9",
                         state="done",
                         stdout=("b",),
@@ -861,7 +875,7 @@ def test_attachments_ride_user_messages_and_tool_results() -> None:
         [
             UserMessage(content="see", attachments=(image,)),
             ToolCall(call_id="a", name="Echo"),
-            ToolResult(
+            ToolMessage(
                 call_id="a",
                 state="done",
                 stdout=(image,),

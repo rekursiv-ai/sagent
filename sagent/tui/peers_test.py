@@ -43,7 +43,7 @@ async def test_flag_slash_and_conversation_share_the_inherited_choice(
         agent,
         catalog=catalog,
         team=team,
-        say=lambda _: None,
+        print_output=lambda _: None,
         screen=_Screen(),
         panes=Panes(),
     )

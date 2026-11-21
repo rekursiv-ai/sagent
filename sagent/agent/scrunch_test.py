@@ -15,7 +15,7 @@ from sagent.model.types import Response
 from sagent.runtime.types import ModelContextEvent
 from sagent.session.types import (
     AssistantMessage,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -57,7 +57,7 @@ def _text(entry: ModelContextEvent) -> str:
         return "".join(
             r.content or "" for r in entry.records if isinstance(r, AssistantMessage)
         )
-    if isinstance(entry, ToolResult):
+    if isinstance(entry, ToolMessage):
         return entry.text()
     assert isinstance(entry, UserMessage)
     return entry.content or ""
@@ -128,7 +128,7 @@ async def test_passes_continue_oldest_first_and_stop_once_the_whole_fits() -> No
 @pytest.mark.asyncio
 async def test_a_partition_never_cuts_a_call_from_its_result() -> None:
     turn = reply("r" * 10, calls=[call("Read", "c1")])
-    result = ToolResult(
+    result = ToolMessage(
         call_id="c1",
         state="done",
         stdout=("t" * 10,),

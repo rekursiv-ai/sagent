@@ -21,13 +21,13 @@ from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
+    SessionContext,
     SessionRecord,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -243,7 +243,7 @@ async def test_runtime_persists_measurements_and_resumes_across_windows(
     ("record", "expected"),
     [
         (
-            ToolResult(
+            ToolMessage(
                 call_id="a",
                 state="done",
                 stdout=("x" * 40,),
@@ -251,7 +251,7 @@ async def test_runtime_persists_measurements_and_resumes_across_windows(
             ),
             10,
         ),
-        (TurnContext(model="abc"), 2),
+        (SessionContext(model="abc"), 2),
         (ToolCall(name="tool", call_id="a", arguments={"x": 1}), 2),
         (Thinking(content="x" * 40), 10),
         (Thinking(summary="x" * 40), 10),
@@ -370,7 +370,7 @@ async def test_runtime_captures_request_before_stream_changes_context(
 
         def during(request: Request) -> Response:
             agent.runtime.system = ("changed",)
-            agent.runtime.append_history(SystemMessage(content="unsent"))
+            agent.runtime.tape.append_history(SystemMessage(content="unsent"))
             return reply(str(len(request.records)), tokens=TokenCount(request=777))
 
         provider.replies.append(during)
@@ -406,7 +406,7 @@ async def test_old_journal_usage_restores_response_meters(tmp_path: Path) -> Non
         tool_context=ToolContext(cwd=tmp_path),
     ) as agent:
         response = next(
-            r for r in agent.runtime.context().messages if isinstance(r, Response)
+            r for r in agent.runtime.tape.context().messages if isinstance(r, Response)
         )
         assert response.tokens == TokenCount(request=11, cache_read=22, response=33)
         assert not agent.runtime.token_accounting.has_measurements

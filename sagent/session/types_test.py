@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, cast
@@ -13,7 +13,7 @@ import json
 import re
 import time
 
-from treekle import PlainTree, ReadError, immutable, json_loads
+from treekle import PlainTree, ReadError, from_plain, immutable, json_loads
 
 import pytest
 
@@ -23,18 +23,21 @@ from sagent.session.types import (
     FORMER_RESULT_KINDS,
     RENAMED,
     RENAMED_KINDS,
+    AgentIdle,
+    AgentMessage,
     AgentSelfResult,
     AgentSendResult,
     AgentSpawnResult,
-    AgentToAgentMessage,
     AssistantMessage,
     Attachment,
     BackgroundTaskResult,
     BashResult,
+    Cancelled,
     ContextClear,
     ContextCompaction,
     ContextState,
     EditResult,
+    Failed,
     GlobResult,
     GrepResult,
     IncompleteRecord,
@@ -42,6 +45,8 @@ from sagent.session.types import (
     ListResult,
     McpResult,
     MemoryResult,
+    ModelIdle,
+    Outcome,
     PaperAuthorResult,
     PaperDetailsResult,
     PaperFetchResult,
@@ -49,18 +54,20 @@ from sagent.session.types import (
     PlanResult,
     PlayAudioResult,
     ReadResult,
+    RecallResult,
     RemoteToolResult,
     RequestMeasurement,
+    SessionContext,
     SessionRecord,
     SessionResult,
     SkillResult,
     Splice,
+    Succeeded,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -69,12 +76,22 @@ from sagent.session.types import (
     WebSearchHit,
     WebSearchResult,
     WriteResult,
+    as_sent,
     current_plain,
+    first_name,
     former_kind,
+    labeled_text,
+    late_messages,
     now_timestamp,
+    pairings,
+    parsed_timestamp,
     record_classes,
+    renamed_records,
+    stated_timestamp,
+    stored_names,
     stored_plain,
     stored_record,
+    timestamp_as_written,
 )
 
 
@@ -107,6 +124,7 @@ _ARGUMENT_ECHO_RESULTS: Final = (
     AgentSelfResult(),
     PaperFetchResult(),
     PlanResult(),
+    RecallResult(),
 )
 """One result of each class whose fields only repeat the call's arguments."""
 
@@ -115,8 +133,8 @@ _ARGUMENT_ECHO_RESULTS: Final = (
 # freeze it: a default is frozen already, and would show nothing.
 def _every_record() -> list[SessionRecord]:
     return [
-        TurnContext(
-            cwd="/w",
+        SessionContext(
+            cwd=Path("/w"),
             model="m",
             effort="high",
             encoding={"crlf": True},
@@ -135,7 +153,7 @@ def _every_record() -> list[SessionRecord]:
             arguments={"path": "a.py", "n": [1, 2]},
             extra=_json(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="1",
             wire_id="ab12",
             state="done",
@@ -144,7 +162,7 @@ def _every_record() -> list[SessionRecord]:
             result=UncategorizedToolResult(exit_code=2),
             extra=_json(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="2",
             state="done",
             stdout=(
@@ -161,44 +179,44 @@ def _every_record() -> list[SessionRecord]:
             result=UncategorizedToolResult(),
             shown="[pruned]",
         ),
-        ToolResult(call_id="3", state="pending", shown="[running]"),
-        ToolResult(call_id="4", state="cancelled", stdout=("so far\n",)),
-        ToolResult(call_id="5", state="failed", stderr=("ValueError: no",)),
+        ToolMessage(call_id="3", state="pending", shown="[running]"),
+        ToolMessage(call_id="4", state="cancelled", stdout=("so far\n",)),
+        ToolMessage(call_id="5", state="failed", stderr=("ValueError: no",)),
         *(
-            ToolResult(call_id=type(result).__name__, state="done", result=result)
+            ToolMessage(call_id=type(result).__name__, state="done", result=result)
             for result in _ARGUMENT_ECHO_RESULTS
         ),
-        ToolResult(
+        ToolMessage(
             call_id="6",
             state="done",
             stdout=("3\tx\n", LineSpan(start=3, count=1)),
             result=ReadResult(path="/r/a.py", status="past_end", exit_code=1),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="7",
             state="done",
             stdout=("Wrote /r/a.py.",),
             result=WriteResult(path="/r/a.py", content="x\n"),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="8",
             state="done",
             stdout=("Edited /r/a.py.", Splice(before="a", after="b")),
             result=EditResult(path="/r/a.py"),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="9",
             state="done",
             stdout=("t\nu\ns", WebSearchHit(url="u", title="t", snippet="s")),
             result=WebSearchResult(query="q", duration_sec=0.5),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="10",
             state="done",
             stdout=("page",),
             result=WebFetchResult(url="http://a", code=200, duration_sec=0.5, size=4),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="11",
             state="done",
             stdout=("three TODOs",),
@@ -214,7 +232,12 @@ def _every_record() -> list[SessionRecord]:
                 output_file="/s/session.jsonl",
             ),
         ),
-        SystemMessage(content="reminder", subtype="rules", extra=_json()),
+        SystemMessage(
+            content="reminder",
+            subtype="rules",
+            due_after=ModelIdle,
+            extra=_json(),
+        ),
         TokenUsage(
             info={"request": 1},
             rate_limits={"5h": 0.5},
@@ -240,7 +263,13 @@ def _every_record() -> list[SessionRecord]:
             history=(UserMessage(content="before"),),
             extra=_json(),
         ),
-        AgentToAgentMessage(content="ping", sender="a", recipient="b", extra=_json()),
+        AgentMessage(
+            content="ping",
+            sender="a",
+            recipient="b",
+            due_after=AgentIdle,
+            extra=_json(),
+        ),
         UncategorizedRecord(kind="custom", payload={"k": "v"}),
         IncompleteRecord(text="{torn"),
     ]
@@ -262,11 +291,11 @@ def pacific(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.mark.usefixtures("pacific")
 def test_turn_context_text_states_each_setting_on_its_own_line() -> None:
-    context = TurnContext(
-        cwd="/w",
+    context = SessionContext(
+        cwd=Path("/w"),
         environment="Platform: linux",
         model="opus",
-        timestamp="2026-10-23T00:00:00Z",
+        timestamp=datetime(2026, 10, 23, tzinfo=UTC),
         agents_md="Be terse.",
     )
     assert context.text() == (
@@ -278,34 +307,347 @@ def test_turn_context_text_states_each_setting_on_its_own_line() -> None:
     )
 
 
+def test_turn_context_text_names_the_session_s_user_first() -> None:
+    """Who a message with no sender is from."""
+    assert SessionContext(user="ann", cwd=Path("/w")).text() == (
+        "User: ann\nWorking directory: /w"
+    )
+
+
 @pytest.mark.usefixtures("pacific")
-@pytest.mark.parametrize(
-    ("timestamp", "shown"),
-    [
-        ("2026-12-01T08:30:00+00:00", "Tue 2026-12-01 00:30 -08:00 (PST)"),
-        ("2026-10-23T09:00:00", "2026-10-23T09:00:00"),
-        ("yesterday", "yesterday"),
-    ],
-    ids=["winter", "no-offset", "no-time"],
-)
-def test_the_time_reads_where_the_user_is(timestamp: str, shown: str) -> None:
-    assert TurnContext(timestamp=timestamp).text() == f"Current time: {shown}"
+def test_the_time_reads_where_the_user_is() -> None:
+    winter = datetime(2026, 12, 1, 8, 30, tzinfo=UTC)
+    assert SessionContext(timestamp=winter).text() == (
+        "Current time: Tue 2026-12-01 00:30 -08:00 (PST)"
+    )
 
 
 def test_a_timestamp_is_now_here_to_the_second() -> None:
     before = datetime.now().astimezone().replace(microsecond=0)
-    stamp = now_timestamp()
+    when = now_timestamp()
     after = datetime.now().astimezone()
-    when = datetime.fromisoformat(stamp)
     assert when.utcoffset() == before.utcoffset()
     assert when.microsecond == 0
     assert before <= when <= after
 
 
+def test_a_stored_time_reads_as_a_datetime_and_is_stored_as_it_was() -> None:
+    """A journal written before a time was a ``datetime`` reads, and writes the same."""
+    stored = {
+        "py/object": "UserMessage",
+        "timestamp": "2026-11-19T02:03:04-08:00",
+        "content": "hi",
+    }
+    read = stored_record(stored, UserMessage)
+    assert read.timestamp == datetime(
+        2026,
+        11,
+        19,
+        2,
+        3,
+        4,
+        tzinfo=timezone(timedelta(hours=-8)),
+    )
+    assert read.extra == {}
+    assert stored_plain(read)["timestamp"] == "2026-11-19T02:03:04-08:00"
+
+
+@pytest.mark.parametrize(
+    ("spelled", "when"),
+    [
+        ("2026-11-19T10:03:04.123Z", datetime(2026, 11, 19, 10, 3, 4, 123_000, UTC)),
+        # A time with no offset is read as UTC, so every time read compares.
+        ("2026-11-19T10:03:04", datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)),
+        ("soon", None),
+    ],
+    ids=["another-spelling", "no-offset", "no-time"],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        SessionContext,
+        UserMessage,
+        AssistantMessage,
+        Thinking,
+        SystemMessage,
+        TokenUsage,
+        ContextState,
+        ContextCompaction,
+        ContextClear,
+        AgentMessage,
+    ],
+)
+def test_a_stored_time_spelled_another_way_keeps_its_spelling_beside_the_record(
+    kind: type,
+    spelled: str,
+    when: datetime | None,
+) -> None:
+    stored = {"py/object": kind.__name__, "context_id": 3, "timestamp": spelled}
+    read = stored_record(stored)
+    assert isinstance(read, kind)
+    assert not isinstance(read, IncompleteRecord | UncategorizedRecord)
+    assert (read.timestamp, read.extra) == (when, {"$timestamp_as_written": spelled})
+    # It is stored key for key as a record whose time ``isoformat`` spells: the
+    # spelling is the stored time, where a time is stored, and nothing beside it.
+    again = stored_plain(read)
+    at_some_time = replace(read, timestamp=datetime(2026, 1, 1, tzinfo=UTC), extra={})
+    spelled_alike = stored_plain(at_some_time)
+    assert list(again.items()) == list((spelled_alike | {"timestamp": spelled}).items())
+    assert stored_record(again) == read
+
+
+def test_a_spelling_kept_beside_a_record_is_the_time_it_is_stored_with() -> None:
+    """As a converter keeps a line's own spelling: the stored record holds it once."""
+    record = UserMessage(
+        timestamp=datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC),
+        extra={"$timestamp_as_written": "2026-11-19T10:03:04.000Z", "k": 1},
+    )
+    stored = stored_plain(record)
+    assert (stored["timestamp"], stored["extra"]) == (
+        "2026-11-19T10:03:04.000Z",
+        {"k": 1},
+    )
+    assert stored_record(stored) == record
+
+
+def test_a_spelling_is_kept_only_while_it_names_the_record_s_time() -> None:
+    """A record given another time, or none, is stored with that, not the spelling."""
+    read = stored_record(
+        {"py/object": "UserMessage", "timestamp": "2026-11-19T10:03:04Z"},
+        UserMessage,
+    )
+    later = stored_plain(replace(read, timestamp=datetime(2026, 11, 20, tzinfo=UTC)))
+    assert (later["timestamp"], later["extra"]) == ("2026-11-20T00:00:00+00:00", {})
+    cleared = stored_plain(replace(read, timestamp=None))
+    assert ("timestamp" in cleared, cleared["extra"]) == (False, {})
+    # The same instant in another zone is still the time the source spelled.
+    west = timezone(timedelta(hours=-8))
+    moved = replace(read, timestamp=datetime(2026, 11, 19, 2, 3, 4, tzinfo=west))
+    assert stored_plain(moved)["timestamp"] == "2026-11-19T10:03:04Z"
+    assert timestamp_as_written(None, {"$timestamp_as_written": 5}) is None
+
+
+def test_the_records_that_keep_a_time_s_spelling_are_those_with_a_timestamp() -> None:
+    # The cached set is worked out once per process; this works it out here.
+    stamped = types._stamped_tags.__wrapped__()
+    assert {"UserMessage", "ToolCall", "ToolMessage", "ContextClear"} <= stamped
+    assert {"Attachment", "ReadResult", "Splice"}.isdisjoint(stamped)
+    assert stamped == types._stamped_tags()
+
+
+def test_a_former_tag_reads_as_the_tag_its_class_bears_now() -> None:
+    # The cached map is worked out once per process; this works it out here.
+    names = types._tags_now.__wrapped__()
+    assert names["ToolResult"] == "ToolMessage"
+    assert names["AgentToAgentMessage"] == "AgentMessage"
+    assert names == types._tags_now()
+
+
+@pytest.mark.parametrize(
+    ("entry", "labeled"),
+    [
+        (
+            AgentMessage(sender="reviewer", content="finding"),
+            "[from reviewer]: finding",
+        ),
+        # Labeled once: its own label is not written again.
+        (
+            AgentMessage(sender="reviewer", content="[from reviewer]: x"),
+            "[from reviewer]: x",
+        ),
+        # Another sender's label is not mistaken for this one.
+        (
+            AgentMessage(sender="b", content="[from a]: x"),
+            "[from b]: [from a]: x",
+        ),
+        (AgentMessage(sender="a"), "[from a]: "),
+        # A person and an agent of one name are told apart.
+        (UserMessage(sender="bob", content="hi"), "[from user bob]: hi"),
+        (
+            UserMessage(sender="bob", content="[from user bob]: hi"),
+            "[from user bob]: hi",
+        ),
+        (
+            UserMessage(sender="bob", content="[from bob]: hi"),
+            "[from user bob]: [from bob]: hi",
+        ),
+        # Who names no sender is not named.
+        (UserMessage(content="mine"), "mine"),
+        (UserMessage(), ""),
+        (AgentMessage(sender=None, content="unsigned"), "unsigned"),
+    ],
+)
+def test_a_message_s_text_is_labeled_with_who_sent_it(
+    entry: UserMessage | AgentMessage,
+    labeled: str,
+) -> None:
+    assert labeled_text(entry) == labeled
+
+
+@pytest.mark.parametrize(
+    ("spelled", "when"),
+    [
+        ("2026-11-19T10:03:04Z", datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)),
+        ("2026-11-19T02:03:04-08:00", datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)),
+        # No offset is read as UTC, so every time read compares with every other.
+        ("2026-11-19T10:03:04", datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)),
+        ("soon", None),
+        ("", None),
+    ],
+)
+def test_a_spelled_time_is_read_with_an_offset_or_as_none(
+    spelled: str,
+    when: datetime | None,
+) -> None:
+    read = parsed_timestamp(spelled)
+    assert read == when
+    assert read is None or read.utcoffset() is not None
+
+
+def test_the_stored_shape_keeps_a_time_as_it_is_stored() -> None:
+    """``current_plain`` returns what ``stored_plain`` writes; only a read parses it."""
+    stored = {"py/object": "UserMessage", "timestamp": "2026-11-19T10:03:04Z"}
+    assert current_plain(stored) == stored
+
+
+def test_a_record_states_its_time_as_it_is_written() -> None:
+    when = datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)
+    spelled = {"$timestamp_as_written": "2026-11-19T10:03:04Z"}
+    assert stated_timestamp(UserMessage(timestamp=when)) == "2026-11-19T10:03:04+00:00"
+    assert stated_timestamp(UserMessage(timestamp=when, extra=spelled)) == (
+        "2026-11-19T10:03:04Z"
+    )
+    # A record of no other type keeps the spelling in its payload.
+    assert stated_timestamp(
+        UncategorizedRecord(timestamp=when, kind="odd", payload=spelled),
+    ) == ("2026-11-19T10:03:04Z")
+    assert stated_timestamp(UserMessage()) is None
+    assert stated_timestamp(IncompleteRecord(text="{torn")) is None
+
+
+def test_a_window_s_first_records_are_each_stored_as_they_were_spelled() -> None:
+    """A ``UserMessage`` is stored there with no tag; every other record with one."""
+    when = datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC)
+    spelled = {"$timestamp_as_written": "2026-11-19T10:03:04Z"}
+    window = ContextClear(
+        history=(
+            UserMessage(timestamp=when, extra=spelled),
+            AssistantMessage(timestamp=when, extra=spelled),
+            IncompleteRecord(text="{torn"),
+        ),
+    )
+    stored = stored_plain(window)
+    message, answered, torn = from_plain(stored["history"], list[dict[str, object]])
+    assert [
+        (held.get("py/object"), held["timestamp"], held["extra"])
+        for held in (message, answered)
+    ] == [
+        (None, "2026-11-19T10:03:04Z", {}),
+        ("AssistantMessage", "2026-11-19T10:03:04Z", {}),
+    ]
+    assert torn == {"py/object": "IncompleteRecord", "text": "{torn"}
+    assert stored_record(stored) == window
+
+
+def test_a_window_whose_history_holds_no_record_does_not_read() -> None:
+    with pytest.raises(ReadError):
+        _ = stored_record({"py/object": "ContextClear", "history": ["no record"]})
+
+
+def test_a_time_in_plain_data_under_py_dict_is_no_record_s() -> None:
+    """A host's ``Call`` holds its arguments so: whatever they look like, they are data."""
+    held = {"py/object": "UserMessage", "timestamp": "2026-11-19T10:03:04Z"}
+    stored = {
+        "py/object": "ToolCall",
+        "call_id": "1",
+        "name": "Read",
+        # Its own copy: a reader that took it for a record would change it in place.
+        "arguments": {"py/dict": dict(held)},
+    }
+    assert stored_record(stored, ToolCall).arguments == held
+
+
+def test_a_call_s_arguments_are_no_record_whatever_their_keys() -> None:
+    arguments = {
+        "py/object": "UserMessage",
+        "timestamp": "t",
+        "extra": {"$timestamp_as_written": "kept"},
+    }
+    stored = stored_plain(ToolCall(call_id="1", name="Read", arguments=arguments))
+    assert stored_record(stored, ToolCall).arguments == arguments
+
+
+def test_a_call_and_its_result_keep_a_time_spelled_another_way() -> None:
+    call = stored_record(
+        {"py/object": "ToolCall", "timestamp": "soon", "call_id": "1", "name": "Read"},
+        ToolCall,
+    )
+    result = stored_record(
+        {
+            "py/object": "ToolMessage",
+            "timestamp": "soon",
+            "call_id": "1",
+            "state": "cancelled",
+        },
+        ToolMessage,
+    )
+    assert (call.timestamp, call.extra) == (None, {"$timestamp_as_written": "soon"})
+    assert (result.timestamp, result.extra) == (None, {"$timestamp_as_written": "soon"})
+
+
+def test_a_record_of_no_other_type_keeps_such_a_time_in_its_payload() -> None:
+    """It has no ``extra``; a ``timestamp`` its payload holds is its source's own key."""
+    payload: dict[str, PlainTree] = {"timestamp": "soon", "k": 1}
+    stored = {
+        "py/object": "UncategorizedRecord",
+        "timestamp": "soon",
+        "kind": "odd",
+        "payload": payload,
+    }
+    read = stored_record(stored, UncategorizedRecord)
+    assert (read.timestamp, read.payload) == (
+        None,
+        {**payload, "$timestamp_as_written": "soon"},
+    )
+    # Stored again it is as it was, its payload the source's own.
+    again = stored_plain(read)
+    assert list(again.items()) == list(stored.items())
+
+
+def test_a_payload_s_own_timestamp_is_not_the_time_a_record_is_stored_with() -> None:
+    record = UncategorizedRecord(
+        timestamp=datetime(2026, 11, 19, 10, 3, 4, tzinfo=UTC),
+        kind="odd",
+        payload={"timestamp": "2026-11-19T10:03:04.000Z"},
+    )
+    stored = stored_plain(record)
+    assert stored["timestamp"] == "2026-11-19T10:03:04+00:00"
+    assert stored_record(stored) == record
+
+
+def test_times_read_from_a_session_that_spells_them_both_ways_sort() -> None:
+    stored = [
+        {
+            "py/object": "UserMessage",
+            "timestamp": "2026-11-19T02:03:05-08:00",
+            "content": "later",
+        },
+        {
+            "py/object": "UserMessage",
+            "timestamp": "2026-11-19T10:03:04",
+            "content": "sooner",
+        },
+    ]
+    read = [stored_record(each, UserMessage) for each in stored]
+    times = [(r.timestamp, r.content) for r in read if r.timestamp is not None]
+    # By the instant, not by the text: 02:03:05 at -08:00 is 10:03:05 UTC.
+    assert [content for _, content in sorted(times)] == ["sooner", "later"]
+
+
 def test_turn_context_text_skips_what_it_does_not_state() -> None:
-    assert TurnContext().text() == ""
-    assert TurnContext(model="opus").text() == "Model: opus"
-    assert TurnContext(environment="", agents_md="").text() == ""
+    assert SessionContext().text() == ""
+    assert SessionContext(model="opus").text() == "Model: opus"
+    assert SessionContext(environment="", agents_md="").text() == ""
 
 
 @pytest.mark.parametrize(
@@ -320,12 +662,14 @@ def test_turn_context_text_names_the_tools_the_model_may_call(
     tools: tuple[str, ...],
     shown: str,
 ) -> None:
-    assert TurnContext(tools=tools).text() == shown
+    assert SessionContext(tools=tools).text() == shown
 
 
 def test_a_stored_record_keeps_its_fields_in_declaration_order() -> None:
     """``timestamp`` is declared before ``content``, though it sorts after it."""
-    stored = stored_plain(UserMessage(timestamp="t", content="hi"))
+    stored = stored_plain(
+        UserMessage(timestamp=datetime(2026, 10, 23, tzinfo=UTC), content="hi"),
+    )
     assert [key for key in stored if not key.startswith("py/")] == [
         "timestamp",
         "content",
@@ -357,7 +701,7 @@ def test_a_record_with_a_field_its_class_lacks_does_not_read(
 
 def test_a_result_keeps_the_id_its_call_went_by_on_the_wire() -> None:
     """A journal written before ``wire_id`` reads it as ``""``."""
-    sent = ToolResult(
+    sent = ToolMessage(
         call_id="toolu_1",
         wire_id="ab12",
         state="done",
@@ -371,7 +715,7 @@ def test_a_result_keeps_the_id_its_call_went_by_on_the_wire() -> None:
 def test_text_joins_the_text_items_of_stdout_then_stderr() -> None:
     """Items that are not text, such as a ``Splice`` or an ``Attachment``, are skipped."""
     image = Attachment(mime_descriptor="image/png", data=b"png")
-    result = ToolResult(
+    result = ToolMessage(
         call_id="1",
         state="done",
         stdout=("a\n", Splice(after="x"), "b\n", image),
@@ -380,12 +724,12 @@ def test_text_joins_the_text_items_of_stdout_then_stderr() -> None:
     )
 
     assert result.text() == "a\nb\nwarn"
-    assert ToolResult(call_id="1", state="done").text() == ""
+    assert ToolMessage(call_id="1", state="done").text() == ""
 
 
 def test_text_is_shown_when_set_and_the_output_is_kept() -> None:
     """A prune or a placeholder sets ``shown``; ``stdout`` is unchanged."""
-    read = ToolResult(
+    read = ToolMessage(
         call_id="1",
         state="done",
         stdout=("body",),
@@ -395,7 +739,7 @@ def test_text_is_shown_when_set_and_the_output_is_kept() -> None:
 
     assert (read.text(), pruned.text()) == ("body", "[pruned]")
     assert pruned.stdout == ("body",)
-    assert ToolResult(call_id="2", state="pending", shown="[running]").text() == (
+    assert ToolMessage(call_id="2", state="pending", shown="[running]").text() == (
         "[running]"
     )
     assert replace(read, shown="").text() == ""
@@ -405,11 +749,11 @@ def test_text_is_shown_when_set_and_the_output_is_kept() -> None:
     ("result", "failed"),
     [
         (
-            ToolResult(call_id="1", state="done", result=UncategorizedToolResult()),
+            ToolMessage(call_id="1", state="done", result=UncategorizedToolResult()),
             False,
         ),
         (
-            ToolResult(
+            ToolMessage(
                 call_id="1",
                 state="done",
                 result=UncategorizedToolResult(exit_code=2),
@@ -417,20 +761,20 @@ def test_text_is_shown_when_set_and_the_output_is_kept() -> None:
             True,
         ),
         (
-            ToolResult(
+            ToolMessage(
                 call_id="1",
                 state="done",
                 result=UncategorizedToolResult(exit_code=-9),
             ),
             True,
         ),
-        (ToolResult(call_id="1", state="done"), False),
-        (ToolResult(call_id="1", state="pending"), False),
-        (ToolResult(call_id="1", state="failed"), True),
-        (ToolResult(call_id="1", state="cancelled"), True),
-        (ToolResult(call_id="1", state="done", result=ReadResult(path="a")), False),
-        (ToolResult(call_id="1", state="done", result=ReadResult(exit_code=1)), True),
-        (ToolResult(call_id="1", state="done", result=BashResult(exit_code=2)), False),
+        (ToolMessage(call_id="1", state="done"), False),
+        (ToolMessage(call_id="1", state="pending"), False),
+        (ToolMessage(call_id="1", state="failed"), True),
+        (ToolMessage(call_id="1", state="cancelled"), True),
+        (ToolMessage(call_id="1", state="done", result=ReadResult(path="a")), False),
+        (ToolMessage(call_id="1", state="done", result=ReadResult(exit_code=1)), True),
+        (ToolMessage(call_id="1", state="done", result=BashResult(exit_code=2)), False),
     ],
     ids=[
         "zero",
@@ -446,7 +790,7 @@ def test_text_is_shown_when_set_and_the_output_is_kept() -> None:
     ],
 )
 def test_is_error_for_a_failed_or_cancelled_call_or_a_nonzero_exit_code(
-    result: ToolResult,
+    result: ToolMessage,
     failed: bool,
 ) -> None:
     assert result.is_error is failed
@@ -455,7 +799,7 @@ def test_is_error_for_a_failed_or_cancelled_call_or_a_nonzero_exit_code(
 def test_attachments_are_the_attachment_items_of_stdout() -> None:
     one = Attachment(mime_descriptor="image/png", data=b"1")
     two = Attachment(mime_descriptor="image/jpeg", data=b"2")
-    result = ToolResult(call_id="1", state="done", stdout=("[image]", one, "x", two))
+    result = ToolMessage(call_id="1", state="done", stdout=("[image]", one, "x", two))
 
     assert result.attachments == (one, two)
     assert result.attached((two,)).stdout == ("[image]", "x", two)
@@ -465,7 +809,7 @@ def test_attachments_are_the_attachment_items_of_stdout() -> None:
 def test_a_restated_result_keeps_its_result_and_drops_attachments() -> None:
     image = Attachment(mime_descriptor="image/png", data=b"png")
     edit = Splice(after="x")
-    result = ToolResult(
+    result = ToolMessage(
         call_id="1",
         state="done",
         stdout=("Edited a.py.", edit, image),
@@ -484,22 +828,22 @@ def test_a_restated_result_keeps_its_result_and_drops_attachments() -> None:
     assert restated.is_error
 
 
-def _formerly(tag: str, **fields: object) -> ToolResult:
-    """Return the ``ToolResult`` read from a legacy record of class ``tag``."""
+def _formerly(tag: str, **fields: object) -> ToolMessage:
+    """Return the ``ToolMessage`` read from a legacy record of class ``tag``."""
     read = stored_record({"py/object": tag, "call_id": "1", **fields})
-    assert isinstance(read, ToolResult)
+    assert isinstance(read, ToolMessage)
     return read
 
 
 @pytest.mark.parametrize("tag", sorted(FORMER_RESULT_KINDS))
 def test_a_result_stored_under_a_former_class_reads_as_a_tool_result(tag: str) -> None:
-    assert RENAMED_KINDS[tag] == "ToolResult"
+    assert RENAMED_KINDS[tag] == "ToolMessage"
     read = _formerly(tag)
     assert (read.call_id, read.state) == (
         "1",
         "failed" if tag == "ToolErrorResult" else "done",
     )
-    assert json.dumps(stored_plain(read)).startswith('{"py/object": "ToolResult"')
+    assert json.dumps(stored_plain(read)).startswith('{"py/object": "ToolMessage"')
 
 
 @pytest.mark.parametrize("tag", sorted(FORMER_RESULT_KINDS))
@@ -509,14 +853,26 @@ def test_a_former_result_keeps_its_call_id_context_and_shown_text(
     read = _formerly(
         tag,
         context_id=3,
-        timestamp="t",
+        timestamp="2026-10-23T00:00:00+00:00",
         wire_id="w",
         shown="[pruned]",
         extra={"k": [1]},
     )
-    assert (read.context_id, read.timestamp, read.wire_id) == (3, "t", "w")
+    assert (read.context_id, read.timestamp, read.wire_id) == (
+        3,
+        datetime(2026, 10, 23, tzinfo=UTC),
+        "w",
+    )
     assert read.text() == "[pruned]"
     assert read.extra == {"k": (1,)}
+
+
+def test_a_former_result_keeps_a_time_spelled_another_way() -> None:
+    read = _formerly("BashResult", timestamp="t", extra={"k": [1]})
+    assert (read.timestamp, read.extra) == (
+        None,
+        {"k": (1,), "$timestamp_as_written": "t"},
+    )
 
 
 # Each former class whose only output was its ``content`` text.
@@ -639,7 +995,7 @@ def test_a_stored_function_result_reads_as_an_uncategorized_one() -> None:
         },
     )
 
-    assert record == ToolResult(
+    assert record == ToolMessage(
         call_id="1",
         state="done",
         stdout=("3",),
@@ -709,7 +1065,7 @@ def test_a_failing_command_s_exit_is_read_after_its_streams_and_held_in_neither(
     exit_code: int | None,
     note: str,
 ) -> None:
-    ran = ToolResult(
+    ran = ToolMessage(
         call_id="1",
         state="done",
         stdout=("out\n",),
@@ -728,7 +1084,7 @@ def test_a_failing_command_s_exit_is_read_after_its_streams_and_held_in_neither(
 
 def test_only_a_bash_result_adds_its_exit_code_to_the_text() -> None:
     assert [
-        ToolResult(call_id="1", state="done", stdout=("out",), result=result).text()
+        ToolMessage(call_id="1", state="done", stdout=("out",), result=result).text()
         for result in (
             ReadResult(exit_code=3),
             UncategorizedToolResult(exit_code=3),
@@ -815,7 +1171,7 @@ def test_a_former_record_converts_to_exactly_the_fields_it_had() -> None:
     assert current_plain(
         {"py/object": "ToolErrorResult", "call_id": "1", "content": ""},
     ) == {
-        "py/object": "ToolResult",
+        "py/object": "ToolMessage",
         "call_id": "1",
         "state": "failed",
         "stdout": [],
@@ -974,7 +1330,7 @@ def test_a_stored_bare_exit_code_reads_as_an_uncategorized_tool_result(
         "stdout": ["out"],
         "result": code,
     }
-    expected = ToolResult(
+    expected = ToolMessage(
         call_id="1",
         state="done",
         stdout=("out",),
@@ -1020,19 +1376,19 @@ _OLD_ROWS: Final = (
 def test_an_old_item_stored_untagged_reads_as_its_class() -> None:
     edited, read, searched, cleared = map(stored_record, _OLD_ROWS)
 
-    assert isinstance(edited, ToolResult)
+    assert isinstance(edited, ToolMessage)
     assert edited.stdout == ("Edited a.py.", Splice(before="a", after="b", start=3))
-    assert isinstance(read, ToolResult)
+    assert isinstance(read, ToolMessage)
     assert read.stdout == (
         "[image: a.png]",
         LineSpan(start=1),
         Attachment(mime_descriptor="image/png", data=b""),
     )
-    assert isinstance(searched, ToolResult)
+    assert isinstance(searched, ToolMessage)
     assert searched.stdout == ("t\nu\ns", WebSearchHit(url="u", title="t", snippet="s"))
     assert isinstance(cleared, ContextClear)
     assert cleared.history == (
-        ToolResult(call_id="1", state="done", stdout=("x",), result=BashResult()),
+        ToolMessage(call_id="1", state="done", stdout=("x",), result=BashResult()),
     )
 
 
@@ -1061,28 +1417,28 @@ def test_former_kind_of_a_legacy_record_is_its_class_name_after_renames(
 @pytest.mark.parametrize(
     ("result", "kind"),
     [
-        (ToolResult(call_id="1", state="done", result=BashResult()), "BashResult"),
+        (ToolMessage(call_id="1", state="done", result=BashResult()), "BashResult"),
         (
-            ToolResult(call_id="1", state="done", result=UncategorizedToolResult()),
+            ToolMessage(call_id="1", state="done", result=UncategorizedToolResult()),
             "UncategorizedToolResult",
         ),
         (
-            ToolResult(
+            ToolMessage(
                 call_id="1",
                 state="done",
                 result=UncategorizedToolResult(exit_code=3),
             ),
             "UncategorizedToolResult",
         ),
-        (ToolResult(call_id="1", state="done"), "UncategorizedToolResult"),
-        (ToolResult(call_id="1", state="failed"), "ToolErrorResult"),
-        (ToolResult(call_id="1", state="pending"), "ToolResult"),
-        (ToolResult(call_id="1", state="cancelled"), "ToolResult"),
+        (ToolMessage(call_id="1", state="done"), "UncategorizedToolResult"),
+        (ToolMessage(call_id="1", state="failed"), "ToolErrorResult"),
+        (ToolMessage(call_id="1", state="pending"), "ToolMessage"),
+        (ToolMessage(call_id="1", state="cancelled"), "ToolMessage"),
     ],
     ids=["bash", "zero", "nonzero", "no-result", "failed", "pending", "cancelled"],
 )
 def test_former_kind_is_the_result_class_name_or_follows_the_state(
-    result: ToolResult,
+    result: ToolMessage,
     kind: str,
 ) -> None:
     assert former_kind(result) == kind
@@ -1100,7 +1456,9 @@ def test_every_result_class_names_a_former_result_kind() -> None:
     assert result_class_names <= FORMER_RESULT_KINDS
 
 
-def test_record_classes_names_every_dataclass_the_module_defines() -> None:
+def test_record_classes_names_every_dataclass_the_module_defines_but_the_outcomes() -> (
+    None
+):
     classes = record_classes()
     members = dict[str, object](vars(types))
     defined = {
@@ -1108,8 +1466,187 @@ def test_record_classes_names_every_dataclass_the_module_defines() -> None:
         for name in types.__all__
         if isinstance(kind := members[name], type) and is_dataclass(kind)
     }
-    assert set(classes) == defined
+    # No record holds an outcome, nor how an entry pairs.
+    assert set(classes) == defined - {"Succeeded", "Cancelled", "Failed", "Pairing"}
     assert all(classes[name] is members[name] for name in classes)
+
+
+def test_an_outcome_is_one_of_three_endings() -> None:
+    endings: list[Outcome[int]] = [
+        Succeeded(value=1),
+        Cancelled(),
+        Failed(exception=RuntimeError("no")),
+    ]
+
+    assert [type(each) for each in endings] == [Succeeded, Cancelled, Failed]
+
+
+def test_a_failure_holds_what_was_raised() -> None:
+    error = RuntimeError("no")
+    assert Failed(exception=error).exception is error
+
+
+@pytest.mark.parametrize("state", [AgentIdle, ModelIdle])
+def test_a_message_waiting_for_a_state_is_stored_and_read_back_by_its_name(
+    state: type[AgentIdle | ModelIdle],
+) -> None:
+    held = UserMessage(content="later", due_after=state)
+
+    plain = stored_plain(held)
+
+    assert plain["due_after"] == {"py/type": state.__name__}
+    assert stored_record(plain) == held
+
+
+def test_the_model_s_idle_says_how_its_work_stopped() -> None:
+    assert ModelIdle(outcome=Succeeded(value=None)) != ModelIdle(outcome=Cancelled())
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Turn:
+    """A model turn held as one entry, as a context holds a reply."""
+
+    records: tuple[AssistantMessage | Thinking | ToolCall, ...]
+
+
+@pytest.mark.parametrize(
+    ("entries", "late"),
+    [
+        # A context: each reply one entry.
+        (
+            [
+                UserMessage(content="go"),
+                _Turn(records=(ToolCall(call_id="c1", name="Bash"),)),
+                ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+                _Turn(records=(AssistantMessage(content="waiting"),)),
+                ToolMessage(
+                    call_id="c1",
+                    state="pending",
+                    stdout=("[Bash c1 running]\nhalf",),
+                ),
+                ToolMessage(
+                    call_id="c1",
+                    state="failed",
+                    stdout=("boom", Attachment(mime_descriptor="image/png", data=b"p")),
+                ),
+            ],
+            {4, 5},
+        ),
+        # A log: a reply is a run of records; a note between them is no one's turn.
+        (
+            [
+                UserMessage(content="go"),
+                AssistantMessage(content="looking"),
+                ToolCall(call_id="c0", name="Read"),
+                TokenUsage(),
+                ToolCall(call_id="c1", name="Bash"),
+                ToolMessage(call_id="c0", state="done"),
+                ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+                AssistantMessage(content="waiting"),
+                ToolMessage(
+                    call_id="c1",
+                    state="failed",
+                    stdout=("boom", Attachment(mime_descriptor="image/png", data=b"p")),
+                ),
+            ],
+            {8},
+        ),
+    ],
+    ids=["context", "log"],
+)
+def test_a_call_s_messages_after_its_first_answer_are_late(
+    entries: list[SessionRecord | _Turn],
+    late: set[int],
+) -> None:
+    assert late_messages(entries) == late
+
+
+def test_a_message_of_a_call_no_entry_answered_is_late_only_if_orphans_are_news() -> (
+    None
+):
+    entries = [
+        UserMessage(content="[summary]"),
+        ToolMessage(call_id="c1", state="pending", stdout=("[Bash c1 running]\nhalf",)),
+        ToolMessage(
+            call_id="c1",
+            state="failed",
+            stdout=("boom", Attachment(mime_descriptor="image/png", data=b"p")),
+        ),
+        ToolMessage(
+            call_id="c1",
+            state="failed",
+            stdout=("boom", Attachment(mime_descriptor="image/png", data=b"p")),
+        ),
+    ]
+    assert late_messages(entries) == {1, 2}
+    assert late_messages(entries, orphans_are_news=False) == {2}
+    # After its call's result, a message of the call is a repeat: no news.
+    assert pairings(entries)[0][3].role == "repeat"
+
+
+def test_each_entry_is_told_where_it_stands_among_the_calls() -> None:
+    entries: list[SessionRecord | _Turn] = [
+        _Turn(
+            records=(ToolCall(call_id="a", name="R"), ToolCall(call_id="x", name="R")),
+        ),
+        SystemMessage(content="n"),
+        ToolMessage(call_id="z", state="done"),
+        AgentMessage(sender="peer", content="hi"),
+        ToolMessage(call_id="a", state="done"),
+        ToolMessage(call_id="x", state="done"),
+        ToolMessage(call_id="a", state="done"),
+        _Turn(records=(ToolCall(call_id="b", name="R"),)),
+        UserMessage(content="stop"),
+        _Turn(
+            records=(ToolCall(call_id="a", name="R"), ToolCall(call_id="c", name="R")),
+        ),
+    ]
+
+    found, still_open = pairings(entries, paired_externally=frozenset({"x"}))
+
+    assert [p.role for p in found] == [
+        "reply",
+        "note",
+        "orphan",
+        "aside",
+        "answer",
+        "elsewhere",
+        "repeat",
+        "reply",
+        "interrupt",
+        "reply",
+    ]
+    assert [p.waiting for p in found][1:5] == [("a",)] * 4
+    assert (found[8].left_open, found[9].reused, still_open) == (
+        ("b",),
+        ("a",),
+        ("a", "c"),
+    )
+    # The next reply leaves what one before it left open unanswered.
+    assert pairings([*entries, _Turn(records=())])[0][-1].left_open == ("a", "c")
+
+
+def test_a_late_message_is_sent_as_the_user_s_text_headed_by_its_call() -> None:
+    entries: list[SessionRecord] = [
+        ToolCall(call_id="c1", name="Bash"),
+        ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+        AssistantMessage(content="waiting"),
+        ToolMessage(call_id="c1", state="pending", stdout=("[Bash c1 running]\nhalf",)),
+        ToolMessage(
+            call_id="c1",
+            state="failed",
+            stdout=("boom", Attachment(mime_descriptor="image/png", data=b"p")),
+        ),
+    ]
+    assert as_sent(entries) == [
+        *entries[:3],
+        UserMessage(content="[Bash c1 running]\nhalf"),
+        UserMessage(
+            content="[call c1 failed]\nboom",
+            attachments=(Attachment(mime_descriptor="image/png", data=b"p"),),
+        ),
+    ]
+    assert as_sent(entries[:3]) == entries[:3]
 
 
 @pytest.mark.parametrize(
@@ -1176,14 +1713,14 @@ def test_a_stored_record_names_every_class_it_holds_alone() -> None:
         history=(
             UserMessage(content="u"),
             AssistantMessage(content="a"),
-            ToolResult(call_id="c", state="done", stdout=(Splice(after="y"),)),
+            ToolMessage(call_id="c", state="done", stdout=(Splice(after="y"),)),
         ),
     )
 
     stored = stored_plain(record)
 
     tags = re.findall(r'"py/object": "([^"]+)"', json.dumps(stored))
-    assert tags == ["ContextClear", "AssistantMessage", "ToolResult", "Splice"]
+    assert tags == ["ContextClear", "AssistantMessage", "ToolMessage", "Splice"]
     assert stored_record(stored) == record
 
 
@@ -1206,16 +1743,22 @@ def test_a_class_outside_the_vocabulary_stores_only_where_classes_name_it() -> N
 
 def test_the_round_trip_cases_cover_every_record_kind() -> None:
     covered = {type(r).__name__ for r in _every_record()}
+    named_by_due_after = {
+        r.due_after.__name__
+        for r in _every_record()
+        if isinstance(r, (UserMessage, AgentMessage, SystemMessage, ToolMessage))
+        and r.due_after is not None
+    }
     inside_tool_results = {
         type(item).__name__
         for r in _every_record()
-        if isinstance(r, ToolResult)
+        if isinstance(r, ToolMessage)
         for item in (*r.stdout, r.result)
         if is_dataclass(item)
     }
-    assert covered | inside_tool_results | {"RequestMeasurement"} == set(
-        record_classes(),
-    )
+    assert covered | inside_tool_results | named_by_due_after | {
+        "RequestMeasurement",
+    } == set(record_classes())
 
 
 def test_a_session_preserves_interleaved_tool_lifecycles() -> None:
@@ -1224,20 +1767,20 @@ def test_a_session_preserves_interleaved_tool_lifecycles() -> None:
     records = (
         AssistantMessage(content="Starting both."),
         ToolCall(call_id="a", name="Read", arguments={"path": "/a"}),
-        ToolResult(
+        ToolMessage(
             call_id="a",
             state="pending",
             stdout=(Attachment(mime_descriptor="image/png", data=b"png"),),
         ),
         UserMessage(content="Also check B."),
         ToolCall(call_id="b", name="Read", arguments={"path": "/b"}),
-        ToolResult(
+        ToolMessage(
             call_id="b",
             state="done",
             stdout=("B",),
             result=UncategorizedToolResult(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="a",
             state="done",
             stdout=("A",),
@@ -1249,7 +1792,7 @@ def test_a_session_preserves_interleaved_tool_lifecycles() -> None:
 
     assert restored.history == records
     assert [
-        item.call_id for item in restored.history if isinstance(item, ToolResult)
+        item.call_id for item in restored.history if isinstance(item, ToolMessage)
     ] == ["a", "b", "a"]
 
 
@@ -1287,6 +1830,51 @@ def test_a_record_names_its_settings_by_index_rather_than_copying_them() -> None
     assert isinstance(first, AssistantMessage)
     assert isinstance(second, AssistantMessage)
     assert (first.context_id, second.context_id) == (0, 4)
+
+
+def test_these_record_classes_are_renamed() -> None:
+    assert dict(renamed_records()) == {
+        "AgentToAgentMessage": "AgentMessage",
+        "ToolResult": "ToolMessage",
+        "TurnContext": "SessionContext",
+    }
+    # Each class bears one of its two names, never both and never neither.
+    for old, new in renamed_records().items():
+        assert (old in record_classes()) is not (new in record_classes())
+
+
+@pytest.mark.parametrize(("old", "new"), sorted(renamed_records().items()))
+def test_a_renamed_record_is_stored_under_both_names_and_first_under_the_old(
+    old: str,
+    new: str,
+) -> None:
+    assert stored_names(old) == (old, new)
+    assert stored_names(new) == (new, old)
+    assert (first_name(old), first_name(new)) == (old, old)
+
+
+def test_a_record_never_renamed_is_stored_under_its_one_name() -> None:
+    assert stored_names("UserMessage") == ("UserMessage",)
+    assert first_name("UserMessage") == "UserMessage"
+
+
+@pytest.mark.parametrize(("old", "new"), sorted(renamed_records().items()))
+def test_a_former_record_tag_reads_as_the_new_one_once_a_class_bears_it(
+    old: str,
+    new: str,
+) -> None:
+    # Each has a state, as every tool call's record now has: one with none is
+    # the placeholder of a former format, which is converted, not only renamed.
+    held = {"py/object": old, "state": "done"}
+    stored = {**held, "held": held}
+    read = cast("dict[str, object]", current_plain(stored))
+    assert (read["py/object"] == new) is (new in record_classes())
+    # Told the names, it renames the tag wherever a record is held.
+    assert current_plain(stored, {old: new}) == {
+        "py/object": new,
+        "state": "done",
+        "held": {"py/object": new, "state": "done"},
+    }
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
+    from sagent.model.cost import TokenCost
     from sagent.providers.catalog import CachedModel
     from sagent.providers.types import Model
     from sagent.runtime.runtime import Runtime
@@ -48,8 +49,8 @@ class Agent(Resource, Protocol):
     """A model, its tools, and the session it keeps; ``async with`` runs it.
 
     Each operation lives on the part it acts on. An assignment takes effect at
-    the next model call; ``clear``, ``run``, and ``schedule`` wait for the
-    runtime's next safe point::
+    the next model call; ``clear``, ``run``, and what ``submit`` or ``ask`` pushes
+    wait for the runtime's next safe point::
 
       agent
       ├─ model
@@ -89,14 +90,15 @@ class Agent(Resource, Protocol):
       │  ├─ __aiter__()
       │  ├─ push(event)
       │  ├─ halt()
-      │  ├─ schedule(work)
+      │  ├─ submit(request)
+      │  ├─ ask(request)
       │  ├─ jobs[id]
       │  │  ├─ call
-      │  │  ├─ state
+      │  │  ├─ status
       │  │  └─ cancel()
       │  └─ foreground(call_id)
       ├─ spend_usd
-      ├─ charge(usd, by=...)
+      ├─ charge(spend, label=...)
       ├─ send(text, ...)
       └─ stream(text, ...)
 
@@ -152,9 +154,9 @@ class Agent(Resource, Protocol):
 
     def charge(
         self,
-        usd: float,
+        spend: TokenCost,
         *,
-        by: str,
+        label: str,
         measurement: RequestMeasurement | None = None,
     ) -> None:
         """Count side-call spend and its captured measurement; halt past the cap."""

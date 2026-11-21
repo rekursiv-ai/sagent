@@ -29,9 +29,22 @@ import pytest
 import pytest_asyncio
 
 from sagent.model.scripted import ScriptedProvider, reply
-from sagent.runtime import types
+from sagent.runtime import (
+    runtime as runtime_module,
+    types,
+)
 from sagent.runtime.runtime import Await, Runtime
-from sagent.session.types import AgentToAgentMessage, Attachment, UserMessage
+from sagent.session.types import (
+    AgentIdle,
+    AgentMessage,
+    Attachment,
+    Cancelled,
+    Failed,
+    ModelIdle,
+    Succeeded,
+    ToolCall,
+    UserMessage,
+)
 from sagent.tui.prompt import (
     OPEN_TREE,
     Deferred,
@@ -56,12 +69,20 @@ if TYPE_CHECKING:
 _PNG = Attachment(mime_descriptor="image/png", data=b"png")
 
 
-async def _forever() -> None:
-    await asyncio.Event().wait()
-
-
 def _runtime() -> Runtime:
     return Runtime(model=ScriptedProvider()["scripted"])
+
+
+def _waiting_on(runtime: Runtime, call_id: str, task: asyncio.Task[None]) -> None:
+    """Have ``runtime`` wait on a call ``call_id`` that ``task`` runs."""
+    runtime._calls[call_id] = runtime_module._Call(
+        call=ToolCall(call_id=call_id, name="echo", arguments={}),
+        key=None,
+        task=task,
+        background=False,
+        status="waited",
+        refusal=None,
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -177,7 +198,7 @@ def test_sending_a_pane_pushes_it_and_empties_it() -> None:
     assert panes.send_deferred(runtime) is True
     assert runtime.inbox.drain_nowait() == [
         UserMessage(content="q"),
-        types.UserDeferredMessage(text="d", attachments=(_PNG,)),
+        UserMessage(due_after=AgentIdle, content="d", attachments=(_PNG,)),
     ]
     assert (panes.queue, panes.deferred) == (None, None)
 
@@ -216,7 +237,13 @@ def test_an_earlier_hook_s_event_wins_and_its_silence_lets_the_queue_through() -
     assert seen == [turn, turn]
 
 
-@pytest.mark.parametrize("edge", [types.AgentIdle(), types.ClearComplete()])
+@pytest.mark.parametrize(
+    "edge",
+    [
+        AgentIdle(),
+        types.SessionClearCompleted(outcome=Succeeded(value=None)),
+    ],
+)
 def test_an_idle_or_a_finished_clear_sends_the_queue_first_then_the_deferred(
     edge: types.RuntimeEvent,
 ) -> None:
@@ -227,7 +254,9 @@ def test_an_idle_or_a_finished_clear_sends_the_queue_first_then_the_deferred(
     runtime.publish(edge)
     assert runtime.inbox.drain_nowait() == [UserMessage(content="q")]
     runtime.publish(edge)
-    assert runtime.inbox.drain_nowait() == [types.UserDeferredMessage(text="d")]
+    assert runtime.inbox.drain_nowait() == [
+        UserMessage(due_after=AgentIdle, content="d"),
+    ]
     runtime.publish(edge)
     assert runtime.inbox.drain_nowait() == []
 
@@ -236,8 +265,16 @@ def test_other_events_send_nothing() -> None:
     runtime, panes = _runtime(), Panes()
     commit_panes(runtime, panes)
     panes.stage("q", deferred=False)
-    runtime.publish(types.ModelIdle())
-    runtime.publish(types.ModelResponseComplete(response=reply("x")))
+    # A turn that stopped short among them: what waits is not sent into a halt.
+    for outcome in (
+        Succeeded(value=None),
+        Cancelled(),
+        Failed(exception=ValueError("x")),
+    ):
+        runtime.publish(ModelIdle(outcome=outcome))
+    runtime.publish(
+        types.ModelResponseCompleted(outcome=Succeeded(value=reply("x"))),
+    )
     assert runtime.inbox.drain_nowait() == []
 
 
@@ -257,7 +294,7 @@ def test_the_undo_restores_the_hook_and_removes_the_observer_once() -> None:
     assert runtime.before_tool_spawn is earlier
     assert runtime.observers == before
     panes.stage("q", deferred=False)
-    runtime.publish(types.AgentIdle())
+    runtime.publish(AgentIdle())
     assert runtime.inbox.drain_nowait() == []
 
 
@@ -295,16 +332,17 @@ def test_the_deferred_frame_compares_equal_until_what_waits_changes() -> None:
     assert deferred.frame() == (("class:queued_input_pane", "queued"), ("", "\n"))
 
 
-def test_the_panes_and_pending_user_messages_show_above_the_prompt() -> None:
+def test_the_panes_and_pending_user_messages_show_above_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime, panes = _runtime(), Panes()
     panes.stage("queued", deferred=False)
     panes.stage("line one\nline two", deferred=True)
-    runtime._mid_stream_queue.extend(
-        [
-            UserMessage(content="typed mid-stream"),
-            AgentToAgentMessage(content="from a child"),
-        ],
+    pending = (
+        UserMessage(content="typed mid-stream"),
+        AgentMessage(content="from a child"),
     )
+    monkeypatch.setattr(runtime, "pending_mid_stream", lambda: pending)
     assert _prompt_text(runtime, panes) == FormattedText(
         [
             ("", "\n"),
@@ -318,9 +356,12 @@ def test_the_panes_and_pending_user_messages_show_above_the_prompt() -> None:
     )
 
 
-def test_an_agent_s_pending_message_alone_shows_nothing() -> None:
+def test_an_agent_s_pending_message_alone_shows_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime()
-    runtime._mid_stream_queue.append(AgentToAgentMessage(content="x"))
+    pending = (AgentMessage(content="x"),)
+    monkeypatch.setattr(runtime, "pending_mid_stream", lambda: pending)
     assert _prompt_text(runtime, Panes()) == FormattedText(
         [("", "\n"), ("class:input_pane", "> ")],
     )
@@ -339,7 +380,7 @@ def test_tab_while_idle_sends_the_line_deferred() -> None:
     prompt = _Prompt()
     prompt.type("later")
     prompt.press(Keys.ControlI)
-    assert prompt.pushed() == [types.UserDeferredMessage(text="later")]
+    assert prompt.pushed() == [UserMessage(due_after=AgentIdle, content="later")]
     assert prompt.buffer.text == ""
     assert list(prompt.buffer.history.get_strings()) == ["later"]
 
@@ -380,7 +421,7 @@ async def test_enter_after_a_halt_is_queued_still_sends() -> None:
     prompt.runtime.halt()
     prompt.type("redirect")
     prompt.press(Keys.ControlM)
-    assert prompt.pushed() == [types.Halt(), UserMessage(content="redirect")]
+    assert prompt.pushed() == [types.ModelHalt(), UserMessage(content="redirect")]
     await prompt.runtime.model_call
 
 
@@ -391,47 +432,53 @@ async def test_an_armed_gate_takes_enter_and_tab_even_mid_stream(
     key: Keys,
 ) -> None:
     """A halt parks the inbox; the line is what releases it, so it must not stage."""
-    busy.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    busy.runtime.inbox.push_front(gate=Await(types=(UserMessage,)))
     busy.type("go")
     busy.press(key)
     assert busy.pushed() == [
         UserMessage(content="go")
         if key == Keys.ControlM
-        else types.UserDeferredMessage(text="go"),
+        else UserMessage(due_after=AgentIdle, content="go"),
     ]
     assert (busy.panes.queue, busy.panes.deferred) == (None, None)
 
 
-def test_an_armed_gate_does_not_send_tab_past_a_running_cohort() -> None:
+@pytest.mark.asyncio
+async def test_an_armed_gate_does_not_send_tab_past_a_running_cohort() -> None:
     prompt = _Prompt()
-    prompt.runtime.cohort.add("c1")
-    prompt.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    task = asyncio.create_task(asyncio.sleep(0))
+    _waiting_on(prompt.runtime, "c1", task)
+    prompt.runtime.inbox.push_front(gate=Await(types=(UserMessage,)))
     prompt.type("go")
     prompt.press(Keys.ControlI)
     assert prompt.pushed() == []
     assert prompt.panes.deferred == Staged(text="go")
+    await task
 
 
-def test_mid_cohort_enter_redirects_and_tab_waits() -> None:
+@pytest.mark.asyncio
+async def test_mid_cohort_enter_redirects_and_tab_waits() -> None:
     prompt = _Prompt()
-    prompt.runtime.cohort.add("c1")
+    task = asyncio.create_task(asyncio.sleep(0))
+    _waiting_on(prompt.runtime, "c1", task)
     prompt.type("redirect")
     prompt.press(Keys.ControlM)
     prompt.type("after")
     prompt.press(Keys.ControlI)
     assert prompt.pushed() == [UserMessage(content="redirect")]
     assert prompt.panes.deferred == Staged(text="after")
+    await task
 
 
 @pytest.mark.asyncio
 async def test_tab_waits_behind_a_running_tool() -> None:
     prompt = _Prompt()
-    prompt.runtime.running_tools["c1"] = asyncio.create_task(asyncio.sleep(0))
+    _waiting_on(prompt.runtime, "c1", asyncio.create_task(asyncio.sleep(0)))
     prompt.type("after")
     prompt.press(Keys.ControlI)
     assert prompt.pushed() == []
     assert prompt.panes.deferred == Staged(text="after")
-    await prompt.runtime.running_tools["c1"]
+    await prompt.runtime._calls["c1"].task
 
 
 @pytest.mark.parametrize("key", [Keys.ControlM, Keys.ControlI])
@@ -474,7 +521,7 @@ def test_alt_enter_inserts_a_newline() -> None:
 async def busy() -> AsyncIterator[_Prompt]:
     """Return a prompt whose runtime streams, so a pane written back stays a pane."""
     prompt = _Prompt()
-    stream = asyncio.create_task(_forever())
+    stream = asyncio.create_task(asyncio.wait_for(asyncio.Future[None](), None))
     prompt.runtime.model_call = stream
     yield prompt
     stream.cancel()
@@ -560,7 +607,9 @@ def test_tab_at_an_idle_deferred_stop_sends_its_attachments() -> None:
     prompt.panes.stage("D", (_PNG,), deferred=True)
     prompt.press(Keys.Up)
     prompt.press(Keys.ControlI)
-    assert prompt.pushed() == [types.UserDeferredMessage(text="D", attachments=(_PNG,))]
+    assert prompt.pushed() == [
+        UserMessage(due_after=AgentIdle, content="D", attachments=(_PNG,)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -630,7 +679,7 @@ def test_a_pane_left_unedited_on_an_idle_agent_is_sent() -> None:
     prompt.press(Keys.Up)
     assert prompt.pushed() == [
         UserMessage(content="Q"),
-        types.UserDeferredMessage(text="D"),
+        UserMessage(due_after=AgentIdle, content="D"),
     ]
     assert (prompt.panes.queue, prompt.panes.deferred) == (None, None)
 
@@ -848,9 +897,9 @@ async def test_ctrl_c_halts_a_busy_agent(busy_with: str) -> None:
     elif busy_with == "compact_task":
         prompt.runtime.compact_task = task
     else:
-        prompt.runtime.cohort.add("c1")
+        _waiting_on(prompt.runtime, "c1", task)
     prompt.press(Keys.ControlC)
-    assert prompt.pushed() == [types.Halt()]
+    assert prompt.pushed() == [types.ModelHalt()]
     assert prompt.buffer.text == ""
     assert list(prompt.buffer.history.get_strings()) == ["abandoned"]
     await task

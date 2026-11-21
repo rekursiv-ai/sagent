@@ -39,15 +39,15 @@ from sagent.providers import cli_login
 from sagent.providers.google import cli
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -344,7 +344,7 @@ async def test_stream_reuses_only_a_conversation_that_can_continue(
     answered: bool,
     restart: bool,
 ) -> None:
-    result = ToolResult(
+    result = ToolMessage(
         call_id="c1",
         state="done",
         stdout=("x",),
@@ -493,25 +493,25 @@ def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript() -> None:
     records = (
         ContextClear(summary="earlier", history=(UserMessage(content="before"),)),
         ContextClear(history=(UserMessage(content="kept"),)),
-        AgentToAgentMessage(content="from a", sender="lead"),
-        AgentToAgentMessage(content="anon"),
+        AgentMessage(content="from a", sender="lead"),
+        AgentMessage(content="anon"),
         Thinking(content="hmm"),
         AssistantMessage(content="ok"),
         ToolCall(call_id="c0", name="Echo", arguments={"text": "x"}),
-        ToolResult(
+        ToolMessage(
             call_id="c0",
             state="done",
             stdout=("x",),
             result=UncategorizedToolResult(),
         ),
-        TurnContext(),
-        TurnContext(cwd="/w"),
+        SessionContext(),
+        SessionContext(cwd=Path("/w")),
         UserMessage(content="go"),
     )
 
     assert "\n\n".join(cli._transcript(records)) == (
         "Summary of the conversation so far:\nearlier\n\n"
-        "User: before\n\nUser: kept\n\nAgent lead: from a\n\nAgent: anon\n\n"
+        "User: before\n\nUser: kept\n\nUser: [from lead]: from a\n\nUser: anon\n\n"
         "Assistant: ok\n\n"
         'Assistant called Echo as c0: {"text": "x"}\n\nc0 returned: x\n\n'
         "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\n"
@@ -521,17 +521,20 @@ def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript() -> None:
 
 def test_the_next_turn_says_each_new_message_its_own_way() -> None:
     records = (
-        AgentToAgentMessage(content="hi", sender="lead"),
-        AgentToAgentMessage(content="plain"),
-        TurnContext(),
-        TurnContext(cwd="/w"),
+        AgentMessage(content="hi", sender="lead"),
+        AgentMessage(content="plain"),
+        SessionContext(),
+        SessionContext(cwd=Path("/w")),
         UserMessage(content="go"),
     )
 
-    assert cli._said_text(records) == (
-        "[from lead]: hi\n\nplain\n\n"
-        "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\ngo"
-    )
+    assert [cli._prompt_line(record) for record in records] == [
+        "[from lead]: hi",
+        "plain",
+        "",
+        "<system-reminder>\nWorking directory: /w\n</system-reminder>",
+        "go",
+    ]
     agy = cli._Agy(
         cast("Process", object()),
         home=Path("/nowhere"),
@@ -583,7 +586,7 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
     [
         (
             (
-                ToolResult(
+                ToolMessage(
                     call_id="c1",
                     state="done",
                     stdout=("x",),
@@ -595,19 +598,19 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
         (
             (
                 SystemMessage(content="note"),
-                ToolResult(
+                ToolMessage(
                     call_id="c1",
                     state="done",
                     stdout=("x",),
                     result=UncategorizedToolResult(),
                 ),
-                TurnContext(cwd="/work"),
+                SessionContext(cwd=Path("/work")),
             ),
             True,
         ),
         (
             (
-                ToolResult(
+                ToolMessage(
                     call_id="wrong",
                     state="done",
                     result=UncategorizedToolResult(),
@@ -618,12 +621,12 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
         ((), False),
         (
             (
-                ToolResult(
+                ToolMessage(
                     call_id="c1",
                     state="done",
                     result=UncategorizedToolResult(),
                 ),
-                ToolResult(
+                ToolMessage(
                     call_id="c1",
                     state="done",
                     result=UncategorizedToolResult(),
@@ -633,7 +636,7 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
         ),
         (
             (
-                ToolResult(
+                ToolMessage(
                     call_id="c1",
                     state="done",
                     result=UncategorizedToolResult(),
@@ -690,15 +693,15 @@ def test_an_image_is_named_not_sent() -> None:
     image = Attachment(mime_descriptor="image/png", data=b"not sent")
     named = "[an image/png attachment, which agy cannot send]"
     person = UserMessage(content="look", attachments=(image,))
-    signed = AgentToAgentMessage(sender="lead", content="see", attachments=(image,))
-    unsigned = AgentToAgentMessage(content="here", attachments=(image,))
+    signed = AgentMessage(sender="lead", content="see", attachments=(image,))
+    unsigned = AgentMessage(content="here", attachments=(image,))
     assert cli._transcript((person, signed, unsigned)) == [
         f"User: look\n{named}",
-        f"Agent lead: see\n{named}",
-        f"Agent: here\n{named}",
+        f"User: [from lead]: see\n{named}",
+        f"User: here\n{named}",
     ]
     # A line to a running ``agy`` names it too, whoever sent the line.
-    assert [cli._said(line) for line in (person, signed, unsigned)] == [
+    assert [cli._prompt_line(line) for line in (person, signed, unsigned)] == [
         f"look\n{named}",
         f"[from lead]: see\n{named}",
         f"here\n{named}",
@@ -886,13 +889,13 @@ async def test_agy_quiet_too_long_is_a_disconnect(
 async def test_answer_forwards_only_results_in_record_order(late: bool) -> None:
     first = ToolCall(call_id="first", name="Echo")
     second = ToolCall(call_id="second", name="Echo")
-    first_result = ToolResult(
+    first_result = ToolMessage(
         call_id="first",
         state="done",
         stdout=("one",),
         result=UncategorizedToolResult(),
     )
-    second_result = ToolResult(
+    second_result = ToolMessage(
         call_id="second",
         state="done",
         stdout=("two",),
@@ -920,7 +923,7 @@ async def test_answer_forwards_only_results_in_record_order(late: bool) -> None:
         (
             SystemMessage(content="note"),
             second_result,
-            TurnContext(cwd="/work"),
+            SessionContext(cwd=Path("/work")),
             first_result,
         ),
         mount=Mock(answer=answered),
@@ -1186,7 +1189,7 @@ def test_a_tool_schema_keeps_its_characters(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("record", "said"),
+    ("record", "prompt_line"),
     [
         (
             UserMessage(
@@ -1194,12 +1197,26 @@ def test_a_tool_schema_keeps_its_characters(tmp_path: Path) -> None:
             ),
             "\n[an image/png attachment, which agy cannot send]",
         ),
-        (AgentToAgentMessage(sender="lead"), "[from lead]: "),
-        (AgentToAgentMessage(), ""),
+        (AgentMessage(sender="lead"), "[from lead]: "),
+        (AgentMessage(), ""),
     ],
 )
-def test_a_message_with_no_words_says_none(record: UserMessage, said: str) -> None:
-    assert cli._said(record) == said
+def test_a_message_with_no_words_says_none(
+    record: UserMessage,
+    prompt_line: str,
+) -> None:
+    assert cli._prompt_line(record) == prompt_line
+
+
+def test_a_person_who_is_not_the_session_s_user_is_named_as_an_agent_is() -> None:
+    bob = UserMessage(sender="bob", content="hi")
+
+    assert cli._prompt_line(bob) == "[from user bob]: hi"
+    # A fresh process hears the line as a running one does: one label, one way.
+    assert cli._transcript((bob, UserMessage(content="mine"))) == [
+        "User: [from user bob]: hi",
+        "User: mine",
+    ]
 
 
 @pytest.mark.asyncio

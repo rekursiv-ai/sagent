@@ -2,8 +2,9 @@
 
 Everything the API does to a session, the model can do to its own: list and
 read what it sees, search the whole session, weigh and make a prune, compact,
-or clear. A change reaches the runtime just after this call's result, so the
-call and its result are part of what it changes.
+or clear. A change to the caller's own session reaches the runtime just after
+this call's result, so the call and its result are part of what it changes. A
+change to a descendant's is waited for: the call's result says how it went.
 
 The ``agent`` argument targets another agent with the caller's authority.
 ``records`` reads by record number, as ``search`` and a watcher's feed give
@@ -27,7 +28,6 @@ from treekle import json_dumps, mutable
 
 from sagent.agent.compactor import Style, SummaryCompactor, text
 from sagent.agent.pruner import (
-    drop,
     left_in,
     limit_tokens,
     prices,
@@ -39,15 +39,18 @@ from sagent.agent.team import Team
 from sagent.model.types import Response
 from sagent.runtime import types
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
+    Failed,
+    SessionContext,
     SessionResult,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
 )
 from sagent.tools.agent_tool import target_agent
@@ -67,6 +70,7 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.agent.agent import Agent
+    from sagent.runtime.context import ResolvedContext
     from sagent.runtime.types import ModelContextEvent
     from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
@@ -123,9 +127,6 @@ class AgentSession:
     team: Team = field(repr=False)
     """Where the caller is found."""
 
-    stub: str = "[pruned: old tool output removed to keep the context small]"
-    """What a pruned result reads."""
-
     display: ToolDisplay = field(default=ToolDisplay())
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
@@ -157,11 +158,13 @@ class AgentSession:
           arguments: What the model passed, as ``AgentSession.Arguments``.
 
         Returns:
-          streaming_result: What the action found, or what it queued.
+          streaming_result: What the action found; for a change, that it is queued
+            (the caller's own session) or how it went (a descendant's).
 
         Raises:
           ValueError: The caller is in no team; an id names no entry, or no
-            result where one is needed; an action lacks what it needs.
+            result where one is needed; an action lacks what it needs; a change
+            to a descendant's session was not done.
 
         """
         return whole_output(self._run(context, arguments))
@@ -179,7 +182,8 @@ class AgentSession:
             agent=a.agent,
             reading=a.action in ("list", "read", "search"),
         )
-        entries = agent.runtime.context().messages
+        read = agent.runtime.tape.context()
+        entries = read.messages
         if a.action == "list":
             body = "\n".join(_line(i, e, entries) for i, e in enumerate(entries))
             return _said(context, a.action, body or "The context is empty.")
@@ -209,39 +213,83 @@ class AgentSession:
             found = await asyncio.to_thread(_search, agent.session.history(), a.text)
             return _said(context, a.action, found)
         if a.action in ("estimate", "prune"):
-            return self._prune(agent, entries, a)
-        # Each is queued behind this call's result: taken ahead of it, a clear or a
-        # compaction would detach the call.
+            return await self._prune(agent, read, a, asker=context.label)
+        # The asker's own is queued behind this call's result: taken ahead of it, a
+        # clear or a compaction would detach the call. A descendant's has no such
+        # knot: the call waits, and its own result says how it went.
+        own = agent is self.team[context.label]
         calling = asyncio.current_task()
         if a.action == "clear":
-            agent.runtime.push_after(calling, types.Clear())
-            return ToolOutput(
-                stdout=("Clear queued.",),
-                result=SessionResult(action=a.action),
-            )
+            clear = types.SessionClear(sender=context.label)
+            if own:
+                agent.runtime.push_after(calling, clear)
+                reply = "Clear queued."
+            elif isinstance(await agent.runtime.ask(clear), Succeeded):
+                reply = "Cleared."
+            else:
+                raise ValueError("The clear was not done: the agent quit first.")
+            return ToolOutput(stdout=(reply,), result=SessionResult(action=a.action))
         compactor = agent.session.compactor
         summarizes = isinstance(compactor, SummaryCompactor)
         if not summarizes:
             raise ValueError("This agent has no compactor.")
         if a.style is not None:
             compactor.style = a.style
-        agent.runtime.push_after(calling, types.Compact(args=a.prompt))
-        return ToolOutput(
-            stdout=(f"Compaction queued ({compactor.style}).",),
-            result=SessionResult(action=a.action),
+        compact = types.SessionCompact(
+            sender=context.label,
+            summary_must_keep=a.prompt,
         )
+        if own:
+            agent.runtime.push_after(calling, compact)
+            reply = f"Compaction queued ({compactor.style})."
+        else:
+            match await agent.runtime.ask(compact):
+                case Failed(exception=exc):
+                    raise ValueError(f"The compaction was not done: {exc}") from exc
+                case Cancelled():
+                    raise ValueError(
+                        "The compaction was not done: it was stopped first.",
+                    )
+                case Succeeded(value=did):
+                    reply = (
+                        f"Compacted ({compactor.style}): ~{did.masked_tokens:,} to"
+                        f" ~{did.replacement_tokens:,} tokens."
+                    )
+        return ToolOutput(stdout=(reply,), result=SessionResult(action=a.action))
 
-    def _prune(
+    # A prune of the asker's own session runs once this call has ended, so the call
+    # cannot wait for it: the runtime tells its model if it is then not done. A
+    # descendant's has no such knot, and its model did not ask: the call waits, and
+    # its own result says how the prune went.
+    async def _prune(
         self,
         agent: Agent,
-        entries: Sequence[ModelContextEvent],
+        read: ResolvedContext,
         a: AgentSession.Arguments,
+        *,
+        asker: str,
     ) -> ToolOutput[SessionResult, str, str]:
-        """Weigh dropping the tool outputs ``a.ids``; for ``prune``, queue the drop."""
+        """Weigh dropping the tool outputs ``a.ids``; for ``prune``, drop them for ``asker``."""
+        entries = read.messages
         picked = _picked(entries, a.ids)
-        kept = [i for i in picked if not prunable(entries[i], stub=self.stub)]
+        stub = agent.runtime.stubs.pruned
+        kept = [i for i in picked if not prunable(entries[i], stub=stub)]
         if kept:
             raise ValueError(f"#{kept[0]} is no tool output that can be pruned.")
+        # A prune names calls and stubs every output of each: what is weighed is
+        # what goes, a long call's other outputs too.
+        named = {
+            output.call_id
+            for i in picked
+            if isinstance(output := entries[i], ToolMessage)
+        }
+        picked = [
+            i
+            for i, entry in enumerate(entries)
+            if isinstance(entry, ToolMessage)
+            and entry.call_id in named
+            and prunable(entry, stub=stub)
+        ]
         if a.action == "prune" and not a.reason.strip():
             raise ValueError("Say why in 'reason'.")
         model = agent.model
@@ -249,7 +297,7 @@ class AgentSession:
         worth = saving(
             tokens,
             picked,
-            stub=len(self.stub) / model.capability.approx_chars_per_token,
+            stub=len(stub) / model.capability.approx_chars_per_token,
             prices=prices(model, prompt=int(sum(tokens))),
             left=left_in(entries, tokens, limit=limit_tokens(agent)),
         )
@@ -271,24 +319,33 @@ class AgentSession:
                 stdout=("\n".join(lines),),
                 result=SessionResult(action=a.action),
             )
-        # By what they are, since positions may move before the drop runs.
-        chosen = [entries[i] for i in picked]
-        runtime = agent.runtime
-
-        async def work() -> None:
-            now = runtime.context().messages
-            drop(
-                runtime,
-                [i for i, e in enumerate(now) if e in chosen],
-                stub=self.stub,
-            )
-
-        runtime.push_after(
-            asyncio.current_task(),
-            types.Scheduled(work=work, done=asyncio.get_running_loop().create_future()),
+        # Positions may move before the drop runs; call ids do not.
+        own = agent is self.team[asker]
+        request = types.SessionPrune(
+            sender=asker,
+            # A long call's stub and its news name one call: it is named once.
+            call_ids=tuple(
+                dict.fromkeys(
+                    output.call_id
+                    for i in picked
+                    if isinstance(output := entries[i], ToolMessage)
+                ),
+            ),
+            reason=a.reason.strip(),
         )
+        if own:
+            agent.runtime.push_after(asyncio.current_task(), request)
+            reply = "Prune queued"
+        else:
+            match await agent.runtime.ask(request):
+                case Failed(exception=exc):
+                    raise ValueError(f"The prune was not done: {exc}") from exc
+                case Cancelled():
+                    raise ValueError("The prune was not done: the agent quit first.")
+                case Succeeded():
+                    reply = "Pruned"
         return ToolOutput(
-            stdout=("\n".join([f"Prune queued: {a.reason.strip()}", *lines]),),
+            stdout=("\n".join([f"{reply}: {a.reason.strip()}", *lines]),),
             result=SessionResult(action=a.action),
         )
 
@@ -316,7 +373,7 @@ def _line(
 
 def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str:
     """Return what ``entry`` is, such as ``result of Read`` or ``pruned result``."""
-    if isinstance(entry, ToolResult):
+    if isinstance(entry, ToolMessage):
         named = {
             r.call_id: r.name
             for e in entries
@@ -330,13 +387,15 @@ def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str
     if isinstance(entry, Response):
         called = [r.name for r in entry.records if isinstance(r, ToolCall)]
         return f"your turn, calling {', '.join(called)}" if called else "your turn"
-    if isinstance(entry, AgentToAgentMessage):
+    if isinstance(entry, AgentMessage):
         return f"message from {entry.sender}"
     if isinstance(entry, SystemMessage):
         return "note"
-    if isinstance(entry, TurnContext):
+    if isinstance(entry, SessionContext):
         return "settings"
-    return "user message"
+    return (
+        "user message" if entry.sender is None else f"user message from {entry.sender}"
+    )
 
 
 # ``records`` are the session's from record ``start``, of ``total``, read once as
@@ -356,7 +415,7 @@ def _records(
         shown[n] = []
     calls: dict[str, list[int]] = {}
     for m, record in enumerate(records, start):
-        if isinstance(record, ToolResult):
+        if isinstance(record, ToolMessage):
             for n in calls.get(record.call_id, ()):
                 shown[n].append(f"its result, record {m}:\n{_record_text(record)}")
         if m in shown:
@@ -388,13 +447,13 @@ def _record_text(record: SessionRecord) -> str:
     """Return what a search reads in ``record``."""
     if isinstance(record, ToolCall):
         return f"{record.name} {json_dumps(mutable(record.arguments))}"
-    if isinstance(record, (ToolResult, TurnContext)):
+    if isinstance(record, (ToolMessage, SessionContext)):
         return record.text()
     if isinstance(record, ContextClear):
         return record.summary or ""
     if isinstance(
         record,
-        (UserMessage, AssistantMessage, AgentToAgentMessage, SystemMessage, Thinking),
+        (UserMessage, AssistantMessage, AgentMessage, SystemMessage, Thinking),
     ):
         return record.content or ""
     return ""

@@ -10,7 +10,7 @@ import pytest
 
 from sagent.model.scripted import ScriptedProvider
 from sagent.runtime.runtime import Runtime
-from sagent.runtime.types import DetachSchedule, WakeSchedule
+from sagent.runtime.types import ToolWakeSchedules, WakeSchedule
 from sagent.settings.harvest import harvest
 from sagent.tools.bash import Bash
 from sagent.tools.read import Read
@@ -40,16 +40,16 @@ async def test_detach_sets_when_every_tool_wakes_the_model() -> None:
 
     assert setting.value() == "15s 1 300s (default)"
     assert await setting.apply("10 0.5 120") == "10s 0.5 120s"
-    assert runtime.detach_schedule.default == WakeSchedule(
-        first_sec=10.0,
-        growth=0.5,
+    assert runtime.wake_schedules.default == WakeSchedule(
+        first_gap_sec=10.0,
+        gap_growth=0.5,
         max_gap_sec=120.0,
     )
     assert await setting.apply("5s,2,60s") == "5s 2 60s"
     assert await setting.apply("off") == "off"
-    assert runtime.detach_schedule.default is None
+    assert runtime.wake_schedules.default is None
     assert await setting.apply("default") == "15s 1 300s (default)"
-    assert runtime.detach_schedule == DetachSchedule()
+    assert runtime.wake_schedules == ToolWakeSchedules()
 
 
 @pytest.mark.parametrize(
@@ -57,8 +57,8 @@ async def test_detach_sets_when_every_tool_wakes_the_model() -> None:
     [
         ("10 1", "'10 1' is not FIRST GROWTH MAX_GAP, off, or default"),
         ("a b c", "'a b c' is not FIRST GROWTH MAX_GAP, off, or default"),
-        ("0 1 300", "first_sec must be a number of seconds above 0, got 0.0."),
-        ("10 -1 300", "growth must be a number at least 0, got -1.0."),
+        ("0 1 300", "first_gap_sec must be a number of seconds above 0, got 0.0."),
+        ("10 -1 300", "gap_growth must be a number at least 0, got -1.0."),
     ],
 )
 @pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_detach_refuses_what_is_not_a_schedule(bad: str, message: str) -> 
     for name in ("runtime.detach", "runtime.detach.Bash"):
         with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             await settings[name].apply(bad)
-    assert runtime.detach_schedule == DetachSchedule()
+    assert runtime.wake_schedules == ToolWakeSchedules()
 
 
 @pytest.mark.asyncio
@@ -79,19 +79,34 @@ async def test_a_tool_s_own_detach_wins_over_the_default_until_given_up() -> Non
     assert bash.value is not None
     assert bash.value() == "default"
     assert await bash.apply("off") == "off"
-    assert runtime.detach_schedule.of("Bash") is None
-    assert runtime.detach_schedule.of("Read") == WakeSchedule()
+    assert (
+        runtime.wake_schedules.per_tool.get("Bash", runtime.wake_schedules.default)
+        is None
+    )
+    assert (
+        runtime.wake_schedules.per_tool.get("Read", runtime.wake_schedules.default)
+        == WakeSchedule()
+    )
     assert await settings["runtime.detach"].apply("30 1 600") == "30s 1 600s"
-    assert runtime.detach_schedule.of("Bash") is None
+    assert (
+        runtime.wake_schedules.per_tool.get("Bash", runtime.wake_schedules.default)
+        is None
+    )
     assert await bash.apply("1 0 5") == "1s 0 5s"
-    assert runtime.detach_schedule.of("Bash") == WakeSchedule(
-        first_sec=1.0,
-        growth=0.0,
+    assert runtime.wake_schedules.per_tool.get(
+        "Bash",
+        runtime.wake_schedules.default,
+    ) == WakeSchedule(
+        first_gap_sec=1.0,
+        gap_growth=0.0,
         max_gap_sec=5.0,
     )
     assert await bash.apply("default") == "default"
-    assert runtime.detach_schedule.of("Bash") == WakeSchedule(
-        first_sec=30.0,
+    assert runtime.wake_schedules.per_tool.get(
+        "Bash",
+        runtime.wake_schedules.default,
+    ) == WakeSchedule(
+        first_gap_sec=30.0,
         max_gap_sec=600.0,
     )
 
@@ -152,7 +167,7 @@ def test_each_setting_says_how_it_is_typed_what_it_takes_and_what_it_does() -> N
 
 
 def test_a_new_runtime_wakes_on_the_default_schedule() -> None:
-    assert _runtime().detach_schedule == DetachSchedule()
+    assert _runtime().wake_schedules == ToolWakeSchedules()
 
 
 if __name__ == "__main__":

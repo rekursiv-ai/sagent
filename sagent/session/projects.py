@@ -38,7 +38,7 @@ import uuid
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.userdirs import data_dir
 from sagent.session.jsonl import read_record
-from sagent.session.types import TurnContext, UserMessage
+from sagent.session.types import SessionContext, UserMessage, stored_names
 
 
 if TYPE_CHECKING:
@@ -546,7 +546,13 @@ def _infos(paths: Iterable[Path], *, limit: int | None) -> list[SessionInfo]:
 # each record's class first, so a record nested in a snapshot never leads a line.
 def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
     """Return what ``path`` says of itself; ``None`` when unreadable or nothing was said."""
-    said = False
+    # A line that stores the settings in force begins so, under each name its class
+    # is stored by.
+    settings_lines = tuple(
+        f'{{"py/object": "{name}"'.encode()
+        for name in stored_names(SessionContext.__name__)
+    )
+    prompted = False  # pragma: no mutate[truthiness]
     title = model = ""
     records = 0
     try:
@@ -558,17 +564,20 @@ def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
                 if line.startswith(b'{"py/object": "UserMessage"') and not title:
                     message = read_record(line)
                     if isinstance(message, UserMessage):
-                        said = True
+                        prompted = True
                         title = (message.content or "").strip()
-                elif line.startswith(b'{"py/object": "TurnContext"'):
+                elif line.startswith(settings_lines):
                     settings = read_record(line)
-                    if isinstance(settings, TurnContext) and settings.model is not None:
+                    if (
+                        isinstance(settings, SessionContext)
+                        and settings.model is not None
+                    ):
                         model = settings.model
     except OSError:
         return None
     # A launch makes its journal before the first prompt; one quit there holds
     # only the window's start, and listing it offers a resume of nothing.
-    if not said:
+    if not prompted:
         return None
     return SessionInfo(
         path=path,

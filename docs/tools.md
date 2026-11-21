@@ -14,11 +14,11 @@ A tool (`sagent.tools.types.Tool`) exposes:
 - `display`: how its calls show in the terminal, a `ToolDisplay`.
 - `summary(arguments)`: short label for a call, such as `Edit foo.py`.
 - `serialize_key(context, arguments)`: which calls this one must not overlap; `None` runs beside anything; `"*"` waits for every keyed call before it, and every later call waits for it.
-- `call(context, arguments)`: start the tool and return a `ToolStreamingResult` at once: the tool's output streams (`stdout`, `stderr`) and a future of its result (`result`), a dataclass with an `exit_code`, `0` for success.
+- `call(context, arguments)`: start the tool and return a `ToolStreamingResult` at once: the tool's output streams (`stdout`, `stderr`) and a future of its result (`result`), a dataclass with an `exit_code`, `0` for success. A tool whose call ends only when it is stopped, as `Recall`'s does, says so with `runs_until_stopped`: run in the background, such a call does not keep its agent from going idle, and it wakes the model when it has news (`Runtime.wake`).
 
 A tool writes each item as it has it: Bash each line as printed, Grep each match, Glob each path, List each row, PaperFetch each download, AgentSpawn what its child says and calls, an MCP tool each progress report, RemoteTool the other machine's items. Grep and Glob search in parallel, so they write in the order found, no set order. An order that needs every item, such as a `keep_last` tail or a Glob `sort`, and the note counting what was cut, come at the end. A tool whose items are too much for the model, as a long Bash output is, puts the bounded view on its result's `shown`.
 
-Whoever ran the call reads the streams and saves the session record, a `ToolResult`; a tool never builds one. The record keeps every item, and the view, if any, as `shown`. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call; its `on_item` sees each item, and its stream, as it is read.
+Whoever ran the call reads the streams and saves the session record, a `ToolMessage`; a tool never builds one. The record keeps every item, and the view, if any, as `shown`. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call; its `on_item` sees each item, and its stream, as it is read.
 
 A tool holds no agent's state. Each call gets the calling agent's `ToolContext`: its working directory, the files it has seen, and its result size limit. Arguments that do not fit the schema raise `ValueError`; the model reads the message as the call's error.
 
@@ -115,7 +115,7 @@ class Echo:
 
 ## Built-ins
 
-Each built-in lives in its own module under `sagent.tools`, such as `sagent.tools.read.Read` and `sagent.tools.glob_tool.Glob`. `AgentSpawn`, `AgentSend`, `AgentSelf`, and `AgentSession` take the session's `Team`: `AgentSpawn(team=team)`.
+Each built-in lives in its own module under `sagent.tools`, such as `sagent.tools.read.Read` and `sagent.tools.glob_tool.Glob`. `AgentSpawn`, `AgentSend`, `AgentSelf`, `AgentSession`, and `Recall` take the session's `Team`: `AgentSpawn(team=team)`.
 
 | Tool | Purpose | Key inputs |
 | --- | --- | --- |
@@ -138,6 +138,7 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
 | `AgentSession` | List, read, search, prune, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
+| `Recall` | Name stored sessions like this one, as each is found, and wake the model. | Optional `limit`. Set `/tool.Recall.url` and `/tool.Recall.session`, or `TRACKINIZER_URL` and `TRAX_SESSION`; the key is `TRACKINIZER_TOKEN`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
 | `Plan` | Say the steps of the work in hand and where each stands; viewers draw it as a checklist. | `plan` (each `step`, `status`: `pending`, `in_progress` or `completed`); optional `explanation`. |
@@ -154,7 +155,7 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 
 ## Bash
 
-`Bash` runs `/bin/bash -c <command>` with the agent process permissions. `timeout` is in milliseconds; the default and the maximum are 600,000 (10 minutes).
+`Bash` runs `/bin/bash -c <command>` with the agent process permissions. `timeout` is in milliseconds; with none, the command runs until it ends or is cancelled.
 
 When `Bash` is constructed with peer tools, it can warn the model when a dedicated tool should be used instead of a shell command.
 
@@ -257,12 +258,15 @@ inherited restrictions. All other tools remain bounded by the parent's permissio
 
 ## Background tasks
 
-If `BackgroundTask` is available to an agent, Sagent injects `background` and `delay` fields into other tool schemas.
+If `BackgroundTask` is available to an agent, Sagent injects `background`, `delay` and `wake_every` fields into other tool schemas.
 
 ```json
 {"command": "make", "description": "Build it", "background": true}
 {"command": "echo done", "description": "Remind me", "delay": 60}
+{"command": "python train.py", "description": "Train", "wake_every": 600}
 ```
+
+`wake_every` is how often, in seconds, the agent is told what a long call wrote since it last looked, or that it wrote nothing. It replaces, for that call, the agent's schedule for the tool (`detach`), which every call of the tool shares.
 
 A backgrounded tool immediately returns a placeholder result. When the tool completes, its real result is delivered to the agent inbox. Use:
 

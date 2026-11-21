@@ -23,7 +23,7 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
-from sagent.runtime.types import DetachSchedule, WakeSchedule
+from sagent.runtime.types import ToolWakeSchedules, WakeSchedule
 from sagent.session.types import AgentSelfResult
 from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
@@ -140,7 +140,7 @@ async def test_a_status_is_published(tmp_path: Path) -> None:
     assert await _patch(tool, tmp_path, {"status": "Fixing the parser"}) == (
         "status: Fixing the parser"
     )
-    assert seen == [types.StatusChanged(text="Fixing the parser")]
+    assert seen == [types.SessionTitleChanged(title="Fixing the parser")]
 
 
 @pytest.mark.asyncio
@@ -215,18 +215,18 @@ async def test_when_long_calls_wake_is_patched_and_reported(tmp_path: Path) -> N
         tmp_path,
         {
             "detach": {
-                "default": {"first_sec": 30, "max_gap_sec": 600},
-                "tools": {"Bash": {"off": True}, "Read": {"growth": 0}},
+                "default": {"first_gap_sec": 30, "max_gap_sec": 600},
+                "per_tool": {"Bash": {"off": True}, "Read": {"gap_growth": 0}},
             },
         },
     )
 
-    schedule = agent.runtime.detach_schedule
-    assert schedule == DetachSchedule(
-        default=WakeSchedule(first_sec=30.0, max_gap_sec=600.0),
-        tools={
+    schedule = agent.runtime.wake_schedules
+    assert schedule == ToolWakeSchedules(
+        default=WakeSchedule(first_gap_sec=30.0, max_gap_sec=600.0),
+        per_tool={
             "Bash": None,
-            "Read": WakeSchedule(first_sec=30.0, growth=0.0, max_gap_sec=600.0),
+            "Read": WakeSchedule(first_gap_sec=30.0, gap_growth=0.0, max_gap_sec=600.0),
         },
     )
     assert text == "detach: 30s 1 600s; Bash off; Read 30s 0 600s"
@@ -238,7 +238,7 @@ async def test_when_long_calls_wake_is_patched_and_reported(tmp_path: Path) -> N
         await _patch(
             tool,
             tmp_path,
-            {"detach": {"tools": {"Bash": {"first_sec": 5}}}},
+            {"detach": {"per_tool": {"Bash": {"first_gap_sec": 5}}}},
         )
         == "detach: off; Bash 5s 1 300s; Read 30s 0 600s"
     )
@@ -248,14 +248,17 @@ async def test_when_long_calls_wake_is_patched_and_reported(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("detach", "message"),
     [
-        ({"default": {"first_sec": 0}}, "first_sec must be a number of seconds"),
         (
-            {"tools": {"Bash": {"soon": 1}}},
-            "detach.tools.Bash takes first_sec, growth, max_gap_sec, off; not soon.",
+            {"default": {"first_gap_sec": 0}},
+            "first_gap_sec must be a number of seconds",
+        ),
+        (
+            {"per_tool": {"Bash": {"soon": 1}}},
+            "detach.per_tool.Bash takes first_gap_sec, gap_growth, max_gap_sec, off; not soon.",
         ),
         ({"default": {"later": 1}}, "detach.default takes .*; not later."),
-        ({"later": {}}, "detach takes default, tools; not later."),
-        ({"default": {"growth": "fast"}}, "growth"),
+        ({"later": {}}, "detach takes default, per_tool; not later."),
+        ({"default": {"gap_growth": "fast"}}, "gap_growth"),
     ],
 )
 async def test_a_detach_patch_that_does_not_fit_changes_nothing(
@@ -268,7 +271,7 @@ async def test_a_detach_patch_that_does_not_fit_changes_nothing(
     with pytest.raises(ValueError, match=message):
         _ = await _patch(tool, tmp_path, {"detach": detach, "status": "x"})
 
-    assert agent.runtime.detach_schedule == DetachSchedule()
+    assert agent.runtime.wake_schedules == ToolWakeSchedules()
 
 
 @pytest.mark.asyncio
@@ -588,8 +591,8 @@ async def test_a_patch_keeps_each_knob_it_leaves_out(tmp_path: Path) -> None:
         tmp_path,
         {
             "detach": {
-                "default": {"first_sec": 30},
-                "tools": {"Bash": {"first_sec": 5}},
+                "default": {"first_gap_sec": 30},
+                "per_tool": {"Bash": {"first_gap_sec": 5}},
             },
         },
     )
@@ -597,7 +600,12 @@ async def test_a_patch_keeps_each_knob_it_leaves_out(tmp_path: Path) -> None:
     text = await _patch(
         tool,
         tmp_path,
-        {"detach": {"default": {"growth": 2}, "tools": {"Bash": {"growth": 3}}}},
+        {
+            "detach": {
+                "default": {"gap_growth": 2},
+                "per_tool": {"Bash": {"gap_growth": 3}},
+            },
+        },
     )
 
     assert text == "detach: 30s 2 300s; Bash 5s 3 300s"
@@ -606,9 +614,7 @@ async def test_a_patch_keeps_each_knob_it_leaves_out(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_every_unknown_knob_is_named(tmp_path: Path) -> None:
     _, _, tool = _setup(tmp_path)
-    message = (
-        "detach.default takes first_sec, growth, max_gap_sec, off; not later, soon."
-    )
+    message = "detach.default takes first_gap_sec, gap_growth, max_gap_sec, off; not later, soon."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _ = await _patch(
             tool,

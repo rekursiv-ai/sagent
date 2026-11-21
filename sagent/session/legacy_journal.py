@@ -48,7 +48,7 @@ from sagent.runtime.context import (
 )
 from sagent.runtime.tape import (
     ContextSplice,
-    InvalidPayloadError,
+    InvalidReplacementError,
     MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
@@ -63,8 +63,8 @@ from sagent.session.jsonl import record_line
 from sagent.session.projects import is_session, legacy_log
 from sagent.session.types import (
     FORMER_TAPE_KINDS,
+    AgentMessage,
     AgentSpawnResult,
-    AgentToAgentMessage,
     AssistantMessage,
     Attachment,
     BashResult,
@@ -75,7 +75,7 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
     WebFetchResult,
@@ -151,7 +151,7 @@ def convert(path: Path) -> tuple[SessionRecord, ...]:
     tape_records = _tape(tape, _str(meta.get("session_id")))
     seen = splice_safe_repair(resolve_context(tape_records).messages)
     clear = ContextClear(
-        timestamp=datetime.now(UTC).isoformat(),
+        timestamp=datetime.now(UTC),
         extra={"spend_usd": _spent(meta), "converted_from": str(path)},
     )
     return (
@@ -245,7 +245,7 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
             if event is not None:
                 built = ReferrableTapeEvent(ref=ref, event=event)
                 n = _int(record.get("id"))
-                if isinstance(event, ToolResult) and n is not None:
+                if isinstance(event, ToolMessage) and n is not None:
                     ids[n] = len(tape)
         elif kind == "persistent_agent":
             directory = PurePath(_str(record.get("session_dir")))
@@ -267,7 +267,7 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
                         else "insert_after",
                     ),
                 ),
-                payload=_payload(entries, record.get("payload")),
+                replacement=_replacement(entries, record.get("payload")),
                 paired=frozenset(
                     s
                     for s in _list(record.get("paired_externally"))
@@ -281,8 +281,8 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
     return sorted(_unique(tape), key=lambda r: r.ref.ordinal)
 
 
-def _payload(entries: _Entries, raw: PlainTree) -> tuple[ModelContextEvent, ...]:
-    """Return a splice payload's entries."""
+def _replacement(entries: _Entries, raw: PlainTree) -> tuple[ModelContextEvent, ...]:
+    """Return the entries a journaled splice's ``payload`` key holds."""
     events: list[ModelContextEvent] = []
     for item in _list(raw):
         event = entries.read(_object(item))
@@ -297,27 +297,27 @@ def _splice(
     mask: tuple[MaskRange, ...],
     strategy: str,
     insert_after: TapeRef | None = None,
-    payload: tuple[ModelContextEvent, ...] = (),
+    replacement: tuple[ModelContextEvent, ...] = (),
     paired: frozenset[str] = frozenset(),
 ) -> ContextSplice:
-    """Return the splice; a payload not valid on its own is repaired first."""
+    """Return the splice; a replacement not valid on its own is repaired first."""
     mask = merge_mask_ranges(mask)
     try:
         return ContextSplice(
             ref=ref,
             mask=mask,
             insert_after=insert_after,
-            payload=payload,
+            replacement=replacement,
             strategy=strategy,
             paired_externally=paired,
         )
-    except InvalidPayloadError:
-        repaired = splice_safe_repair(payload, paired_externally=paired)
+    except InvalidReplacementError:
+        repaired = splice_safe_repair(replacement, paired_externally=paired)
         return ContextSplice(
             ref=ref,
             mask=mask,
             insert_after=insert_after,
-            payload=repaired,
+            replacement=repaired,
             strategy=strategy,
             paired_externally=unpaired_call_ids(repaired),
         )
@@ -383,7 +383,7 @@ def _patch(
     held = tape[at]
     assert isinstance(held, ReferrableTapeEvent)
     result = held.event
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolMessage)
     tape[at] = replace(
         held,
         event=entries.result(
@@ -507,7 +507,7 @@ class _Entries:
                 attachments=attachments,
             )
         if kind == "agent_send":
-            return AgentToAgentMessage(
+            return AgentMessage(
                 timestamp=timestamp,
                 content=text,
                 attachments=attachments,
@@ -536,9 +536,9 @@ class _Entries:
         *,
         failed: bool,
         kind: PlainTree = None,
-        timestamp: str | None = None,
+        timestamp: datetime | None = None,
         attachments: tuple[Attachment, ...] = (),
-    ) -> ToolResult:
+    ) -> ToolMessage:
         """Return a result as today's, typed by the call it answers.
 
         Args:
@@ -555,7 +555,7 @@ class _Entries:
 
         """
         stub = _stub(kind, content)
-        return ToolResult(
+        return ToolMessage(
             timestamp=timestamp,
             call_id=call_id,
             state=stub or "done",
@@ -612,7 +612,7 @@ class _Entries:
         entry: _Record,
         *,
         text: str,
-        timestamp: str | None,
+        timestamp: datetime | None,
     ) -> Response:
         """Return an assistant entry as one model turn, remembering each call."""
         calls = [
@@ -659,7 +659,7 @@ def _signature(record: _Record) -> dict[str, PlainTree]:
 
 # Anthropic seals its thinking with a signature, or redacts it whole; OpenAI seals its
 # reasoning beside its id. The oldest blocks name no type, only their thinking.
-def _thinking(block: _Record, timestamp: str | None) -> Thinking | None:
+def _thinking(block: _Record, timestamp: datetime | None) -> Thinking | None:
     """Return a thinking block as today's ``Thinking``; ``None`` for one unknown."""
     kind = block.get("type", "thinking" if "thinking" in block else None)
     if kind == "thinking":
@@ -719,8 +719,8 @@ def _attachments(raw: PlainTree) -> tuple[Attachment, ...]:
 
 
 # Some writers took the monotonic clock, which no date reads from.
-def _time(raw: PlainTree) -> str | None:
-    """Return seconds or nanoseconds since the epoch as ISO 8601."""
+def _time(raw: PlainTree) -> datetime | None:
+    """Return the time seconds or nanoseconds since the epoch name."""
     if not isinstance(raw, int | float) or isinstance(raw, bool):
         return None
     # Seconds past year 9999 are nanoseconds; a monotonic clock falls short of 2001.
@@ -729,7 +729,7 @@ def _time(raw: PlainTree) -> str | None:
             when = datetime.fromtimestamp(seconds, UTC)
         except (OverflowError, OSError, ValueError):
             continue
-        return when.isoformat() if seconds > 1e9 else None
+        return when if seconds > 1e9 else None
     return None
 
 

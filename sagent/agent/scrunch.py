@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import logging
 
 from sagent.model.types import Response
-from sagent.session.types import ToolCall, ToolResult
+from sagent.session.types import ToolCall, ToolMessage
 
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ def safe_boundaries(view: Sequence[ModelContextEvent]) -> list[bool]:
             unanswered.update(
                 r.call_id for r in entry.records if isinstance(r, ToolCall)
             )
-        elif isinstance(entry, ToolResult):
+        elif isinstance(entry, ToolMessage):
             unanswered.discard(entry.call_id)
         safe.append(not unanswered)
     return safe

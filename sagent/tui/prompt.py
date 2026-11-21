@@ -37,7 +37,11 @@ import asyncio
 import functools
 
 from sagent.runtime import types
-from sagent.session.types import Attachment, UserMessage
+from sagent.session.types import (
+    AgentIdle,
+    Attachment,
+    UserMessage,
+)
 
 
 if TYPE_CHECKING:
@@ -208,9 +212,10 @@ class Panes:
         if self.deferred is None:
             return False
         runtime.push(
-            types.UserDeferredMessage(
-                text=self.deferred.text,
+            UserMessage(
+                content=self.deferred.text,
                 attachments=self.deferred.attachments,
+                due_after=AgentIdle,
             ),
         )
         self.deferred = None
@@ -277,7 +282,7 @@ def commit_panes(runtime: Runtime, panes: Panes) -> Callable[[], None]:
         return event if event is not None else panes.pop_queue()
 
     def observe(event: types.RuntimeEvent) -> None:
-        if isinstance(event, (types.AgentIdle, types.ClearComplete)) and not (
+        if isinstance(event, (AgentIdle, types.SessionClearCompleted)) and not (
             panes.send_queue(runtime)
         ):
             panes.send_deferred(runtime)
@@ -480,12 +485,26 @@ def _send_or_stage(
     attachments: tuple[Attachment, ...] = (),
 ) -> None:
     """Send ``text`` when the runtime takes it now, else stage it in its pane."""
-    if deferred and runtime.accepts_deferred_dispatch:
-        runtime.push(types.UserDeferredMessage(text=text, attachments=attachments))
-    elif not deferred and runtime.accepts_user_dispatch:
+    if deferred and _takes_now(runtime) and not runtime.running_tools:
+        runtime.push(
+            UserMessage(content=text, attachments=attachments, due_after=AgentIdle),
+        )
+    elif not deferred and _takes_now(runtime):
         runtime.push(UserMessage(content=text, attachments=attachments))
     else:
         panes.stage(text, attachments, deferred=deferred)
+
+
+# Staged, a message sent as a reply streams or a compaction runs stays editable.
+# While the runtime waits for the user it is what the runtime waits for; while a
+# halt is queued but not yet taken, the stream about to stop must not strand it.
+def _takes_now(runtime: Runtime) -> bool:
+    """Return whether a message sent now makes progress, rather than waiting staged."""
+    if runtime.inbox.gate_armed:
+        return True
+    if runtime.model_call is None:
+        return runtime.compact_task is None
+    return not runtime.inbox.empty()
 
 
 # A pane's own stop emptied that pane when the cursor came, so staging the line back

@@ -319,7 +319,7 @@ class Views:
         scrollback = Scrollback(
             self.printer,
             tools=agent.tools,
-            markers=runtime.markers,
+            stubs=runtime.stubs,
             home=runtime.tool_context.origin,
         )
         status = Status(runtime, spend=agent.spend_usd)
@@ -336,7 +336,7 @@ class Views:
             commands=self._make(
                 agent,
                 catalog=self.catalog,
-                say=scrollback.show,
+                print_output=scrollback.show,
                 screen=self.screen(label),
                 panes=panes,
                 team=self.team,

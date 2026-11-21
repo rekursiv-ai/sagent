@@ -22,13 +22,15 @@ Iterate `agent.runtime` for every event published from then on, or add a callbac
 
 ```python
 from sagent.runtime import types
+from sagent.session.types import Succeeded
 
 
 def observe(event: types.RuntimeEvent) -> None:
-    if isinstance(event, types.ModelResponseThinking):
+    if isinstance(event, types.ModelResponseThinkingStreamed):
         print(event.text, end="")
-    elif isinstance(event, types.ModelResponseComplete):
-        print(event.response.spend.total)
+    elif isinstance(event, types.ModelResponseCompleted):
+        if isinstance(event.outcome, Succeeded):
+            print(event.outcome.value.spend.total)
 
 
 agent.runtime.observers.append(observe)
@@ -40,18 +42,20 @@ Common events in `sagent.runtime.types`:
 
 | Event | Meaning |
 | --- | --- |
-| `ModelCallStarted` | A model call began. |
-| `ModelResponsePartial` | Reply text chunk. |
-| `ModelResponseThinking` | Thinking text chunk, when the provider returns it. |
-| `ModelResponseComplete` | The finished `Response`: records, tool calls, tokens, spend. |
-| `ModelResponseError` | A model call failed past retrying. |
-| `ModelCallSuspended` | A transient failure; the turn waits, then calls again. |
-| `CompactStarted`, `CompactComplete` | Compaction began, and finished. |
-| `ChildEvent`, `ChildDoneEvent` | A spawned child's event, and its finish. |
-| `Halt` | Someone halted the turn. |
+| `ModelResponseStarted` | A model call began. |
+| `ModelResponseTextStreamed` | Reply text chunk. |
+| `ModelResponseThinkingStreamed` | Thinking text chunk, when the provider returns it. |
+| `ModelResponseCompleted` | A model call ended. Its `outcome` is `Succeeded` with the finished `Response` (records, tool calls, tokens, spend), `Cancelled`, or `Failed` with what was raised. It says nothing of the turn: after a call that failed the turn may go on. |
+| `ModelResponseSuspended` | A transient failure; the turn waits, then calls again. |
+| `ModelIdle` | The model's work on the turn stopped. Its `outcome` is `Succeeded` (it finished), `Cancelled` (a halt or a clear stopped it), or `Failed` with what was raised, past retrying. |
+| `UserMessageCompleted` | A person's message was answered, or was not: with its turn's outcome, or `Cancelled` when no turn took it in (a clear dropped it; a halt came before the call for it; the runtime quit). `await runtime.ask(message)` returns the outcome of the message it was given. |
+| `ModelRetryCompleted` | A retry called the model again for a stopped turn (`Succeeded`), or found none stopped (`Cancelled`). |
+| `SessionCompactStarted`, `SessionCompactCompleted` | Compaction began, and ended: `Succeeded`, `Cancelled`, or `Failed`. |
+| `ChildEvent` | A spawned child's event. |
+| `ModelHalt` | Someone asked to halt the turn. |
 | `AgentIdle` | The agent has no more work and waits for input. |
 
-A tool result arrives as the session record it is, a `ToolResult`.
+A tool result arrives as the session record it is, a `ToolMessage`.
 
 ## CLI output formats
 
@@ -82,7 +86,7 @@ printf 'Say hi' | sagent --provider Google --model gemini-pro-3.1 --output-forma
 | `text/x-thinking` | Thinking text chunk. |
 | `text/x-tool-label` | Label of a tool call, with its `call_id`. |
 | `application/x-tool-result` | Tool result, with `call_id` and `is_error`. |
-| `application/x-error` | Model call failed. |
+| `application/x-error` | The turn failed. |
 | `text/x-notice` | Retry wait or login switch. |
 | `result` | Final reply. |
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, override
 from unittest import mock
 from unittest.mock import Mock
@@ -44,8 +45,13 @@ from sagent.runtime import types
 from sagent.runtime.runtime import Runtime
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
+    Failed,
+    ModelIdle,
+    Succeeded,
     SystemMessage,
     ToolCall,
     UncategorizedRecord,
@@ -664,7 +670,7 @@ async def test_a_stopped_agent_tells_those_it_owes(tmp_path: Path) -> None:
 
     assert shown == [("a", "[a stopped]")]
     (told,) = team["Agent"].runtime.inbox.drain_nowait()
-    assert told == AgentToAgentMessage(
+    assert told == AgentMessage(
         sender="a",
         recipient="Agent",
         content="[a stopped]",
@@ -706,10 +712,10 @@ def test_a_reply_owed_an_unwatched_user_is_dropped(tmp_path: Path) -> None:
     ("event", "said"),
     [
         (
-            types.ModelResponseError(exception=ValueError("down")),
+            ModelIdle(outcome=Failed(exception=ValueError("down"))),
             "[a failed] ValueError: down",
         ),
-        (types.ModelResponseCancelled(output_chars_estimate=0), "[a halted]"),
+        (ModelIdle(outcome=Cancelled()), "[a halted]"),
     ],
 )
 async def test_a_debtor_that_fails_or_halts_answers_for_itself(
@@ -720,21 +726,54 @@ async def test_a_debtor_that_fails_or_halts_answers_for_itself(
     team = _family(tmp_path)
     team.send("Agent", "a", "x")
 
+    team["a"].runtime.publish(types.ModelResponseStarted())
     team["a"].runtime.publish(event)
 
     (told,) = team["Agent"].runtime.inbox.drain_nowait()
-    assert isinstance(told, AgentToAgentMessage)
+    assert isinstance(told, AgentMessage)
     assert told.content == said
     assert team.owes("a") == {}
+
+
+# Only the runtime knows whether a turn stopped: a compaction cancels a call, a
+# failure may be got past, and a halt or a clear of an agent at rest stops nothing.
+@pytest.mark.parametrize(
+    "event",
+    [
+        types.ModelResponseCompleted(outcome=Cancelled()),
+        types.ModelResponseCompleted(
+            outcome=Failed(exception=ValueError("down")),
+        ),
+        types.ModelHalt(),
+        types.SessionClearCompleted(outcome=Succeeded(value=None)),
+        ModelIdle(outcome=Succeeded(value=None)),
+    ],
+    ids=["a-call-cancelled", "a-call-failed", "a-halt-asked", "a-clear", "finished"],
+)
+def test_nothing_but_a_turn_that_stopped_short_ends_a_run_for_its_agent(
+    tmp_path: Path,
+    event: types.RuntimeEvent,
+) -> None:
+    team = _family(tmp_path)
+    team.send("Agent", "a", "x")
+    a = team["a"].runtime
+
+    a.publish(types.ModelResponseStarted())
+    a.publish(event)
+
+    assert team["Agent"].runtime.inbox.drain_nowait() == []
+    assert team.owes("a") == {"Agent": "x"}
 
 
 def _idle(agent: Agent, *said: str | None) -> None:
     """Have ``agent`` reply ``said`` in one response, then go idle."""
     records = tuple(AssistantMessage(content=s) for s in said)
     agent.runtime.publish(
-        types.ModelResponseComplete(response=replace(reply(), records=records)),
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=replace(reply(), records=records)),
+        ),
     )
-    agent.runtime.publish(types.AgentIdle())
+    agent.runtime.publish(AgentIdle())
 
 
 @pytest.mark.parametrize("allowed", [None, frozenset({"AgentSend"})])
@@ -785,9 +824,9 @@ def test_an_idle_debtor_is_nudged_and_its_parent_is_not_told(tmp_path: Path) -> 
     inbox = a.runtime.inbox.drain_nowait()
 
     assert [
-        m.sender if isinstance(m, AgentToAgentMessage) else "nudge"
+        m.sender if isinstance(m, AgentMessage) else "nudge"
         for m in inbox
-        if isinstance(m, (AgentToAgentMessage, SystemMessage))
+        if isinstance(m, (AgentMessage, SystemMessage))
     ] == ["Agent", "nudge", "nudge", "nudge"]
     assert _told(team["Agent"]) == [("a", "[a is idle] half done")]
 
@@ -844,7 +883,7 @@ def test_an_unavailable_reply_tool_fails_once_without_waking_the_debtor(
     assert _told(team["b"]) == [failed]
     assert (team.owes("Agent"), team.owes("b")) == ({}, {})
     team.wake("Agent")
-    debtor.runtime.publish(types.AgentIdle())
+    debtor.runtime.publish(AgentIdle())
     assert _nudged(debtor) == 0
     assert _told(team["Agent"]) == []
     assert _told(team["b"]) == []
@@ -878,7 +917,9 @@ async def test_the_round_cap_preserves_reply_enforcement(tmp_path: Path) -> None
     async with debtor:
         team.send("b", "a", "look")
         debtor.runtime.publish(
-            types.ModelResponseComplete(response=reply(calls=[call("Read")])),
+            types.ModelResponseCompleted(
+                outcome=Succeeded(value=reply(calls=[call("Read")])),
+            ),
         )
         assert debtor.allowed is None
         assert debtor.runtime.allowed == frozenset({"AgentSend"})
@@ -931,8 +972,10 @@ async def test_an_excluded_reply_tool_settles_restored_debt_durably(
 def _complete_responses_and_idle(agent: Agent, *responses: Response) -> None:
     """Have ``agent`` make ``responses``, then go idle."""
     for response in responses:
-        agent.runtime.publish(types.ModelResponseComplete(response=response))
-    agent.runtime.publish(types.AgentIdle())
+        agent.runtime.publish(
+            types.ModelResponseCompleted(outcome=Succeeded(value=response)),
+        )
+    agent.runtime.publish(AgentIdle())
 
 
 def _told(agent: Agent) -> list[tuple[str | None, str | None]]:
@@ -940,7 +983,7 @@ def _told(agent: Agent) -> list[tuple[str | None, str | None]]:
     return [
         (m.sender, m.content)
         for m in agent.runtime.inbox.drain_nowait()
-        if isinstance(m, AgentToAgentMessage)
+        if isinstance(m, AgentMessage)
     ]
 
 
@@ -959,9 +1002,9 @@ def test_an_idle_with_no_work_since_the_last_is_not_acted_on(tmp_path: Path) -> 
     _ = team["a"].runtime.inbox.drain_nowait()
 
     for label in ("a", "b"):
-        team[label].runtime.publish(types.AgentIdle())
+        team[label].runtime.publish(AgentIdle())
     _complete_responses_and_idle(team["b"], reply("done"))
-    team["b"].runtime.publish(types.AgentIdle())
+    team["b"].runtime.publish(AgentIdle())
 
     assert _nudged(team["a"]) == 0
     assert _told(team["Agent"]) == [("b", "[b is idle] done")]
@@ -971,13 +1014,13 @@ def test_an_idle_with_no_work_since_the_last_is_not_acted_on(tmp_path: Path) -> 
     "first",
     [
         UserMessage(content="hi"),
-        AgentToAgentMessage(sender="user", recipient="Agent", content="hi"),
+        AgentMessage(sender="user", recipient="Agent", content="hi"),
     ],
     ids=["typed", "sent"],
 )
 def test_the_users_first_message_nudges_each_debtor_once(
     tmp_path: Path,
-    first: UserMessage | AgentToAgentMessage,
+    first: UserMessage | AgentMessage,
 ) -> None:
     team = _family(tmp_path)
     team.send("Agent", "a", "x")
@@ -986,7 +1029,7 @@ def test_the_users_first_message_nudges_each_debtor_once(
         _ = team[label].runtime.inbox.drain_nowait()
     root = team["Agent"].runtime
 
-    root.publish(AgentToAgentMessage(sender="b", recipient="Agent", content="hi"))
+    root.publish(AgentMessage(sender="b", recipient="Agent", content="hi"))
     assert [_nudged(team[label]) for label in team] == [0, 0, 0, 0]
     root.publish(first)
     root.publish(first)
@@ -1055,10 +1098,10 @@ def test_no_debtor_is_answered_for_whether_it_owes_its_parent_or_another(
     ("event", "said"),
     [
         (
-            types.ModelResponseError(exception=ValueError("down")),
+            ModelIdle(outcome=Failed(exception=ValueError("down"))),
             "[a failed] ValueError: down",
         ),
-        (types.ModelResponseCancelled(output_chars_estimate=0), "[a halted]"),
+        (ModelIdle(outcome=Cancelled()), "[a halted]"),
     ],
 )
 def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
@@ -1069,7 +1112,12 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
     """It waits for the user then, so it never idles; the parent hears it stopped."""
     team = _family(tmp_path)
     a = team["a"].runtime
-    a.publish(types.ModelResponseComplete(response=reply(calls=[_send("Agent")])))
+    a.publish(types.ModelResponseStarted())
+    a.publish(
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=reply(calls=[_send("Agent")])),
+        ),
+    )
     a.publish(event)
     _complete_responses_and_idle(team["a"], reply("back"))
 
@@ -1080,10 +1128,10 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
     ("event", "said"),
     [
         (
-            types.ModelResponseError(exception=ValueError("down")),
+            ModelIdle(outcome=Failed(exception=ValueError("down"))),
             "[a failed] ValueError: down",
         ),
-        (types.ModelResponseCancelled(output_chars_estimate=0), "[a halted]"),
+        (ModelIdle(outcome=Cancelled()), "[a halted]"),
     ],
 )
 def test_what_a_child_said_before_it_failed_is_not_told_again(
@@ -1093,7 +1141,10 @@ def test_what_a_child_said_before_it_failed_is_not_told_again(
 ) -> None:
     team = _family(tmp_path)
     a = team["a"].runtime
-    a.publish(types.ModelResponseComplete(response=reply("half done")))
+    a.publish(types.ModelResponseStarted())
+    a.publish(
+        types.ModelResponseCompleted(outcome=Succeeded(value=reply("half done"))),
+    )
     a.publish(event)
     _complete_responses_and_idle(team["a"], reply(calls=[call("Read")]))
 
@@ -1124,10 +1175,10 @@ def test_a_child_waiting_out_a_spent_quota_tells_its_parent_once(
         (OverloadedError("busy"), 1),
     ):
         a.publish(
-            types.ModelCallSuspended(
+            types.ModelResponseSuspended(
                 exception=exception,
-                until=_NOON + 5.0,
-                attempt=attempt,
+                retry_at=datetime.fromtimestamp(_NOON + 5.0, UTC),
+                failures_in_a_row=attempt,
             ),
         )
 
@@ -1144,13 +1195,13 @@ def test_a_spawned_child_waiting_out_a_quota_tells_its_parent_too(
     team.awaited.add("a")
     a = team["a"].runtime
     a.publish(
-        types.ModelCallSuspended(
+        types.ModelResponseSuspended(
             exception=RateLimitedError("spent"),
-            until=_NOON + 5.0,
-            attempt=1,
+            retry_at=datetime.fromtimestamp(_NOON + 5.0, UTC),
+            failures_in_a_row=1,
         ),
     )
-    a.publish(types.ModelResponseError(exception=ValueError("down")))
+    a.publish(ModelIdle(outcome=Failed(exception=ValueError("down"))))
 
     assert _told(team["Agent"]) == [
         ("a", "[a waiting until Wed Oct 28 12:00:05] RateLimitedError: spent"),
@@ -1381,7 +1432,9 @@ async def _session(
 
 
 def _switches(seen: list[types.RuntimeEvent]) -> list[tuple[str, str]]:
-    return [(e.was, e.now) for e in seen if isinstance(e, types.LoginSwitched)]
+    return [
+        (e.from_login, e.to_login) for e in seen if isinstance(e, types.LoginSwitched)
+    ]
 
 
 @pytest.mark.asyncio
@@ -1419,14 +1472,18 @@ async def test_a_window_that_names_no_reset_is_spent_an_hour(tmp_path: Path) -> 
     finally:
         await agent.aclose()
     (moved,) = [e for e in seen if isinstance(e, types.LoginSwitched)]
-    assert (moved.provider, moved.was, moved.now, moved.window, moved.first) == (
-        "sub",
-        "default",
-        "personal",
-        "5-hour",
-        "default",
+    assert (
+        moved.provider,
+        moved.from_login,
+        moved.to_login,
+        moved.spent_window,
+        moved.first_login_in_order,
+    ) == ("sub", "default", "personal", "5-hour", "default")
+    assert moved.spent_window_resets_at is not None
+    assert moved.spent_window_resets_at.timestamp() == pytest.approx(
+        began + 3_600.0,
+        abs=0.5,
     )
-    assert moved.until == pytest.approx(began + 3_600.0, abs=0.5)
 
 
 @pytest.mark.asyncio
@@ -1526,7 +1583,11 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     # The session starts off the spent login quietly; the move back is news.
     assert _switches(seen) == [("personal", "default")]
     (back,) = (e for e in seen if isinstance(e, types.LoginSwitched))
-    assert (back.window, back.until, back.first) == ("", 0.0, "default")
+    assert (
+        back.spent_window,
+        back.spent_window_resets_at,
+        back.first_login_in_order,
+    ) == ("", None, "default")
 
 
 @pytest.mark.asyncio
@@ -1598,7 +1659,7 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
     waiting = asyncio.Event()
 
     def suspended(event: types.RuntimeEvent) -> None:
-        if isinstance(event, types.ModelCallSuspended):
+        if isinstance(event, types.ModelResponseSuspended):
             waiting.set()
 
     agent.runtime.observers.append(suspended)
@@ -1612,16 +1673,21 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
         await asyncio.wait_for(waiting.wait(), timeout=10)
         assert not sending.done()
         assert accounts.served == ["default"]
-        clock[0] = soon
-        agent.runtime.push(types.SaveSession())
+        # The reset rides a ``datetime``, to the microsecond: just past it.
+        clock[0] = soon + 1e-3
+        agent.runtime.push(types.SessionSaveDue())
         assert await asyncio.wait_for(sending, timeout=10) == "from personal"
     finally:
         sending.cancel()
         await asyncio.gather(sending, return_exceptions=True)
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
-    (wait,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
-    assert wait.until == soon
+    (wait,) = [e for e in seen if isinstance(e, types.ModelResponseSuspended)]
+    assert wait.retry_at == datetime.fromtimestamp(soon, UTC)
+    assert (wait.provider, list(wait.reset_at_by_login)) == (
+        "sub",
+        ["personal", "default"],
+    )
     assert _switches(seen) == [("default", "personal")]
 
 
@@ -1641,9 +1707,8 @@ async def test_no_login_is_asked_twice_and_all_spent_waits_as_ever(
     finally:
         await agent.aclose()
     assert accounts.served == ["default", "personal", "work"]
-    (spent,) = [e for e in seen if isinstance(e, types.LoginsSpent)]
-    assert spent.provider == "sub"
-    assert [account for account, _ in spent.resets] == ["work", "default", "personal"]
+    # Not waiting it out, the turn fails: no wait is told.
+    assert [e for e in seen if isinstance(e, types.ModelResponseSuspended)] == []
 
 
 @pytest.mark.asyncio
@@ -1694,7 +1759,11 @@ async def test_no_login_left_with_none_spent_says_nothing_of_resets(
     finally:
         await agent.aclose()
     assert accounts.served == ["default", "personal", "personal"]
-    assert [e for e in seen if isinstance(e, types.LoginsSpent)] == []
+    assert [
+        e
+        for e in seen
+        if isinstance(e, types.ModelResponseSuspended) and e.reset_at_by_login
+    ] == []
 
 
 @pytest.mark.asyncio
@@ -1847,14 +1916,17 @@ async def test_a_compaction_on_a_spent_login_moves_to_one_with_quota_first(
             None,
             Spent(window="5-hour", model="scripted", until=until),
         )
-        agent.runtime.push(types.Compact())
+        agent.runtime.push(types.SessionCompact())
         async with asyncio.timeout(5):
             await recording.asked.wait()
     finally:
         await agent.aclose()
     assert recording.logins == ["personal"]
     (moved,) = [e for e in seen if isinstance(e, types.LoginSwitched)]
-    assert (moved.window, moved.until) == ("5-hour", until)
+    assert (moved.spent_window, moved.spent_window_resets_at) == (
+        "5-hour",
+        datetime.fromtimestamp(until, UTC),
+    )
 
 
 @pytest.mark.asyncio
@@ -1870,7 +1942,7 @@ async def test_a_compaction_first_leaves_the_session_s_start_quiet(
     recording = _Recording()
     agent.runtime.compactor = recording
     try:
-        agent.runtime.push(types.Compact())
+        agent.runtime.push(types.SessionCompact())
         async with asyncio.timeout(5):
             await recording.asked.wait()
         assert await agent.send("hi") == "one"
@@ -2021,7 +2093,7 @@ async def test_a_login_moved_onto_and_found_signed_out_is_passed_over(
     assert accounts.served == ["default", "personal", "work"]
     assert _switches(seen) == [("default", "personal"), ("personal", "work")]
     (_, out) = [e for e in seen if isinstance(e, types.LoginSwitched)]
-    assert (out.window, out.until) == ("signed out", 0.0)
+    assert (out.spent_window, out.spent_window_resets_at) == ("signed out", None)
 
 
 @pytest.mark.asyncio

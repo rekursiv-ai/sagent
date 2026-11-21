@@ -12,7 +12,7 @@ from sagent.providers.resources import SharedResources
 from sagent.session.types import (
     AssistantMessage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UserMessage,
 )
 
@@ -30,7 +30,7 @@ async def test_endpoint_auth_and_native_request() -> None:
             records=(
                 UserMessage(content="hi"),
                 ToolCall(call_id="c", name="Read"),
-                ToolResult(call_id="c", state="done", shown="result"),
+                ToolMessage(call_id="c", state="done", shown="result"),
             ),
         ),
         model=model,

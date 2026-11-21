@@ -30,7 +30,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -118,13 +118,13 @@ def test_encode_renders_each_record_as_its_input_item() -> None:
         AssistantMessage(content=""),
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
         ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_b",
             state="done",
             stdout=("missing",),
             result=UncategorizedToolResult(exit_code=1),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_a",
             state="done",
             stdout=(
@@ -134,13 +134,13 @@ def test_encode_renders_each_record_as_its_input_item() -> None:
             ),
             result=UncategorizedToolResult(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_c",
             state="done",
             stdout=(image,),
             result=UncategorizedToolResult(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_d",
             state="done",
             result=UncategorizedToolResult(exit_code=1),

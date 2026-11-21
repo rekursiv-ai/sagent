@@ -2,15 +2,17 @@
 
 A ``ReferrableTapeEvent`` records one event. A ``ContextSplice`` edits what
 the model sees: it hides the records its ``mask`` names and shows its
-``payload`` after ``insert_after``. ``context.resolve_context`` plays the
+``replacement`` after ``insert_after``. ``context.resolve_context`` plays the
 tape back.
 
 A ref has one alive editor at a time. To edit what a splice hides, mask the
 splice's own ref: that ends it, and what it hid shows again until the new
 splice hides it.
 
-A splice's payload is valid on its own: calls and results pair within it,
-or are named in ``paired_externally``, and user and model turns alternate.
+A splice's replacement is valid on its own: calls pair with results within it,
+or are named in ``paired_externally``, and user and model turns alternate. A
+result answering no call of it is its call's later message, a user-side turn
+(``session.types.late_messages``).
 """
 
 from __future__ import annotations
@@ -20,21 +22,21 @@ from typing import TYPE_CHECKING
 
 from sagent.model.types import Response
 from sagent.runtime.types import (
-    CompactComplete,
-    CompactFailed,
-    CompactStarted,
     ModelContextEvent,
-    labeled_agent_send_text,
+    SessionCompactCompleted,
+    SessionCompactStarted,
 )
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
+    SessionContext,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
+    labeled_text,
+    pairings,
 )
 
 
@@ -44,7 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ContextSplice",
-    "InvalidPayloadError",
+    "InvalidReplacementError",
     "InvalidSpliceError",
     "MaskRange",
     "ReferrableTapeEvent",
@@ -62,19 +64,19 @@ __all__ = [
 ]
 
 
-class InvalidPayloadError(ValueError):
-    """A tape record that cannot be built: a bad ref, range, mask, or payload."""
+class InvalidReplacementError(ValueError):
+    """A tape record that cannot be built: a bad ref, range, mask, or replacement."""
 
 
 class InvalidSpliceError(ValueError):
     """A splice that cannot join this tape: it claims what an alive splice masks.
 
-    Or it absorbs a splice without carrying its payload, or is inserted inside
+    Or it absorbs a splice without carrying its replacement, or is inserted inside
     its own mask.
     """
 
 
-type TapeEvent = ModelContextEvent | CompactStarted | CompactComplete | CompactFailed
+type TapeEvent = ModelContextEvent | SessionCompactStarted | SessionCompactCompleted
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -91,7 +93,7 @@ class TapeRef:
         """Validate ordinal is a non-negative integer."""
         # ``True`` is an int, equal to 1; a negative ordinal no mask can reach.
         if isinstance(self.ordinal, bool) or self.ordinal < 0:
-            raise InvalidPayloadError(
+            raise InvalidReplacementError(
                 f"TapeRef ordinal must be a non-negative int, got {self.ordinal!r}",
             )
 
@@ -116,11 +118,11 @@ class MaskRange:
     def __post_init__(self) -> None:
         """Validate ``0 <= lo <= hi``."""
         if self.lo < 0:
-            raise InvalidPayloadError(
+            raise InvalidReplacementError(
                 f"MaskRange lo={self.lo} is negative",
             )
         if self.hi < self.lo:
-            raise InvalidPayloadError(
+            raise InvalidReplacementError(
                 f"MaskRange hi={self.hi} < lo={self.lo} is inverted",
             )
 
@@ -150,7 +152,7 @@ class ReferrableTapeEvent:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContextSplice:
-    """A view-editing splice: mask some refs, insert a payload."""
+    """A view-editing splice: mask some refs, insert a replacement."""
 
     ref: TapeRef
     """Canonical identity."""
@@ -159,42 +161,42 @@ class ContextSplice:
     """The disjoint ranges of records this splice hides."""
 
     insert_after: TapeRef | None
-    """The record ``payload`` shows after, hidden or not; ``None`` for the head."""
+    """The record ``replacement`` shows after, hidden or not; ``None`` for the head."""
 
-    payload: tuple[ModelContextEvent, ...]
+    replacement: tuple[ModelContextEvent, ...]
     """What the splice shows."""
 
     strategy: str
     """What produced it, such as ``"summary"``."""
 
-    token_before: int = 0
+    masked_tokens: int = 0
     """Tokens of what it hides."""
 
-    token_after: int = 0
-    """Tokens of ``payload``."""
+    replacement_tokens: int = 0
+    """Tokens of ``replacement``."""
 
-    fallback_reason: str = ""
+    summary_fallback_reason: str = ""
     """Why a summary fell back to keeping history, if it did."""
 
-    preserved_tail_count: int = 0
+    entries_kept_verbatim: int = 0
     """How many recent entries that fallback kept."""
 
     paired_externally: frozenset[str] = frozenset()
-    """Call ids whose partner lies outside ``payload``, and never inside it.
+    """Call ids whose partner lies outside ``replacement``, and never inside it.
 
     A deferred pairing shows only a result: its call is in a recorded turn.
     """
 
     def __post_init__(self) -> None:
-        """Validate the mask and the payload.
+        """Validate the mask and the replacement.
 
         Raises:
-          InvalidPayloadError: Two ranges share a record, or the payload is
+          InvalidReplacementError: Two ranges share a record, or the replacement is
             not valid on its own.
 
         """
         _validate_mask_disjoint(self.mask)
-        _validate_payload(self.payload, self.paired_externally)
+        _validate_replacement(self.replacement, self.paired_externally)
 
 
 type TapeRecord = ReferrableTapeEvent | ContextSplice
@@ -262,11 +264,11 @@ def mask_ranges_overlap(
 
 
 def splice_safe_repair(
-    payload: Sequence[ModelContextEvent],
+    replacement: Sequence[ModelContextEvent],
     *,
     paired_externally: frozenset[str] = frozenset(),
 ) -> tuple[ModelContextEvent, ...]:
-    """Return ``payload`` repaired into a valid splice payload; repairing it again changes nothing.
+    """Return ``replacement`` repaired into a valid splice replacement; repairing it again changes nothing.
 
     Calls are paired and deduplicated, adjacent turns of one side merged, then
     paired again: a turn merged across a note carries its calls ahead of it.
@@ -275,16 +277,16 @@ def splice_safe_repair(
     at most once per entry.
 
     Args:
-      payload: The entries.
-      paired_externally: Calls answered outside ``payload``, such as a call
+      replacement: The entries.
+      paired_externally: Calls answered outside ``replacement``, such as a call
         still running detached; they are not answered ``[interrupted]``.
 
     Returns:
-      repaired: The entries, valid as a splice payload.
+      repaired: The entries, valid as a splice replacement.
 
     """
     repaired = tuple(
-        _pair_and_dedup_tool_calls(payload, paired_externally=paired_externally),
+        _pair_and_dedup_tool_calls(replacement, paired_externally=paired_externally),
     )
     # A merge removes an entry, but pairing may add an ``[interrupted]`` result,
     # so nothing proves the passes settle; one per entry bounds them.
@@ -301,7 +303,7 @@ def splice_safe_repair(
     return repaired
 
 
-def parts_model_turns(entry: SystemMessage | TurnContext) -> bool:
+def parts_model_turns(entry: SystemMessage | SessionContext) -> bool:
     """Return whether a harness note keeps the model turns either side of it apart.
 
     Every provider sends a note with text on the user side, as it sends a wake
@@ -314,46 +316,76 @@ def parts_model_turns(entry: SystemMessage | TurnContext) -> bool:
       parts: Whether it has text.
 
     """
-    return bool(entry.text() if isinstance(entry, TurnContext) else entry.content)
+    return bool(entry.text() if isinstance(entry, SessionContext) else entry.content)
 
 
 def coalesce_roles(
-    payload: Sequence[ModelContextEvent],
+    replacement: Sequence[ModelContextEvent],
+    *,
+    keep_senders_apart: bool = False,
 ) -> tuple[ModelContextEvent, ...]:
     """Merge each user-side or model turn into the same side's turn just before it.
 
     Notes between two user-side turns do not keep them apart; a tool result
     does, and so does a note between two model turns that ``parts_model_turns``.
     Messages from different senders merge into a ``UserMessage`` labelling each
-    part. It pairs no calls; it never raises, and merging again changes nothing.
+    part. A message that names the user the context before it says the session is
+    (``SessionContext.user``) is that user's own, as one that names no sender is: the
+    model was told who they are, and is not told again. It pairs no calls; it
+    never raises, and merging again changes nothing.
 
     Args:
-      payload: The entries.
+      replacement: The entries.
+      keep_senders_apart: Leave user-side turns from different senders as they
+        are, each its own turn: for an API that passes adjacent user turns to
+        the model as it was sent them (``ModelCapability.keeps_user_turns_apart``).
 
     Returns:
-      coalesced: ``payload`` with adjacent turns of one side merged.
+      coalesced: ``replacement`` with adjacent turns of one side merged.
 
     """
     out: list[ModelContextEvent] = []
-    for entry in payload:
+    # Where in ``out`` a turn holds more than one sender's words.
+    mixed: set[int] = set()
+    # Whose session the context so far says it is.
+    user: str | None = None
+    for stated in replacement:
+        entry = stated
+        if isinstance(entry, SessionContext) and entry.user is not None:
+            user = entry.user
+        elif (
+            isinstance(entry, (UserMessage, AgentMessage))
+            and user is not None
+            and entry.sender == user
+        ):
+            entry = UserMessage(
+                context_id=entry.context_id,
+                timestamp=entry.timestamp,
+                content=entry.content,
+                attachments=entry.attachments,
+                extra=entry.extra,
+            )
         # A note is no one's turn, so the turn before it is the one ``entry``
         # meets: the merge lands there, and the notes after it stay after it.
         at = next(
             (
                 i
                 for i in range(len(out) - 1, -1, -1)
-                if not isinstance(out[i], (SystemMessage, TurnContext))
+                if not isinstance(out[i], (SystemMessage, SessionContext))
             ),
             None,
         )
         prior = None if at is None else out[at]
-        user_side = (UserMessage, AgentToAgentMessage)
+        user_side = (UserMessage, AgentMessage)
         if (
             at is not None
             and isinstance(entry, user_side)
             and isinstance(prior, user_side)
+            and not (keep_senders_apart and not _same_sender(prior, entry))
         ):
-            out[at] = _merge_user(prior, entry)
+            out[at] = _merge_user(prior, entry, mixed=at in mixed)
+            if not _same_sender(prior, entry):
+                mixed.add(at)
         elif (
             at is not None
             and isinstance(entry, Response)
@@ -361,7 +393,7 @@ def coalesce_roles(
             and not any(
                 parts_model_turns(note)
                 for note in out[at + 1 :]
-                if isinstance(note, SystemMessage | TurnContext)
+                if isinstance(note, SystemMessage | SessionContext)
             )
         ):
             out[at] = _merge_assistant(prior, entry)
@@ -371,40 +403,25 @@ def coalesce_roles(
 
 
 def unpaired_call_ids(
-    payload: Sequence[ModelContextEvent],
+    replacement: Sequence[ModelContextEvent],
 ) -> frozenset[str]:
-    """Return the call ids of ``payload`` whose partner it lacks.
+    """Return the call ids of ``replacement`` whose partner it lacks.
 
-    A splice's ``paired_externally``, computed from its final payload: an id
+    A splice's ``paired_externally``, computed from its final replacement: an id
     named there may not have both partners local.
 
     Args:
-      payload: The entries.
+      replacement: The entries.
 
     Returns:
-      ids: The calls unanswered before the next turn, and the results with no
-        call before them.
+      ids: The calls left unanswered (``session.types.pairings``). A result with
+        no call before it is its call's later message, which needs no partner.
 
     """
-    pending: set[str] = set()
-    am_only_local: set[str] = set()
-    tr_only_local: set[str] = set()
-    for entry in payload:
-        if isinstance(entry, (SystemMessage, TurnContext)):
-            continue
-        if isinstance(entry, Response):
-            am_only_local.update(pending)
-            pending = {c.call_id for c in calls(entry.records)}
-        elif isinstance(entry, ToolResult):
-            if entry.call_id in pending:
-                pending.discard(entry.call_id)
-            else:
-                tr_only_local.add(entry.call_id)
-        else:
-            am_only_local.update(pending)
-            pending.clear()
-    am_only_local.update(pending)
-    return frozenset(am_only_local | tr_only_local)
+    found, still_open = pairings(replacement)
+    return frozenset(
+        {i for pairing in found for i in pairing.left_open} | {*still_open},
+    )
 
 
 def calls(records: Sequence[object]) -> tuple[ToolCall, ...]:
@@ -425,208 +442,200 @@ def _validate_mask_disjoint(mask: tuple[MaskRange, ...]) -> None:
     for i, r in enumerate(mask):
         for prior in mask[:i]:
             if prior.overlaps(r):
-                raise InvalidPayloadError(
+                raise InvalidReplacementError(
                     f"mask ranges overlap in session {r.session_id!r}",
                 )
 
 
-# A result answers a call before it in the payload, or is named in
-# ``paired_externally``; a call is answered before the next turn, or is named there; an
-# id named there has no partner in the payload. No call id or result repeats, and two
-# model turns have a user-side turn, a note that parts them, or a local result between.
-# Otherwise notes are skipped.
-def _validate_payload(
-    payload: tuple[ModelContextEvent, ...],
+# How calls and results pair is ``session.types.pairings``'s to say; this refuses
+# what a splice may not show. A call is answered before the next turn, or is named in
+# ``paired_externally``; an id named there has no partner in the replacement. No call
+# id repeats, and two model turns have a user-side turn, a note that parts them, or a
+# local result between. Otherwise notes are skipped.
+def _validate_replacement(
+    replacement: tuple[ModelContextEvent, ...],
     paired_externally: frozenset[str],
 ) -> None:
-    """Raise unless ``payload`` is valid on its own."""
-    pending: set[str] = set()
-    seen_results: set[str] = set()
-    seen_tool_call_ids: set[str] = set()
+    """Raise unless ``replacement`` is valid on its own."""
+    found, still_open = pairings(replacement, paired_externally=paired_externally)
     # The ``paired_externally`` ids seen on one side, so the other side is refused.
-    externally_consumed_by_am: set[str] = set()
-    externally_consumed_by_tr: set[str] = set()
+    called_here: set[str] = set()
+    answered_here: set[str] = set()
     # Whether the last turn was the model's.
     after_model = False
-    for entry in payload:
-        if isinstance(entry, SystemMessage | TurnContext):
-            if not pending and parts_model_turns(entry):
-                after_model = False
-            continue
-        if isinstance(entry, Response):
-            if pending:
-                raise InvalidPayloadError(
-                    f"unpaired tool_call id(s) in payload: {sorted(pending)}"
-                    " (no matching ToolResult; not in paired_externally)",
-                )
-            if after_model:
-                raise InvalidPayloadError("payload violates role alternation")
-            after_model = True
-            for tc in calls(entry.records):
-                if tc.call_id in seen_tool_call_ids:
-                    raise InvalidPayloadError(
-                        f"duplicate tool_call id {tc.call_id!r} across"
-                        " model turns in payload",
+    for entry, pairing in zip(replacement, found, strict=True):
+        match pairing.role:
+            case "note":
+                if (
+                    isinstance(entry, SystemMessage | SessionContext)
+                    and not pairing.waiting
+                    and parts_model_turns(entry)
+                ):
+                    after_model = False
+            case "reply":
+                if pairing.left_open:
+                    raise InvalidReplacementError(_unpaired(pairing.left_open))
+                if after_model:
+                    raise InvalidReplacementError(
+                        "replacement violates role alternation",
                     )
-                seen_tool_call_ids.add(tc.call_id)
-                if tc.call_id in paired_externally:
-                    if tc.call_id in externally_consumed_by_tr:
-                        raise InvalidPayloadError(
-                            f"call_id {tc.call_id!r} appears as both"
-                            " ToolCall and ToolResult in payload"
-                            " yet is declared paired_externally; the"
-                            " partner cannot be both local and external",
-                        )
-                    externally_consumed_by_am.add(tc.call_id)
-                else:
-                    pending.add(tc.call_id)
-        elif isinstance(entry, ToolResult):
-            if entry.call_id in seen_results:
-                raise InvalidPayloadError(
-                    f"duplicate ToolResult for call_id {entry.call_id!r} in payload",
-                )
-            seen_results.add(entry.call_id)
-            if entry.call_id in pending:
-                pending.discard(entry.call_id)
-                after_model = False
-                continue
-            if entry.call_id in paired_externally:
-                if entry.call_id in externally_consumed_by_am:
-                    raise InvalidPayloadError(
-                        f"call_id {entry.call_id!r} appears as both"
-                        " ToolCall and ToolResult in payload"
-                        " yet is declared paired_externally; the"
-                        " partner cannot be both local and external",
+                after_model = True
+                assert isinstance(entry, Response)
+                for tc in calls(entry.records):
+                    if tc.call_id in paired_externally:
+                        _refuse_both_sides(tc.call_id, answered_here)
+                        called_here.add(tc.call_id)
+                if pairing.reused:
+                    raise InvalidReplacementError(
+                        f"duplicate tool_call id {pairing.reused[0]!r} across"
+                        " model turns in replacement",
                     )
-                externally_consumed_by_tr.add(entry.call_id)
+            case "elsewhere":
+                assert isinstance(entry, ToolMessage)
+                _refuse_both_sides(entry.call_id, called_here)
+                answered_here.add(entry.call_id)
                 after_model = False
-                continue
-            raise InvalidPayloadError(
-                f"orphan ToolResult for call_id {entry.call_id!r} in payload"
-                " (no matching ToolCall; not in paired_externally)",
-            )
-        else:
-            if pending:
-                raise InvalidPayloadError(
-                    f"unpaired tool_call id(s) in payload: {sorted(pending)}"
-                    " (no matching ToolResult; not in paired_externally)",
+            case "repeat":
+                assert isinstance(entry, ToolMessage)
+                raise InvalidReplacementError(
+                    f"duplicate ToolMessage for call_id {entry.call_id!r} in replacement",
                 )
-            after_model = False
-    if pending:
-        raise InvalidPayloadError(
-            f"unpaired tool_call id(s) in payload: {sorted(pending)}"
-            " (no matching ToolResult; not in paired_externally)",
+            case "orphan" | "interrupt" | "aside":
+                raise InvalidReplacementError(_unpaired(pairing.waiting))
+            case _:
+                after_model = False
+    if still_open:
+        raise InvalidReplacementError(_unpaired(still_open))
+
+
+def _unpaired(ids: Sequence[str]) -> str:
+    """Return the refusal of a replacement that leaves the calls ``ids`` unanswered."""
+    return (
+        f"unpaired tool_call id(s) in replacement: {sorted(ids)}"
+        " (no matching ToolMessage; not in paired_externally)"
+    )
+
+
+def _refuse_both_sides(call_id: str, other_side: set[str]) -> None:
+    """Raise if ``call_id``, declared paired elsewhere, has its other side here too."""
+    if call_id in other_side:
+        raise InvalidReplacementError(
+            f"call_id {call_id!r} appears as both ToolCall and ToolMessage in"
+            " replacement yet is declared paired_externally; the partner cannot be"
+            " both local and external",
         )
 
 
-# A call id seen in an earlier turn is dropped, and a turn left empty with it. A result
-# for no open call is dropped; a call unanswered when the next turn comes is answered
-# ``[interrupted]``, in id order. A ``UserMessage`` is such a turn; a peer's message is
-# not: it waits for the open calls, whose results may still follow. Adjacent turns are
-# not merged.
+# How calls and results pair is ``session.types.pairings``'s to say; this mends what
+# a splice may not show. A call under an id an earlier entry named is dropped, and a
+# turn left empty with it. An orphan or a repeat is dropped, as is a result of an id
+# answered elsewhere whose call is here; a call's news is kept. A
+# call left unanswered is answered ``[interrupted]``, in id order, where the turn or
+# the user's message that left it comes. A peer's message or a note among a turn's
+# results waits for them, as its results may still follow. Adjacent turns are not
+# merged.
 def _pair_and_dedup_tool_calls(
-    payload: Sequence[ModelContextEvent],
+    replacement: Sequence[ModelContextEvent],
     *,
     paired_externally: frozenset[str] = frozenset(),
 ) -> list[ModelContextEvent]:
-    """Return ``payload`` with each call answered once and each result answering one."""
-    out: list[ModelContextEvent] = []
-    pending: set[str] = set()
-    seen: set[str] = set()
-    deferred: list[ModelContextEvent] = []
-
-    for entry in payload:
-        if isinstance(entry, Response):
-            _flush_interrupted(pending, paired_externally, out, deferred)
-            records = tuple(
-                r
-                for r in entry.records
-                if not (isinstance(r, ToolCall) and r.call_id in seen)
-            )
-            if not records:
-                continue
-            out.append(
+    """Return ``replacement`` with each call answered once, and nothing after its result."""
+    found, _ = pairings(replacement, paired_externally=paired_externally)
+    fresh: list[ModelContextEvent] = []
+    for entry, pairing in zip(replacement, found, strict=True):
+        if not isinstance(entry, Response):
+            fresh.append(entry)
+            continue
+        records = tuple(
+            r
+            for r in entry.records
+            if not (isinstance(r, ToolCall) and r.call_id in pairing.reused)
+        )
+        if records:
+            fresh.append(
                 entry if records == entry.records else replace(entry, records=records),
             )
-            pending.update(c.call_id for c in calls(records))
-            seen.update(c.call_id for c in calls(records))
-        elif isinstance(entry, ToolResult):
-            if entry.call_id in pending:
+    found, still_open = pairings(fresh, paired_externally=paired_externally)
+    called = {
+        c.call_id for e in fresh if isinstance(e, Response) for c in calls(e.records)
+    }
+    out: list[ModelContextEvent] = []
+    deferred: list[ModelContextEvent] = []
+    for entry, pairing in zip(fresh, found, strict=True):
+        match pairing.role:
+            case "reply" | "interrupt":
+                _interrupt(pairing.left_open, out, deferred)
                 out.append(entry)
-                pending.discard(entry.call_id)
-                if not pending:
-                    _flush_deferred(out, deferred)
-        elif isinstance(entry, UserMessage):
-            _flush_interrupted(pending, paired_externally, out, deferred)
-            out.append(entry)
-        elif pending:
-            deferred.append(entry)
-        else:
-            out.append(entry)
-    _flush_interrupted(pending, paired_externally, out, deferred)
+            case "answer":
+                out.append(entry)
+                assert isinstance(entry, ToolMessage)
+                if {*pairing.waiting} == {entry.call_id}:
+                    _interrupt((), out, deferred)
+            case "orphan" | "repeat":
+                pass
+            # An id answered elsewhere has no partner here, so a call here keeps none.
+            case "elsewhere" if (
+                isinstance(entry, ToolMessage) and entry.call_id in called
+            ):
+                pass
+            case "aside" | "note" if pairing.waiting:
+                deferred.append(entry)
+            case _:
+                out.append(entry)
+    _interrupt(still_open, out, deferred)
     return out
 
 
-def _flush_interrupted(
-    pending: set[str],
-    paired_externally: frozenset[str],
+def _interrupt(
+    left_open: Sequence[str],
     out: list[ModelContextEvent],
     deferred: list[ModelContextEvent],
 ) -> None:
-    """Emit interrupted results and deferred peers."""
+    """Answer each call of ``left_open`` ``[interrupted]``; then emit what waited for them."""
     out.extend(
-        ToolResult(call_id=cid, state="failed", stderr=("[interrupted]",))
-        for cid in sorted(pending - paired_externally)
+        ToolMessage(call_id=cid, state="failed", stderr=("[interrupted]",))
+        for cid in sorted(left_open)
     )
-    pending.clear()
-    _flush_deferred(out, deferred)
-
-
-def _flush_deferred(
-    out: list[ModelContextEvent],
-    deferred: list[ModelContextEvent],
-) -> None:
-    """Emit peers held past an open pair, in arrival order."""
     out.extend(deferred)
     deferred.clear()
 
 
 # Messages from different senders become a ``UserMessage`` labelling each part, so no one
-# is named as the author of another's words.
+# is named as the author of another's words. The session's user, who is not named, is
+# named ``user`` wherever their words follow another's: left bare there, they would
+# read as that sender's. Anthropic's API joins adjacent user turns itself (measured
+# 2026-11-19: the same input tokens for two turns as for one), so there the label is
+# the only mark of where a sender's words end.
 def _merge_user(
-    prior: UserMessage | AgentToAgentMessage,
-    entry: UserMessage | AgentToAgentMessage,
-) -> UserMessage | AgentToAgentMessage:
-    """Merge two adjacent user-side entries."""
+    prior: UserMessage | AgentMessage,
+    entry: UserMessage | AgentMessage,
+    *,
+    mixed: bool,
+) -> UserMessage | AgentMessage:
+    """Merge two adjacent user-side entries; ``mixed`` says ``prior`` holds two senders' words."""
     attachments = (*prior.attachments, *entry.attachments)
-    if _same_sender(prior, entry):
+    if not mixed and _same_sender(prior, entry):
         return replace(
             prior,
             content=f"{prior.content or ''}\n\n{entry.content or ''}",
             attachments=attachments,
         )
-    text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
-    return UserMessage(content=text, attachments=attachments)
+    # A turn already mixed names no sender of its own, so its words stand as they are.
+    labeled = labeled_text(entry)
+    if isinstance(entry, UserMessage) and entry.sender is None:
+        labeled = f"[from user]: {labeled}"
+    return UserMessage(
+        content=f"{labeled_text(prior)}\n\n{labeled}",
+        attachments=attachments,
+    )
 
 
 def _same_sender(
-    prior: UserMessage | AgentToAgentMessage,
-    entry: UserMessage | AgentToAgentMessage,
+    prior: UserMessage | AgentMessage,
+    entry: UserMessage | AgentMessage,
 ) -> bool:
-    """Return True for two ``UserMessage``, or two agent messages from one sender."""
-    if isinstance(prior, AgentToAgentMessage) and isinstance(
-        entry,
-        AgentToAgentMessage,
-    ):
-        return prior.sender == entry.sender
-    return isinstance(prior, UserMessage) and isinstance(entry, UserMessage)
-
-
-def _labeled_text(entry: UserMessage | AgentToAgentMessage) -> str:
-    """Return ``entry`` text, labeling an agent message with its sender."""
-    if isinstance(entry, UserMessage):
-        return entry.content or ""
-    return labeled_agent_send_text(entry)
+    """Return True for two people's messages, or two agents', from one sender."""
+    return type(prior) is type(entry) and prior.sender == entry.sender
 
 
 # A signature binds thinking to its own turn, so signed thinking is dropped from both,

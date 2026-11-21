@@ -73,7 +73,7 @@ def _team() -> _Team:
 def test_each_agent_follows_its_parent_depth_first_with_the_shown_one_marked() -> None:
     team = _team()
     team["kid"].spend_usd = 0.25
-    shown = rows(team, focused="kid", now=0.0)
+    shown = rows(team, focused="kid")
     assert [(r.branch, r.text, r.state, r.detail) for r in shown] == [
         ("", "Agent", "idle", "$0.00"),
         ("├─ ", "● kid", "idle", "$0.25"),
@@ -87,7 +87,7 @@ def test_an_agent_at_work_alone_is_busy() -> None:
     team = _team()
     team["kid"].runtime.at_work = True
     team["other"].runtime.at_work = True
-    assert [r.state for r in rows(team, focused="kid", now=0.0)] == [
+    assert [r.state for r in rows(team, focused="kid")] == [
         "idle",
         "busy",
         "idle",
@@ -101,14 +101,14 @@ def test_a_last_child_s_job_hangs_from_a_blank_stem_and_never_runs_backwards() -
     team["kid"].runtime.jobs = {
         "w1": SimpleNamespace(
             call=ToolCall(call_id="w1", name="Wait", arguments={}),
-            started=10.0,
-            state="running",
+            elapsed_sec=-10.0,
+            status="running",
         ),
     }
     team["kid"].tools = {
         "Wait": SimpleNamespace(summary=MagicMock(return_value="Wait")),
     }
-    shown = rows(team, focused="Agent", now=5.0)
+    shown = rows(team, focused="Agent")
     assert [(r.branch, r.text, r.detail) for r in shown] == [
         ("", "● Agent", "$0.00"),
         ("└─ ", "kid", "$0.00"),
@@ -123,14 +123,14 @@ def test_a_busy_agent_lists_its_jobs_but_not_its_spawns() -> None:
     team["Agent"].runtime.jobs = {
         call_id: SimpleNamespace(
             call=ToolCall(call_id=call_id, name=name, arguments={"on": "tests"}),
-            started=10.0,
-            state="running",
+            elapsed_sec=42.0,
+            status="running",
         )
         for call_id, name in (("w1", "Wait"), ("s1", "AgentSpawn"))
     }
     summary = MagicMock(return_value="Wait tests")
     team["Agent"].tools = {"Wait": SimpleNamespace(summary=summary)}
-    shown = rows(team, focused="Agent", now=52.0)
+    shown = rows(team, focused="Agent")
     assert [(r.branch, r.text, r.state, r.detail, r.call_id) for r in shown] == [
         ("", "● Agent", "busy", "$0.00", ""),
         ("├─ ", "Wait tests", "running", "42s", "w1"),
@@ -145,8 +145,8 @@ def test_a_job_whose_tool_is_gone_shows_its_name() -> None:
     team["Agent"].runtime.jobs = {
         "w1": SimpleNamespace(
             call=ToolCall(call_id="w1", name="Wait", arguments={}),
-            started=0.0,
-            state="detached",
+            elapsed_sec=0.0,
+            status="detached",
         ),
     }
     _, job = rows(team, focused="Agent")
@@ -304,8 +304,8 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
     team["grand"].runtime.jobs = {
         "w1": SimpleNamespace(
             call=ToolCall(call_id="w1", name="Wait", arguments={}),
-            started=0.0,
-            state="running",
+            elapsed_sec=0.0,
+            status="running",
         ),
     }
     down.handler(MagicMock(spec=KeyPressEvent))
@@ -410,8 +410,8 @@ def test_delete_on_a_job_cancels_it() -> None:
     team["Agent"].runtime.jobs = {
         "w1": SimpleNamespace(
             call=ToolCall(call_id="w1", name="Wait", arguments={}),
-            started=0.0,
-            state="running",
+            elapsed_sec=0.0,
+            status="running",
         ),
     }
     controls = _FakeControls()

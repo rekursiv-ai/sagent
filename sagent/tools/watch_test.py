@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import time
@@ -20,15 +22,20 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
     ContextCompaction,
+    Failed,
+    ModelIdle,
+    SessionContext,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -39,7 +46,6 @@ from sagent.tools.watch import Feed, lines
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
@@ -101,19 +107,19 @@ def test_the_feed_shows_what_the_user_sees_and_stubs_the_rest() -> None:
             AssistantMessage(content="Reading first."),
             AssistantMessage(content=""),
             ToolCall(call_id="c1", name="Bash", arguments={"command": "pytest"}),
-            ToolResult(
+            ToolMessage(
                 call_id="c1",
                 state="done",
                 stdout=("hidden too",),
                 result=UncategorizedToolResult(),
             ),
             ToolCall(call_id="c2", name="Gone"),
-            AgentToAgentMessage(sender="kid", recipient="Agent", content="done"),
+            AgentMessage(sender="kid", recipient="Agent", content="done"),
             SystemMessage(content=long, subtype="nudge"),
             ContextCompaction(summary="gist"),
             ContextClear(summary="gist"),
             ContextClear(),
-            TurnContext(model="opus", effort="high", tools=("Read",), agents_md="x"),
+            SessionContext(model="opus", effort="high", tools=("Read",), agents_md="x"),
             SystemMessage(content="a note", subtype="reminder"),
             SystemMessage(),
         ],
@@ -140,7 +146,7 @@ def test_the_feed_shows_what_the_user_sees_and_stubs_the_rest() -> None:
 
 def test_a_message_with_no_content_shows_empty() -> None:
     shown = lines(
-        [UserMessage(), AgentToAgentMessage(sender="kid", recipient="Agent")],
+        [UserMessage(), AgentMessage(sender="kid", recipient="Agent")],
         start=0,
         label="Agent",
         tools={},
@@ -148,12 +154,23 @@ def test_a_message_with_no_content_shows_empty() -> None:
     assert shown == ["> user: ", "> kid: "]
 
 
+def test_a_person_who_is_not_the_session_s_user_is_shown_by_name() -> None:
+    shown = lines(
+        [UserMessage(sender="bob", content="hi")],
+        start=0,
+        label="Agent",
+        tools={},
+    )
+    assert shown == ["> bob: hi"]
+
+
 def test_settings_name_only_what_was_set() -> None:
     shown = lines(
         [
-            TurnContext(cwd="/w"),
-            TurnContext(tools=("Read", "Edit")),
-            TurnContext(tools=()),
+            SessionContext(cwd=Path("/w")),
+            SessionContext(tools=("Read", "Edit")),
+            SessionContext(tools=()),
+            SessionContext(user="ann"),
         ],
         start=1,
         label="Agent",
@@ -163,6 +180,7 @@ def test_settings_name_only_what_was_set() -> None:
         "r1 [settings: cwd=/w]",
         "r2 [settings: tools=Read, Edit]",
         "r3 [settings: tools=]",
+        "r4 [settings: user=ann]",
     ]
 
 
@@ -197,7 +215,7 @@ def _told(watcher: Agent) -> list[str]:
     return [
         m.content or ""
         for m in watcher.runtime.inbox.drain_nowait()
-        if isinstance(m, AgentToAgentMessage)
+        if isinstance(m, AgentMessage)
     ]
 
 
@@ -211,9 +229,9 @@ def test_each_send_carries_only_what_is_new() -> None:
     agent.session.append(UserMessage(content="go"))
 
     feed.send("how to watch")
-    feed(types.AgentIdle())
+    feed(AgentIdle())
     agent.session.append(AssistantMessage(content="done"))
-    feed(types.AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == [
         "how to watch\n\n[watch]\n> user: go",
@@ -254,22 +272,51 @@ def test_each_send_reads_only_the_records_not_yet_sent() -> None:
     ("event", "said"),
     [
         (
-            types.ModelResponseError(exception=ValueError("down")),
+            ModelIdle(outcome=Failed(exception=ValueError("down"))),
             "[failed] ValueError: down",
         ),
-        (types.ModelResponseCancelled(output_chars_estimate=0), "[halted]"),
+        (ModelIdle(outcome=Cancelled()), "[halted]"),
     ],
 )
-def test_a_failure_or_halt_is_told_at_once(
+def test_a_turn_that_fails_or_is_halted_is_told_at_once(
     event: types.RuntimeEvent,
     said: str,
 ) -> None:
     team, _, watcher = _watched()
     feed = Feed(team=team, watched="Agent", watcher="watcher")
 
+    feed(types.ModelResponseStarted())
     feed(event)
 
     assert _told(watcher) == [f"[watch]\n{said}"]
+
+
+# Only the runtime knows whether a turn stopped: a compaction cancels a call, a
+# failure may be got past, and a halt of an agent at rest stops nothing.
+@pytest.mark.parametrize(
+    "event",
+    [
+        types.ModelResponseCompleted(outcome=Cancelled()),
+        types.ModelResponseCompleted(
+            outcome=Failed(exception=ValueError("down")),
+        ),
+        types.ModelHalt(),
+        ModelIdle(outcome=Succeeded(value=None)),
+    ],
+    ids=["a-call-cancelled", "a-call-failed", "a-halt-asked", "finished"],
+)
+def test_nothing_but_a_turn_that_stopped_short_is_told_as_one(
+    event: types.RuntimeEvent,
+) -> None:
+    team, agent, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+    agent.session.append(UserMessage(content="go"))
+
+    feed(types.ModelResponseStarted())
+    feed(event)
+
+    assert _told(watcher) == []
+    assert feed.sent == 0
 
 
 def test_a_wait_for_a_spent_quota_is_told_once_at_once() -> None:
@@ -283,10 +330,10 @@ def test_a_wait_for_a_spent_quota_is_told_once_at_once() -> None:
         (OverloadedError("busy"), 1),
     ):
         feed(
-            types.ModelCallSuspended(
+            types.ModelResponseSuspended(
                 exception=exception,
-                until=noon + 5.0,
-                attempt=attempt,
+                retry_at=datetime.fromtimestamp(noon + 5.0, UTC),
+                failures_in_a_row=attempt,
             ),
         )
 
@@ -297,7 +344,13 @@ def test_a_wait_for_a_spent_quota_is_told_once_at_once() -> None:
 
 @pytest.mark.parametrize(
     "event",
-    [types.CompactComplete(), types.ClearComplete(), types.AgentIdle()],
+    [
+        types.SessionCompactCompleted(
+            outcome=Succeeded(value=types.SessionCompacted()),
+        ),
+        types.SessionClearCompleted(outcome=Succeeded(value=None)),
+        AgentIdle(),
+    ],
 )
 def test_a_compaction_clear_or_idle_sends_what_is_new(
     event: types.RuntimeEvent,
@@ -316,12 +369,12 @@ def test_other_events_and_an_off_or_gone_watcher_send_nothing() -> None:
     feed = Feed(team=team, watched="Agent", watcher="watcher")
     agent.session.append(UserMessage(content="go"))
 
-    feed(types.ModelIdle())
+    feed(types.ToolCohortStarted())
     team.watching["watcher"] = False
-    feed(types.AgentIdle())
+    feed(AgentIdle())
     team.watching["watcher"] = True
     _ = team.leave("watcher")
-    feed(types.AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == []
     assert feed.sent == 0
@@ -333,10 +386,10 @@ def test_a_watcher_never_turned_on_or_a_watched_agent_gone_sends_nothing() -> No
     agent.session.append(UserMessage(content="go"))
 
     del team.watching["watcher"]
-    feed(types.AgentIdle())
+    feed(AgentIdle())
     team.watching["watcher"] = True
     _ = team.leave("Agent")
-    feed(types.AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == []
 
@@ -351,7 +404,7 @@ def test_a_send_names_who_watches_whom_and_each_call_by_its_summary() -> None:
     feed.send()
 
     (told,) = watcher.runtime.inbox.drain_nowait()
-    assert told == AgentToAgentMessage(
+    assert told == AgentMessage(
         sender="Agent",
         recipient="watcher",
         content="[watch]\n  r0 Bash ls",
@@ -371,7 +424,7 @@ def test_nothing_new_sends_nothing() -> None:
     team, _, watcher = _watched()
     feed = Feed(team=team, watched="Agent", watcher="watcher")
 
-    feed(types.AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == []
 
@@ -384,9 +437,9 @@ def test_an_idle_after_work_ends_by_saying_the_agent_waits() -> None:
     feed = Feed(team=team, watched="Agent", watcher="watcher")
     agent.session.append(UserMessage(content="go"))
 
-    feed(types.ModelResponseComplete(response=reply("ok")))
-    feed(types.AgentIdle())
-    feed(types.AgentIdle())
+    feed(types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))))
+    feed(AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == [f"[watch]\n> user: go\n{_WAITS}"]
 
@@ -396,13 +449,13 @@ def test_an_idle_it_is_woken_from_at_once_still_tails_without_the_idle_line() ->
     team, agent, watcher = _watched()
     feed = Feed(team=team, watched="Agent", watcher="watcher")
     agent.session.append(UserMessage(content="go"))
-    feed(types.ModelResponseComplete(response=reply("ok")))
+    feed(types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))))
 
     agent.runtime.push(UserMessage(content="again"))
-    feed(types.AgentIdle())
+    feed(AgentIdle())
     assert _told(watcher) == ["[watch]\n> user: go"]
     _ = agent.runtime.inbox.drain_nowait()
-    feed(types.AgentIdle())
+    feed(AgentIdle())
 
     assert _told(watcher) == [f"[watch]\n{_WAITS}"]
 

@@ -17,7 +17,7 @@ import pytest
 from sagent.session.types import (
     BackgroundTaskResult,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools.background_task import (
@@ -26,6 +26,7 @@ from sagent.tools.background_task import (
     background_delay,
     backgroundable,
     offered,
+    wake_period,
     without_controls,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
@@ -93,8 +94,9 @@ class FakeJob:
     """A job as the runtime lists it."""
 
     call: ToolCall
-    started: float
-    state: Literal["running", "sleeping", "detached"]
+    elapsed_sec: float
+    status: Literal["running", "sleeping", "detached"]
+    runs_until_stopped: bool = False
     cancelled: list[bool] = field(default_factory=list)
 
     def cancel(self) -> None:
@@ -106,28 +108,24 @@ class FakeTable:
     """The runtime's jobs, and the result a foreground call would get."""
 
     listed: dict[str, FakeJob] = field(default_factory=dict)
-    results: dict[str, ToolResult] = field(default_factory=dict)
+    results: dict[str, ToolMessage] = field(default_factory=dict)
     waited: list[str] = field(default_factory=list)
 
     @property
     def jobs(self) -> Mapping[str, Job]:
         return self.listed
 
-    async def foreground(self, call_id: str) -> ToolResult | None:
+    async def foreground(self, call_id: str) -> ToolMessage | None:
         self.waited.append(call_id)
         return self.results.get(call_id)
 
 
 def _job(
     name: str,
-    state: Literal["running", "sleeping", "detached"],
+    status: Literal["running", "sleeping", "detached"],
     age: float,
 ) -> FakeJob:
-    return FakeJob(
-        call=ToolCall(call_id="", name=name),
-        started=time.time() - age,
-        state=state,
-    )
+    return FakeJob(call=ToolCall(call_id="", name=name), elapsed_sec=age, status=status)
 
 
 _CONTEXT = ToolContext(cwd=Path("/"))
@@ -137,7 +135,7 @@ def test_an_ordinary_tool_is_backgroundable() -> None:
     assert backgroundable(Echo())
 
 
-@pytest.mark.parametrize("key", ["background", "delay"])
+@pytest.mark.parametrize("key", ["background", "delay", "wake_every"])
 def test_a_tool_owning_a_control_key_is_not(key: str) -> None:
     assert not backgroundable(Echo(schema={"type": "object", "properties": {key: {}}}))
 
@@ -150,7 +148,7 @@ def test_background_task_is_not_backgroundable() -> None:
 def test_a_schemaless_tool_is_backgroundable() -> None:
     tool = Echo(schema={})
     assert backgroundable(tool)
-    assert set(_properties(offered(tool))) == {"background", "delay"}
+    assert set(_properties(offered(tool))) == {"background", "delay", "wake_every"}
 
 
 def test_offered_adds_the_control_keys_and_keeps_the_rest() -> None:
@@ -170,6 +168,15 @@ def test_offered_adds_the_control_keys_and_keeps_the_rest() -> None:
         "minimum": 0,
         "description": "Seconds to wait before running; implies background.",
     }
+    assert properties["wake_every"] == {
+        "type": "number",
+        "minimum": 1,
+        "description": (
+            "Seconds between wakes while the call runs: each tells you what it"
+            " wrote since the last, or that it wrote nothing. Omit for your usual"
+            " schedule."
+        ),
+    }
     assert _properties(tool) == {"text": {"type": "string"}}
 
 
@@ -182,7 +189,12 @@ def test_a_tool_that_owns_a_key_is_offered_as_itself() -> None:
 async def test_offered_forwards_everything_without_the_control_keys() -> None:
     tool = Echo()
     shown = offered(tool)
-    arguments: dict[str, PlainTree] = {"text": "hi", "background": True, "delay": 2}
+    arguments: dict[str, PlainTree] = {
+        "text": "hi",
+        "background": True,
+        "delay": 2,
+        "wake_every": 30,
+    }
     assert (shown.name, shown.description, shown.display) == (
         tool.name,
         tool.description,
@@ -227,6 +239,11 @@ def test_background_delay(arguments: dict[str, PlainTree], delay: float | None) 
             ValueError,
             "'delay' must be seconds, at least 0, got nan.",
         ),
+        (
+            {"delay": float("inf")},
+            ValueError,
+            "'delay' must be seconds, at least 0, got inf.",
+        ),
     ],
 )
 def test_a_malformed_control_key_is_refused(
@@ -239,10 +256,35 @@ def test_a_malformed_control_key_is_refused(
 
 
 def test_without_controls_drops_only_the_control_keys() -> None:
-    assert without_controls({"text": "a", "background": True, "delay": 1}) == {
-        "text": "a",
-    }
+    assert without_controls(
+        {"text": "a", "background": True, "delay": 1, "wake_every": 30},
+    ) == {"text": "a"}
     assert without_controls({}) == {}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "period"),
+    [({}, None), ({"wake_every": 1}, 1.0), ({"wake_every": 90.5}, 90.5)],
+)
+def test_wake_period(arguments: dict[str, PlainTree], period: float | None) -> None:
+    assert wake_period(arguments) == period
+
+
+@pytest.mark.parametrize(
+    ("given", "kind"),
+    [
+        (True, TypeError),
+        ("5", TypeError),
+        (0.99, ValueError),
+        (-3, ValueError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+    ],
+)
+def test_a_malformed_period_is_refused(given: PlainTree, kind: type[Exception]) -> None:
+    error = f"'wake_every' must be seconds, at least 1, got {given!r}."
+    with pytest.raises(kind, match=f"^{re.escape(error)}$"):
+        _ = wake_period({"wake_every": given})
 
 
 def test_background_task_describes_itself() -> None:
@@ -262,7 +304,7 @@ def test_background_task_describes_itself() -> None:
 @pytest.mark.asyncio
 async def test_background_task_alone_has_no_jobs_to_manage() -> None:
     result = await settled(BackgroundTask().call(_CONTEXT, {"operation": "list"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=("BackgroundTask runs only inside an agent's runtime.",),
@@ -274,7 +316,7 @@ async def test_background_task_alone_has_no_jobs_to_manage() -> None:
 async def test_list_without_jobs() -> None:
     table = FakeTable(listed={"c1": _job("Bash", "running", 0)})
     result = await BackgroundTask().manage(table, {"operation": "list"})
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("No background jobs.",),
@@ -297,7 +339,7 @@ async def test_list_shows_each_background_job(
     result = await BackgroundTask().manage(table, {"operation": "list"})
     assert result.call_id == ""
     assert result.text().splitlines() == [
-        f"{'ID':<12}  {'TOOL':<20}  {'PHASE':<8}  ELAPSED",
+        f"{'ID':<12}  {'TOOL':<20}  {'STATUS':<8}  ELAPSED",
         f"{'call_long_id':<12}  {'Bash':<20}  {'running':<8}  12s",
         f"{'d1':<12}  {'Grep':<20}  {'sleeping':<8}  3s",
     ]
@@ -308,7 +350,7 @@ async def test_cancel_cancels_the_job() -> None:
     job = _job("Bash", "detached", 0)
     table = FakeTable(listed={"c1": job})
     result = await BackgroundTask().manage(table, {"operation": "cancel", "id": "c1"})
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("Cancelling Bash (c1).",),
@@ -320,7 +362,7 @@ async def test_cancel_cancels_the_job() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed", [False, True], ids=["completed", "live"])
 async def test_foreground_returns_the_jobs_result(listed: bool) -> None:
-    real = ToolResult(
+    real = ToolMessage(
         call_id="c1",
         state="done",
         stdout=("done",),
@@ -342,7 +384,7 @@ async def test_foreground_returns_the_jobs_result(listed: bool) -> None:
 @pytest.mark.asyncio
 async def test_an_operation_on_a_job_needs_its_id(operation: str) -> None:
     result = await BackgroundTask().manage(FakeTable(), {"operation": operation})
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=(f"{operation} requires an id.",),
@@ -356,7 +398,7 @@ async def test_only_background_jobs_can_be_managed(operation: str) -> None:
     job = _job("Read", "running", 0)
     table = FakeTable(listed={"fg": job})
     result = await BackgroundTask().manage(table, {"operation": operation, "id": "fg"})
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stderr=("No background job 'fg'; list shows them.",),

@@ -8,7 +8,7 @@ to idle, whose last text is the spawn's result, then stays, its inbox open,
 until the team stops it; a message its parent sends it later is owed a reply.
 
 Its events reach the parent's observers as ``ChildEvent``s, so the parent's
-screen shows its work; a finished one ends with a ``ChildDoneEvent``. What its
+screen shows its work; the call's ``AgentSpawnResult`` says what it used. What its
 model calls cost is charged to its parent and each agent above, journaled, and
 held to their spend caps; it may spend no more than the least of them has left.
 
@@ -47,6 +47,7 @@ from sagent.model.capability import (
     ThinkingEffort,
     ThinkingOutput,
 )
+from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.types import Request
 from sagent.providers.catalog import counterpart, successor
 from sagent.runtime import types
@@ -54,11 +55,14 @@ from sagent.runtime.exceptions import describe
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.projects import child_journal, session_file
 from sagent.session.types import (
+    AgentMessage,
     AgentSpawnResult,
-    AgentToAgentMessage,
     AssistantMessage,
+    Failed,
+    ModelIdle,
+    Succeeded,
     ToolCall,
-    ToolResult,
+    ToolMessage,
 )
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.display import ToolDisplay
@@ -622,33 +626,25 @@ class AgentSpawn:
         started = time.monotonic()
         tally = _Tally()
         waits = _DetachOnWait(parent=parent, task=asyncio.current_task())
-        says = _Say(stdout=stdout, tools=child.tools)
-        child.runtime.observers.extend((tally, waits, says))
+        reply_writer = _ReplyWriter(stdout=stdout, tools=child.tools)
+        child.runtime.observers.extend((tally, waits, reply_writer))
         self.team.awaited.add(label)
         try:
             reply, state = await _answer(child, a.prompt)
         except asyncio.CancelledError:
             # The spawn is cancelled, not the child: it stops its turn and stays.
             child.runtime.halt()
-            child.runtime.push(types.Kill())
+            child.runtime.push(types.ToolHalt())
             raise
         finally:
             self.team.awaited.discard(label)
-            for observer in (tally, waits, says):
+            for observer in (tally, waits, reply_writer):
                 if observer in child.runtime.observers:
                     child.runtime.observers.remove(observer)
-            parent.runtime.publish(
-                types.ChildDoneEvent(
-                    label=label,
-                    elapsed=time.monotonic() - started,
-                    tokens=tally.tokens,
-                    cost=tally.cost,
-                ),
-            )
         kept = child.session.journal.path
         return ToolOutput(
             # A reply the child said last is written already.
-            stdout=() if says.last == f"{reply}\n" else (reply,),
+            stdout=() if reply_writer.last == f"{reply}\n" else (reply,),
             shown=reply,
             result=AgentSpawnResult(
                 agent_id=label,
@@ -656,7 +652,8 @@ class AgentSpawn:
                 prompt=a.prompt,
                 model=child.model.capability.model_id,
                 state=state,
-                tokens=tally.tokens,
+                tokens=tally.tokens.total,
+                spend=tally.spend,
                 duration_sec=time.monotonic() - started,
                 tool_calls=tally.calls,
                 output_file=str(kept) if kept else None,
@@ -780,10 +777,11 @@ def _agent_from_parent(
         max_spend_usd=max_spend_usd,
         agents_md=parent.agents_md,
         environment=parent.environment,
+        user=parent.user,
         account=account,
         persistent_retry=parent.runtime.persistent_retry,
     )
-    agent.runtime.detach_schedule = parent.runtime.detach_schedule
+    agent.runtime.wake_schedules = parent.runtime.wake_schedules
     agent.model_cache = dict(parent.model_cache)
     return agent
 
@@ -803,20 +801,24 @@ async def _answer(
 class _Tally:
     """What a child's model calls cost, counted as they finish."""
 
-    tokens: int = 0
-    cost: float = 0.0
+    tokens: TokenCount = field(default_factory=TokenCount)
+    spend: TokenCost = field(default_factory=TokenCost)
     calls: int = 0
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Count a finished model call."""
-        if isinstance(event, types.ModelResponseComplete):
-            self.tokens += event.response.tokens.total
-            self.cost += event.response.spend.total
-            self.calls += sum(isinstance(r, ToolCall) for r in event.response.records)
+        if isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
+            response = event.outcome.value
+            self.tokens += response.tokens
+            self.spend += response.spend
+            self.calls += sum(isinstance(r, ToolCall) for r in response.records)
 
 
 @dataclass(slots=True, kw_only=True)
-class _Say:
+class _ReplyWriter:
     """Writes what a child says, and the first line of each call it makes, as it works."""
 
     stdout: Stream[str]
@@ -826,9 +828,12 @@ class _Say:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Write each text and call of a finished model call."""
-        if not isinstance(event, types.ModelResponseComplete):
+        if not (
+            isinstance(event, types.ModelResponseCompleted)
+            and isinstance(event.outcome, Succeeded)
+        ):
             return
-        for record in event.response.records:
+        for record in event.outcome.value.records:
             if isinstance(record, AssistantMessage) and record.content not in {
                 None,
                 "",
@@ -857,7 +862,7 @@ class _DetachOnWait:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Detach the spawn's call at the child's first quota wait."""
-        if isinstance(event, types.ModelCallSuspended) and event.opens_a_quota_wait:
+        if isinstance(event, types.ModelResponseSuspended) and event.opens_a_quota_wait:
             self.parent.runtime.detach(self.task)
 
 
@@ -870,21 +875,23 @@ class _Forward:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Republish ``event`` on the parent's runtime."""
-        if isinstance(
-            event,
-            (
-                types.ModelResponseComplete,
-                types.ModelResponseError,
-                types.ModelCallSuspended,
-                types.LoginSwitched,
-                types.LoginsSpent,
-                types.CompactComplete,
-                types.DetachedResult,
-                AgentToAgentMessage,
-                ToolResult,
-            ),
-        ):
-            self.parent.runtime.publish(types.ChildEvent(label=self.label, inner=event))
+        match event:
+            # A child's halt, a call of its that failed while its turn went on, and a
+            # compaction of its that did not happen, are its own.
+            case (
+                types.ModelResponseCompleted(outcome=Succeeded())
+                | ModelIdle(outcome=Failed())
+                | types.ModelResponseSuspended()
+                | types.LoginSwitched()
+                | types.SessionCompactCompleted(outcome=Succeeded())
+                | AgentMessage()
+                | ToolMessage()
+            ):
+                self.parent.runtime.publish(
+                    types.ChildEvent(label=self.label, event=event),
+                )
+            case _:
+                pass
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -900,12 +907,15 @@ class _Charge:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Charge a finished model call to each payer."""
-        if isinstance(event, types.ModelResponseComplete):
-            usd = event.response.spend.total
-        elif isinstance(event, types.Charged) and event.by == self.label:
-            usd = event.usd
+        if isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
+            spend = event.outcome.value.spend
+        elif isinstance(event, types.SessionSpendCharged) and event.label == self.label:
+            spend = event.spend
         else:
             return
-        if usd:
+        if spend.total:
             for payer in self.payers:
-                payer.charge(usd, by=self.label)
+                payer.charge(spend, label=self.label)
