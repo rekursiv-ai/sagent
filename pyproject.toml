@@ -1,6 +1,16 @@
 # NEVER EDIT THIS FILE!
-# uv sync --all-groups --frozen  # cu132 aka "cuda"
-# uv sync --all-groups --frozen --no-group cuda --extra cpu
+# Example Installation:
+#
+# Typical:
+#   uv sync --all-groups --frozen  # cu132 aka "default-cuda"
+#
+# No GPU:
+#   uv sync --all-groups --frozen --no-group default-cuda --extra cpu
+#   export UV_NO_SYNC=1
+#
+# Old GPU (eg sm_5x):
+#   uv sync --all-groups --frozen --no-group default-cuda --extra cu126
+#   export UV_NO_SYNC=1
 
 [project]
 name = "sagent"
@@ -70,7 +80,7 @@ sagent = "sagent.tui.main:main"
 # Requirements are floors; uv.lock fixes versions. Never cap a dependency.
 # Public package deltas replace project.dependencies; these groups are monorepo-only.
 
-cuda = [
+default-cuda = [
     "torch",
     "torchao",
     "torchvision",
@@ -123,6 +133,9 @@ cu126 = [
     "torchao",
     "torchvision",
 ]
+# cu128 Not Recommended: download.pytorch.org/whl/cu128 stops at torch 2.11.0, so the
+# extra locked to a stale torch. Its builds also lack sm_5x kernels which is likely the
+# reason you'd want older CUDA; use cu126.
 cu128 = [
     "torch",
     "torchao",
@@ -802,19 +815,19 @@ formats = "ipynb,py:percent"
 
 [tool.uv]
 package = true
-default-groups = ["dev", "cuda"]
+default-groups = ["dev", "default-cuda"]
 conflicts = [[
     {extra = "cpu"},
     {extra = "cu126"},
-    {extra = "cu128"},
+    # {extra = "cu128"},  # Retired in the root pyproject.toml.
     {extra = "cu130"},
     {extra = "cu132"},
     {extra = "cu134"},
 ], [
-    {group = "cuda"},
+    {group = "default-cuda"},
     {extra = "cpu"},
     {extra = "cu126"},
-    {extra = "cu128"},
+    # {extra = "cu128"},  # Retired in the root pyproject.toml.
     {extra = "cu130"},
     {extra = "cu134"},
 ]]
@@ -844,6 +857,7 @@ name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
+# Not Recommended; see project.optional-dependencies.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
