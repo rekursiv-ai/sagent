@@ -1603,7 +1603,9 @@ def _records(
             }
             for call in _calls(ended.value)
         ]
-    # A detached call streams its stand-in, marked, then its result when it lands.
+    # A detached call streams its stand-in, marked, then its result when it lands. A
+    # stand-in is the note it shows; what a call run apart wrote since is pending too,
+    # and shows its output, so it is no stand-in.
     if isinstance(event, ToolMessage):
         return [
             {
@@ -1613,7 +1615,8 @@ def _records(
                 "is_error": event.is_error or None,
                 **(
                     {"stub": event.state}
-                    if event.state in ("pending", "cancelled")
+                    if event.state == "cancelled"
+                    or (event.state == "pending" and event.shown is not None)
                     else {}
                 ),
             },
