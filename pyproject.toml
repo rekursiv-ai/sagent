@@ -46,8 +46,9 @@ dependencies = [
     # typing: TypeVar defaults
     "typing_extensions>=4.16.0",
     # json
-    # 0.4.1 leaves dataclass fields at their defaults out of trees.
-    "treekle>=0.4.1",
+    # 0.4.1 leaves dataclass fields at their defaults out of trees. 0.4.10 writes a
+    # class named in ``classes`` as ``py/type`` by that name, as records store it.
+    "treekle>=0.4.10",
     # bash
     "bashlex>=0.18",
     # media
