@@ -34,8 +34,8 @@ from sagent.session.projects import (
 from sagent.session.types import (
     Attachment,
     ContextClear,
+    SessionContext,
     SessionRecord,
-    TurnContext,
     UserMessage,
     record_classes,
 )
@@ -244,12 +244,12 @@ def test_a_listing_reads_title_model_and_record_count(tmp_path: Path) -> None:
     _journal(
         tmp_path / "abc123000000",
         ContextClear(),
-        TurnContext(model="first"),
+        SessionContext(model="first"),
         UserMessage(content="   "),
         UserMessage(content="  fix\n  the   bug "),
         UserMessage(content="later"),
-        TurnContext(model="last"),
-        TurnContext(cwd="/w"),
+        SessionContext(model="last"),
+        SessionContext(cwd=Path("/w")),
     )
     (info,) = list_sessions(tmp_path)
     assert info.id == "abc123000000"
@@ -281,12 +281,12 @@ def test_a_listing_parses_no_window_s_snapshot(
 ) -> None:
     """A snapshot holds a whole window's history; one journal held 318 of them."""
     snapshot = ContextClear(
-        history=(UserMessage(content="old"), TurnContext(model="older")),
+        history=(UserMessage(content="old"), SessionContext(model="older")),
     )
     _journal(
         tmp_path / "000000000001",
         snapshot,
-        TurnContext(model="m"),
+        SessionContext(model="m"),
         UserMessage(content="a"),
         snapshot,
         UserMessage(content="b"),

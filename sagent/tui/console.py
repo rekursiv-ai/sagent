@@ -714,17 +714,17 @@ class Title:
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Take ``event`` when it is a new status."""
-        if isinstance(event, types.StatusChanged):
+        if isinstance(event, types.SessionTitleChanged):
             self.update(event)
 
-    def update(self, given: types.StatusChanged) -> None:
+    def update(self, given: types.SessionTitleChanged) -> None:
         """Set the title to ``given``'s text, if that changes it.
 
         Args:
           given: The status, folded to one line of at most 80 characters.
 
         """
-        one = " ".join(_shown(given.text).split())
+        one = " ".join(_shown(given.title).split())
         one = one if len(one) <= 80 else one[:79] + "…"
         if one == self._text:
             return

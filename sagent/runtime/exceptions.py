@@ -5,11 +5,10 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-import time
-
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     import asyncio
     import logging
@@ -71,9 +70,9 @@ def describe(error: BaseException, *, status: int | None = None) -> str:
     return f"{type(error).__name__}{status_part}" + (f": {message}" if message else "")
 
 
-def local_time(at: float) -> str:
-    """Return the epoch time ``at`` as ``date`` prints it here: ``Sat Oct 31 06:00:00``."""
-    return time.strftime("%a %b %d %H:%M:%S", time.localtime(at))
+def local_time(at: datetime) -> str:
+    """Return ``at`` as ``date`` prints it here: ``Sat Oct 31 06:00:00``."""
+    return at.astimezone().strftime("%a %b %d %H:%M:%S")
 
 
 # ``exc_info=exc``, not ``True``: called outside an ``except`` block,

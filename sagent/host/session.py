@@ -66,8 +66,8 @@ from sagent.host.wire import (
 )
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.runtime.exceptions import describe
-from sagent.runtime.types import Markers
-from sagent.session.types import ToolResult
+from sagent.runtime.types import Stubs
+from sagent.session.types import ToolMessage
 from sagent.tools.builtin import builders
 from sagent.tools.remote import RemoteSession, saved, tls_link
 from sagent.tools.types import ToolContext, settled
@@ -320,10 +320,10 @@ class _Calls:
     def _finished(self, call_id: str, task: asyncio.Task[None]) -> None:
         self._running.pop(call_id, None)
         if task.cancelled():
-            cancelled = ToolResult(
+            cancelled = ToolMessage(
                 call_id="",
                 state="cancelled",
-                shown=Markers().cancelled,
+                shown=Stubs().cancelled,
             )
             self._writer.write(encoded(Result(id=call_id, record=cancelled)))
 
@@ -391,10 +391,10 @@ async def _result(
     on_item: Callable[[Literal["stdout", "stderr"], object], object] = (
         lambda _stream, _item: None
     ),
-) -> ToolResult:
+) -> ToolMessage:
     """Return what ``tool`` did, a failure or a cancel as the runtime records it."""
     if tool is None:
-        return ToolResult(
+        return ToolMessage(
             call_id="",
             state="failed",
             stderr=(f"Unknown tool: {call.tool}",),
@@ -402,14 +402,14 @@ async def _result(
     try:
         streaming_result = tool.call(context, call.arguments)
     except Exception as exc:  # noqa: BLE001 -- A tool's failure is its call's result, as the runtime records it.
-        return ToolResult(call_id="", state="failed", stderr=(describe(exc),))
+        return ToolMessage(call_id="", state="failed", stderr=(describe(exc),))
     running = streaming_result.result
     result = await settled(
         streaming_result,
         on_item=lambda stream, item: None if running.done() else on_item(stream, item),
     )
     if result.state == "cancelled":
-        return replace(result, shown=Markers().cancelled)
+        return replace(result, shown=Stubs().cancelled)
     return result
 
 

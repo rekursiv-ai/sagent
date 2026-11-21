@@ -62,6 +62,13 @@ def test_the_cache_lives_as_long_as_the_provider_keeps_it(
     assert row.default.cache_ttl_sec == ttl
 
 
+# Measured on the API alone (Chat Completions and Responses): two adjacent user turns
+# count 4 tokens more than the same text in one. The ChatGPT endpoint is not measured.
+def test_only_the_api_is_known_to_keep_adjacent_user_turns_apart() -> None:
+    assert OpenAI.models()["sol-6.1"].keeps_user_turns_apart
+    assert not OpenAISub.models()["sol-6.1"].keeps_user_turns_apart
+
+
 def test_the_provider_serves_openais_models_by_any_name() -> None:
     openai = OpenAI()
     assert openai.name == "openai"

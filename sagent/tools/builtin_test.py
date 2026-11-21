@@ -16,11 +16,15 @@ from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.bash import Bash
 from sagent.tools.builtin import TOOLS, builders
 from sagent.tools.memory import Memory
+from sagent.tools.recall import Recall
 from sagent.tools.remote import RemoteSession, RemoteTool
+from sagent.tools.skill import Skill
 
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sagent.agent.agents_md import Tier
 
 
 def _built(tmp_path: Path) -> dict[str, object]:
@@ -73,6 +77,15 @@ def test_outside_a_repository_memory_is_the_directory_s_and_nothing_folds(
     assert not memory.directory.exists()
 
 
+def test_skill_reads_the_tiers_the_agent_is_given(tmp_path: Path) -> None:
+    team = Team(catalog=ModelCatalog(factories={}))
+    tiers: frozenset[Tier] = frozenset({"User"})
+    built = builders(cwd=tmp_path, team=team, remote=RemoteSession([]), tiers=tiers)
+    skill = built["Skill"]()
+    assert isinstance(skill, Skill)
+    assert skill.tiers == tiers
+
+
 def test_remote_tool_knows_each_local_tool_but_itself(tmp_path: Path) -> None:
     remote = _built(tmp_path)["RemoteTool"]
     assert isinstance(remote, RemoteTool)
@@ -86,7 +99,7 @@ def test_agent_tools_share_the_team_and_remote_tool_shares_its_endpoints(
     team = Team(catalog=ModelCatalog(factories={}))
     remote = RemoteSession([], team=team)
     built = builders(cwd=tmp_path, team=team, remote=remote)
-    for kind in (AgentSpawn, AgentSend, AgentSelf, AgentSession):
+    for kind in (AgentSpawn, AgentSend, AgentSelf, AgentSession, Recall):
         tool = built[kind.name]()
         assert isinstance(tool, kind)
         assert tool.team is team

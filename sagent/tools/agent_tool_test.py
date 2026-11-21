@@ -18,7 +18,7 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.runtime.context import validate_context
-from sagent.session.types import ToolResult, UncategorizedToolResult, UserMessage
+from sagent.session.types import ToolMessage, UncategorizedToolResult, UserMessage
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_session import AgentSession
 from sagent.tools.agent_tool import target_agent
@@ -97,27 +97,7 @@ async def test_session_reads_reach_any_team_member(
     action: str,
     target: str,
 ) -> None:
-    def resolve(pattern: str, *, by: str) -> list[str]:
-        del by
-        return {"parent": ["child"], "descendants": list[str]()}.get(pattern, [pattern])
-
-    label = "child" if target == "parent" else target
-    record = UserMessage(content=f"{label}'s words")
-    contexted = Mock(return_value=Mock(messages=[record]))
-    history = Mock(return_value=[record])
-    selected = Mock(
-        spec=Agent,
-        runtime=Mock(context=contexted),
-        session=Mock(history=history),
-    )
-    resolved = Mock(side_effect=resolve)
-    fetched = Mock(return_value=selected)
-    team = MagicMock(
-        spec=Team,
-        __contains__=Mock(side_effect={"grand", label}.__contains__),
-        resolve=resolved,
-        __getitem__=fetched,
-    )
+    _, _, session = _setup(tmp_path)
     arguments: dict[str, PlainTree] = {
         "agent": target,
         "action": action,
@@ -125,16 +105,13 @@ async def test_session_reads_reach_any_team_member(
         "text": "words",
     }
     result = await settled(
-        AgentSession(team=team).call(
+        session.call(
             ToolContext(cwd=tmp_path / "grand", label="grand"),
             arguments,
         ),
     )
-    assert f"{label}'s words" in result.text()
-    resolved.assert_called_once_with(target, by="grand")
-    fetched.assert_called_once_with(label)
-    contexted.assert_called_once_with()
-    assert history.call_args_list == ([((), {})] if action == "search" else [])
+    # ``parent`` is resolved as ``grand`` sees it: its parent is ``child``.
+    assert f"{'child' if target == 'parent' else target}'s words" in result.text()
 
 
 @pytest.mark.asyncio
@@ -161,7 +138,7 @@ async def test_session_mutation_queues_on_the_target_only(
     team, _, session = _setup(tmp_path)
     target = team["grand"]
     target.session.append(
-        ToolResult(
+        ToolMessage(
             call_id="old",
             state="done",
             # Longer than the stub a prune leaves, so pruning it saves something.
@@ -172,17 +149,27 @@ async def test_session_mutation_queues_on_the_target_only(
     arguments: dict[str, PlainTree] = {"agent": "grand", "action": action}
     if action == "prune":
         arguments.update({"ids": [1], "reason": "obsolete"})
-    await settled(session.call(team["root"].runtime.tool_context, arguments))
+    call = session.call(team["root"].runtime.tool_context, arguments)
+    # A descendant's change is waited for, and the target, not running here, never
+    # ends it.
+    await asyncio.sleep(0)
     await asyncio.sleep(0)
     (queued,) = target.runtime.inbox.drain_nowait()
-    if action == "prune":
-        assert isinstance(queued, types.Scheduled)
-        await queued.work()
-        results = [r for r in target.session if isinstance(r, ToolResult)]
-        assert results[0].text().startswith("[pruned:")
-    else:
-        assert isinstance(queued, types.Clear if action == "clear" else types.Compact)
+    assert isinstance(
+        queued,
+        {
+            "prune": types.SessionPrune,
+            "clear": types.SessionClear,
+            "compact": types.SessionCompact,
+        }[action],
+    )
+    assert queued.sender == "root"
+    if isinstance(queued, types.SessionPrune):
+        assert (queued.call_ids, queued.reason) == (("old",), "obsolete")
+    assert not call.result.done()
     assert team["root"].runtime.inbox.drain_nowait() == []
+    _ = call.result.cancel()
+    _ = await asyncio.gather(call.result, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -278,7 +265,7 @@ async def test_runtime_admission_holds_across_the_round_cap(
             else None
         )
     results = [
-        r for r in caller.session if isinstance(r, ToolResult) and r.call_id == "probe"
+        r for r in caller.session if isinstance(r, ToolMessage) and r.call_id == "probe"
     ]
     result = arrived if arrived is not None else results[-1]
     if permitted:
@@ -326,7 +313,9 @@ async def test_target_status_events_publish_on_the_target_only(tmp_path: Path) -
             {"agent": "grand", "status": "Checking the target state"},
         ),
     )
-    assert child_events == [types.StatusChanged(text="Checking the target state")]
+    assert child_events == [
+        types.SessionTitleChanged(title="Checking the target state"),
+    ]
     assert root_events == []
 
 
@@ -349,11 +338,11 @@ async def test_invalid_target_call_does_not_drop_a_sibling_call(tmp_path: Path) 
     )
     async with caller:
         assert await asyncio.wait_for(caller.send("probe"), timeout=5) == "recovered"
-    results = {r.call_id: r for r in caller.session if isinstance(r, ToolResult)}
+    results = {r.call_id: r for r in caller.session if isinstance(r, ToolMessage)}
     assert results["bad"].state == "failed"
     assert "names 0 agents" in results["bad"].text()
     assert "grand's words" in results["good"].text()
-    validate_context(caller.runtime.context().messages)
+    validate_context(caller.runtime.tape.context().messages)
 
 
 @pytest.mark.asyncio

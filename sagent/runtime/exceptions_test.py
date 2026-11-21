@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from datetime import UTC, datetime
 
 import asyncio
 import logging
@@ -45,7 +45,9 @@ def test_local_time_is_the_local_date_as_date_prints_it(
     time.tzset()
     try:
         # 2026-10-31T16:00:00Z is 06:00 in Honolulu, which keeps no daylight time.
-        assert local_time(1_793_462_400.0) == "Sat Oct 31 06:00:00"
+        assert (
+            local_time(datetime(2026, 10, 31, 16, tzinfo=UTC)) == "Sat Oct 31 06:00:00"
+        )
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -157,15 +159,6 @@ async def test_task_callback_is_silent_on_success_and_cancel(
         await _settled(done)
         await _settled(cancelled)
     assert caplog.records == []
-
-
-def test_local_time_formats_the_supplied_epoch_in_the_local_timezone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = Mock(return_value=time.struct_time((2001, 1, 2, 3, 4, 5, 1, 2, 0)))
-    monkeypatch.setattr(time, "localtime", clock)
-    assert local_time(123.5) == "Tue Jan 02 03:04:05"
-    clock.assert_called_once_with(123.5)
 
 
 if __name__ == "__main__":

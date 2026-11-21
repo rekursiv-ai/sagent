@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
@@ -76,12 +77,15 @@ from sagent.session.jsonl import JsonlJournal, read_record
 from sagent.session.projects import list_sessions, project_dir
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
     BashResult,
+    SessionContext,
     SessionRecord,
+    Succeeded,
     Thinking,
-    ToolResult,
+    ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -777,14 +781,14 @@ def test_a_command_builds_one_set_of_commands_for_its_flags_and_itself(
             agent: Agent,
             *,
             catalog: ModelCatalog,
-            say: Callable[[CommandOutput], None],
+            print_output: Callable[[CommandOutput], None],
             screen: main._Screen,
             panes: Panes,
         ) -> None:
             super().__init__(
                 agent,
                 catalog=catalog,
-                say=say,
+                print_output=print_output,
                 screen=screen,
                 panes=panes,
             )
@@ -1669,11 +1673,11 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
         model=script.catalog()["scripted"]["scripted"],
         tool_context=ToolContext(cwd=tmp_path),
     )
-    said: list[CommandOutput] = []
+    printed: list[CommandOutput] = []
     commands = Commands(
         agent,
         catalog=script.catalog(),
-        say=said.append,
+        print_output=printed.append,
         screen=main._Screen(),
         panes=Panes(),
     )
@@ -1703,8 +1707,8 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
         assert main.main() == code, (action.name, args)
         shell = capsys.readouterr()
         asyncio.run(commands(f"/{dotted} {args}"))
-        (prompt,) = said
-        said.clear()
+        (prompt,) = printed
+        printed.clear()
         assert prompt.command == f"/{dotted}"
         if code == 0:
             assert prompt.tone == "note"
@@ -2232,7 +2236,7 @@ async def test_an_agent_opened_by_default_starts_and_links_this_machine_s_daemon
     offline_daemon: AsyncMock,
 ) -> None:
     flags = _flags("--ephemeral", "--tools", "Read")
-    async with main.opened(flags, given=(), interactive=False) as o:
+    async with main.opened(flags, given=(), interactive=False, user=None) as o:
         offline_daemon.assert_awaited_once_with(
             ServeDirs(
                 secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
@@ -2254,7 +2258,13 @@ async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
     beside.parent.mkdir(parents=True)
     beside.write_text("{}")
     flags = _flags("--ephemeral", "--tools", "Read")
-    async with main.opened(flags, given=(), interactive=False, use_daemon=False):
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        use_daemon=False,
+    ):
         pass
     assert not beside.exists()
     named = Logins(AnthropicCLI.default_login_path(), own_directory=True).path("work")
@@ -2273,6 +2283,7 @@ async def test_an_agent_opened_without_the_daemon_starts_and_links_none(
         flags,
         given=(),
         interactive=False,
+        user=None,
         use_daemon=False,
     ) as o:
         offline_daemon.assert_not_awaited()
@@ -2282,11 +2293,28 @@ async def test_an_agent_opened_without_the_daemon_starts_and_links_none(
     del script
 
 
+# Sagent holds a model login and no identity of the person: whoever opens it and
+# knows who that is says so, and the model is told with the window's settings.
+@pytest.mark.parametrize("user", ["ada@example.com", None])
+@pytest.mark.asyncio
+async def test_an_agent_is_told_whose_session_it_is_only_when_its_opener_says(
+    script: _Script,
+    user: str | None,
+) -> None:
+    script.replies.append(reply("done"))
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(flags, given=(), interactive=False, user=user) as o:
+        _ = await o.agent.send("go")
+        (stated,) = (r for r in o.agent.session if isinstance(r, SessionContext))
+    assert stated.user == user
+    assert ("User: ada@example.com" in stated.text()) is (user is not None)
+
+
 @dataclass(slots=True, kw_only=True)
 class _Echo:
     """A tool's function as a program gives it: says back what it is given."""
 
-    said: list[str] = field(default_factory=list[str])
+    given: list[str] = field(default_factory=list[str])
     """What each call was given, in order."""
 
     def __call__(self, text: str) -> str:
@@ -2296,7 +2324,7 @@ class _Echo:
           text: What to say.
 
         """
-        self.said.append(text)
+        self.given.append(text)
         return text
 
 
@@ -2307,11 +2335,17 @@ async def test_a_tool_the_caller_gives_is_called_by_the_model(script: _Script) -
     given = tool(echo, name="Echo")
     script.replies.extend([reply(calls=[call("Echo", text="hi")]), reply("done")])
     flags = _flags("--ephemeral", "--tools", "Echo")
-    async with main.opened(flags, given=(), interactive=False, tools=[given]) as o:
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        tools=[given],
+    ) as o:
         assert list(o.agent.tools) == ["Echo"]
         assert o.agent.tools["Echo"] is given
         assert await o.agent.send("go") == "done"
-    assert echo.said == ["hi"]
+    assert echo.given == ["hi"]
 
 
 @pytest.mark.asyncio
@@ -2324,6 +2358,7 @@ async def test_a_child_shares_the_given_tool_its_parent_holds(script: _Script) -
         _flags("--ephemeral"),
         given=(),
         interactive=False,
+        user=None,
         tools=[given],
     ) as o:
         spawn = o.agent.tools["AgentSpawn"]
@@ -2338,7 +2373,7 @@ async def test_a_child_shares_the_given_tool_its_parent_holds(script: _Script) -
         kid = o.team["kid"]
         assert kid.tools["Echo"] is given
         assert kid.allowed == {"Echo", "AgentSend"}
-    assert echo.said == ["kid"]
+    assert echo.given == ["kid"]
 
 
 @pytest.mark.asyncio
@@ -2347,11 +2382,17 @@ async def test_every_listing_of_the_agent_s_tools_shows_a_given_one(
 ) -> None:
     given = tool(lambda: "x", name="Echo")
     flags = _flags("--ephemeral", "--tools", "Echo", "AgentSpawn")
-    async with main.opened(flags, given=(), interactive=False, tools=[given]) as o:
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        tools=[given],
+    ) as o:
         commands = Commands(
             o.agent,
             catalog=o.catalog,
-            say=main._dropped,
+            print_output=main._dropped,
             screen=o.screen,
             panes=Panes(),
         )
@@ -2386,6 +2427,7 @@ async def test_a_given_tool_named_as_a_built_in_is_refused_before_a_session_is_m
             flags,
             given=(),
             interactive=False,
+            user=None,
             tools=[tool(lambda: "x", name="Read")],
         ):
             pass
@@ -2438,7 +2480,7 @@ def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
     logs: logging.Logger,
     tmp_path: Path,
 ) -> None:
-    ran: list[tuple[bool, bool, Path | None]] = []
+    ran: list[tuple[bool, bool, Path | None, str]] = []
 
     async def run(
         agent: Agent,
@@ -2449,8 +2491,15 @@ def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
         show_thinking: bool,
         theme: ThemeState,
     ) -> None:
-        del catalog, show_thinking, theme
-        ran.append((agent.runtime.persistent_retry, team["lead"] is agent, history))
+        del catalog, show_thinking
+        ran.append(
+            (
+                agent.runtime.persistent_retry,
+                team["lead"] is agent,
+                history,
+                theme.current.name,
+            ),
+        )
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "run", run)
@@ -2466,10 +2515,13 @@ def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
         "lead",
         "--history",
         str(tmp_path / "h"),
+        "--screen.theme",
+        "light",
     )
     _stdin(monkeypatch, tty=True)
     assert main.main() == 0
-    assert ran == [(True, True, tmp_path / "h")]
+    # It draws in the theme the session opened with.
+    assert ran == [(True, True, tmp_path / "h", "light")]
     assert capsys.readouterr().err.startswith("[/model] work@scripted/scripted+")
     del script, logs
 
@@ -2577,7 +2629,7 @@ async def _set(*argv: str) -> tuple[main._Screen, Agent]:
     commands = Commands(
         agent,
         catalog=catalog,
-        say=main._dropped,
+        print_output=main._dropped,
         screen=screen,
         panes=Panes(),
     )
@@ -2715,6 +2767,7 @@ _DEFAULT_TOOLS = [
     "AgentSend",
     "AgentSelf",
     "AgentSession",
+    "Recall",
     "Skill",
     "BackgroundTask",
     "RemoteTool",
@@ -3545,31 +3598,38 @@ async def test_a_failure_while_streaming_is_its_own_record(
 
 def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
     tools = {"Read": Read()}
-    assert main._records(types.ModelResponseThinking(text="hm"), tools=tools) == [
+    assert main._records(
+        types.ModelResponseThinkingStreamed(text="hm"),
+        tools=tools,
+    ) == [
         {"descriptor": "text/x-thinking", "content": "hm"},
     ]
-    suspended = types.ModelCallSuspended(
+    suspended = types.ModelResponseSuspended(
         exception=RateLimitedError("spent", limit="weekly"),
-        until=time.time() + 30.0,
-        attempt=1,
+        retry_at=datetime.fromtimestamp(time.time() + 30.0, UTC),
+        failures_in_a_row=1,
     )
     ((record,),) = [main._records(suspended, tools=tools)]
     assert record["descriptor"] == "text/x-notice"
     assert str(record["content"]).startswith("Weekly limit reached. Resumes ")
     switched = types.LoginSwitched(
         provider="acli",
-        was="work",
-        now="default",
-        first="default",
+        from_login="work",
+        to_login="default",
+        first_login_in_order="default",
     )
     assert main._records(switched, tools=tools) == [
         {"descriptor": "text/x-notice", "content": "[on default, first in order]"},
     ]
-    spent = types.LoginsSpent(provider="acli", resets=(("work", time.time() + 60),))
-    ((notice,),) = [main._records(spent, tools=tools)]
-    assert notice["descriptor"] == "text/x-notice"
+    spent = replace(
+        suspended,
+        provider="acli",
+        reset_at_by_login={"work": datetime.fromtimestamp(time.time() + 60, UTC)},
+    )
+    notice, resumes = main._records(spent, tools=tools)
+    assert (notice["descriptor"], resumes["descriptor"]) == ("text/x-notice",) * 2
     assert str(notice["content"]).startswith("[no acli login has quota: work ")
-    result = ToolResult(
+    result = ToolMessage(
         call_id="1",
         state="done",
         stdout=("out",),
@@ -3585,7 +3645,7 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
         },
     ]
     # A shell command's ``[exit N]`` follows its output, and is no error.
-    exited = ToolResult(
+    exited = ToolMessage(
         call_id="1",
         state="done",
         stdout=("out",),
@@ -3599,15 +3659,15 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
             "is_error": None,
         },
     ]
-    assert main._records(types.AgentIdle(), tools=tools) == []
+    assert main._records(AgentIdle(), tools=tools) == []
     assert main._records(UserMessage(content="x"), tools=tools) == []
 
 
 def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
     """A reader can tell the stand-in from the result that replaces it."""
     tools = {"Read": Read()}
-    stub = ToolResult(call_id="1", state="pending", stdout=("[detached]",))
-    real = ToolResult(
+    stub = ToolMessage(call_id="1", state="pending", stdout=("[detached]",))
+    real = ToolMessage(
         call_id="1",
         state="done",
         stdout=("done",),
@@ -3622,7 +3682,7 @@ def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
             "stub": "pending",
         },
     ]
-    assert main._records(types.DetachedResult(result=real), tools=tools) == [
+    assert main._records(real, tools=tools) == [
         {
             "descriptor": "application/x-tool-result",
             "call_id": "1",
@@ -3630,9 +3690,21 @@ def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
             "is_error": None,
         },
     ]
+    killed = ToolMessage(call_id="1", state="cancelled", shown="[cancelled]")
+    assert main._records(killed, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "[cancelled]",
+            "is_error": True,
+            "stub": "cancelled",
+        },
+    ]
     assert (
         main._records(
-            types.ModelResponseComplete(response=reply("no calls")),
+            types.ModelResponseCompleted(
+                outcome=Succeeded(value=reply("no calls")),
+            ),
             tools=tools,
         )
         == []
@@ -3686,7 +3758,7 @@ async def test_run_redraws_the_session_then_answers_what_is_typed(
         answered = asyncio.Event()
 
         def watch(event: types.RuntimeEvent) -> None:
-            if isinstance(event, types.AgentIdle) and provider.requests:
+            if isinstance(event, AgentIdle) and provider.requests:
                 answered.set()
 
         agent.runtime.observers.append(watch)
@@ -3914,6 +3986,7 @@ def test_the_system_prompt_is_replaced_or_extended(
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     assert agent.system_prompt == system
 
@@ -3926,6 +3999,7 @@ def test_an_appended_prompt_extends_the_default_one() -> None:
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     assert agent.system_prompt == f"{default_system_prompt()}\n\nUse tabs."
 
@@ -3942,6 +4016,7 @@ def test_compact_picks_the_compactor(argv: tuple[str, ...], compactor: type) -> 
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     assert type(agent.session.compactor) is compactor
 
@@ -3958,6 +4033,7 @@ def test_prune_picks_the_pruner(argv: tuple[str, ...], pruner: type) -> None:
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     assert type(agent.session.pruner) is pruner
 
@@ -3985,6 +4061,7 @@ def test_compactor_picks_how_it_compacts(argv: tuple[str, ...], style: str) -> N
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     compactor = agent.session.compactor
     assert isinstance(compactor, SummaryCompactor)
@@ -3999,6 +4076,7 @@ def test_the_caps_reach_the_agent() -> None:
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
+        user=None,
     )
     assert (agent.max_rounds, agent.max_spend_usd) == (3, 1.5)
 
@@ -4287,7 +4365,7 @@ async def test_run_wires_the_catalog_team_and_printer_into_its_commands(
                 timeout=5,
             )
         assert agent.model.capability.model_id == "deep"
-        assert child.runtime.inbox.drain_nowait() == [types.Halt()]
+        assert child.runtime.inbox.drain_nowait() == [types.ModelHalt()]
     shown = screen.getvalue()
     assert (
         "[/model] deep/deep+fullcontext+nothink\n" in shown  # codespell:ignore nothink
@@ -4401,7 +4479,7 @@ async def test_left_opens_the_tree_and_enter_shows_the_agent_picked(
         kid.session.append(AssistantMessage(content="kid earlier"))
         answered = asyncio.Event()
         kid.runtime.observers.append(
-            lambda e: answered.set() if isinstance(e, types.AgentIdle) else None,
+            lambda e: answered.set() if isinstance(e, AgentIdle) else None,
         )
         with (
             create_pipe_input() as pipe,
@@ -4422,7 +4500,7 @@ async def test_left_opens_the_tree_and_enter_shows_the_agent_picked(
         assert UserMessage(content="hi kid") in kid_provider.requests[0].records
         # What was typed went to the kid alone; its parent hears only that it stopped.
         assert agent.runtime.inbox.drain_nowait() == [
-            AgentToAgentMessage(
+            AgentMessage(
                 sender="kid",
                 recipient="Agent",
                 content="[kid is idle] kid answers",
@@ -4443,7 +4521,7 @@ async def test_what_the_shown_agent_did_under_the_tree_prints_once_it_closes(
         views = Views(agent, team=None, printer=printer, catalog=_Script().catalog())
         idle = asyncio.Event()
         agent.runtime.observers.append(
-            lambda e: idle.set() if isinstance(e, types.AgentIdle) else None,
+            lambda e: idle.set() if isinstance(e, AgentIdle) else None,
         )
 
         async def busy(*args: object, **kwargs: object) -> None:
@@ -4526,7 +4604,7 @@ async def test_run_labels_calls_by_their_tool_and_quits_by_command(
         answered = asyncio.Event()
 
         def watch(event: types.RuntimeEvent) -> None:
-            if isinstance(event, types.AgentIdle) and len(provider.requests) == 2:
+            if isinstance(event, AgentIdle) and len(provider.requests) == 2:
                 answered.set()
 
         agent.runtime.observers.append(watch)
@@ -4787,7 +4865,9 @@ def test_a_listing_exactly_at_the_cap_hides_nothing(
 def test_a_tool_label_record_is_the_tool_s_summary_in_field_order() -> None:
     read = call("Read", "c1", file_path="a.txt")
     (record,) = main._records(
-        types.ModelResponseComplete(response=reply(calls=[read])),
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=reply(calls=[read])),
+        ),
         tools={"Read": Read()},
     )
     assert record == {
@@ -4862,6 +4942,7 @@ def test_the_agent_works_where_it_was_told_through_the_session_s_fetches() -> No
         journal=None,
         tool_context=ToolContext(cwd=Path("/w"), fetch_session=fetches),
         interactive=False,
+        user=None,
     )
     context = agent.runtime.tool_context
     assert (context.cwd, context.fetch_session) == (Path("/w"), fetches)
@@ -4878,6 +4959,7 @@ def test_a_terminal_waits_out_a_rate_limit_and_a_pipe_does_not(
         journal=None,
         tool_context=ToolContext(cwd=Path("/w")),
         interactive=interactive,
+        user=None,
     )
     assert agent.runtime.persistent_retry is interactive
 
@@ -5636,7 +5718,7 @@ async def test_peer_setting_validates_and_inherits_without_pinning_a_choice() ->
     commands = Commands(
         agent,
         catalog=catalog,
-        say=main._dropped,
+        print_output=main._dropped,
         screen=main._Screen(),
         panes=Panes(),
         team=team,

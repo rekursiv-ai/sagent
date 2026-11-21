@@ -16,11 +16,14 @@ Typical usage example:
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from importlib.resources import files
+from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import asyncio
+import re
 import uuid
 
 from treekle import PlainTree, from_plain
@@ -42,16 +45,21 @@ from sagent.runtime.tape import (
 )
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
+    Failed,
+    ModelIdle,
     RequestMeasurement,
+    SessionContext,
+    Succeeded,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedRecord,
     UserMessage,
     now_timestamp,
@@ -69,7 +77,7 @@ if TYPE_CHECKING:
         Mapping,
         Sequence,
     )
-    from pathlib import Path
+    from datetime import date, datetime, timedelta
 
     from sagent.agent.types import (
         Agent as AgentProtocol,
@@ -156,6 +164,8 @@ class Agent(AsyncResource):
         host's details are not for.
       account: The named login ``model``'s provider signs in as; ``None`` for
         its default. Whoever switches the model keeps it current.
+      user: Whose session it is, which the model is told: a person's message
+        that names no sender is theirs. ``None`` tells the model no name.
 
     Raises:
       ValueError: ``allowed`` names a tool not in ``tools``.
@@ -179,6 +189,7 @@ class Agent(AsyncResource):
         allowed: Collection[str] | None = None,
         environment: bool = True,
         account: str | None = None,
+        user: str | None = None,
     ) -> None:
         self.agents_md: AgentsMdConfig = (
             agents_md if agents_md is not None else AgentsMdConfig()
@@ -206,6 +217,7 @@ class Agent(AsyncResource):
         self.tools: Mapping[str, Tool] = self.runtime.tools
         self.environment = environment
         self.account = account
+        self.user = user
         self.max_rounds = max_rounds
         self._rounds = 0
         self._allowed = frozenset(allowed) if allowed is not None else None
@@ -221,7 +233,7 @@ class Agent(AsyncResource):
         # What a child it spawns compacts with, so the child compacts as it does.
         self.compactor_factory: Factory[Shrinker] = compactor
         self.runtime.context_updates = self._session.updates
-        # A compactor the runtime can call compacts on ``Compact``, and when due,
+        # A compactor the runtime can call compacts on ``SessionCompact``, and when due,
         # and sizes each reply to the room the window leaves.
         summarizer = self._session.compactor
         if isinstance(summarizer, Compactor):
@@ -238,8 +250,9 @@ class Agent(AsyncResource):
         self.runtime.persistent_retry = persistent_retry
         # What the model calls have cost, a resumed session's included.
         self.spend_usd = 0.0
-        # Models assigned away from, closed at the runtime's next safe point.
+        # Models assigned away from, closed once no call can still be on them.
         self._retired: list[Model] = []
+        self._closing: set[asyncio.Task[None]] = set()
         # The settings each model was left with, by ``cache_key``: a switch back
         # restores them.
         self.model_cache: dict[str, CachedModel] = {}
@@ -252,8 +265,8 @@ class Agent(AsyncResource):
         return self.runtime.model
 
     # The agent owns the models assigned to it. One assigned away from may still be
-    # streaming, so it closes once the runtime is between turns; with no loop yet,
-    # when one starts.
+    # streaming, so it closes once the context naming its successor is in force: the
+    # runtime puts it there just before it calls the new one.
     @model.setter
     def model(self, model: Model) -> None:
         old, self.runtime.model = self.runtime.model, model
@@ -268,8 +281,6 @@ class Agent(AsyncResource):
                 settings=old.settings,
             )
         self._retired.append(old)
-        if self._loop is not None:
-            self._close_retired_soon()
 
     @property
     def running(self) -> bool:
@@ -307,32 +318,32 @@ class Agent(AsyncResource):
 
     def charge(
         self,
-        usd: float,
+        spend: TokenCost,
         *,
-        by: str,
+        label: str,
         measurement: RequestMeasurement | None = None,
     ) -> None:
         """Count spend no reply of this agent's own brought; halt the turn past the cap.
 
         The spend is journaled, so a resumed session counts it too, and told to the
-        runtime's observers as ``Charged``.
+        runtime's observers as ``SessionSpendCharged``.
 
         Args:
-          usd: What one model call cost.
-          by: The label of the agent that spent it: one below this one, or this
-            one's own for a compaction.
+          spend: What one model call cost.
+          label: The label of the agent that spent it: one below this one, or
+            this one's own for a compaction.
           measurement: The exact request's measurement for a side call, if captured.
 
         """
-        self.spend_usd += usd
+        self.spend_usd += spend.total
         self._session.journal.append(
             TokenUsage(
                 timestamp=now_timestamp(),
-                info={"spend_usd": usd, "agent": by},
+                info={"spend_usd": spend.total, "agent": label},
                 measurement=measurement,
             ),
         )
-        self.runtime.publish(types.Charged(usd=usd, by=by))
+        self.runtime.publish(types.SessionSpendCharged(spend=spend, label=label))
         if (over := self._over_budget()) is not None:
             self._limit = over
             self.runtime.halt()
@@ -369,17 +380,16 @@ class Agent(AsyncResource):
     async def aopen(self) -> None:
         self._session.frame()
         await self._session.aresume()
+        await self._close_retired()
         self.runtime.observers.append(self._observe)
         self._loop = asyncio.create_task(self.runtime.run_forever())
-        if self._retired:
-            self._close_retired_soon()
 
     @override
     async def aclose(self) -> None:
         loop, self._loop = self._loop, None
         try:
             if loop is not None:
-                self.runtime.push(types.Quit())
+                self.runtime.push(types.SessionQuit())
                 await loop
         finally:
             # What the session holds is written even when the loop died raising.
@@ -389,6 +399,7 @@ class Agent(AsyncResource):
             self._session.persist()
             self.session.journal.flush()
             self._retired.append(self.runtime.model)
+            await asyncio.gather(*self._closing)
             await self._close_retired()
 
     async def send(
@@ -416,10 +427,13 @@ class Agent(AsyncResource):
         """
         reply = ""
         async for event in self._turn(text, attachments=attachments):
-            if isinstance(event, types.ModelResponseComplete):
+            if isinstance(event, types.ModelResponseCompleted) and isinstance(
+                event.outcome,
+                Succeeded,
+            ):
                 said = "".join(
                     r.content or ""
-                    for r in event.response.records
+                    for r in event.outcome.value.records
                     if isinstance(r, AssistantMessage)
                 )
                 if said:
@@ -450,7 +464,7 @@ class Agent(AsyncResource):
 
         """
         async for event in self._turn(text, attachments=attachments):
-            if isinstance(event, types.ModelResponsePartial):
+            if isinstance(event, types.ModelResponseTextStreamed):
                 yield event.text
 
     async def _turn(
@@ -463,35 +477,54 @@ class Agent(AsyncResource):
         # A spent cap refuses the turn before a model call could spend more.
         if (over := self._over_budget()) is not None:
             raise over
-        queue: asyncio.Queue[types.RuntimeEvent] = asyncio.Queue()
-        observer = queue.put_nowait
+        queue: asyncio.Queue[tuple[types.RuntimeEvent, bool]] = asyncio.Queue()
         # A cap tripped outside a turn, by a message no turn sent, is not this one's.
         self._limit = None
+        ended = self.runtime.submit(
+            UserMessage(content=text, attachments=tuple(attachments)),
+        )
+
+        # The message ends just before its ending is told, so the event that tells
+        # it is the first heard with it ended: read later, that is still so.
+        def observer(event: types.RuntimeEvent) -> None:
+            queue.put_nowait((event, ended.done()))
+
+        answered = False  # pragma: no mutate[truthiness]
         self.runtime.observers.append(observer)
         try:
-            self.runtime.push(UserMessage(content=text, attachments=tuple(attachments)))
             while True:
-                event = await self._next(queue)
+                event, ended_by_then = await self._next(queue)
                 yield event
-                if isinstance(event, types.AgentIdle):
+                if isinstance(event, AgentIdle):
                     return
-                if isinstance(event, types.ModelResponseError):
-                    raise event.exception
-                if isinstance(event, types.Halt):
+                # The message's own end, whatever became of it: a turn that stopped
+                # before it was taken in is the one that ran before it. Once it is
+                # answered, a stop before the agent rests is the turn's too, as when
+                # the reply that answers it reaches a cap.
+                if ended_by_then and not answered:
+                    answered = True
+                    outcome = ended.result()
+                elif answered and isinstance(event, ModelIdle):
+                    outcome = event.outcome
+                else:
+                    continue
+                if isinstance(outcome, Failed):
+                    raise outcome.exception
+                if isinstance(outcome, Cancelled):
                     limit, self._limit = self._limit, None
                     if limit is not None:
                         raise limit
-                    raise asyncio.CancelledError
+                    # A runtime that quit ends its loop: the wait for its next
+                    # event raises that.
+                    if not self.runtime.has_quit:
+                        raise asyncio.CancelledError
         finally:
             self.runtime.observers.remove(observer)
 
     # The loop raises what it cannot recover from; waiting on its events alone would
     # then wait forever.
-    async def _next(
-        self,
-        queue: asyncio.Queue[types.RuntimeEvent],
-    ) -> types.RuntimeEvent:
-        """Return the next event, or raise why the runtime's loop ended first."""
+    async def _next[T](self, queue: asyncio.Queue[T]) -> T:
+        """Return the next of ``queue``, or raise why the runtime's loop ended first."""
         loop = self._loop
         if loop is None:
             raise RuntimeError("The agent is not open: use it with 'async with'.")
@@ -503,15 +536,6 @@ class Agent(AsyncResource):
         loop.result()
         raise RuntimeError("The agent's runtime stopped.")
 
-    def _close_retired_soon(self) -> None:
-        """Close the models assigned away from at the runtime's next safe point."""
-        self.runtime.push(
-            types.Scheduled(
-                work=self._close_retired,
-                done=asyncio.get_running_loop().create_future(),
-            ),
-        )
-
     async def _close_retired(self) -> None:
         """Close each model assigned away from, once."""
         retired = self._retired
@@ -519,28 +543,42 @@ class Agent(AsyncResource):
         for model in retired:
             await model.aclose()
 
-    # The runtime publishes a halt before it stops anything, so what was at work is
-    # still at work here. The record is the journal's alone: a resume never reads
-    # it, so the model is not told.
+    # The runtime publishes a halt before it stops anything, so the turn it will stop
+    # is still under way here, and the record precedes what the stop writes. What is
+    # at work says less: nothing is, in a wait to call again. The record is the
+    # journal's alone: a resume never reads it, so the model is not told.
     def _observe(self, event: types.RuntimeEvent) -> None:
-        """Write the session, note a halt that stopped work, start windows, hold caps."""
-        if isinstance(event, types.SaveSession):
+        """Write the session, note a halt that stops a turn, start windows, hold caps."""
+        if isinstance(event, types.SessionSaveDue):
             self._session.persist()
-        elif isinstance(event, types.Halt) and self.runtime.at_work:
+        # A call on the model now, or none at all: no call is still on a retired one.
+        elif (
+            isinstance(event, types.ModelResponseStarted | AgentIdle) and self._retired
+        ):
+            closing = asyncio.create_task(self._close_retired())
+            self._closing.add(closing)
+            closing.add_done_callback(self._closing.discard)
+        elif isinstance(event, types.ModelHalt) and self.runtime.turn_under_way:
             self._session.persist()
             self._session.journal.append(
                 UncategorizedRecord(timestamp=now_timestamp(), kind="interrupted"),
             )
-        elif isinstance(event, (types.CompactComplete, types.ClearComplete)):
+        elif isinstance(
+            event,
+            types.SessionClearCompleted | types.SessionCompactCompleted,
+        ) and isinstance(event.outcome, Succeeded):
             self.runtime.tool_context.files.forget()
             self._return_home()
             self._session.frame()
         # The next turn starts afresh: a persistent child's with another agent's
         # message, which mid-turn, as a child's idle ping, starts none.
-        elif isinstance(event, (UserMessage, types.AgentIdle)):
+        elif isinstance(event, (UserMessage, AgentIdle)):
             self._new_turn()
-        elif isinstance(event, types.ModelResponseComplete):
-            self._charge(event.response)
+        elif isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
+            self._charge(event.outcome.value)
 
     # The turn that reaches the round cap leaves the model no tool to call, so the next
     # answers with what it has; a call then halts the turn.
@@ -640,7 +678,9 @@ class RuntimeSession:
         # The model and prompt last stood, so each stands again only when it changes.
         self._memory: ModelMemory | None = None
         self._prompt: str | None = None
-        self._told: set[str] = set()
+        # The last context this session stated, and the skipped files it meant:
+        # its ``()`` says either "as before" or "none now", which it alone knows.
+        self._stated_skipped: tuple[SessionContext, tuple[Path, ...]] | None = None
         self.frame()
 
     # A window's prompt is read once, at its start, and never again until the next:
@@ -678,7 +718,7 @@ class RuntimeSession:
 
     def __iter__(self) -> Iterator[SessionRecord]:
         """Yield what the model sees: the last clear onward."""
-        return iter(_records(self._agent.runtime.context().messages))
+        return iter(_records(self._agent.runtime.tape.context().messages))
 
     def history(self, start: int = 0) -> Iterator[SessionRecord]:
         """Yield the session from record ``start``: every window, compacted ones too.
@@ -699,26 +739,22 @@ class RuntimeSession:
     def append(self, *records: SessionRecord) -> None:
         """Add ``records`` to the end; the journal writes them after the loop's pass."""
         for entry in _entries(records):
-            self._agent.runtime.append_history(entry)
+            self._agent.runtime.tape.append_history(entry)
 
     async def clear(self) -> None:
         """Schedule a start over with nothing kept, and wait; the journal keeps the past.
 
         The new window reads its system prompt afresh, as the agent frames it.
+
+        Raises:
+          asyncio.CancelledError: The runtime quit before it cleared.
+
         """
-        cleared = asyncio.Event()
-
-        def observe(event: types.RuntimeEvent) -> None:
-            if isinstance(event, types.ClearComplete):
-                cleared.set()
-
-        self._agent.runtime.observers.append(observe)
-        try:
-            self._agent.runtime.push(types.Clear())
-            await cleared.wait()
-        finally:
-            self._agent.runtime.observers.remove(observe)
-        self._agent.runtime.tool_context.files.forget()
+        if isinstance(
+            await self._agent.runtime.ask(types.SessionClear()),
+            Cancelled,
+        ):
+            raise asyncio.CancelledError
 
     def stand(self, key: str, record: UncategorizedRecord | None) -> None:
         """Keep ``record`` in force under ``key``: written now and at each window's start.
@@ -851,7 +887,7 @@ class RuntimeSession:
             if isinstance(record, ReferrableTapeEvent)
             and not isinstance(
                 record.event,
-                (types.CompactStarted, types.CompactComplete, types.CompactFailed),
+                (types.SessionCompactStarted, types.SessionCompactCompleted),
             )
         ]
         if not any(isinstance(record, ContextSplice) for record in added):
@@ -866,7 +902,10 @@ class RuntimeSession:
         restated, added_records = grown
         if restated:
             self.journal.append(
-                UncategorizedRecord(kind="restated", payload={"results": restated}),
+                UncategorizedRecord(
+                    kind="restated",
+                    payload={"messages": [list(each) for each in restated]},
+                ),
             )
         self.journal.append(
             *added_records,
@@ -888,7 +927,7 @@ class RuntimeSession:
         )
         self._lines = list(history)
 
-    def updates(self) -> list[TurnContext | SystemMessage]:
+    def updates(self) -> list[types.SessionContextUpdate | SystemMessage]:
         """Return what to restate before the next model call, if it changed.
 
         The runtime asks once per model round. The window's first states every
@@ -900,15 +939,17 @@ class RuntimeSession:
         withdrawn when it empties.
 
         Returns:
-          updates: A ``TurnContext``, a ``SystemMessage`` of AGENTS.md files, and
-            reminders, each only when there is something new to say.
+          updates: A context to put in force, a ``SystemMessage`` of AGENTS.md
+            files, and reminders, each only when there is something new to say.
 
         """
-        context = self._agent.runtime.context().messages
-        out: list[TurnContext | SystemMessage] = []
+        context = self._agent.runtime.tape.context().messages
+        out: list[types.SessionContextUpdate | SystemMessage] = []
         turn = self._turn(context)
         if turn is not None:
-            out.append(turn)
+            out.append(
+                types.SessionContextUpdate(timestamp=turn.timestamp, context=turn),
+            )
         tool_context = self._agent.runtime.tool_context
         seen = (tool_context.cwd, tuple(tool_context.files.recent()))
         if seen != self._seen:
@@ -935,26 +976,24 @@ class RuntimeSession:
                     ),
                 )
         out.extend(self._reminders(context))
-        self._tell_skipped()
         return out
 
-    # The prompt is up by now, and logs go to the session's file; the user is told
-    # here, once a session, of each file the model was not given.
-    def _tell_skipped(self) -> None:
-        """Publish each AGENTS.md file and skill left unread, once."""
+    def _skipped_instruction_files(self) -> tuple[Path, ...]:
+        """Return each AGENTS.md, rule, and skill file left unread, sorted."""
         tool_context = self._agent.runtime.tool_context
-        for text in (
-            *self._directives.skipped,
-            *(
-                line
-                for tool in self._agent.tools.values()
-                if isinstance(tool, Skipping)
-                for line in tool.skipped(tool_context)
+        return tuple(
+            sorted(
+                {
+                    *self._directives.skipped,
+                    *(
+                        path
+                        for tool in self._agent.tools.values()
+                        if isinstance(tool, Skipping)
+                        for path in tool.skipped(tool_context)
+                    ),
+                },
             ),
-        ):
-            if text not in self._told:
-                self._told.add(text)
-                self._agent.runtime.publish(types.Skipped(text=text))
+        )
 
     # One that empties is withdrawn, so the model stops relying on what it said.
     def _reminders(
@@ -995,16 +1034,21 @@ class RuntimeSession:
             )
         return out
 
-    def _turn(self, context: Sequence[types.ModelContextEvent]) -> TurnContext | None:
+    def _turn(
+        self,
+        context: Sequence[types.ModelContextEvent],
+    ) -> SessionContext | None:
         """Return the settings changed since the window last stated them, or ``None``."""
-        stated = [entry for entry in context if isinstance(entry, TurnContext)]
+        stated = [entry for entry in context if isinstance(entry, SessionContext)]
         agent = self._agent
         cwd = agent.runtime.tool_context.cwd
         model = agent.model
         settings = model.settings
         offered = frozenset(agent.tools)
+        skipped = self._skipped_instruction_files()
         current = _Stated(
-            cwd=str(cwd) if agent.environment else None,
+            user=agent.user,
+            cwd=cwd if agent.environment else None,
             environment=environment(
                 cwd,
                 knowledge_cutoff=model.capability.knowledge_cutoff,
@@ -1013,12 +1057,26 @@ class RuntimeSession:
             else None,
             model=ModelTags.from_settings(model.capability, settings).name,
             tools=_gate(agent.runtime.allowed, offered=offered),
+            skipped_instruction_files=skipped,
         )
         now = now_timestamp()
-        delta = current
+        # A window's first context names skipped files only when there are some.
+        delta = replace(
+            current,
+            skipped_instruction_files=current.skipped_instruction_files or None,
+        )
         if stated:
             last = _last_stated(stated, offered=offered)
+            if (
+                self._stated_skipped is not None
+                and self._stated_skipped[0] is stated[-1]
+            ):
+                last = replace(
+                    last,
+                    skipped_instruction_files=self._stated_skipped[1],
+                )
             delta = _Stated(
+                user=current.user if current.user != last.user else None,
                 cwd=current.cwd if current.cwd != last.cwd else None,
                 environment=current.environment
                 if current.environment != last.environment
@@ -1032,16 +1090,23 @@ class RuntimeSession:
                 )
                 if current.tools != last.tools
                 else None,
+                skipped_instruction_files=current.skipped_instruction_files
+                if current.skipped_instruction_files != last.skipped_instruction_files
+                else None,
             )
             if delta == _Stated() and _hour(stated[-1].timestamp) == _hour(now):
                 return None
-        return TurnContext(
+        restated = SessionContext(
             timestamp=now,
+            user=delta.user,
             cwd=delta.cwd,
             environment=delta.environment,
             model=delta.model,
             tools=delta.tools,
+            skipped_instruction_files=delta.skipped_instruction_files or (),
         )
+        self._stated_skipped = (restated, skipped)
+        return restated
 
 
 def default_system_prompt() -> str:
@@ -1070,7 +1135,7 @@ def spent(records: Iterable[SessionRecord]) -> float:
 def spent_by_model(records: Iterable[SessionRecord]) -> dict[str, float]:
     """Return what an agent's journal says it spent on each model, from its start.
 
-    Each ``TokenUsage`` counts toward the model the last ``TurnContext`` stated. A
+    Each ``TokenUsage`` counts toward the model the last ``SessionContext`` stated. A
     ``ContextClear`` states what was spent before it: what it states past the sum so
     far counts toward the model then in force, so read from the start the sums add up
     to :func:`spent`'s total.
@@ -1079,7 +1144,7 @@ def spent_by_model(records: Iterable[SessionRecord]) -> dict[str, float]:
       records: The journal's records, oldest first, from its start.
 
     Returns:
-      usd: Per model, as its ``TurnContext`` names it (``sol-6.1+fullcontext``), what
+      usd: Per model, as its ``SessionContext`` names it (``sol-6.1+fullcontext``), what
         was spent; ``""`` for spend before any model was stated.
 
     """
@@ -1092,7 +1157,7 @@ def _tallied(records: Iterable[SessionRecord]) -> tuple[float, dict[str, float]]
     by_model: dict[str, float] = {}
     model = ""
     for record in records:
-        if isinstance(record, TurnContext) and record.model is not None:
+        if isinstance(record, SessionContext) and record.model is not None:
             model = record.model
         elif isinstance(record, ContextClear):
             usd = from_plain(record.extra.get("spend_usd"), float, default=0.0)
@@ -1114,13 +1179,16 @@ class _Prompt:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Stated:
-    """The settings a ``TurnContext`` states; ``None`` for each it leaves as was."""
+    """The settings a ``SessionContext`` states; ``None`` for each it leaves as was."""
 
-    cwd: str | None = None
+    user: str | None = None
+    cwd: Path | None = None
     environment: str | None = None
     model: str | None = None
     tools: tuple[str, ...] | None = None
     """The tools the model may call; ``None`` for every one offered."""
+
+    skipped_instruction_files: tuple[Path, ...] | None = None
 
 
 def _gate(
@@ -1135,14 +1203,16 @@ def _gate(
 
 
 def _last_stated(
-    stated: Iterable[TurnContext],
+    stated: Iterable[SessionContext],
     *,
     offered: frozenset[str],
 ) -> _Stated:
     """Return the settings in force after ``stated``, each the last any of them said."""
-    last = _Stated()
+    # A journal from before the field said nothing was skipped.
+    last = _Stated(skipped_instruction_files=())
     for turn in stated:
         last = _Stated(
+            user=turn.user if turn.user is not None else last.user,
             cwd=turn.cwd if turn.cwd is not None else last.cwd,
             environment=turn.environment
             if turn.environment is not None
@@ -1151,6 +1221,8 @@ def _last_stated(
             tools=_gate(turn.tools, offered=offered)
             if turn.tools is not None
             else last.tools,
+            skipped_instruction_files=turn.skipped_instruction_files
+            or last.skipped_instruction_files,
         )
     return last
 
@@ -1160,9 +1232,13 @@ def _prompt(prompt: str | None) -> str:
     return prompt if prompt is not None else default_system_prompt()
 
 
-def _hour(timestamp: str | None) -> str | None:
-    """Return an ISO 8601 time to the hour, such as ``2026-10-24T13``."""
-    return timestamp.partition(":")[0] if timestamp is not None else None
+# The offset too: when clocks go back, an hour comes twice.
+def _hour(timestamp: datetime | None) -> tuple[date, int, timedelta | None] | None:
+    """Return the hour a time falls in, here, where the model is told it."""
+    if timestamp is None:
+        return None
+    here = timestamp.astimezone()
+    return here.date(), here.hour, here.utcoffset()
 
 
 def _records(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord]:
@@ -1216,10 +1292,13 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
     priced = False  # pragma: no mutate[truthiness]
     for record in _flatten(records):
         if isinstance(record, AssistantMessage | Thinking | ToolCall):
-            spoke = any(isinstance(e, UserMessage | AgentToAgentMessage) for e in held)
+            spoke = any(isinstance(e, UserMessage | AgentMessage) for e in held)
             answered = not calling and any(
-                isinstance(e, ToolResult)
-                or (isinstance(e, SystemMessage | TurnContext) and parts_model_turns(e))
+                isinstance(e, ToolMessage)
+                or (
+                    isinstance(e, SystemMessage | SessionContext)
+                    and parts_model_turns(e)
+                )
                 for e in held
             )
             if turn and (spoke or answered):
@@ -1240,17 +1319,13 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
             continue
         if not isinstance(
             record,
-            UserMessage
-            | AgentToAgentMessage
-            | SystemMessage
-            | TurnContext
-            | ToolResult,
+            UserMessage | AgentMessage | SystemMessage | SessionContext | ToolMessage,
         ):
             continue
         priced = False  # pragma: no mutate[truthiness]
-        if isinstance(record, ToolResult):
+        if isinstance(record, ToolMessage):
             calling.discard(record.call_id)
-        elif isinstance(record, UserMessage | AgentToAgentMessage) and not calling:
+        elif isinstance(record, UserMessage | AgentMessage) and not calling:
             entries.extend(_reply_entries(turn, held, usage=usage))
             turn.clear()
             held.clear()
@@ -1271,8 +1346,8 @@ def _reply_entries(
 ) -> list[types.ModelContextEvent]:
     """Return the reply as one turn, then what came while it was open, users last."""
     reply = [_response(turn, usage=usage)] if turn else []
-    spoken = [e for e in held if isinstance(e, UserMessage | AgentToAgentMessage)]
-    rest = [e for e in held if not isinstance(e, UserMessage | AgentToAgentMessage)]
+    spoken = [e for e in held if isinstance(e, UserMessage | AgentMessage)]
+    rest = [e for e in held if not isinstance(e, UserMessage | AgentMessage)]
     return [*reply, *rest, *spoken]
 
 
@@ -1332,7 +1407,7 @@ def _counted(records: Iterable[SessionRecord]) -> tuple[int, int]:
     """Return turn and compaction counts from the journal."""
     turns = compactions = 0
     for record in records:
-        if isinstance(record, (UserMessage, AgentToAgentMessage)):
+        if isinstance(record, (UserMessage, AgentMessage)):
             turns += 1
         elif isinstance(record, ContextClear) and record.history:
             compactions += 1
@@ -1362,37 +1437,88 @@ def _apply_standing(
 def _grown(
     lines: Sequence[SessionRecord],
     current: Sequence[SessionRecord],
-) -> tuple[dict[str, str], list[SessionRecord]] | None:
-    """Return the results ``current`` restates in ``lines``, by call, and what it adds."""
+) -> tuple[list[tuple[str, int, str]], list[SessionRecord]] | None:
+    """Return each result ``current`` restates, by call and message, and what it adds."""
     n = len(lines)
     if len(current) < n:
         return None
-    restated: dict[str, str] = {}
+    restated: list[tuple[str, int, str]] = []
+    told = Counter[str]()
     for old, new in zip(lines, current, strict=False):
+        if isinstance(old, ToolMessage):
+            told[old.call_id] += 1
         if old == new:
             continue
         if not (
-            isinstance(old, ToolResult)
-            and isinstance(new, ToolResult)
+            isinstance(old, ToolMessage)
+            and isinstance(new, ToolMessage)
             and new == old.restated(new.text())
         ):
             return None
-        restated[old.call_id] = new.text()
+        restated.append((old.call_id, told[old.call_id] - 1, new.text()))
     return restated, list(current[n:])
 
 
+# A journal from before long calls told their news as results held a wake as a note
+# naming its call, and a call's end under ``<id>:detached``: a ``foreground`` call the
+# runtime made itself, after a note saying the call completed.
+def _as_today(record: SessionRecord) -> SessionRecord | None:
+    """Return ``record`` as today's journal holds it; ``None`` if it holds nothing so."""
+    match record:
+        case SystemMessage(subtype="wake", call_id=str() as call_id):
+            return ToolMessage(
+                timestamp=record.timestamp,
+                call_id=call_id,
+                state="pending",
+                stdout=(record.content or "",),
+                extra=record.extra,
+            )
+        case UserMessage(content=str() as content) if re.fullmatch(
+            r"\[detached tool .+ completed\]",
+            content,
+        ):
+            return None
+        case ToolCall(call_id=call_id) if call_id.endswith(":detached"):
+            return None
+        case ToolMessage(call_id=call_id) if call_id.endswith(":detached"):
+            return replace(record, call_id=call_id.removesuffix(":detached"))
+        case _:
+            return record
+
+
+# A ``restated`` record names each result a prune stubbed: today as which message of
+# its call it is, as a call run apart has several; before, by the id it was written
+# under, when a call had one.
 def _restated(records: Iterable[SessionRecord]) -> list[SessionRecord]:
-    """Return ``records``, flat, each result a later ``restated`` record names restated."""
+    """Return ``records``, flat and as today's, restated as later records say."""
     out: list[SessionRecord] = []
+    # The id each result of ``out`` was written under; ``None`` for any other record.
+    written: list[str | None] = []
     for record in _flatten(records):
         if not (isinstance(record, UncategorizedRecord) and record.kind == "restated"):
-            out.append(record)
+            if (today := _as_today(record)) is not None:
+                out.append(today)
+                written.append(
+                    record.call_id if isinstance(record, ToolMessage) else None,
+                )
+            continue
+        if "messages" in record.payload:
+            for call_id, nth, text in from_plain(
+                record.payload["messages"],
+                list[tuple[str, int, str]],
+            ):
+                i, result = [
+                    (i, r)
+                    for i, r in enumerate(out)
+                    if isinstance(r, ToolMessage) and r.call_id == call_id
+                ][nth]
+                out[i] = result.restated(text)
             continue
         texts = from_plain(record.payload.get("results"), dict[str, str])
         out = [
-            r.restated(texts[r.call_id])
-            if isinstance(r, ToolResult) and r.call_id in texts
+            r.restated(texts[key])
+            if isinstance(r, ToolMessage) and (key := written[i]) in texts
             else r
-            for r in out
+            for i, r in enumerate(out)
         ]
     return out

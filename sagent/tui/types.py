@@ -31,6 +31,9 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 import itertools
 
+from sagent.session.types import (
+    ModelIdle,
+)
 from sagent.tools.display import ToolDisplay
 
 
@@ -43,30 +46,24 @@ if TYPE_CHECKING:
     from rich.text import Text
 
     from sagent.runtime.types import (
-        ChildDoneEvent,
         ChildEvent,
-        CompactComplete,
-        CompactFailed,
-        CompactStarted,
-        DetachedResult,
-        LoginsSpent,
         LoginSwitched,
-        ModelCallSuspended,
-        ModelResponseCancelled,
-        ModelResponseComplete,
-        ModelResponseError,
-        ModelResponsePartial,
-        ModelResponseThinking,
-        Skipped,
-        StatusChanged,
+        ModelResponseCompleted,
+        ModelResponseSuspended,
+        ModelResponseTextStreamed,
+        ModelResponseThinkingStreamed,
+        SessionCompactCompleted,
+        SessionCompactStarted,
+        SessionContextUpdateCompleted,
+        SessionTitleChanged,
     )
     from sagent.session.types import (
-        AgentToAgentMessage,
+        AgentMessage,
         AssistantMessage,
         SystemMessage,
         Thinking,
         ToolCall,
-        ToolResult,
+        ToolMessage,
         UserMessage,
     )
     from sagent.tools.display import Overflow
@@ -99,22 +96,14 @@ __all__ = [
 
 type Record = (
     UserMessage
-    | AgentToAgentMessage
+    | AgentMessage
     | SystemMessage
     | AssistantMessage
     | Thinking
     | ToolCall
-    | ToolResult
+    | ToolMessage
 )
-"""What replay feeds, one journal record at a time.
-
-The runtime tapes three synthetic records per detached delivery: a
-``[detached tool <id> completed]`` UserMessage, a ``BackgroundTask`` foreground
-ToolCall (id ``<id>:detached``; ``DetachedArrived`` in older journals), and the
-result under that id. The first two draw
-nothing; the result draws under the call ``<id>`` (Markers.arrival
-stripped), as live does for a DetachedResult.
-"""
+"""What replay feeds, one journal record at a time."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -129,32 +118,27 @@ class CommandOutput:
 
 
 type Live = (
-    ModelResponsePartial
-    | ModelResponseThinking
-    | ModelResponseComplete
-    | ModelResponseCancelled
-    | ModelResponseError
-    | ModelCallSuspended
+    ModelResponseTextStreamed
+    | ModelResponseThinkingStreamed
+    | ModelResponseCompleted
+    | ModelResponseSuspended
+    | ModelIdle
     | LoginSwitched
-    | LoginsSpent
-    | CompactStarted
-    | CompactComplete
-    | CompactFailed
-    | DetachedResult
+    | SessionCompactStarted
+    | SessionCompactCompleted
+    | SessionContextUpdateCompleted
     | ChildEvent
-    | ChildDoneEvent
     | CommandOutput
-    | Skipped
 )
 """What only a live session feeds.
 
-ModelResponseComplete and DetachedResult unwrap to the Records the journal
-holds for them, and print through the Record path. ChildEvent is live-only:
+A ModelResponseCompleted that succeeded unwraps to the Records the journal holds
+for it, and prints through the Record path. ChildEvent is live-only:
 a child's records live in its own journal, not the parent's.
 """
 
 type Shown = Record | Live
-"""Exactly the events scrollback prints; StatusChanged feeds TitlePane."""
+"""Exactly the events scrollback prints; SessionTitleChanged feeds TitlePane."""
 
 
 type Stream = Literal["reply", "thinking"]
@@ -164,8 +148,7 @@ type Stream = Literal["reply", "thinking"]
 class Printed:
     """How much of the reply now streaming is already in scrollback.
 
-    Reset by ModelResponseComplete, ModelResponseCancelled, ModelResponseError,
-    ModelCallSuspended.
+    Reset by ModelResponseCompleted and ModelResponseSuspended.
 
     Attributes:
       held: Text of each open stream short of a block boundary, not yet
@@ -463,8 +446,8 @@ class ScrollbackPane(Protocol):
     def show(self, given: Shown) -> None:
         """Print what ``given`` adds to scrollback.
 
-        Replay calls it per Record; live per Shown event. ModelResponseComplete
-        and DetachedResult unwrap into their Records and take the same
+        Replay calls it per Record; live per Shown event. A reply that came
+        unwraps into its Records and takes the same
         per-Record path, so live and replay print the same scrollback for
         every Record. A ChildEvent recurses on its inner event, in brief,
         under the child's label.
@@ -509,7 +492,7 @@ class StatusPane(Protocol):
 class TitlePane(Protocol):
     """The terminal's title bar, set by OSC; written iff it changes."""
 
-    def update(self, given: StatusChanged) -> None:
+    def update(self, given: SessionTitleChanged) -> None:
         """Take the runtime's latest status text."""
         ...
 
@@ -537,7 +520,7 @@ class Commands(Protocol):
         self,
         line: str,
         *,
-        say: Callable[[CommandOutput], None],
+        print_output: Callable[[CommandOutput], None],
     ) -> bool:
         """Run ``line``; return True to quit."""
         ...

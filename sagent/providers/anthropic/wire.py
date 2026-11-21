@@ -44,15 +44,16 @@ from sagent.model.exceptions import (
 from sagent.model.types import Response, TextChunk
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
+    labeled_text,
 )
 
 
@@ -516,23 +517,21 @@ def _blocks(
 ) -> list[tuple[str, dict[str, object]]]:
     """Return the role and blocks ``record`` becomes; none for bookkeeping records."""
     match record:
-        case UserMessage(content=text, attachments=attachments):
+        # Whoever is named is named: another agent, or a person not the session's user.
+        case UserMessage() | AgentMessage():
             return [
                 ("user", block)
-                for block in content(text or "", attachments, limits=limits)
-            ]
-        case AgentToAgentMessage(content=text, sender=sender, attachments=attachments):
-            body = text if text is not None else ""
-            labeled = f"[from {sender}]: {body}" if sender is not None else body
-            return [
-                ("user", block)
-                for block in content(labeled, attachments, limits=limits)
+                for block in content(
+                    labeled_text(record),
+                    record.attachments,
+                    limits=limits,
+                )
             ]
         # A harness note is no one's turn; it rides the user side, marked.
         case SystemMessage(content=str() as text) if text:
             note = f"<system-reminder>\n{text}\n</system-reminder>"
             return [("user", {"type": "text", "text": note})]
-        case TurnContext() if record.text():
+        case SessionContext() if record.text():
             note = f"<system-reminder>\n{record.text()}\n</system-reminder>"
             return [("user", {"type": "text", "text": note})]
         case AssistantMessage(content=str() as text) if text:
@@ -559,7 +558,7 @@ def _blocks(
                 "input": mutable(arguments),
             }
             return [("assistant", call)]
-        case ToolResult():
+        case ToolMessage():
             result: dict[str, object] = {
                 "type": "tool_result",
                 "tool_use_id": _wire_id(record.call_id, ids=ids),

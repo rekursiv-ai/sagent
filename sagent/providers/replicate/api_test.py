@@ -25,7 +25,7 @@ from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     SystemMessage,
@@ -219,7 +219,7 @@ def test_caller_must_supply_wrapper_capabilities_and_prices() -> None:
             ),
         ),
         (
-            AgentToAgentMessage(
+            AgentMessage(
                 sender="lead",
                 content="hi",
                 attachments=(Attachment(mime_descriptor="image/png", data=b"png"),),
@@ -246,8 +246,8 @@ def test_text_wrapper_encodes_system_and_history() -> None:
                 Thinking(content="private deliberation"),
                 AssistantMessage(content="hello"),
                 # Another agent's line and a harness note are the user's side too.
-                AgentToAgentMessage(sender="lead", content="status?"),
-                AgentToAgentMessage(content="unsigned"),
+                AgentMessage(sender="lead", content="status?"),
+                AgentMessage(content="unsigned"),
                 SystemMessage(content="Saved."),
             ),
             max_response_tokens=23,

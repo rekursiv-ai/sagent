@@ -16,7 +16,7 @@ import pytest
 from sagent.session.types import (
     EditResult,
     Splice,
-    ToolResult,
+    ToolMessage,
 )
 from sagent.tools import edit
 from sagent.tools.command_analyzer import invocations
@@ -53,7 +53,7 @@ async def test_a_unique_string_is_replaced_and_the_splice_says_where(
     (tmp_path / "a.py").write_text("one\nx = 1\nthree\n")
     context = ToolContext(cwd=tmp_path)
     result = await _edit(context, "a.py", "x = 1", "x = 2")
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=(
@@ -389,7 +389,7 @@ async def _edit(
     new: str,
     *,
     replace_all: bool = False,
-) -> ToolResult:
+) -> ToolMessage:
     """Replace ``old`` with ``new`` in ``file_path``; the runtime names the call."""
     result = await settled(
         Edit().call(
@@ -445,7 +445,7 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
     monkeypatch.setattr(edit, "file_lock", lock)
     monkeypatch.setattr(edit, "write_file", held)
 
-    async def run(context: ToolContext, old: str, new: str) -> ToolResult:
+    async def run(context: ToolContext, old: str, new: str) -> ToolMessage:
         arguments: dict[str, PlainTree] = {
             "file_path": "a.py",
             "old_string": old,

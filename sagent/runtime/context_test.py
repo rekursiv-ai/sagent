@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import itertools
@@ -14,33 +15,39 @@ from sagent.model.types import Response
 from sagent.runtime import context
 from sagent.runtime.context import (
     InvalidContextError,
+    Tape,
     alive_splices,
     masked_refs_by_alive,
     resolve_context,
     validate_context,
+    widen_barrier_mask,
 )
 from sagent.runtime.tape import (
     ContextSplice,
+    InvalidSpliceError,
     MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
 )
 from sagent.runtime.types import (
-    CompactComplete,
-    CompactFailed,
-    CompactStarted,
-    Markers,
     ModelContextEvent,
+    SessionCompactCompleted,
+    SessionCompacted,
+    SessionCompactStarted,
+    Stubs,
 )
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
+    Failed,
+    SessionContext,
+    Succeeded,
     SystemMessage,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
+    as_sent,
 )
 
 
@@ -69,7 +76,7 @@ def _splice(
     *,
     mask: tuple[MaskRange, ...] = (),
     insert_after: TapeRef | None = None,
-    payload: tuple[ModelContextEvent, ...] = (),
+    replacement: tuple[ModelContextEvent, ...] = (),
     paired_externally: frozenset[str] = frozenset(),
     session: str = "s",
 ) -> ContextSplice:
@@ -77,7 +84,7 @@ def _splice(
         ref=_ref(ordinal, session),
         mask=mask,
         insert_after=insert_after,
-        payload=payload,
+        replacement=replacement,
         strategy="test",
         paired_externally=paired_externally,
     )
@@ -102,9 +109,9 @@ def _texts(tape: Sequence[TapeRecord]) -> list[str]:
                     if isinstance(r, AssistantMessage)
                 ),
             )
-        elif isinstance(m, ToolResult):
+        elif isinstance(m, ToolMessage):
             out.append(m.text())
-        elif isinstance(m, (UserMessage, AgentToAgentMessage, SystemMessage)):
+        elif isinstance(m, (UserMessage, AgentMessage, SystemMessage)):
             out.append(m.content or "")
     return out
 
@@ -126,11 +133,17 @@ def test_events_render_in_tape_order_with_their_origins() -> None:
 def test_compaction_markers_render_nothing() -> None:
     tape: list[TapeRecord] = [
         _event(0, _user("a")),
-        ReferrableTapeEvent(ref=_ref(1), event=CompactStarted()),
-        ReferrableTapeEvent(ref=_ref(2), event=CompactComplete()),
+        ReferrableTapeEvent(ref=_ref(1), event=SessionCompactStarted()),
+        ReferrableTapeEvent(
+            ref=_ref(2),
+            event=SessionCompactCompleted(outcome=Succeeded(value=SessionCompacted())),
+        ),
         ReferrableTapeEvent(
             ref=_ref(3),
-            event=CompactFailed(exception=RuntimeError(), tape_len=1),
+            event=SessionCompactCompleted(
+                outcome=Failed(exception=RuntimeError()),
+                tape_len_before=1,
+            ),
         ),
     ]
     assert _texts(tape) == ["a"]
@@ -142,7 +155,7 @@ def test_a_splice_masks_and_inserts_after_its_anchor() -> None:
         _event(0, _user("a")),
         _event(1, _user("b")),
         _event(2, _user("c")),
-        _splice(3, mask=(_one(1),), insert_after=_ref(0), payload=(_user("B"),)),
+        _splice(3, mask=(_one(1),), insert_after=_ref(0), replacement=(_user("B"),)),
     ]
     assert _texts(tape) == ["a", "B", "c"]
     assert resolve_context(tape).origins == [_ref(0), _ref(3), _ref(2)]
@@ -152,13 +165,18 @@ def test_a_mask_names_one_session() -> None:
     tape = [
         _event(0, _user("a0"), "a"),
         _event(0, _user("b0"), "b"),
-        _splice(1, mask=(_one(0, "a"),), payload=(_user("summary a"),), session="a"),
+        _splice(
+            1,
+            mask=(_one(0, "a"),),
+            replacement=(_user("summary a"),),
+            session="a",
+        ),
     ]
     assert _texts(tape) == ["summary a", "b0"]
 
 
 def test_a_splice_without_anchor_inserts_at_the_head() -> None:
-    tape = [_event(0, _user("a")), _splice(1, payload=(_user("HEAD"),))]
+    tape = [_event(0, _user("a")), _splice(1, replacement=(_user("HEAD"),))]
     assert _texts(tape) == ["HEAD", "a"]
 
 
@@ -167,7 +185,7 @@ def test_a_splice_anchored_off_tape_falls_to_the_head(
 ) -> None:
     tape = [
         _event(0, _user("a")),
-        _splice(1, insert_after=_ref(9), payload=(_user("X"),)),
+        _splice(1, insert_after=_ref(9), replacement=(_user("X"),)),
     ]
     with caplog.at_level(logging.WARNING, logger=context.__name__):
         assert _texts(tape) == ["X", "a"]
@@ -181,7 +199,7 @@ def test_a_splice_anchored_off_tape_falls_to_the_head(
 def test_an_anchor_appended_later_is_not_on_tape_yet() -> None:
     tape = [
         _event(0, _user("a")),
-        _splice(1, insert_after=_ref(2), payload=(_user("X"),)),
+        _splice(1, insert_after=_ref(2), replacement=(_user("X"),)),
         _event(2, _user("b")),
     ]
     assert _texts(tape) == ["X", "a", "b"]
@@ -196,7 +214,7 @@ def test_an_empty_payload_deletes_and_an_empty_mask_inserts() -> None:
     assert _texts(deleted) == ["a"]
     inserted = [
         _event(0, _user("a")),
-        _splice(1, insert_after=_ref(0), payload=(_user("X"),)),
+        _splice(1, insert_after=_ref(0), replacement=(_user("X"),)),
     ]
     assert _texts(inserted) == ["a", "X"]
 
@@ -208,7 +226,7 @@ def test_a_sparse_mask_removes_only_its_ranges() -> None:
             5,
             mask=(_one(1), _one(3)),
             insert_after=_ref(0),
-            payload=(_user("S"),),
+            replacement=(_user("S"),),
         ),
     )
     assert _texts(tape) == ["a", "S", "c", "e"]
@@ -221,7 +239,7 @@ def test_records_after_a_barrier_render_after_its_payload() -> None:
         _splice(
             2,
             mask=(MaskRange(session_id="s", lo=0, hi=1),),
-            payload=(_user("S"),),
+            replacement=(_user("S"),),
         ),
         _event(3, _user("c")),
     ]
@@ -234,9 +252,9 @@ def test_masking_a_splice_undoes_its_mask() -> None:
         _event(0, _user("a")),
         _event(1, _user("b")),
         _event(2, _user("c")),
-        _splice(3, mask=(_one(1),), insert_after=_ref(0), payload=(_user("D"),)),
+        _splice(3, mask=(_one(1),), insert_after=_ref(0), replacement=(_user("D"),)),
         _event(4, _user("e")),
-        _splice(5, mask=(_one(3),), insert_after=_ref(0), payload=(_user("F"),)),
+        _splice(5, mask=(_one(3),), insert_after=_ref(0), replacement=(_user("F"),)),
     ]
     assert _texts(tape) == ["a", "F", "b", "c", "e"]
 
@@ -244,8 +262,8 @@ def test_masking_a_splice_undoes_its_mask() -> None:
 def test_a_dead_splice_contributes_no_payload() -> None:
     tape = [
         _event(0, _user("a")),
-        _splice(1, insert_after=_ref(0), payload=(_user("X"),)),
-        _splice(2, mask=(_one(1),), insert_after=_ref(0), payload=(_user("Y"),)),
+        _splice(1, insert_after=_ref(0), replacement=(_user("X"),)),
+        _splice(2, mask=(_one(1),), insert_after=_ref(0), replacement=(_user("Y"),)),
     ]
     assert _texts(tape) == ["a", "Y"]
 
@@ -253,10 +271,10 @@ def test_a_dead_splice_contributes_no_payload() -> None:
 def test_two_independent_splices_both_apply() -> None:
     tape: list[TapeRecord] = [_event(i, _user(t)) for i, t in enumerate("abcde")]
     tape.append(
-        _splice(5, mask=(_one(3),), insert_after=_ref(2), payload=(_user("F"),)),
+        _splice(5, mask=(_one(3),), insert_after=_ref(2), replacement=(_user("F"),)),
     )
     tape.append(
-        _splice(6, mask=(_one(1),), insert_after=_ref(0), payload=(_user("G"),)),
+        _splice(6, mask=(_one(1),), insert_after=_ref(0), replacement=(_user("G"),)),
     )
     assert _texts(tape) == ["a", "G", "c", "F", "e"]
 
@@ -264,7 +282,7 @@ def test_two_independent_splices_both_apply() -> None:
 def test_alive_splices_excludes_a_masked_splice() -> None:
     tape = [
         _event(0, _user("a")),
-        _splice(1, insert_after=_ref(0), payload=(_user("X"),)),
+        _splice(1, insert_after=_ref(0), replacement=(_user("X"),)),
         _splice(2, mask=(_one(1),)),
     ]
     assert alive_splices(tape) == {_ref(2)}
@@ -376,7 +394,7 @@ def test_resolve_probes_each_anchor_once(monkeypatch: pytest.MonkeyPatch) -> Non
                 2 * i + 1,
                 mask=(_one(2 * i),),
                 insert_after=_ref(2 * i - 1) if i else None,
-                payload=(response,),
+                replacement=(response,),
             ),
         )
     resolved = resolve_context(tape)
@@ -402,7 +420,7 @@ def test_a_duplicate_ref_is_refused() -> None:
         [
             _user("go"),
             _calling("t1"),
-            ToolResult(
+            ToolMessage(
                 call_id="t1",
                 state="done",
                 stdout=("ok",),
@@ -413,27 +431,27 @@ def test_a_duplicate_ref_is_refused() -> None:
         [
             _user("go"),
             _calling("t1", "t2"),
-            ToolResult(
+            ToolMessage(
                 call_id="t2",
                 state="done",
                 stdout=("ok",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="t1",
                 state="done",
                 stdout=("ok",),
                 result=UncategorizedToolResult(),
             ),
         ],
-        [_user("a"), AgentToAgentMessage(sender="A", content="b"), _user("c")],
+        [_user("a"), AgentMessage(sender="A", content="b"), _user("c")],
         [_user("a"), SystemMessage(content="n"), _user("b"), reply("both")],
         [
             _user("q"),
             SystemMessage(content="cwd: /x"),
             _calling("c1"),
-            TurnContext(cwd="/x"),
-            ToolResult(
+            SessionContext(cwd=Path("/x")),
+            ToolMessage(
                 call_id="c1",
                 state="done",
                 stdout=("ok",),
@@ -443,8 +461,22 @@ def test_a_duplicate_ref_is_refused() -> None:
             reply("done"),
         ],
         # Every provider sends a note on the user side, so one parts two replies.
-        [reply("a"), SystemMessage(content="n", subtype="wake"), reply("b")],
-        [reply("a"), TurnContext(cwd="/x"), reply("b")],
+        [reply("a"), SystemMessage(content="n", subtype="nudge"), reply("b")],
+        # A call run apart: its stub, its news, then its result, each sent as
+        # the user's side; the news parts two replies.
+        [
+            _user("go"),
+            _calling("t1"),
+            ToolMessage(call_id="t1", state="pending", shown="[detached]"),
+            reply("waiting"),
+            ToolMessage(call_id="t1", state="pending", stdout=("half",)),
+            reply("still waiting"),
+            ToolMessage(call_id="t1", state="done", stdout=("all",)),
+            reply("done"),
+        ],
+        # News of a call whose turn a compaction summarized away.
+        [_user("[summary]"), ToolMessage(call_id="t1", state="done"), reply("ok")],
+        [reply("a"), SessionContext(cwd=Path("/x")), reply("b")],
     ],
 )
 def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
@@ -456,38 +488,32 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
     [
         ([reply("a"), reply("b")], "^provider context violates role alternation$"),
         (
-            [reply("a"), SystemMessage(), TurnContext(), reply("b")],
+            [reply("a"), SystemMessage(), SessionContext(), reply("b")],
             "^provider context violates role alternation$",
         ),
+        # News between a turn's results is a user turn before they are all in.
         (
             [
-                ToolResult(
-                    call_id="t1",
-                    state="done",
-                    stdout=("ok",),
-                    result=UncategorizedToolResult(),
-                ),
+                _user("go"),
+                _calling("t1", "t2"),
+                ToolMessage(call_id="t1", state="pending", shown="[detached]"),
+                ToolMessage(call_id="t1", state="done", stdout=("all",)),
+                ToolMessage(call_id="t2", state="done", stdout=("ok",)),
             ],
-            "orphan ToolResult",
+            r"^user message before tool results: pending \['t2'\]$",
         ),
+        # Once a call's result is in, nothing more of it is news.
         (
             [
                 _user("go"),
                 _calling("t1"),
-                ToolResult(
-                    call_id="t1",
-                    state="done",
-                    stdout=("ok",),
-                    result=UncategorizedToolResult(),
-                ),
-                ToolResult(
-                    call_id="t2",
-                    state="done",
-                    stdout=("ok",),
-                    result=UncategorizedToolResult(),
-                ),
+                ToolMessage(call_id="t1", state="pending", shown="[detached]"),
+                reply("waiting"),
+                ToolMessage(call_id="t1", state="done", stdout=("all",)),
+                reply("ok"),
+                ToolMessage(call_id="t1", state="pending", stdout=("more",)),
             ],
-            "orphan ToolResult",
+            "^duplicate ToolMessage for call_id 't1'$",
         ),
         ([_user("go"), _calling("t1")], "without results at end"),
         ([_user("go"), _calling("t1"), reply("oops")], "pending tool calls"),
@@ -496,7 +522,7 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
                 _user("go"),
                 _calling("t1"),
                 _user("wait"),
-                ToolResult(
+                ToolMessage(
                     call_id="t1",
                     state="done",
                     stdout=("ok",),
@@ -509,20 +535,20 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
             [
                 _user("go"),
                 _calling("t1"),
-                ToolResult(
+                ToolMessage(
                     call_id="t1",
                     state="done",
                     stdout=("a",),
                     result=UncategorizedToolResult(),
                 ),
-                ToolResult(
+                ToolMessage(
                     call_id="t1",
                     state="done",
                     stdout=("b",),
                     result=UncategorizedToolResult(),
                 ),
             ],
-            "duplicate ToolResult",
+            "^duplicate ToolMessage for call_id 't1'$",
         ),
     ],
 )
@@ -559,13 +585,40 @@ def test_masked_ranges_are_kept_as_the_fewest_runs(
     assert index.intervals_by_session == {"s": runs}
 
 
+def test_a_call_s_later_messages_are_sent_as_the_user_s_side() -> None:
+    stub = ToolMessage(call_id="t1", state="pending", shown="[detached]")
+    entries: list[ModelContextEvent] = [
+        _user("go"),
+        _calling("t1"),
+        stub,
+        reply("waiting"),
+        ToolMessage(
+            call_id="t1",
+            state="pending",
+            stdout=("[Bash t1 still running after 9s]\nhalf",),
+        ),
+        reply("still waiting"),
+        ToolMessage(call_id="t1", state="failed", stderr=("boom",)),
+    ]
+
+    sent = as_sent(entries)
+
+    assert sent[:4] == entries[:4]
+    assert sent[4:] == [
+        UserMessage(content="[Bash t1 still running after 9s]\nhalf"),
+        entries[5],
+        UserMessage(content="[call t1 failed]\nboom"),
+    ]
+    validate_context(sent)
+
+
 def test_a_compacted_tool_round_validates() -> None:
     tape = [
         _event(0, _user("go")),
         _event(1, _calling("t1")),
         _event(
             2,
-            ToolResult(
+            ToolMessage(
                 call_id="t1",
                 state="done",
                 stdout=("ok",),
@@ -575,7 +628,7 @@ def test_a_compacted_tool_round_validates() -> None:
         _splice(
             3,
             mask=(MaskRange(session_id="s", lo=0, hi=2),),
-            payload=(_user("[summary]"),),
+            replacement=(_user("[summary]"),),
         ),
     ]
     validate_context(resolve_context(tape).messages)
@@ -588,10 +641,10 @@ def test_a_result_spliced_over_its_stub_validates() -> None:
         _event(1, _calling("t1")),
         _event(
             2,
-            ToolResult(
+            ToolMessage(
                 call_id="t1",
                 state="done",
-                stdout=(Markers().detached,),
+                stdout=(Stubs().detached,),
                 result=UncategorizedToolResult(),
             ),
         ),
@@ -599,8 +652,8 @@ def test_a_result_spliced_over_its_stub_validates() -> None:
             3,
             mask=(_one(2),),
             insert_after=_ref(1),
-            payload=(
-                ToolResult(
+            replacement=(
+                ToolMessage(
                     call_id="t1",
                     state="done",
                     stdout=("real",),
@@ -612,6 +665,598 @@ def test_a_result_spliced_over_its_stub_validates() -> None:
     ]
     validate_context(resolve_context(tape).messages)
     assert _texts(tape) == ["go", "", "real"]
+
+
+def _output_texts(entries: Sequence[ModelContextEvent]) -> list[str]:
+    return [entry.text() for entry in entries if isinstance(entry, ToolMessage)]
+
+
+def test_only_a_tool_s_output_may_be_stubbed() -> None:
+    entries = [
+        UserMessage(content="go"),
+        reply(calls=[call("Read", "c0")]),
+        ToolMessage(call_id="c0", state="done", stdout=("x" * 400,)),
+        reply("done"),
+    ]
+    with pytest.raises(TypeError, match=r"^Entry 0 is no tool output\.$"):
+        _ = context.stubbed(entries, [0], stub="gone")
+
+    assert context.stubbed(entries, [], stub="gone") == entries
+    assert _output_texts(context.stubbed(entries, [2], stub="gone")) == ["gone"]
+    # The entries given are left as they were.
+    assert _output_texts(entries) == ["x" * 400]
+
+
+def test_a_stubbed_output_keeps_the_line_that_says_which_call_and_what_became_of_it() -> (
+    None
+):
+    entries = [
+        reply(calls=[call("Bash", c) for c in ("c0", "c1", "c2")]),
+        ToolMessage(call_id="c0", state="pending", shown=f"[detached]\n{'x' * 400}"),
+        ToolMessage(call_id="c1", state="cancelled", shown=f"[cancelled]\n{'x' * 400}"),
+        ToolMessage(call_id="c2", state="done", stdout=("x" * 400,)),
+        reply("waiting"),
+        ToolMessage(
+            call_id="c0",
+            state="pending",
+            stdout=("[talk c0 still running after 15s]\none\ntwo",),
+        ),
+        ToolMessage(call_id="c0", state="pending"),
+    ]
+
+    after = context.stubbed(entries, [1, 2, 3, 5, 6], stub="[gone]")
+
+    assert _output_texts(after) == [
+        "[detached]\n[gone]",
+        "[cancelled]\n[gone]",
+        "[gone]",
+        "[talk c0 still running after 15s]\n[gone]",
+        "\n[gone]",
+    ]
+    states = [e.state for e in after if isinstance(e, ToolMessage)]
+    assert states == ["pending", "cancelled", "done", "pending", "pending"]
+
+
+def test_a_splice_may_reclaim_what_a_dead_splice_masked() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("u0"))
+    first = tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        strategy="x",
+    )
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=first.ordinal, hi=first.ordinal),),
+        strategy="undo",
+    )
+    assert _texts(tape) == ["u0"]
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        strategy="again",
+    )
+    assert _texts(tape) == []
+
+
+def test_appends_mint_consecutive_refs_in_the_session() -> None:
+    tape = Tape("s")
+    first = tape.append_history(_user("a"))
+    second = tape.append_splice(
+        insert_after=first,
+        replacement=(reply("b"),),
+        strategy="x",
+    )
+    assert (first, second) == (
+        TapeRef(session_id="s", ordinal=0),
+        TapeRef(session_id="s", ordinal=1),
+    )
+    assert tape._by_ref.get(first) == ReferrableTapeEvent(
+        ref=first,
+        event=_user("a"),
+    )
+    assert tape._by_ref.get(TapeRef(session_id="s", ordinal=9)) is None
+
+
+def test_context_is_memoized_until_the_next_append() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("a"))
+    first = tape.context()
+    assert tape.context() is first
+    tape.append_history(reply("b"))
+    second = tape.context()
+    assert second is not first
+    assert second.version == 2
+    tape.append_clear()
+    assert tape.context().messages == []
+
+
+def test_a_splice_may_not_claim_a_position_another_holds() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("a"))
+    tape.append_history(_user("b"))
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=1, hi=1),),
+        strategy="x",
+    )
+    with pytest.raises(InvalidSpliceError, match="overlaps alive splice"):
+        _ = tape.append_splice(
+            mask=(MaskRange(session_id="s", lo=0, hi=1),),
+            strategy="y",
+        )
+
+
+def test_a_splice_may_claim_a_position_after_absorbing_its_holder() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("a"))
+    tape.append_history(_user("b"))
+    holder = tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=1, hi=1),),
+        strategy="x",
+    )
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=1, hi=holder.ordinal),),
+        strategy="y",
+    )
+    assert _texts(tape) == ["a"]
+
+
+def test_a_splice_may_not_anchor_inside_its_own_mask() -> None:
+    tape = Tape("s")
+    tape.append_splice(
+        mask=(MaskRange(session_id="A", lo=0, hi=10),),
+        insert_after=TapeRef(session_id="B", ordinal=5),
+        strategy="other session",
+    )
+    with pytest.raises(InvalidSpliceError, match="inside this splice's own mask"):
+        _ = tape.append_splice(
+            mask=(MaskRange(session_id="A", lo=20, hi=30),),
+            insert_after=TapeRef(session_id="A", ordinal=25),
+            strategy="same session",
+        )
+
+
+def _barrier(tape: Tape, *replacement: ModelContextEvent) -> TapeRef:
+    tape.append_history(_user("u0"))
+    return tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        replacement=replacement,
+        strategy="summary",
+    )
+
+
+def test_absorbing_a_splice_must_carry_its_text() -> None:
+    tape = Tape("s")
+    barrier = _barrier(tape, _user("must survive"), reply("b"))
+    mask = (MaskRange(session_id="s", lo=0, hi=barrier.ordinal),)
+    with pytest.raises(InvalidSpliceError, match="replacement drops 2 entry"):
+        _ = tape.append_splice(
+            mask=mask,
+            replacement=(_user("unrelated"), reply("other")),
+            strategy="careless",
+        )
+    with pytest.raises(InvalidSpliceError, match="replacement drops"):
+        tape.adopt_record(
+            ContextSplice(
+                ref=tape.mint_ref(),
+                mask=mask,
+                insert_after=None,
+                replacement=(_user("x"),),
+                strategy="c",
+            ),
+        )
+    assert _texts(tape) == ["must survive", "b"]
+
+
+def test_absorbing_a_splice_while_carrying_it_is_allowed() -> None:
+    tape = Tape("s")
+    barrier = _barrier(tape, _user("a"), reply("b"))
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=barrier.ordinal),),
+        replacement=(_user("a"), reply("b"), _user("more")),
+        strategy="careful",
+    )
+    assert _texts(tape) == ["a", "b", "more"]
+
+
+def test_a_declared_discard_may_replace_what_it_absorbs() -> None:
+    tape = Tape("s")
+    barrier = _barrier(tape, _user("a"), reply("b"))
+    mask = (MaskRange(session_id="s", lo=0, hi=barrier.ordinal),)
+    tape.append_splice(
+        mask=mask,
+        replacement=(_user("[summary]"),),
+        strategy="summary",
+        discards_content=True,
+    )
+    assert _texts(tape) == ["[summary]"]
+
+
+def test_an_empty_absorber_needs_no_carry() -> None:
+    tape = Tape("s")
+    _barrier(tape, _user("a"), reply("b"))
+    tape.append_clear()
+    assert tape.context().messages == []
+
+
+def test_adopt_record_refuses_an_overlapping_mask() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("a"))
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        strategy="x",
+    )
+    with pytest.raises(InvalidSpliceError, match="overlaps alive splice"):
+        tape.adopt_record(
+            ContextSplice(
+                ref=tape.mint_ref(),
+                mask=(MaskRange(session_id="s", lo=0, hi=0),),
+                insert_after=None,
+                replacement=(),
+                strategy="y",
+            ),
+        )
+
+
+def test_clearing_an_empty_tape_marks_it() -> None:
+    tape = Tape("s")
+    ref = tape.append_clear()
+    record = tape._by_ref.get(ref)
+    assert isinstance(record, ContextSplice)
+    assert (record.mask, record.strategy) == ((), "clear")
+
+
+def test_adopting_a_ref_already_on_the_tape_is_refused() -> None:
+    tape = Tape("s")
+    taken = tape.append_history(_user("a"))
+    with pytest.raises(InvalidContextError, match="duplicate tape ref"):
+        tape.adopt_record(ReferrableTapeEvent(ref=taken, event=_user("b")))
+    assert _texts(tape) == ["a"]
+
+
+def test_append_history_keeps_the_entry_itself() -> None:
+    tape = Tape("s")
+    entry = _user("hi")
+    tape.append_history(entry)
+    (seen,) = tape.context().messages
+    assert seen is entry
+
+
+def test_clearing_a_taped_session_returns_its_barrier() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("a"))
+    tape.append_history(reply("b"))
+    ref = tape.append_clear()
+    assert ref == TapeRef(session_id="s", ordinal=2)
+    record = tape._by_ref.get(ref)
+    assert isinstance(record, ContextSplice)
+    assert (record.strategy, record.mask, record.replacement) == (
+        "clear",
+        (MaskRange(session_id="s", lo=0, hi=1),),
+        (),
+    )
+    assert tape.context().messages == []
+
+
+def _tape(*refs: TapeRef) -> tuple[TapeRecord, ...]:
+    return tuple(ReferrableTapeEvent(ref=r, event=_user(str(r.ordinal))) for r in refs)
+
+
+def _summary_splice(
+    *mask: MaskRange,
+    session: str = "s",
+    ordinal: int = 9,
+) -> ContextSplice:
+    return ContextSplice(
+        ref=TapeRef(session_id=session, ordinal=ordinal),
+        mask=mask,
+        insert_after=None,
+        replacement=(_user("summary"),),
+        strategy="summary",
+    )
+
+
+def test_widening_preserves_gaps_in_the_mask() -> None:
+    tape = _tape(*(TapeRef(session_id="s", ordinal=i) for i in range(4)))
+    override = _summary_splice(
+        MaskRange(session_id="s", lo=0, hi=0),
+        MaskRange(session_id="s", lo=2, hi=2),
+    )
+    widened = widen_barrier_mask(override, tape)
+    assert widened.mask == (
+        MaskRange(session_id="s", lo=0, hi=0),
+        MaskRange(session_id="s", lo=2, hi=3),
+    )
+    assert widened.replacement == override.replacement
+
+
+def test_widening_partitions_by_session() -> None:
+    tape = _tape(
+        TapeRef(session_id="", ordinal=0),
+        TapeRef(session_id="", ordinal=1),
+        TapeRef(session_id="sess-2", ordinal=2),
+    )
+    widened = widen_barrier_mask(
+        _summary_splice(MaskRange(session_id="", lo=0, hi=0)),
+        tape,
+    )
+    assert set(widened.mask) == {
+        MaskRange(session_id="", lo=0, hi=1),
+        MaskRange(session_id="sess-2", lo=2, hi=2),
+    }
+
+
+def test_widening_an_empty_mask_covers_the_tape() -> None:
+    tape = _tape(TapeRef(session_id="s", ordinal=0), TapeRef(session_id="s", ordinal=1))
+    assert widen_barrier_mask(_summary_splice(), tape).mask == (
+        MaskRange(session_id="s", lo=0, hi=1),
+    )
+
+
+def test_widening_a_covering_mask_returns_the_override() -> None:
+    tape = _tape(TapeRef(session_id="s", ordinal=0), TapeRef(session_id="s", ordinal=1))
+    override = _summary_splice(MaskRange(session_id="s", lo=0, hi=1))
+    assert widen_barrier_mask(override, tape) is override
+    empty = _summary_splice()
+    assert widen_barrier_mask(empty, ()) is empty
+
+
+def test_adopting_a_taped_event_appends_it() -> None:
+    tape = Tape("s")
+    ref = tape.mint_ref()
+    tape.adopt_record(ReferrableTapeEvent(ref=ref, event=_user("a")))
+    assert _texts(tape) == ["a"]
+    assert tape._by_ref.get(ref) == ReferrableTapeEvent(
+        ref=ref,
+        event=_user("a"),
+    )
+
+
+def test_absorbing_a_splice_must_carry_its_results_and_settings() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("u0"))
+    barrier = tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        replacement=(
+            _user("a"),
+            reply(calls=[call("echo", "c1")]),
+            ToolMessage(
+                call_id="c1",
+                state="done",
+                stdout=("tool says",),
+                result=UncategorizedToolResult(),
+            ),
+            SessionContext(cwd=Path("/x")),
+        ),
+        strategy="summary",
+    )
+    mask = (MaskRange(session_id="s", lo=0, hi=barrier.ordinal),)
+    with pytest.raises(InvalidSpliceError, match="tool says"):
+        _ = tape.append_splice(
+            mask=mask,
+            replacement=(
+                _user("a"),
+                reply(calls=[call("echo", "c1")]),
+                ToolMessage(
+                    call_id="c1",
+                    state="done",
+                    stdout=("other",),
+                    result=UncategorizedToolResult(),
+                ),
+                SessionContext(cwd=Path("/x")),
+            ),
+            strategy="careless",
+        )
+    with pytest.raises(InvalidSpliceError, match="Working directory: /x"):
+        _ = tape.append_splice(
+            mask=mask,
+            replacement=(
+                _user("a"),
+                reply(calls=[call("echo", "c1")]),
+                ToolMessage(
+                    call_id="c1",
+                    state="done",
+                    stdout=("tool says",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            strategy="careless",
+        )
+
+
+def test_widening_skips_runs_of_gap_positions() -> None:
+    tape = _tape(*(TapeRef(session_id="s", ordinal=i) for i in range(4)))
+    override = _summary_splice(
+        MaskRange(session_id="s", lo=0, hi=0),
+        MaskRange(session_id="s", lo=3, hi=3),
+    )
+    assert widen_barrier_mask(override, tape).mask == override.mask
+    shorter = _tape(*(TapeRef(session_id="s", ordinal=i) for i in range(3)))
+    wide_gap = _summary_splice(
+        MaskRange(session_id="s", lo=0, hi=0),
+        MaskRange(session_id="s", lo=9, hi=9),
+    )
+    assert widen_barrier_mask(wide_gap, shorter).mask == (
+        MaskRange(session_id="s", lo=0, hi=0),
+    )
+
+
+def test_a_splice_keeps_what_its_producer_says_of_it() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("u0"))
+    ref = tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        replacement=(_user("summary"),),
+        strategy="summary",
+        masked_tokens=90,
+        replacement_tokens=9,
+        summary_fallback_reason="model refused",
+        entries_kept_verbatim=2,
+    )
+    record = tape._by_ref.get(ref)
+    assert isinstance(record, ContextSplice)
+    assert (
+        record.strategy,
+        record.masked_tokens,
+        record.replacement_tokens,
+        record.summary_fallback_reason,
+        record.entries_kept_verbatim,
+    ) == ("summary", 90, 9, "model refused", 2)
+    bare = tape._by_ref.get(tape.append_splice(insert_after=ref))
+    assert isinstance(bare, ContextSplice)
+    assert (
+        bare.strategy,
+        bare.masked_tokens,
+        bare.replacement_tokens,
+        bare.entries_kept_verbatim,
+    ) == ("", 0, 0, 0)
+
+
+def test_absorbing_checks_every_absorbed_splice() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("u0"))
+    tape.append_splice(
+        insert_after=TapeRef(session_id="s", ordinal=0),
+        replacement=(reply("kept"),),
+    )
+    barrier = tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=0),),
+        replacement=(_user("must survive"),),
+        strategy="summary",
+    )
+    with pytest.raises(InvalidSpliceError, match="must survive"):
+        _ = tape.append_splice(
+            mask=(MaskRange(session_id="s", lo=barrier.ordinal, hi=barrier.ordinal),),
+            replacement=(_user("other"),),
+        )
+
+
+def test_an_absorbed_splice_does_not_excuse_overlapping_another() -> None:
+    tape = Tape("s")
+    for text in ("a", "b"):
+        tape.append_history(_user(text))
+    first = tape.append_splice(mask=(MaskRange(session_id="s", lo=0, hi=0),))
+    tape.append_splice(mask=(MaskRange(session_id="s", lo=1, hi=1),))
+    with pytest.raises(InvalidSpliceError, match="overlaps alive splice"):
+        _ = tape.append_splice(
+            mask=(
+                MaskRange(session_id="s", lo=1, hi=1),
+                MaskRange(session_id="s", lo=first.ordinal, hi=first.ordinal),
+            ),
+        )
+
+
+def _strategies(tape: Tape) -> list[str]:
+    return [r.strategy for r in tape if isinstance(r, ContextSplice)]
+
+
+def test_a_valid_tape_needs_no_repair() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    tape.append_history(_calling("c1"))
+    tape.append_history(ToolMessage(call_id="c1", state="done", stdout=("ok",)))
+
+    assert tape.repair() is None
+    assert _strategies(tape) == []
+
+
+def test_a_recorded_call_left_open_is_answered_interrupted_beside_its_turn() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    turn = tape.append_history(_calling("c1", "c2"))
+    tape.append_history(ToolMessage(call_id="c1", state="done", stdout=("ok",)))
+    tape.append_history(_user("next"))
+
+    assert tape.repair() is None
+
+    (repair,) = (r for r in tape if isinstance(r, ContextSplice))
+    assert (repair.strategy, repair.insert_after) == ("orphan_tool_use_repair", turn)
+    assert repair.paired_externally == frozenset({"c2"})
+    assert _texts(tape) == ["go", "", "[interrupted]", "ok", "next"]
+    validate_context(tape.context().messages)
+
+
+def test_a_recorded_call_open_at_the_end_is_answered_interrupted() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    tape.append_history(_calling("c1"))
+
+    assert tape.repair() is None
+
+    assert _strategies(tape) == ["orphan_tool_use_repair"]
+    assert _texts(tape) == ["go", "", "[interrupted]"]
+
+
+def test_a_recorded_repeat_of_a_result_is_hidden() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    tape.append_history(_calling("c1"))
+    tape.append_history(ToolMessage(call_id="c1", state="done", stdout=("ok",)))
+    tape.append_history(ToolMessage(call_id="c1", state="done", stdout=("again",)))
+
+    assert tape.repair() is None
+
+    assert _strategies(tape) == ["orphan_tool_result_repair"]
+    assert _texts(tape) == ["go", "", "ok"]
+
+
+def test_splices_that_leave_partners_unpaired_are_rebuilt_whole() -> None:
+    """Each splice is valid; together they leave a call and a result unpaired."""
+    tape = Tape("s")
+    tape.append_history(_user("dropped"))
+    tape.append_splice(
+        replacement=(_user("[summary]"), _calling("toolu_X")),
+        strategy="summary",
+        paired_externally=frozenset({"toolu_X"}),
+    )
+    tape.append_splice(
+        replacement=(ToolMessage(call_id="ghost", state="done", stdout=("dangling",)),),
+        strategy="lazy_pairing",
+        paired_externally=frozenset({"ghost"}),
+    )
+
+    assert tape.repair() is None
+
+    # No repair anchors at a splice: what a splice shows is the rebuild's.
+    assert _strategies(tape) == ["summary", "lazy_pairing", "context_rescue"]
+    validate_context(tape.context().messages)
+    assert "[interrupted]" in _texts(tape)
+
+
+def test_a_tape_where_two_records_claim_one_ref_is_left_unrepaired() -> None:
+    """A ref adopted ahead of the count is minted again by the next append."""
+    tape = Tape("s")
+    tape.adopt_record(_event(0, _user("adopted")))
+    tape.append_history(_user("minted"))
+
+    error = tape.repair()
+
+    assert isinstance(error, InvalidContextError)
+    assert "duplicate tape ref" in str(error)
+
+
+def test_a_declared_discard_may_be_adopted_over_what_it_absorbs() -> None:
+    tape = Tape("s")
+    barrier = _barrier(tape, _user("a"), reply("b"))
+    tape.adopt_record(
+        ContextSplice(
+            ref=tape.mint_ref(),
+            mask=(MaskRange(session_id="s", lo=0, hi=barrier.ordinal),),
+            insert_after=None,
+            replacement=(_user("[summary]"),),
+            strategy="summary",
+        ),
+        discards_content=True,
+    )
+    assert _texts(tape) == ["[summary]"]
+
+
+def test_a_tape_reads_as_the_sequence_of_its_records() -> None:
+    tape = Tape("s")
+    first = tape.append_history(_user("a"))
+    tape.append_history(_user("b"))
+
+    assert len(tape) == 2
+    assert tape[0] == ReferrableTapeEvent(ref=first, event=_user("a"))
+    assert list(tape[1:]) == [tape[1]]
+    assert list(tape) == [tape[0], tape[1]]
 
 
 if __name__ == "__main__":

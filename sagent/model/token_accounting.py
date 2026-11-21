@@ -12,15 +12,15 @@ from treekle import mutable, to_plain
 
 from sagent.model.types import Response
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     RequestMeasurement,
+    SessionContext,
     SessionRecord,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
     stored_plain,
 )
@@ -282,9 +282,9 @@ def _tools(request: Request) -> tuple[tuple[object, ...], ...]:
 
 def _estimated(record: SessionRecord, *, model: Model) -> int:
     attachments = ()
-    if isinstance(record, ToolResult):
+    if isinstance(record, ToolMessage):
         text, attachments = record.text(), record.attachments
-    elif isinstance(record, TurnContext):
+    elif isinstance(record, SessionContext):
         text = record.text()
     elif isinstance(record, ToolCall):
         text = record.name + _encoded(mutable(record.arguments))
@@ -292,7 +292,7 @@ def _estimated(record: SessionRecord, *, model: Model) -> int:
         text = record.content or record.summary or record.encrypted or ""
     elif isinstance(
         record,
-        (UserMessage, AssistantMessage, SystemMessage, AgentToAgentMessage),
+        (UserMessage, AssistantMessage, SystemMessage, AgentMessage),
     ):
         text, attachments = record.content or "", record.attachments
     else:

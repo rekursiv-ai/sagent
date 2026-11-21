@@ -15,7 +15,7 @@ import pytest
 from sagent.session.types import (
     Attachment,
     ReadResult,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools import types
@@ -85,7 +85,7 @@ async def test_a_call_passes_the_arguments_and_returns_the_text() -> None:
 
     result = await settled(made.call(_context(), {"name": "ann", "times": 2}))
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("hello ann hello ann",),
@@ -108,7 +108,7 @@ async def test_an_async_function_is_awaited() -> None:
 
     result = await settled(tool(shout).call(_context(), {"word": "yo"}))
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("YO",),
@@ -135,7 +135,7 @@ async def test_a_function_taking_the_context_gets_the_callers() -> None:
     context = _context()
 
     assert "context" not in from_plain(made.schema["properties"], dict[str, object])
-    assert await settled(made.call(context, {"path": "a"})) == ToolResult(
+    assert await settled(made.call(context, {"path": "a"})) == ToolMessage(
         call_id="",
         state="done",
         stdout=("/a",),
@@ -165,7 +165,7 @@ async def test_a_returned_output_is_the_tools_output_unchanged() -> None:
             result=UncategorizedToolResult(exit_code=1),
         )
 
-    assert await settled(tool(fail).call(_context(), {})) == ToolResult(
+    assert await settled(tool(fail).call(_context(), {})) == ToolMessage(
         call_id="",
         state="done",
         stdout=("done",),
@@ -246,7 +246,7 @@ async def test_a_given_schema_spares_a_type_with_no_json_schema() -> None:
 
     made = tool(odd, schema={"type": "object", "properties": {}})
 
-    assert await settled(made.call(_context(), {})) == ToolResult(
+    assert await settled(made.call(_context(), {})) == ToolMessage(
         call_id="",
         state="done",
         stdout=("/",),
@@ -267,7 +267,7 @@ def test_tool_as_a_decorator_takes_the_same_settings() -> None:
 async def test_an_omitted_argument_takes_its_default() -> None:
     result = await settled(tool(greet).call(_context(), {"name": "ann"}))
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("hello ann",),
@@ -354,7 +354,7 @@ async def test_a_partial_keeps_the_types_and_defaults_of_what_it_wraps() -> None
         == "integer"
     )
     result = await settled(made.call(_context(), {"name": "ann"}))
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("hello ann hello ann",),
@@ -402,13 +402,13 @@ async def test_tools_over_one_method_share_a_schema_but_call_their_own_object() 
     )
     # Each tool has a schema of its own, so changing one changes no other.
     assert hello.schema is not bye.schema
-    assert await settled(hello.call(_context(), {"name": "ann"})) == ToolResult(
+    assert await settled(hello.call(_context(), {"name": "ann"})) == ToolMessage(
         call_id="",
         state="done",
         stdout=("hello ann",),
         result=UncategorizedToolResult(),
     )
-    assert await settled(bye.call(_context(), {"name": "ann"})) == ToolResult(
+    assert await settled(bye.call(_context(), {"name": "ann"})) == ToolMessage(
         call_id="",
         state="done",
         stdout=("bye ann",),

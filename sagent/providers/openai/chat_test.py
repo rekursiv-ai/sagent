@@ -27,7 +27,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -135,7 +135,7 @@ def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
         ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
         TokenUsage(),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_a",
             state="done",
             stdout=(
@@ -144,7 +144,7 @@ def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
             ),
             result=UncategorizedToolResult(),
         ),
-        ToolResult(
+        ToolMessage(
             call_id="toolu_b",
             state="done",
             stdout=(
@@ -545,7 +545,7 @@ def test_a_results_images_follow_its_run_of_results() -> None:
     }
     records = (
         ToolCall(call_id="a", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="a",
             state="done",
             stdout=(
@@ -556,7 +556,7 @@ def test_a_results_images_follow_its_run_of_results() -> None:
         ),
         AssistantMessage(content="next"),
         ToolCall(call_id="b", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="b",
             state="done",
             stdout=(
@@ -567,7 +567,7 @@ def test_a_results_images_follow_its_run_of_results() -> None:
         ),
         UserMessage(content="and"),
         # A result whose call this request never made.
-        ToolResult(
+        ToolMessage(
             call_id="z",
             state="done",
             stdout=(
@@ -862,7 +862,7 @@ def test_native_thinking_is_not_overwritten_by_a_tool_only_turn() -> None:
         Request(
             records=(
                 *response.records,
-                ToolResult(
+                ToolMessage(
                     call_id="original",
                     state="done",
                     stdout=("ok",),

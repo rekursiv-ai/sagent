@@ -1,62 +1,63 @@
 """The agent's event loop: one inbox, one ``match``, one model-call gate.
 
-``Runtime.run_forever`` drains its inbox, dispatches each event, then calls the
-model when the context ends in something to answer and nothing is in flight: no
-open cohort, no model call, no compaction, and no wait for the user.
+Laws:
 
-Tool calls run in one of two registries:
+1. Every request ends once, told as its ``...Completed``; ``Runtime.ask`` hands
+   whoever asked it how.
+2. What waits before it is acted on waits in one list, each item with the
+   published state it waits for.
+3. Whether the model and the agent are idle is worked out from state
+   (``model_idle``, ``agent_idle``), never kept.
+4. The inbox gate is the only wait for the user.
+5. The tape only grows (``tape.py``); ``context.py`` resolves what the model sees.
 
-- ``cohort``: the calls the next model call waits on.
-- ``detached``: calls already answered by a stub; each one's real result is
-  delivered later as a new ``BackgroundTask`` foreground turn, so nothing the model has
-  read is rewritten.
-
-A call goes to ``detached`` when the model asks for ``background`` or
-``delay``, when the first wake finds it running, or when the user interrupts
-its cohort: a message, ``Halt``, ``Compact``, or ``Clear``. ``Kill`` cancels
-calls in either.
-
-A call the model waits on wakes it on the schedule ``detach_schedule`` gives its
-tool: the first wake detaches each call of the cohort that wakes the model,
-each stub showing what its call wrote so far; each later one tells an idle model
-what the call wrote since it last looked; the call's result, when it comes,
-shows only what the model has not read. A call whose tool wakes no one, or that
-cannot run apart, is waited for. The record keeps everything the call wrote.
+``Runtime.run_forever`` drains the inbox, dispatches each event, then calls the
+model when the context ends in something to answer and nothing is at work: no
+reply streaming, no compaction, no call the model waits on, no wait for the user.
 
 A reply's calls run as a shell line. Calls sharing a ``serialize_key`` run as
 ``a ; b``, a group; other calls run beside them, as ``&``. A ``"*"`` call, whose
 resources are unknown, runs after every keyed call before it, and every call
-after it waits for it. Each call waits for those before it to stop, detached or
-not; ``Kill`` stops one call, ``Detach`` the whole group. A call run in the
-background is a trailing ``&``: it waits for what is before it, and nothing
-waits for it. A later reply is a new line: it waits only for a killed call still
-stopping.
+after it waits for it. A call run in the background is a trailing ``&``. A later
+reply waits only for a killed call still stopping.
+
+The model waits on a reply's calls unless one asks to run apart (``background``,
+``delay``). A waited call is detached, answered with a stub and left running, at
+its tool's first wake, at ``ToolDetach`` (its whole group), or when the user
+interrupts: a message, ``ModelHalt``, ``SessionCompact``, ``SessionClear``. A
+call's stub is its first ``ToolMessage``; what it writes later, at each wake,
+and its result are more ``ToolMessage``s of its id, which the request sends as
+the user's side (``session.types.as_sent``), so nothing the model has read is
+rewritten. Later wakes tell an idle model what a call wrote since it last looked;
+a call's ``wake_every`` wakes it on that period whatever it wrote. ``ToolHalt``
+cancels calls.
 
 What the user sends while the model streams is answered next: the reply's calls
-start, detached, and their results arrive later.
+start detached. ``ModelHalt`` stops the reply, detaches the waited calls, and
+waits for the user. A failed model call goes on by itself where it can: on a
+model switched to meanwhile, after compacting a request too long, or after a
+``ModelResponseSuspended`` wait under ``persistent_retry``. Any other failure
+stops the turn (``ModelIdle`` says how), which waits for the user or a
+``ModelRetry``.
 
-``Halt`` stops the model, detaches the cohort, and waits for the user's next
-message. Meanwhile the inbox holds every event back except the verbs, ``Halt``,
-``Kill``, ``Clear``, and ``Compact``, and the compaction they start.
-
-A failed model call stops the turn one of two ways. A failure that may pass
-(``RetryableError``, under ``persistent_retry``) suspends it: ``ModelCallSuspended``,
-then the call again at the advised time. Any other ends it: ``ModelResponseError``,
-then a wait for the user. Either way, the user's message, a new model, or a
-``Retry`` (as after a sign-in) calls again at once.
-
-The history is a tape that only grows (``tape.py``); ``context.py`` resolves
-what the model sees of it. Providers need user and model turns to alternate,
-and each call answered before the next turn: the runtime merges adjacent
-user-side turns, and repairs at the model-call gate what it cannot keep.
+Providers need user and model turns to alternate, and each call answered before
+the next turn: the request merges adjacent user-side turns, and the model-call
+gate repairs what it cannot keep.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import pairwise
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    Protocol,
+    overload,
+    runtime_checkable,
+)
 
 import asyncio
 import dataclasses
@@ -65,19 +66,16 @@ import logging
 import math
 import time
 
-from sagent.model.cost import TokenCost, TokenCount
-from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.model.exceptions import (
+    ContextOverflowError,
+    DisconnectedError,
+    RetryableError,
+)
 from sagent.model.token_accounting import TokenAccounting
 from sagent.model.types import Request, Response, TextChunk
 
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
-from sagent.runtime.context import (
-    InvalidContextError,
-    ResolvedContext,
-    alive_splices,
-    resolve_context,
-    validate_context,
-)
+from sagent.runtime.context import Tape, stubbed, widen_barrier_mask
 from sagent.runtime.exceptions import (
     describe,
     log_exception_or_warning,
@@ -85,76 +83,83 @@ from sagent.runtime.exceptions import (
 )
 from sagent.runtime.tape import (
     ContextSplice,
-    InvalidPayloadError,
-    InvalidSpliceError,
-    MaskRange,
     ReferrableTapeEvent,
-    TapeEvent,
     TapeRecord,
     TapeRef,
     calls,
     coalesce_roles,
     full_tape_mask,
-    mask_contains_ref,
-    mask_ranges_overlap,
-    splice_safe_repair,
     unpaired_call_ids,
 )
 from sagent.runtime.types import (
-    AgentIdle,
-    AgentSendDeferredMessage,
-    AgentSendQueuedMessage,
-    Clear,
-    ClearComplete,
-    CohortComplete,
-    CohortStarted,
-    Compact,
-    CompactComplete,
-    CompactFailed,
-    CompactStarted,
-    Detach,
-    DetachedResult,
-    DetachSchedule,
-    Halt,
+    AgentMessageCompleted,
     Job,
-    Kill,
-    LazyEvent,
-    Markers,
-    ModelCallStarted,
-    ModelCallSuspended,
     ModelContextEvent,
-    ModelIdle,
-    ModelResponseCancelled,
-    ModelResponseComplete,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    Quit,
-    Retry,
+    ModelHalt,
+    ModelHaltCompleted,
+    ModelMessage,
+    ModelMessageCompleted,
+    ModelResponseCompleted,
+    ModelResponseStarted,
+    ModelResponseSuspended,
+    ModelResponseTextStreamed,
+    ModelResponseThinkingStreamed,
+    ModelRetry,
+    ModelRetryCompleted,
     RuntimeEvent,
-    SaveSession,
-    Scheduled,
-    UserDeferredMessage,
-    UserQueuedMessage,
-    Wake,
+    SessionClear,
+    SessionClearCompleted,
+    SessionCompact,
+    SessionCompactCompleted,
+    SessionCompacted,
+    SessionCompactStarted,
+    SessionContextUpdate,
+    SessionContextUpdateCompleted,
+    SessionPrune,
+    SessionPruneCompleted,
+    SessionQuit,
+    SessionQuitCompleted,
+    SessionSaveDue,
+    Stubs,
+    SystemMessageCompleted,
+    ToolCallCompleted,
+    ToolCohortCompleted,
+    ToolCohortStarted,
+    ToolDetach,
+    ToolDetachCompleted,
+    ToolHalt,
+    ToolHaltCompleted,
+    ToolMessageCompleted,
+    ToolWakeSchedules,
+    UserMessageCompleted,
+    WakeSchedule,
 )
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     AssistantMessage,
     BackgroundTaskResult,
+    Cancelled,
+    Failed,
+    ModelIdle,
+    Outcome,
+    SessionContext,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
+    as_sent,
     now_timestamp,
 )
 from sagent.tools.background_task import (
     BackgroundTask,
     background_delay,
     backgroundable,
+    controls,
     offered,
+    wake_period,
     without_controls,
 )
 from sagent.tools.bash import Bash
@@ -179,47 +184,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long ``Quit`` waits for the tools it cancelled to stop.
+# How long ``SessionQuit`` waits for the tools it cancelled to stop.
 _QUIT_WAIT_SEC: Final = 10.0
 
 # How long before the prompt cache lapses a wake comes, to reach the model in time.
 _CACHE_MARGIN_SEC: Final = 30.0
 
-# The notes that wake an idle model: a reply owed, and a long call's news.
-_WAKING: Final = frozenset({"nudge", "wake"})
-
-
-def widen_barrier_mask(
-    override: ContextSplice,
-    tape: Sequence[TapeRecord],
-) -> ContextSplice:
-    """Return ``override`` with its mask widened over ``tape``, keeping its gaps.
-
-    A sparse mask such as ``((r5, r5), (r10, r10))`` stays sparse over ``r6..r9``.
-
-    Args:
-      override: A compactor's barrier splice.
-      tape: The tape it is adopted onto.
-
-    Returns:
-      widened: ``override``, masking every record of ``tape`` outside its gaps.
-
-    """
-    mask = _widen_mask_ranges(override.mask, tape)
-    if mask == override.mask:
-        return override
-    return dataclasses.replace(override, mask=mask)
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Await:
-    """Drain gate: block until an item matching ``types`` arrives."""
+    """Drain gate: hold the inbox until an item of ``types`` arrives.
+
+    ``SessionQuit`` always releases it; items of ``passes`` are handed over at
+    once, the gate still set.
+    """
 
     types: tuple[type, ...]
-    """Event classes that satisfy the gate (``Quit`` always does)."""
-
     passes: tuple[type, ...] = ()
-    """Event classes handed over at once, the gate still set."""
 
     @classmethod
     def user(cls) -> Await:
@@ -229,21 +210,18 @@ class Await:
         user's message lets the model answer again.
 
         Returns:
-          gate: Released by a user-side message or ``Quit``.
+          gate: Released by a user-side message or ``SessionQuit``.
 
         """
         return cls(
-            types=(
-                UserMessage,
-                UserQueuedMessage,
-                UserDeferredMessage,
-                AgentToAgentMessage,
-                AgentSendQueuedMessage,
-                AgentSendDeferredMessage,
-                SystemMessage,
-                Quit,
+            types=(UserMessage, AgentMessage, SystemMessage, SessionQuit),
+            passes=(
+                ModelHalt,
+                ToolHalt,
+                SessionClear,
+                SessionCompact,
+                SessionCompactCompleted,
             ),
-            passes=(Halt, Kill, Clear, Compact, CompactComplete, CompactFailed),
         )
 
     @classmethod
@@ -251,12 +229,12 @@ class Await:
         """Return the wait after a failed model call ended the turn.
 
         Returns:
-          gate: Released as ``user`` is, and by a ``Retry``: a new model or a
+          gate: Released as ``user`` is, and by a ``ModelRetry``: a new model or a
             sign-in may get past the failure.
 
         """
         user = cls.user()
-        return cls(types=(*user.types, Retry), passes=user.passes)
+        return cls(types=(*user.types, ModelRetry), passes=user.passes)
 
     @classmethod
     def recovery(cls) -> Await:
@@ -266,28 +244,35 @@ class Await:
           gate: Released also by a verb that can repair the context.
 
         """
-        return cls(types=(*cls.user().types, Clear, Compact, Halt, Kill))
+        return cls(
+            types=(
+                *cls.user().types,
+                SessionClear,
+                SessionCompact,
+                ModelHalt,
+                ToolHalt,
+            ),
+        )
 
 
 class GatedDeque[T]:
     """An async queue whose drain can wait for a kind of item.
 
     A gate holds the queue until an item of its ``types`` arrives that was not
-    queued when the gate was set, or a ``Quit``. Counting only new ones keeps a
-    ``Halt`` waiting for a fresh message when the user typed several while the
+    queued when the gate was set, or a ``SessionQuit``. Counting only new ones keeps a
+    ``ModelHalt`` waiting for a fresh message when the user typed several while the
     agent was busy.
     """
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[T] = asyncio.Queue()
-        self._gate: tuple[type, ...] | None = None
+        self.awaiting: Await | None = None
         self._gate_baseline: int = 0
-        self._passes: tuple[type, ...] = ()
 
     @property
     def gate_armed(self) -> bool:
         """True while a gate holds the queue."""
-        return self._gate is not None
+        return self.awaiting is not None
 
     def empty(self) -> bool:
         """Return whether nothing is queued.
@@ -320,46 +305,30 @@ class GatedDeque[T]:
             items.append(self._queue.get_nowait())
         return items
 
-    def push_front(self, *items: T | Await) -> None:
-        """Queue ``items`` at the front, in order; an ``Await`` among them sets the gate.
+    def push_front(self, *items: T, gate: Await | None = None) -> None:
+        """Queue ``items`` at the front, in order; ``gate``, if given, holds the drain.
 
         Args:
-          items: What to queue. An ``Await`` must come first: the gate counts
-            only the items queued before the call.
-
-        Raises:
-          ValueError: An ``Await`` is not first.
+          items: What to queue; they count as new to ``gate``.
+          gate: What the drain waits for; only items queued before the call
+            count against it.
 
         """
-        await_idx = next(
-            (i for i, item in enumerate(items) if isinstance(item, Await)),
-            -1,
-        )
-        if await_idx > 0:
-            raise ValueError(
-                f"GatedDeque.push_front precondition violated: Await must be the "
-                f"first argument when present; got Await at index {await_idx} with "
-                f"{await_idx} non-Await item(s) ahead of it",
-            )
         old = self.drain_nowait()
-        for item in items:
-            if isinstance(item, Await):
-                self._gate = item.types
-                self._passes = item.passes
-                self._gate_baseline = sum(
-                    1
-                    for i in old
-                    if isinstance(i, item.types) and not isinstance(i, Quit)
-                )
-                logger.debug(
-                    "runtime inbox gate armed: gate=%s baseline=%d queued=%s",
-                    _type_names(item.types),
-                    self._gate_baseline,
-                    _item_names(old),
-                )
-            else:
-                self._queue.put_nowait(item)
-        for item in old:
+        if gate is not None:
+            self.awaiting = gate
+            self._gate_baseline = sum(
+                1
+                for i in old
+                if isinstance(i, gate.types) and not isinstance(i, SessionQuit)
+            )
+            logger.debug(
+                "runtime inbox gate armed: gate=%s baseline=%d queued=%s",
+                _type_names(gate.types),
+                self._gate_baseline,
+                _type_names([type(i) for i in old]),
+            )
+        for item in (*items, *old):
             self._queue.put_nowait(item)
 
     async def drain(self) -> list[T]:
@@ -367,7 +336,7 @@ class GatedDeque[T]:
 
         When a gate is set, keeps draining until a NEW item matching
         the gate types arrives (count exceeds the baseline captured at
-        arm time) or until any ``Quit`` is observed. Items the gate
+        arm time) or until any ``SessionQuit`` is observed. Items the gate
         passes are returned as they arrive, the gate still set, and the
         rest keep their order behind it.
 
@@ -377,15 +346,16 @@ class GatedDeque[T]:
         """
         first = await self._queue.get()
         items = [first, *self.drain_nowait()]
-        if self._gate is None:
+        if self.awaiting is None:
             return items
-        gate = self._gate
+        gate = self.awaiting.types
+        passes = self.awaiting.passes
         baseline = self._gate_baseline
         while not self._gate_satisfied(items, gate, baseline):
-            passing = [i for i in items if isinstance(i, self._passes)]
+            passing = [i for i in items if isinstance(i, passes)]
             if passing:
                 for item in items:
-                    if not isinstance(item, self._passes):
+                    if not isinstance(item, passes):
                         self._queue.put_nowait(item)
                 return passing
             items.append(await self._queue.get())
@@ -394,10 +364,10 @@ class GatedDeque[T]:
             "runtime inbox gate released: gate=%s baseline=%d buffered=%s",
             _type_names(gate),
             baseline,
-            _item_names(items),
+            _type_names([type(i) for i in items]),
         )
-        # Arming sets the baseline and the passes afresh; unarmed, neither is read.
-        self._gate = None
+        # Arming sets the baseline afresh; unarmed, it is not read.
+        self.awaiting = None
         return items
 
     @classmethod
@@ -408,9 +378,11 @@ class GatedDeque[T]:
         baseline: int,
     ) -> bool:
         """Return True when ``items`` satisfies the gate beyond ``baseline``."""
-        if any(isinstance(i, Quit) for i in items):
+        if any(isinstance(i, SessionQuit) for i in items):
             return True
-        count = sum(1 for i in items if isinstance(i, gate) and not isinstance(i, Quit))
+        count = sum(
+            1 for i in items if isinstance(i, gate) and not isinstance(i, SessionQuit)
+        )
         return count > baseline
 
 
@@ -428,7 +400,7 @@ class Compactor(Protocol):
     ) -> ContextSplice:
         """Return a barrier splice for the current context.
 
-        A payload keeping a call whose result lies outside it, or a result
+        A replacement keeping a call whose result lies outside it, or a result
         whose call does, names that id in ``paired_externally``;
         :func:`~sagent.runtime.tape.unpaired_call_ids` computes it.
 
@@ -475,10 +447,10 @@ class Runtime:
     Args:
       model: What answers; assign ``runtime.model`` to switch.
       tools: What the model may call; names must differ.
-      compactor: What ``Compact`` runs; ``None`` compacts nothing.
+      compactor: What ``SessionCompact`` runs; ``None`` compacts nothing.
       session_id: Namespace of this runtime's tape refs.
       tool_context: Where tools run, and what the model has read.
-      markers: What the runtime writes for the calls it answers itself.
+      stubs: What the runtime writes for the calls it answers itself.
 
     """
 
@@ -490,164 +462,104 @@ class Runtime:
         compactor: Compactor | None = None,
         session_id: str = "",
         tool_context: ToolContext | None = None,
-        markers: Markers | None = None,
+        stubs: Stubs | None = None,
     ) -> None:
         self._model: Model = model
         self.token_accounting = TokenAccounting()
-        self.markers: Markers = markers if markers is not None else Markers()
+        self.stubs: Stubs = stubs if stubs is not None else Stubs()
         self.tools: dict[str, Tool] = {}
         for t in tools or []:
             if t.name in self.tools:
                 raise ValueError(f"Duplicate tool name: {t.name!r}")
             self.tools[t.name] = t
-        # The system prompt's blocks, sent with every model call.
-        self.system: tuple[str, ...] = ()
-        # The tools the model may call; ``None`` for all. Every tool is still
-        # offered, so agents with different gates send the same cached prefix.
-        self.allowed: frozenset[str] | None = None
         self.compactor = compactor
-        # Whether the compactor wants to run before the next model call.
+        # Where tools run, and what the model has read; one per agent.
+        self.tool_context = tool_context or ToolContext(cwd=Path.cwd())
+
+        # Settings. ``allowed`` gates calls, not the offer: every tool is still
+        # offered, so agents with different gates send the same cached prefix.
+        self.system: tuple[str, ...] = ()
+        self.allowed: frozenset[str] | None = None
+        self.allow_background = True
+        self.persistent_retry = False
+        self.recheck_quota = False
+        self.wake_schedules = ToolWakeSchedules()
+
+        # Hooks the Agent layer sets; see where each is asked.
+        self.observers: list[Callable[[RuntimeEvent], None]] = []
         self.compact_due: Callable[[], bool] | None = None
-        # The most the next reply may hold, as the window leaves room; ``0`` or
-        # ``None`` asks the model's own limit.
         self.reply_room: Callable[[], int] | None = None
-        # Automatic compactions since the last model reply; the circuit breaker.
-        self._auto_compactions = 0
-        # The conversation vendors are told of, and this agent's place in it, as
-        # ``Request`` names them; ``session_id`` namespaces tape refs and is empty
-        # for a live agent.
+        self.prune: Callable[[], bool] | None = None
+        self.before_tool_spawn: Callable[[Response], UserMessage | None] | None = None
+        self.context_updates: (
+            Callable[[], Sequence[SystemMessage | AgentMessage | SessionContextUpdate]]
+            | None
+        ) = None
+        self.before_call: Callable[[bool], Awaitable[None]] | None = None
+        self.after_failure: (
+            Callable[[BaseException], Awaitable[Mapping[str, datetime]]] | None
+        ) = None
+
+        # What each request names its conversation and this agent's place in it.
+        self.session_id = session_id
         self.conversation = ""
         self.agent = ""
         self.parent = ""
         self.parent_turn = 0
         self.root_prompt = ""
         self.name = "/root"
-        self.turn_started_ms = 0
-        # Calls made this turn.
-        self._steps = 0
-        self.compactions = 0
         self.turns = 0
-        # What started the running compaction, or the last one until the next
-        # main call reads it.
-        self._compaction: Literal["", "auto", "manual"] = ""
-        self.session_id = session_id
-        self.tape: list[TapeRecord] = []
-        self._next_ordinal: int = 0
-        self._cached_resolved: ResolvedContext | None = None
-        self._tape_by_ref: dict[TapeRef, TapeRecord] = {}
-        # By call id: the record holding its latest result, and the model turn
-        # that made it, which a deferred pairing is inserted after.
-        self._placeholder_refs: dict[str, TapeRef] = {}
-        self._parent_assistant_refs: dict[str, TapeRef] = {}
+        self.turn_started_ms = 0
+        self.compactions = 0
+        self._steps = 0
+        self._compaction_trigger: Literal["", "auto", "manual"] = ""
+
+        # What the runtime recorded, and what the model sees of it.
+        self.tape = Tape(session_id)
+
+        # The inbox; its gate is the only wait for the user. ``_awaited`` is what
+        # it waited for before this drain, until a message or retry takes it.
         self.inbox: GatedDeque[RuntimeEvent] = GatedDeque()
-        self.detached: dict[str, asyncio.Task[None]] = {}
-        self.observers: list[Callable[[RuntimeEvent], None]] = []
-        # Asked with each reply before its calls run: a message in answer is
-        # answered next, as one typed mid-stream is.
-        self.before_tool_spawn: Callable[[Response], UserMessage | None] | None = None
-        # Asked once per model round, as it is confirmed to fire, for the notes
-        # the Agent layer has to add first. Each is its own entry, no one's turn,
-        # so it can never fire a round of its own.
-        self.context_updates: (
-            Callable[[], Sequence[SystemMessage | TurnContext]] | None
+        self._awaited: Await | None = None
+        # Each request taken in and not yet ended, and where it stands: held for a
+        # state, taken into the turn, or neither yet. Kept in the order each came to
+        # where it stands.
+        self._requests: list[_Taken] = []
+        # Whether a model call was told to start and neither ``AgentIdle`` nor a
+        # stop was told since: the turn a halt or a clear stops. ``AgentIdle`` is
+        # told only with the inbox empty, so state alone cannot say it.
+        self.turn_under_way = False  # pragma: no mutate[truthiness]
+        self.has_quit = False  # pragma: no mutate[truthiness]
+
+        self.model_call: (
+            asyncio.Task[ModelMessage | ModelResponseCompleted | None] | None
         ) = None
-        # Asked before each model round, ahead of compaction: drops what the
-        # context no longer needs when that pays.
-        self.prune: Callable[[], bool] | None = None
-        # Asked just before each model call, ``True`` for a turn's first: it may
-        # assign another model, as a login whose quota reset.
-        self.before_call: Callable[[bool], Awaitable[None]] | None = None
-        # Asked when the model in use fails a call: it may assign another that can
-        # get past the failure, which is then called at once; or say when, in
-        # seconds since the epoch, a wait for it should end instead.
-        self.after_failure: (
-            Callable[[BaseException], Awaitable[float | None]] | None
-        ) = None
-        self.running_tools: dict[str, asyncio.Task[None]] = {}
-        self.cohort: set[str] = set()
-        # A cohort started and not preempted, so its draining is published.
-        self._cohort_seen: bool = False
-        self.model_call: asyncio.Task[None] | None = None
-        # Bumped as a model call starts or is cancelled, and as a compaction is
-        # cancelled: the late reply or completion of an older one is dropped.
-        self._model_call_generation: int = 0
-        self.compact_task: asyncio.Task[None] | None = None
-        self._compact_generation: int = 0
-        # What the user sent while the model streamed; it joins the context once
-        # the reply ends, and the reply's calls run on detached.
-        self._mid_stream_queue: list[UserMessage | AgentToAgentMessage] = []
-        # Input sent to wait until the model is done: the queued is committed then,
-        # the deferred at the idle after that.
-        self._queued: list[UserQueuedMessage | AgentSendQueuedMessage] = []
-        self._deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
-        # Whether the runtime waits for the user; input sent to wait is then
-        # committed at once.
-        self._awaiting_user = False  # pragma: no mutate[truthiness]
-        # What waits for the next model round to be committed (``_flush_pending``).
-        self._pending_commits: list[_PendingCommit] = []
-        # Calls whose result was delivered forward, or is queued to be: a second
-        # delivery would give two arrival turns one call id.
-        self._forwarded_call_ids: set[str] = set()
-        # The next ``<markers.mimic>N`` for a ``DetachedArrived`` call the model
-        # makes itself; past every one the tape holds.
-        self._mimic_counter: int = 0
-        # Wall-clock seconds before which a rate-limited model call waits.
-        self.service_suspended_until: float | None = None
-        # The wake-up armed for the end of that suspension.
-        self._retry_timer: asyncio.TimerHandle | None = None
-        # Retryable failures in a row; what the next wait backs off from.
-        self._retries = 0
-        # Whether a failed call ended the turn, so it waits; a new model, or a
-        # ``Retry``, may get past the failure, and so calls again.
-        self._failed = False  # pragma: no mutate[truthiness]
-        self.recheck_quota = False
-        # The model the call in flight asked; a failure of one switched away from
+        # The model the call in flight asked: a failure of one switched away from
         # says nothing of the model now in use.
         self._called_model: Model = model
-        # Whether a long rate limit is waited out rather than handed to the user.
-        self.persistent_retry = False
-        # Where tools run, and what the model has read; one per agent.
-        self.tool_context = tool_context or ToolContext(cwd=Path.cwd())
-        # Each call the runtime runs, until its task ends.
-        self._calls: dict[str, _Call] = {}
-        # Bash calls that are other tools' work but no one call: the refusal.
-        self._refusals: dict[str, str] = {}
-        # Characters the model call in flight has streamed so far.
         self._streamed_chars = 0
-        # ``Scheduled`` work waiting for a safe point.
-        self._scheduled: list[Scheduled] = []
-        # Whether a call may ask to run in the background, or after a delay.
-        self.allow_background = True
-        # Callers waiting on a background call's result instead of its delivery.
-        self._foreground_waiters: dict[str, list[asyncio.Future[ToolResult]]] = {}
-        # When each tool's long calls wake the model; the first wake answers each
-        # waking call with a stub, and it runs on, its result delivered later.
-        self.detach_schedule = DetachSchedule()
-        # What each running call wrote, and what of it the model has read; kept until
-        # its result is taken in.
-        self._watches: dict[str, _Watch] = {}
+        # What a model call or a compaction had queued when the runtime stopped it:
+        # its ending was told as it was stopped, so each is dropped when its turn comes.
+        self._abandoned: list[
+            ModelMessage | ModelResponseCompleted | SessionCompactCompleted
+        ] = []
         # When the last model call was sent, by ``time.monotonic``: the prompt cache
         # stays warm from then.
         self._last_request: float | None = None
-        # Each killed call still stopping, and its key: its process may still be
-        # writing, so a later reply's call contending with it waits.
-        self._stopping: dict[asyncio.Task[None], str | None] = {}
-        # Each waited-on call's group, by call id: a detach of one detaches the
-        # group.
-        self._groups: dict[str, tuple[ToolCall, ...]] = {}
+        # Automatic compactions since the last reply; two in a row stop trying.
+        self._auto_compactions = 0
 
-    # Background work does not hold the model back: the gate waits on the cohort only.
-    @property
-    def at_work(self) -> bool:
-        """True while a model call streams, a compaction runs, or a waited-on call runs."""
-        return bool(
-            self.cohort or self.model_call is not None or self.compact_task is not None,
-        )
+        self.compact_task: asyncio.Task[SessionCompactCompleted | None] | None = None
+        self._compacting: SessionCompact | None = None
 
-    @property
-    def _ready_to_advance(self) -> bool:
-        """True when nothing is at work and the inbox waits for nothing."""
-        return not self.at_work and not self.inbox.gate_armed
+        # Wall-clock seconds before which a rate-limited model call waits.
+        self.service_suspended_until: float | None = None
+        self._retry_timer: asyncio.TimerHandle | None = None
+        self._retries = 0
+
+        # Each call the runtime runs, until its task has ended and its result,
+        # or what stands for it, is taken in.
+        self._calls: dict[str, _Call] = {}
 
     @property
     def model(self) -> Model:
@@ -665,58 +577,65 @@ class Runtime:
             self.retry()
 
     @property
+    def running_tools(self) -> Mapping[str, asyncio.Task[None]]:
+        """The calls the model waits on, by id."""
+        return {cid: c.task for cid, c in self._calls.items() if c.status == "waited"}
+
+    # A finished task's result is in the inbox, or was never posted: a call
+    # killed before it ran was answered by whatever killed it. A killed call
+    # still stopping runs on.
+    @property
+    def detached(self) -> Mapping[str, asyncio.Task[None]]:
+        """The calls answered by a stub that run on, by id."""
+        return {
+            cid: c.task
+            for cid, c in self._calls.items()
+            if c.status != "waited" and not c.task.done()
+        }
+
+    # A compaction is no turn: one asked for at rest stops none.
+    @property
+    def model_idle(self) -> bool:
+        """True when the model has no turn to work on, or the user holds it."""
+        return (
+            self.model_call is None
+            and not self.running_tools
+            and (self.inbox.gate_armed or not self._should_call_model())
+        )
+
+    # A detached call still owing its result counts: its call is already taped,
+    # so idling first would persist an unanswered call.
+    @property
+    def agent_idle(self) -> bool:
+        """True when the model is idle, and no call owes it a result unless the user holds the turn."""
+        return self.model_idle and (
+            self.inbox.gate_armed
+            or not (self._owes_a_result() or self._holding(ModelResponseStarted))
+        )
+
+    @property
     def stopped(self) -> bool:
         """True while a failed model call holds the turn: suspended, or failed."""
-        return self._failed or self.service_suspended_until is not None
-
-    @property
-    def is_idle(self) -> bool:
-        """True iff a user-side message pushed now would be answered now.
-
-        Background work does not count: it never holds the model back.
-        """
         return (
-            self._ready_to_advance
-            and not self.running_tools
-            and not self._mid_stream_queue
+            self.inbox.awaiting == Await.failure()
+            or self.service_suspended_until is not None
         )
 
+    # Background work does not hold the model back: only the calls it waits on.
     @property
-    def accepts_user_dispatch(self) -> bool:
-        """True iff a user message pushed now makes progress, rather than being staged.
-
-        It does unless a model call streams or a compaction runs. While tools
-        run, the message interrupts them. While the runtime waits for the user,
-        it is what the runtime waits for. And while a ``Halt`` is queued but
-        not yet taken, the stream about to stop must not strand it.
-        """
-        if self.inbox.gate_armed:
-            return True
-        if self.model_call is None and self.compact_task is None:
-            return True
-        return self.model_call is not None and not self.inbox.empty()
-
-    @property
-    def accepts_deferred_dispatch(self) -> bool:
-        """True iff a deferred message pushed now makes progress.
-
-        As :attr:`accepts_user_dispatch`, but never while tools run: a
-        deferred message waits for them rather than interrupting them.
-        """
-        return self.accepts_user_dispatch and not self.cohort and not self.running_tools
-
-    # A queued pairing or ride-along does not count: it waits for a round that real
-    # content drives, so waiting on it would wedge the loop. A forward delivery does:
-    # its call is already taped, so idling first would persist an unanswered call.
-    def _fully_drained(self) -> bool:
-        """Return True iff the agent has no work to do and no gate is armed."""
-        return (
-            self.is_idle
-            and self.inbox.empty()
-            and not self.detached
-            and not self._has_waking_commit()
-            and not self._should_call_model()
+    def at_work(self) -> bool:
+        """True while a reply streams, a compaction runs, or a waited-on call runs."""
+        return bool(
+            self.model_call is not None
+            or self.compact_task is not None
+            or self.running_tools,
         )
+
+    # A call that runs until it is stopped has no result to wait for: waiting on it
+    # would leave the agent never idle. It wakes the model when it has news.
+    def _owes_a_result(self) -> bool:
+        """Return whether a call run apart is still to deliver its result."""
+        return any(not _runs_until_stopped(self._calls[cid]) for cid in self.detached)
 
     def publish(self, event: RuntimeEvent) -> None:
         """Fan out an event to all observers.
@@ -735,47 +654,145 @@ class Runtime:
         """Queue ``event``; the loop takes it at its next drain.
 
         Args:
-          event: An input, such as a ``UserMessage``, ``Halt``, or ``Compact``.
+          event: An input, such as a ``UserMessage``, ``ModelHalt``, or ``SessionCompact``.
 
         """
         self.inbox.push_back(event)
 
-    def halt(self) -> None:
-        """Stop the model call; the calls it waited on are detached and keep running."""
-        self.push(Halt())
+    def halt(self, *, sender: str | None = None) -> None:
+        """Stop the model call; the calls it waited on are detached and keep running.
 
-    # Only while stopped: a ``Retry`` queued otherwise reads as input waiting
-    # behind the stream (``accepts_user_dispatch``) and as a wake to a watcher.
+        Args:
+          sender: Who asks; ``None`` for the session's user.
+
+        """
+        self.push(ModelHalt(sender=sender))
+
+    # Only while stopped: a ``ModelRetry`` queued otherwise wakes a watcher for
+    # nothing.
     def retry(self) -> None:
         """Call the model now for the turn a failure stopped, as after a sign-in."""
         if self.stopped:
-            self.push(Retry())
+            self.push(ModelRetry())
 
-    def _end_suspension(self) -> None:
-        """Let the next model call go now, its backoff started afresh."""
-        self._retries = 0
-        self.service_suspended_until = None
-        if self._retry_timer is not None:
-            self._retry_timer.cancel()
-            self._retry_timer = None
+    @overload
+    async def ask(self, request: SessionCompact) -> Outcome[SessionCompacted]: ...
 
-    async def schedule(self, work: Callable[[], Awaitable[None]]) -> None:
-        """Run ``work`` at the next safe point, between turns, and wait for it.
+    @overload
+    async def ask(
+        self,
+        request: SessionPrune | SessionClear | UserMessage,
+    ) -> Outcome[None]: ...
 
-        While a ``Halt``, ``Clear``, or model error has the runtime waiting for
-        the user, the work waits too.
+    async def ask(
+        self,
+        request: SessionCompact | SessionPrune | SessionClear | UserMessage,
+    ) -> Outcome[SessionCompacted] | Outcome[None]:
+        """Push ``request`` and wait for it to end.
 
         Args:
-          work: What to run once nothing is streaming, compacting, or gating.
+          request: What to ask of the runtime.
+
+        Returns:
+          outcome: How it ended; ``Cancelled``, at once, from a runtime that quit.
 
         """
-        done = asyncio.Future[None]()
-        self.push(Scheduled(work=work, done=done))
-        await done
+        return await self.submit(request)
+
+    # The request itself pairs it with its ending: another's of the same kind, equal
+    # to it field for field, may end first.
+    def submit(
+        self,
+        request: SessionCompact | SessionPrune | SessionClear | UserMessage,
+    ) -> asyncio.Future[Outcome[SessionCompacted] | Outcome[None]]:
+        """Push ``request`` now; return what resolves to how it ends.
+
+        Args:
+          request: What to ask of the runtime.
+
+        Returns:
+          ended: Resolved as the request ends, just before its ending is told to
+            observers; already ``Cancelled`` from a runtime that quit.
+
+        """
+        ended = asyncio.Future[Outcome[SessionCompacted] | Outcome[None]]()
+        if self.has_quit:
+            ended.set_result(Cancelled())
+            return ended
+        self._requests.append(_Taken(request=request, ended=ended))
+        self.push(request)
+        return ended
+
+    # What is asked of the runtime ends once, told as its ``...Completed``.
+    def _open_if_asked(self, event: RuntimeEvent) -> None:
+        """Note ``event`` as owed one ending if it is something asked of the runtime."""
+        if isinstance(
+            event,
+            SessionCompact
+            | SessionClear
+            | SessionPrune
+            | UserMessage
+            | AgentMessage
+            | SystemMessage,
+        ):
+            _ = self._opened(event)
+
+    # Requests equal field for field are still two: each is found as itself.
+    def _taken(self, request: _Request) -> _Taken | None:
+        """Return where ``request`` stands, if it is taken in and not ended."""
+        return next((e for e in self._requests if e.request is request), None)
+
+    def _opened(self, request: _Request) -> _Taken:
+        """Note ``request`` as taken in and owed one ending, unless it already is."""
+        entry = self._taken(request)
+        if entry is None:
+            entry = _Taken(request=request)
+            self._requests.append(entry)
+        return entry
+
+    def _stand(
+        self,
+        request: _Held,
+        stage: Literal["held", "in_turn"],
+        until: _Until | None = None,
+    ) -> None:
+        """Put ``request`` where ``stage`` says, after the others standing there."""
+        entry = self._taken(request)
+        if entry is None:
+            entry = _Taken(request=request)
+        # One pushed twice is one request held twice: acted on twice, ended once,
+        # where the first push ends.
+        elif entry.stage != "open":
+            entry = _Taken(request=request, owed=False)  # pragma: no mutate[truthiness]
+        else:
+            self._requests.remove(entry)
+        entry.stage, entry.until = stage, until
+        self._requests.append(entry)
+
+    # Every caller ends a request it took from ``_requests``, so one is always found.
+    def _end(self, request: _Request, ending: _Ending) -> None:
+        """End ``request`` as ``ending`` says: to whoever asked it, then to every observer."""
+        entry = next(e for e in self._requests if e.request is request)
+        self._requests.remove(entry)
+        if not entry.owed:
+            return
+        if entry.ended is not None and not entry.ended.done():
+            entry.ended.set_result(ending.outcome)
+        self.publish(ending)
 
     def __aiter__(self) -> AsyncIterator[RuntimeEvent]:
         """Return every event published from the first ``__anext__`` on."""
         return self._events()
+
+    async def _events(self) -> AsyncIterator[RuntimeEvent]:
+        queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
+        observer = queue.put_nowait
+        self.observers.append(observer)
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            self.observers.remove(observer)
 
     @property
     def jobs(self) -> Mapping[str, Job]:
@@ -783,18 +800,19 @@ class Runtime:
         return {
             cid: _RunningJob(
                 call=c.call,
-                started=c.started,
-                state="running"
-                if cid in self.cohort
+                status="running"
+                if c.status == "waited"
                 else "sleeping"
-                if c.waiting
+                if c.sleeping
                 else "detached",
+                runs_until_stopped=_runs_until_stopped(c),
                 runtime=self,
             )
             for cid, c in self._calls.items()
+            if not c.task.done()
         }
 
-    async def foreground(self, call_id: str) -> ToolResult | None:
+    async def foreground(self, call_id: str) -> ToolMessage | None:
         """Wait for a detached call's result, or its next wake, whichever comes first.
 
         Waiting no longer than a wake keeps the cache warm, and shows the model a
@@ -809,52 +827,60 @@ class Runtime:
             such call.
 
         """
-        for commit in self._pending_commits:
-            entry = commit.entry
-            if commit.kind == "forward" and entry.call_id == call_id:
-                self._pending_commits.remove(commit)
+        for held in self._requests:
+            if (
+                held.stage == "held"
+                and isinstance(entry := held.request, ToolMessage)
+                and entry.call_id == call_id
+            ):
+                # Taken here, it is answered here: no round will end it.
+                self._end(entry, _message_ending(entry, Succeeded(value=None)))
                 return entry
-        delivered = f"{call_id}{self.markers.arrival}"
-        for entry in self.context().messages:
-            if isinstance(entry, ToolResult) and entry.call_id == delivered:
-                return dataclasses.replace(entry, call_id=call_id)
-        if call_id not in self.detached:
+        for entry in self.tape.context().messages:
+            if (
+                isinstance(entry, ToolMessage)
+                and entry.call_id == call_id
+                and entry.state != "pending"
+            ):
+                return entry
+        call = self._calls.get(call_id)
+        if call is None or call_id not in self.detached or call.status == "answered":
             return None
-        waiter = asyncio.Future[ToolResult]()
-        waiters = self._foreground_waiters.setdefault(call_id, [])
-        waiters.append(waiter)
+        waiter = asyncio.Future[ToolMessage]()
+        call.foreground_waiters.append(waiter)
         try:
-            return await self._result_or_wake(call_id, waiter)
+            return await self._result_or_wake(call, waiter)
         finally:
-            waiters.remove(waiter)
-            if not waiters and self._foreground_waiters.get(call_id) is waiters:
-                del self._foreground_waiters[call_id]
+            call.foreground_waiters.remove(waiter)
 
     async def _result_or_wake(
         self,
-        call_id: str,
-        waiter: asyncio.Future[ToolResult],
-    ) -> ToolResult:
+        call: _Call,
+        waiter: asyncio.Future[ToolMessage],
+    ) -> ToolMessage:
         """Return ``waiter``'s result, or at a wake what the call wrote since last looked."""
-        watch = self._watches.get(call_id)
-        schedule = None if watch is None else self.detach_schedule.of(watch.name)
+        watch = call.watch
+        schedule = None if watch is None else self._schedule(watch)
         if watch is None or schedule is None:
             return await waiter
         while True:
             now = time.monotonic()
-            gap, forced = schedule.gap(
+            next_wake = schedule.delay_sec_until_next_wake(
                 now - watch.started,
-                cache_left_sec=self._cache_left(now),
+                cache_left_sec=self._cache_bound(watch, now),
             )
-            done, _ = await asyncio.wait((waiter,), timeout=gap)
+            done, _ = await asyncio.wait((waiter,), timeout=next_wake.delay_sec)
             if done:
                 return waiter.result()
-            if forced or watch.fresh:
-                return ToolResult(
-                    call_id=call_id,
+            if next_wake.fires_even_without_new_output or watch.fresh:
+                return ToolMessage(
+                    call_id=call.call.call_id,
                     state="done",
-                    stdout=(self._progress(call_id, watch),),
-                    result=BackgroundTaskResult(operation="foreground", job_id=call_id),
+                    stdout=(self._progress(call.call.call_id, watch),),
+                    result=BackgroundTaskResult(
+                        operation="foreground",
+                        job_id=call.call.call_id,
+                    ),
                 )
 
     def detach[T](self, task: asyncio.Future[T] | None) -> None:
@@ -868,12 +894,30 @@ class Runtime:
             in it; ``None``, outside any task, runs none.
 
         """
-        if not self.allow_background:
+        cid = self._call_run_by(task)
+        if cid is not None and cid in self.running_tools and self.allow_background:
+            self.push(ToolDetach(call_id=cid))
+
+    def wake[T](self, task: asyncio.Future[T] | None) -> None:
+        """Tell the model what the call ``task`` runs wrote since it last looked.
+
+        A call the model waits on is detached, as :meth:`detach` does: its stub
+        shows what it wrote. Of a call run apart the model is told once it is
+        free: after its reply, or, while the runtime waits for the user, with
+        their next message. Nothing happens when ``task`` runs no call here.
+
+        Args:
+          task: The task running the call's tool, as ``asyncio.current_task()``
+            in it; ``None``, outside any task, runs none.
+
+        """
+        cid = self._call_run_by(task)
+        if cid is None:
             return
-        for cid in self.running_tools:
-            if self._calls[cid].result_future is task and cid in self.cohort:
-                self.push(Detach(call_id=cid))
-                return
+        if cid in self.running_tools:
+            self.detach(task)
+        elif (watch := self._calls[cid].watch) is not None:
+            self._owe(watch)
 
     # Counting turns of the loop instead would not do: how many pass between a tool's
     # end and its result reaching the inbox is the runtime's own business.
@@ -894,11 +938,21 @@ class Runtime:
             runtime, as a call made by another agent.
 
         """
-        for call in self._calls.values():
-            if task is not None and call.result_future is task:
-                call.events_after_result.append(event)
-                return
-        self.push(event)
+        cid = self._call_run_by(task)
+        if cid is None:
+            self.push(event)
+        else:
+            self._calls[cid].events_after_result.append(event)
+
+    # A call still waiting its turn has no task yet, so ``None`` names none.
+    def _call_run_by[T](self, task: asyncio.Future[T] | None) -> str | None:
+        """Return the id of the call whose tool ``task`` runs, if it runs one here."""
+        if task is None:
+            return None
+        return next(
+            (cid for cid, call in self._calls.items() if call.result_future is task),
+            None,
+        )
 
     # A resumed context's detached calls ran in a process that has ended, so no
     # result will follow; and a clean quit's cancellations are never committed.
@@ -906,22 +960,22 @@ class Runtime:
         """Deliver a cancellation for each call answered only by a stub, running nowhere."""
         pending: list[str] = []
         answered: set[str] = set()
-        for entry in self.context().messages:
-            if not isinstance(entry, ToolResult):
+        for entry in self.tape.context().messages:
+            if not isinstance(entry, ToolMessage):
                 continue
             if entry.state == "pending":
                 pending.append(entry.call_id)
             else:
-                answered.add(entry.call_id.removesuffix(self.markers.arrival))
-        for cid in pending:
+                answered.add(entry.call_id)
+        for cid in dict.fromkeys(pending):
             if cid in answered or cid in self.detached or cid in self.running_tools:
                 continue
-            self._append_detached_arrival(
-                ToolResult(
+            self._append_late(
+                ToolMessage(
                     call_id=cid,
                     timestamp=now_timestamp(),
                     state="cancelled",
-                    shown=self.markers.cancelled,
+                    shown=self.stubs.cancelled,
                 ),
             )
 
@@ -932,596 +986,118 @@ class Runtime:
     def hold_for_user(self) -> None:
         """Wait for the user's next message if the history ends with one to answer."""
         if self._should_call_model():
-            self.inbox.push_front(Await.user())
+            self.inbox.push_front(gate=Await.user())
 
-    async def _events(self) -> AsyncIterator[RuntimeEvent]:
-        queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
-        observer = queue.put_nowait
-        self.observers.append(observer)
-        try:
-            while True:
-                yield await queue.get()
-        finally:
-            self.observers.remove(observer)
-
-    async def _run_scheduled(self, scheduled: Scheduled) -> None:
-        """Run one ``Scheduled`` work, resolving its future either way."""
-        # A caller that stopped waiting no longer wants the work done.
-        if scheduled.done.cancelled():
+    # Calls are named by id, which no compaction or repair since moves. An output the
+    # tape holds but the context no longer shows was taken by a compaction or a
+    # clear since the prune was asked: it is gone already, as the prune wanted.
+    def _on_prune(self, item: SessionPrune) -> None:
+        """Replace the outputs of the calls ``item`` names with a stub, and tell how it went."""
+        chosen: list[int] = []
+        found: set[str | None] = set()
+        for i, entry in enumerate(self.tape.context().messages):
+            if isinstance(entry, ToolMessage) and entry.call_id in item.call_ids:
+                chosen.append(i)
+                found.add(entry.call_id)
+        taped = {
+            record.event.call_id
+            for record in self.tape
+            if isinstance(record, ReferrableTapeEvent)
+            and isinstance(record.event, ToolMessage)
+        }
+        missing = [cid for cid in item.call_ids if cid not in found | taped]
+        if missing:
+            exc = ValueError(f"No output of call {missing[0]} is in the context.")
+            self._end(item, SessionPruneCompleted(outcome=Failed(exception=exc)))
             return
-        try:
-            await scheduled.work()
-        except asyncio.CancelledError:
-            # Only the loop's own cancellation goes on up. The work's own -- it
-            # awaited something that was cancelled -- ended the loop with it,
-            # and the caller waited forever on a future nothing would resolve.
-            loop_task = asyncio.current_task()
-            assert isinstance(loop_task, asyncio.Task)
-            if loop_task.cancelling():
-                raise
-            _ = scheduled.done.cancel()
-        except Exception as exc:  # noqa: BLE001 -- The caller awaiting ``done`` is told; the loop keeps dispatching.
-            if not scheduled.done.done():
-                scheduled.done.set_exception(exc)
-        else:
-            if not scheduled.done.done():
-                scheduled.done.set_result(None)
+        self.drop(chosen)
+        self._end(item, SessionPruneCompleted(outcome=Succeeded(value=None)))
 
-    def context(self) -> ResolvedContext:
-        """Return what the model sees of the tape, resolved once per tape length.
-
-        Returns:
-          resolved: The messages, the ref each came from, and the tape's length.
-
-        """
-        if self._cached_resolved is None or self._cached_resolved.version != len(
-            self.tape,
-        ):
-            self._cached_resolved = resolve_context(self.tape)
-        return self._cached_resolved
-
-    def append_history(self, entry: TapeEvent) -> TapeRef:
-        """Append a ``ReferrableTapeEvent`` for ``entry`` to the tape.
+    def drop(self, indices: Sequence[int]) -> None:
+        """Replace the context's tool outputs at ``indices`` with ``stubs.pruned``, in one splice.
 
         Args:
-          entry: Provider-facing message to record.
-
-        Returns:
-          ref: ``TapeRef`` minted for the new record.
-
-        """
-        ref = self.mint_ref()
-        record = ReferrableTapeEvent(ref=ref, event=entry)
-        self.tape.append(record)
-        self._cached_resolved = None
-        self._index_record(record)
-        return ref
-
-    def append_splice(
-        self,
-        *,
-        mask: tuple[MaskRange, ...] = (),
-        insert_after: TapeRef | None = None,
-        payload: tuple[ModelContextEvent, ...] = (),
-        strategy: str = "",
-        token_before: int = 0,
-        token_after: int = 0,
-        fallback_reason: str = "",
-        preserved_tail_count: int = 0,
-        paired_externally: frozenset[str] = frozenset(),
-        discards_content: bool = False,
-    ) -> TapeRef:
-        """Append a ``ContextSplice`` to the tape.
-
-        A ref has one alive editor at a time: to edit what a splice masks,
-        mask the splice's own ref, which absorbs it.
-
-        Args:
-          mask: The ranges of tape refs to hide.
-          insert_after: Where ``payload`` renders; ``None`` for the head.
-          payload: What the splice shows.
-          strategy: What produced it.
-          token_before: Tokens of what it hides.
-          token_after: Tokens of ``payload``.
-          fallback_reason: Why a summary fell back to keeping history, if it did.
-          preserved_tail_count: How many recent entries that fallback kept.
-          paired_externally: Call ids whose partner lies outside ``payload``.
-          discards_content: Whether it replaces what it absorbs, as compaction
-            does, rather than carrying it forward.
-
-        Returns:
-          ref: ``TapeRef`` minted for the new splice.
+          indices: Positions in ``context().messages``, each a tool's result or a
+            wake's news.
 
         Raises:
-          InvalidSpliceError: When ``mask`` overlaps any existing alive
-              splice's mask, or ``insert_after`` falls inside ``mask``.
+          TypeError: An index is no tool output.
 
         """
-        self._validate_no_alive_mask_overlap(mask)
-        if not discards_content:
-            self._validate_absorbed_payloads_carried(mask, payload)
-        if insert_after is not None and mask_contains_ref(mask, insert_after):
-            raise InvalidSpliceError(
-                f"insert_after {insert_after} falls inside this splice's own mask",
-            )
-        ref = self.mint_ref()
-        record = ContextSplice(
-            ref=ref,
-            mask=mask,
-            insert_after=insert_after,
-            payload=payload,
-            strategy=strategy,
-            token_before=token_before,
-            token_after=token_after,
-            fallback_reason=fallback_reason,
-            preserved_tail_count=preserved_tail_count,
-            paired_externally=paired_externally,
-        )
-        self.tape.append(record)
-        self._cached_resolved = None
-        self._index_record(record)
-        self._invalidate_masked_anchors(record)
-        return ref
-
-    def _alive_splices(self) -> list[ContextSplice]:
-        """Return the splices on the tape that no alive splice masks."""
-        alive = alive_splices(self.tape)
-        return [r for r in self.tape if isinstance(r, ContextSplice) and r.ref in alive]
-
-    # A new splice may absorb an alive one, masking its ref, but not claim a position
-    # one it leaves alive still masks.
-    def _validate_no_alive_mask_overlap(self, new_mask: tuple[MaskRange, ...]) -> None:
-        """Reject ``new_mask`` if it shares any position with a live splice's mask."""
-        for splice in self._alive_splices():
-            alive_ref = splice.ref
-            if mask_contains_ref(new_mask, alive_ref):
-                continue  # Being absorbed by this splice.
-            if mask_ranges_overlap(new_mask, splice.mask):
-                raise InvalidSpliceError(
-                    f"new splice mask overlaps alive splice {alive_ref};"
-                    f" either don't claim already-claimed positions or extend"
-                    f" the mask to include the splice's own ref to absorb it",
-                )
-
-    # Absorbing a splice stops its payload rendering, so a splice that merges rather
-    # than replaces must carry that payload. Checked by text: a merge concatenates,
-    # so an absorbed entry survives as part of a longer one.
-    def _validate_absorbed_payloads_carried(
-        self,
-        new_mask: tuple[MaskRange, ...],
-        payload: tuple[ModelContextEvent, ...],
-    ) -> None:
-        """Reject a mask that absorbs a splice whose payload is not carried."""
-        if not payload:
+        if not indices:
             return
-        for splice in self._alive_splices():
-            alive_ref = splice.ref
-            if not mask_contains_ref(new_mask, alive_ref):
-                continue
-            carried = "\n".join(_entry_text(e) for e in payload)
-            missing = [
-                text
-                for entry in splice.payload
-                if (text := _entry_text(entry)) and text not in carried
-            ]
-            if missing:
-                raise InvalidSpliceError(
-                    f"new splice absorbs {alive_ref} but its payload drops"
-                    f" {len(missing)} entry(s) of the absorbed content"
-                    f" (first: {missing[0][:60]!r}); carry them forward, or"
-                    f" pass discards_content=True to replace deliberately",
-                )
-
-    def append_clear(self) -> TapeRef:
-        """Append a splice hiding the whole tape, and forget every call's anchors.
-
-        Returns:
-          ref: The splice's ref.
-
-        """
-        ref = self.append_splice(
+        context = stubbed(self.tape.context().messages, indices, stub=self.stubs.pruned)
+        _ = self.tape.append_splice(
             mask=full_tape_mask(self.tape),
-            insert_after=None,
-            payload=(),
-            strategy="clear",
+            replacement=tuple(context),
+            strategy="prune",
+            paired_externally=unpaired_call_ids(context),
+            discards_content=True,
         )
-        self._clear_detached_anchors()
-        return ref
+        self.tool_context.files.forget()
 
-    def mint_ref(self) -> TapeRef:
-        """Return the next ``TapeRef``, for a record a compactor builds.
+    def _holding(self, until: _Until) -> bool:
+        """Return whether anything taken in waits for ``until``."""
+        return any(e.stage == "held" and e.until == until for e in self._requests)
+
+    def _take(self, *states: _Until) -> list[_Held]:
+        """Remove and return what waits for any of ``states``, in the order it came."""
+        taken = [e for e in self._requests if e.stage == "held" and e.until in states]
+        for entry in taken:
+            entry.stage, entry.until = "open", None
+        # Only ``_stand`` holds, and it takes no clear: a clear acts at once.
+        return [r for e in taken if not isinstance(r := e.request, SessionClear)]
+
+    async def _release(self, *states: _Until) -> bool:
+        """Act on what waits for any of ``states``, in order; return whether any did."""
+        released = self._take(*states)
+        for request in released:
+            match request:
+                case SessionPrune():
+                    self._on_prune(request)
+                case SessionCompact():
+                    await self._on_compact(request)
+                case ToolMessage() | UserMessage() | AgentMessage() | SystemMessage():
+                    self._commit_due(request)
+        return bool(released)
+
+    def pending_mid_stream(self) -> Sequence[UserMessage | AgentMessage]:
+        """Return what the user sent while the model streams, in order.
 
         Returns:
-          ref: A ref no record holds.
+          pending: The messages; they join the context once the reply ends, its
+            calls detached.
 
         """
-        ref = TapeRef(session_id=self.session_id, ordinal=self._next_ordinal)
-        self._next_ordinal += 1
-        return ref
-
-    def adopt_record(
-        self,
-        record: TapeRecord,
-        *,
-        discards_content: bool = False,
-    ) -> None:
-        """Append a record built with :meth:`mint_ref`, checked as :meth:`append_splice` checks.
-
-        Args:
-          record: The record.
-          discards_content: As :meth:`append_splice` takes it.
-
-        Raises:
-          InvalidSpliceError: A splice claims what an alive splice masks, or
-            absorbs one without carrying its payload.
-          InvalidContextError: ``record``'s ref is already on the tape.
-
-        """
-        # A second claimant of one ref makes every ``context()`` raise, and the
-        # dispatch loop catches that raise above its only ``await``, spinning.
-        if record.ref in self._tape_by_ref:
-            raise InvalidContextError(
-                f"duplicate tape ref {record.ref}: two records claim one position",
-            )
-        if isinstance(record, ContextSplice):
-            self._validate_no_alive_mask_overlap(record.mask)
-            if not discards_content:
-                self._validate_absorbed_payloads_carried(record.mask, record.payload)
-        self.tape.append(record)
-        self._cached_resolved = None
-        self._index_record(record)
-        if isinstance(record, ContextSplice):
-            self._invalidate_masked_anchors(record)
-
-    def _clear_detached_anchors(self) -> None:
-        """Forget every call's anchors."""
-        self._placeholder_refs.clear()
-        self._parent_assistant_refs.clear()
-
-    # Runs after ``_index_record``, which points an anchor the payload keeps at the
-    # splice, so an anchor still masked is one the splice dropped.
-    def _invalidate_masked_anchors(self, splice: ContextSplice) -> None:
-        """Drop per-call anchors whose ref is masked by ``splice``."""
-        if not splice.mask:
-            return
-        for cid, ref in list(self._parent_assistant_refs.items()):
-            if mask_contains_ref(splice.mask, ref):
-                del self._parent_assistant_refs[cid]
-        for cid, ref in list(self._placeholder_refs.items()):
-            if mask_contains_ref(splice.mask, ref):
-                del self._placeholder_refs[cid]
-
-    # A splice's payload anchors too: a compactor that keeps a model turn paired
-    # externally registers its calls against the splice, so a deferred pairing still
-    # finds its anchor after the barrier. Every record is indexed, a resumed one
-    # included, so here every mimic id the context holds is reserved.
-    def _index_record(self, record: TapeRecord) -> None:
-        """Cache ref->record and call_id->anchor mappings after append."""
-        self._tape_by_ref[record.ref] = record
-        entries = (
-            (record.event,)
-            if isinstance(record, ReferrableTapeEvent)
-            else record.payload
+        return tuple(
+            request
+            for e in self._requests
+            if e.stage == "held"
+            and e.until == ModelResponseCompleted
+            and isinstance(request := e.request, (UserMessage, AgentMessage))
         )
-        for entry in entries:
-            ids: tuple[str, ...] = ()
-            if isinstance(entry, Response):
-                ids = tuple(tc.call_id for tc in calls(entry.records))
-                for cid in ids:
-                    self._parent_assistant_refs[cid] = record.ref
-            elif isinstance(entry, ToolResult):
-                ids = (entry.call_id,)
-                self._placeholder_refs[entry.call_id] = record.ref
-            for cid in ids:
-                n = _mimic_index(cid, prefix=self.markers.mimic)
-                if n is not None:
-                    self._mimic_counter = max(self._mimic_counter, n + 1)
-
-    # A caller of :meth:`foreground` takes the result as its own answer, so delivering
-    # it forward as well would tell the model twice.
-    def _deliver_detached(self, result: ToolResult) -> None:
-        """Hand a detached call's result to whoever waits for it, else deliver it."""
-        result = self._unseen(result)
-        waiting = [
-            w for w in self._foreground_waiters.get(result.call_id, ()) if not w.done()
-        ]
-        if not waiting or result.state == "pending":
-            self._defer_detached_forward(result)
-            return
-        for waiter in waiting:
-            waiter.set_result(result)
-        self._forwarded_call_ids.add(result.call_id)
-
-    # Delivered once per call. A stub is never delivered: it is not the tool's output,
-    # and marking its call delivered would drop the real result. A cancellation whose
-    # call is already answered cancelled, as a cohort ``Kill`` answers it, is not
-    # delivered again; a background job's, answered only by its stub, is.
-    def _defer_detached_forward(self, result: ToolResult) -> None:
-        """Queue a completed detached tool's real result for forward delivery."""
-        if result.state == "pending":
-            logger.debug(
-                "runtime detached forward skipped (pending stub, not real result):"
-                " call_id=%s",
-                result.call_id,
-            )
-            return
-        if result.state == "cancelled" and self._inslot_result_is_terminal(
-            result.call_id,
-        ):
-            logger.debug(
-                "runtime detached forward skipped (cancellation already answered"
-                " in-slot): call_id=%s",
-                result.call_id,
-            )
-            return
-        if result.call_id in self._forwarded_call_ids:
-            logger.debug(
-                "runtime detached forward suppressed (already delivered): call_id=%s",
-                result.call_id,
-            )
-            return
-        self._forwarded_call_ids.add(result.call_id)
-        self._pending_commits.append(_PendingCommit(kind="forward", entry=result))
-
-    # The record may be a splice: a compaction can keep the result in its payload.
-    def _inslot_result_is_terminal(self, call_id: str) -> bool:
-        """Return True when ``call_id``'s in-slot ``ToolResult`` is a final answer."""
-        ref = self._placeholder_refs.get(call_id)
-        if ref is None:
-            return False
-        record = self._tape_by_ref[ref]
-        entries = (
-            (record.event,)
-            if isinstance(record, ReferrableTapeEvent)
-            else record.payload
-        )
-        return any(
-            isinstance(entry, ToolResult)
-            and entry.call_id == call_id
-            and entry.state != "pending"
-            for entry in entries
-        )
-
-    # A ``DetachedArrived`` call the model made itself is answered beside it on the
-    # next real round, so it spends no round of its own.
-    def _defer_pairing(self, result: ToolResult) -> None:
-        """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``."""
-        self._pending_commits.append(_PendingCommit(kind="pairing", entry=result))
-
-    # Runs at the model gate before the context is checked, so what it commits is
-    # what the model is sent.
-    def _flush_pending(self) -> None:
-        """Commit every queued :class:`_PendingCommit`, in arrival order, in-slot."""
-        pending = self._pending_commits
-        self._pending_commits = []
-        for commit in pending:
-            if commit.kind == "pairing":
-                self._commit_pairing(commit.entry)
-            else:
-                self._append_detached_arrival(commit.entry)
-
-    # A finished tool is worth a round; a pairing is not.
-    def _has_waking_commit(self) -> bool:
-        """Return True when a queued commit should itself drive a round."""
-        return any(c.kind == "forward" for c in self._pending_commits)
-
-    # Beside its call, not at the tail: a turn in between would leave the call
-    # unanswered, and the gate would answer it ``[interrupted]``.
-    def _commit_pairing(self, result: ToolResult) -> None:
-        """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use."""
-        parent_ref = self._parent_assistant_refs.get(result.call_id)
-        if parent_ref is None:
-            # The call is gone with its turn, so its answer goes too.
-            return
-        self.append_splice(
-            insert_after=parent_ref,
-            payload=(result,),
-            strategy="lazy_pairing",
-            paired_externally=frozenset({result.call_id}),
-        )
-        self.publish(result)
-
-    # After a model turn, a user turn naming the call comes first: two model turns
-    # may not be adjacent.
-    def _append_detached_arrival(self, result: ToolResult) -> None:
-        """Append the synthetic ``BackgroundTask`` foreground pair for ``result``."""
-        messages = self.context().messages
-        at = _last_turn(messages)
-        if at is not None and isinstance(messages[at], Response):
-            self.append_history(
-                UserMessage(content=f"[detached tool {result.call_id} completed]"),
-            )
-        arrival_id = f"{result.call_id}{self.markers.arrival}"
-        self.append_history(
-            Response(
-                records=(
-                    ToolCall(
-                        call_id=arrival_id,
-                        name=self.markers.delivery,
-                        arguments={"operation": "foreground", "id": result.call_id},
-                    ),
-                ),
-                tokens=TokenCount(),
-                spend=TokenCost(),
-                stop_reason="tool_use",
-            ),
-        )
-        self.append_history(dataclasses.replace(result, call_id=arrival_id))
-
-    def _context_validation_error(self) -> Exception | None:
-        """Return an unrepaired context error, if the model-call gate finds one."""
-        try:
-            self._assert_alternation_invariant()
-        except (
-            InvalidContextError,
-            InvalidPayloadError,
-            InvalidSpliceError,
-        ) as exc:
-            return exc
-        return None
 
     async def run_forever(self) -> None:
-        """Drain inbox, dispatch, repeat. The entire engine."""
+        """Drain the inbox, dispatch each event, then advance; until ``SessionQuit``."""
         while True:
-            self._collect_detached()
-            if self._fully_drained():
+            if (
+                self.agent_idle
+                and not self.at_work
+                and not self.inbox.gate_armed
+                and self.inbox.empty()
+            ):
+                self.turn_under_way = False  # pragma: no mutate[truthiness]
                 self.publish(AgentIdle())
+            self._awaited = self.inbox.awaiting
             items = await self.inbox.drain()
-            failed_reply = False  # pragma: no mutate[truthiness]
-
-            for item_idx, item in enumerate(items):
-                # One event that fails to dispatch is logged; the rest of
-                # its batch still is.
+            reply_failed = False  # pragma: no mutate[truthiness]
+            for at, item in enumerate(items):
+                later = items[at + 1 :]
+                # One event that fails to dispatch is logged; the rest of its batch
+                # still is.
                 try:
-                    match item:
-                        case Quit():
-                            await self._on_quit(items[item_idx + 1 :])
-                            return
-
-                        case Halt():
-                            if self._on_halt(item, later=items[item_idx + 1 :]):
-                                break
-
-                        case Clear():
-                            self._on_clear(items[item_idx + 1 :])
-                            break
-
-                        case ModelResponseError():
-                            if await self._on_model_response_error(
-                                item,
-                                later=items[item_idx + 1 :],
-                            ):
-                                break
-
-                        # Released from a failure's wait, or ending a suspension's:
-                        # the gate calls the model for the turn.
-                        case Retry():
-                            self.recheck_quota = True
-                            self._end_suspension()
-                            self._failed = False  # pragma: no mutate[truthiness]
-                            self._awaiting_user = False  # pragma: no mutate[truthiness]
-
-                        case Kill():
-                            self._on_kill(item)
-
-                        # The group goes as one, whichever of its calls is named.
-                        case Detach(call_id=cid) if cid in self._groups and any(
-                            c.call_id in self.cohort for c in self._groups[cid]
-                        ):
-                            self._on_detach(item)
-
-                        case Wake():
-                            self._on_wake(item)
-
-                        case Compact():
-                            await self._on_compact(item)
-
-                        case CompactComplete():
-                            self.compact_task = None
-                            self.compactions += 1
-                            self.append_history(item)
-                            self.publish(item)
-
-                        case CompactFailed():
-                            self.compact_task = None
-                            self._compaction = ""
-                            self.append_history(item)
-                            self.publish(item)
-
-                        # Input held for the running calls goes first. The user
-                        # writing during a suspension asks to try now.
-                        case UserMessage():
-                            self.recheck_quota = True
-                            self._end_suspension()
-                            if self.model_call is not None:
-                                self._mid_stream_queue.append(item)
-                            else:
-                                self._stop_all_tools(mode="detach")
-                                _ = self._drain_mid_stream_queue()
-                                self._commit_user(item)
-                            self._awaiting_user = False  # pragma: no mutate[truthiness]
-
-                        case AgentToAgentMessage():
-                            if self.model_call is not None:
-                                self._mid_stream_queue.append(item)
-                            else:
-                                self._stop_all_tools(mode="detach")
-                                _ = self._drain_mid_stream_queue()
-                                self._commit_user(item)
-                            self._awaiting_user = False  # pragma: no mutate[truthiness]
-
-                        # The harness's note, as a nudge for a reply owed. To a
-                        # busy agent it is moot: it is told again at its next
-                        # idle if it still owes.
-                        case SystemMessage():
-                            if self.model_call is None:
-                                self._note(item)
-                            self._awaiting_user = False  # pragma: no mutate[truthiness]
-
-                        # Input that ends the wait for the user is the user
-                        # resuming; held for idle, the halted turn would be
-                        # sent again without it.
-                        case (
-                            UserQueuedMessage()
-                            | AgentSendQueuedMessage()
-                            | UserDeferredMessage()
-                            | AgentSendDeferredMessage()
-                        ) if self._awaiting_user:
-                            self._commit_user(_message_from_queued(item))
-                            self._awaiting_user = False  # pragma: no mutate[truthiness]
-
-                        case UserQueuedMessage() | AgentSendQueuedMessage():
-                            self._queued.append(item)
-
-                        case UserDeferredMessage() | AgentSendDeferredMessage():
-                            self._deferred.append(item)
-
-                        case ModelResponsePartial():
-                            self.publish(item)
-
-                        case ModelResponseThinking():
-                            self.publish(item)
-
-                        case ModelResponseComplete():
-                            self._on_model_response_complete(item)
-
-                        case ModelResponseCancelled():
-                            self.model_call = None
-                            self.publish(item)
-
-                        case ToolResult() if item.call_id in self.cohort:
-                            cid = item.call_id
-                            self.cohort.discard(cid)
-                            del self.running_tools[cid]
-                            # Waited on, the model reads it whole.
-                            self._watches.pop(cid, None)
-                            self.append_history(item)
-                            self.publish(item)
-
-                        case ToolResult() if item.call_id in self.detached:
-                            cid = item.call_id
-                            # Posted before its call was detached, or refused:
-                            # its call is answered by a stub, so it goes forward.
-                            del self.detached[cid]
-                            self._deliver_detached(item)
-                            self.publish(item)
-
-                        case DetachedResult():
-                            self._deliver_detached(item.result)
-                            self.publish(item)
-
-                        case LazyEvent(payload=payload):
-                            # The call leaves the cohort now, or the round its
-                            # answer waits for never comes.
-                            self.cohort.discard(payload.call_id)
-                            self.running_tools.pop(payload.call_id, None)
-                            self._defer_pairing(payload)
-
-                        case Scheduled():
-                            self._scheduled.append(item)
-
-                        case _:  # pragma: no mutate -- basedpyright asks for the default; without it nothing else matches either.
-                            pass
+                    if await self._dispatch(item, later=later):
+                        break
                 except Exception as exc:  # noqa: BLE001 -- One event's failure must not drop the events after it.
                     log_exception_or_warning(
                         logger,
@@ -1530,53 +1106,155 @@ class Runtime:
                     )
                     # A reply not taken is a failed model call: asked again at
                     # once, it would fail again, so the runtime waits.
-                    if isinstance(item, ModelResponseComplete):
-                        self.inbox.push_front(
-                            ModelResponseError(exception=exc),
-                            *items[item_idx + 1 :],
+                    if isinstance(item, ModelMessage):
+                        self.publish(
+                            ModelMessageCompleted(outcome=Failed(exception=exc)),
                         )
-                        failed_reply = True
+                        self.inbox.push_front(
+                            ModelResponseCompleted(outcome=Failed(exception=exc)),
+                            *later,
+                        )
+                        reply_failed = True
                         break
-
-            if failed_reply:
+            if self.has_quit:
+                return
+            if reply_failed:
                 continue
-
             # A failure here leaves the batch taken; the next pass goes on.
             try:
                 await self._advance()
             except Exception as exc:  # noqa: BLE001 -- The loop must outlive one pass's failure.
                 log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
 
-    async def _on_quit(self, later: Sequence[RuntimeEvent]) -> None:
-        """Cancel everything in flight; wait for the cancelled tools to stop."""
-        logger.debug(
-            "runtime quit: model_call=%s compact_task=%s "
-            "running_tools=%d cohort=%d detached=%d",
-            self.model_call is not None,
-            self.compact_task is not None,
-            len(self.running_tools),
-            len(self.cohort),
-            len(self.detached),
+    async def _dispatch(
+        self,
+        item: RuntimeEvent,
+        *,
+        later: Sequence[RuntimeEvent],
+    ) -> bool:
+        """Act on ``item``; return whether the rest of its batch was put back, or the loop ends."""
+        self._open_if_asked(item)
+        match item:
+            case SessionQuit():
+                await self._on_quit(later)
+                return True
+            case ModelHalt():
+                return await self._on_halt(item, later=later)
+            case SessionClear():
+                self._on_clear(item, later=later)
+                return True
+            # What a call or a compaction queued before it was stopped is its ending
+            # no longer (``_cancel_model``, ``_cancel_model_and_compaction``).
+            case (
+                ModelMessage() | ModelResponseCompleted() | SessionCompactCompleted()
+            ) if self._was_abandoned(item):
+                if isinstance(item, ModelMessage):
+                    self.publish(ModelMessageCompleted(outcome=Cancelled()))
+            case ModelResponseCompleted(outcome=Failed(exception=raised)):
+                return await self._on_model_response_error(
+                    raised,
+                    ended=item,
+                    later=later,
+                )
+            case ModelMessage():
+                return await self._on_model_message(item, later=later)
+            case ModelResponseTextStreamed() | ModelResponseThinkingStreamed():
+                self.publish(item)
+            case ModelRetry():
+                self._on_retry()
+            case ToolHalt():
+                self._on_kill(item)
+            case ToolDetach():
+                self._on_detach(item)
+            case ToolMessage():
+                self._take_result(item)
+            case SessionContextUpdate():
+                self._update_context(item)
+            case SessionCompact():
+                await self._on_compact(item)
+            case SessionCompactCompleted():
+                await self._on_compacted(item)
+            case SessionPrune():
+                self._stand(item, "held", ToolCohortCompleted)
+            case UserMessage() | AgentMessage() | SystemMessage():
+                self._on_message(item)
+            case _:  # pragma: no mutate -- basedpyright asks for the default; without it nothing else matches either.
+                pass
+        return False
+
+    # A message sent to wait is held for what it names, unless it ends a wait for the
+    # user: that is the user resuming, and held for idle the halted turn would be
+    # sent again without it.
+    def _on_message(self, item: UserMessage | AgentMessage | SystemMessage) -> None:
+        """Commit ``item``, hold it until what it waits for, or drop a moot nudge."""
+        if item.due_after is not None and self._awaited is None:
+            self._stand(item, "held", item.due_after)
+            return
+        self._awaited = None
+        if item.due_after is not None:
+            self._commit_due(item)
+            return
+        # The user writing during a suspension asks to try now.
+        if isinstance(item, UserMessage):
+            self.recheck_quota = True
+            self._end_suspension()
+        if isinstance(item, SystemMessage):
+            # A nudge to a busy agent is moot: it is told again at its next idle if
+            # it still owes.
+            if self.model_call is None:
+                self._note(item)
+            else:
+                self._end(item, SystemMessageCompleted(outcome=Cancelled()))
+        elif self.model_call is not None:
+            self._stand(item, "held", ModelResponseCompleted)
+        else:
+            self._stop_all_tools(mode="detach")
+            self._commit_user(item)
+
+    # Released from a failure's wait, or ending a suspension's: the gate calls the
+    # model for the turn. Told before that call: with no turn stopped, none follows.
+    def _on_retry(self) -> None:
+        """Let the next model call go now, and tell whether a stopped turn goes on."""
+        released = (
+            self._awaited == Await.failure() or self.service_suspended_until is not None
         )
-        if self.model_call:
-            self.model_call.cancel()
-        if self.compact_task:
-            self.compact_task.cancel()
-        stopped = [
-            *self.running_tools.values(),
-            *self.detached.values(),
-            *self._stopping,
-        ]
-        for t in self.running_tools.values():
-            t.cancel()
-        # Background work too, or it runs on after shutdown.
-        self._cancel_detached()
-        # Work no loop will reach: its callers stop waiting.
-        for event in (*self._scheduled, *later, *self.inbox.drain_nowait()):
-            if isinstance(event, Scheduled):
-                _ = event.done.cancel()
+        self._awaited = None
+        self.recheck_quota = True
+        self._end_suspension()
+        self.publish(
+            ModelRetryCompleted(
+                outcome=Succeeded(value=None) if released else Cancelled(),
+            ),
+        )
+
+    def _end_suspension(self) -> None:
+        """Let the next model call go now, its backoff started afresh."""
+        self._retries = 0
+        self.service_suspended_until = None
         if self._retry_timer is not None:
             self._retry_timer.cancel()
+            self._retry_timer = None
+
+    async def _on_quit(self, later: Sequence[RuntimeEvent]) -> None:
+        """Cancel everything in flight; wait for the cancelled tools to stop."""
+        # Whatever was told to have started is told to have ended, here cancelled.
+        self._cancel_model_and_compaction()
+        if self.running_tools:
+            self.publish(ToolCohortCompleted(outcome=Cancelled()))
+        # Background work too, or it runs on after shutdown.
+        stopped = [c.task for c in self._calls.values() if not c.task.done()]
+        for task in stopped:
+            task.cancel()
+        # Work no loop will reach: its callers stop waiting. Each request still open,
+        # taken in or not, ends cancelled.
+        self.has_quit = True
+        for event in (*later, *self.inbox.drain_nowait()):
+            self._open_if_asked(event)
+        for entry in tuple(self._requests):
+            self._end(entry.request, self._cancelled(entry.request))
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+        self.publish(SessionQuitCompleted(outcome=Succeeded(value=None)))
         # A cancelled tool takes a moment to stop, as a shell does. The loop ends
         # when they have all stopped, or after ``_QUIT_WAIT_SEC``: a tool that
         # ignores its cancel must not keep the process from exiting.
@@ -1588,99 +1266,152 @@ class Runtime:
                     len(still_running),
                 )
 
-    def _on_halt(self, item: Halt, *, later: Sequence[RuntimeEvent]) -> bool:
-        """Cancel the model call and any compaction, detach the cohort; return whether ``later`` now waits for the user."""
+    # The turn a halt stops may have its reply done, and only what its calls owe
+    # still to come; an agent at rest, or waiting for the user, has none.
+    async def _on_halt(self, item: ModelHalt, *, later: Sequence[RuntimeEvent]) -> bool:
+        """Stop the turn: cancel the model call and any compaction, detach the waited calls; return whether ``later`` now waits for the user."""
         self.publish(item)
-        logger.debug(
-            "runtime halt: model_call=%s compact_task=%s "
-            "running_tools=%d cohort=%d detached=%d "
-            "mid_stream=%d",
-            self.model_call is not None,
-            self.compact_task is not None,
-            len(self.running_tools),
-            len(self.cohort),
-            len(self.detached),
-            len(self._mid_stream_queue),
+        under_way = self.turn_under_way
+        halted = ModelHaltCompleted(
+            outcome=Succeeded(value=None) if under_way or self.at_work else Cancelled(),
         )
         self._cancel_model_and_compaction()
         # Waited on, a call's result would be held behind the wait for the user, so
         # the agent would look busy until the user wrote. Detached, the calls run on
         # and their results arrive after the user's next message.
         self._stop_all_tools(mode="detach")
-        # The user took the turn over: what a failure waited for no longer calls
-        # the model.
         self._end_suspension()
-        self._failed = False  # pragma: no mutate[truthiness]
-        # What the user typed during the stream is what the runtime would wait for.
-        if self._drain_mid_stream_queue():
+        # What the user typed during the stream is what the runtime would wait for:
+        # the turn it was typed into stopped first.
+        if self._holding(ModelResponseCompleted):
+            self._end_turn(Cancelled())
+            _ = await self._release(ModelResponseCompleted)
+            self.publish(halted)
             return False
-        self.inbox.push_front(Await.user(), *later)
-        self._awaiting_user = True
+        self.inbox.push_front(*later, gate=Await.user())
+        # After the gate, as a clear's end is told.
+        if under_way:
+            self._end_turn(Cancelled())
+        # Taken in, with no call for it begun: no turn's end will tell of it.
+        self._end_messages(Cancelled())
+        self.publish(halted)
         return True
 
-    def _on_clear(self, later: Sequence[RuntimeEvent]) -> None:
+    def _on_clear(self, item: SessionClear, *, later: Sequence[RuntimeEvent]) -> None:
         """Stop everything, hide the tape, and wait for the user."""
+        under_way = self.turn_under_way
         self._cancel_model_and_compaction()
         self._stop_all_tools(mode="detach")
-        # With no call registered, a late result matches nothing and is dropped.
         self._cancel_detached()
-        self._watches.clear()
-        self._pending_commits.clear()
-        self._forwarded_call_ids.clear()
-        self._queued.clear()
-        self._deferred.clear()
-        self._mid_stream_queue.clear()
-        self._refusals.clear()
+        # No result of the wiped session's calls is taken in.
+        for call in tuple(self._calls.values()):
+            call.status = "answered"
+            self._forget(call)
+        # What waited for the model, or for rest, is dropped: no turn takes it in.
+        dropped = self._take(
+            ModelResponseStarted,
+            ModelResponseCompleted,
+            ModelIdle,
+            AgentIdle,
+        )
         # A new conversation does not inherit the old one's failure, or its wait
         # for a rate limit.
         self._end_suspension()
-        self._failed = False  # pragma: no mutate[truthiness]
-        self.append_clear()
+        self.tape.append_clear()
+        # A tool that finished as the user cleared posted its result behind the
+        # ``SessionClear``; delivering it would carry the wiped session's work into
+        # the fresh one.
         self.inbox.push_front(
-            Await.user(),
-            # A tool that finished as the user cleared posted its result behind
-            # the ``Clear``, or waits behind a Halt; delivering it would carry the
-            # wiped session's work into the fresh one.
             *(
                 i
                 for i in (*later, *self.inbox.drain_nowait())
-                if not isinstance(i, DetachedResult)
+                if not isinstance(i, ToolMessage)
             ),
+            gate=Await.user(),
         )
         # After the gate: input an observer pushes in reply must count as new, or
         # it never releases the gate.
-        self.publish(ClearComplete())
-        self._awaiting_user = True
+        if under_way:
+            self._end_turn(Cancelled())
+        self._end_messages(Cancelled())
+        for request in dropped:
+            self._end(request, self._cancelled(request))
+        self._end(item, SessionClearCompleted(outcome=Succeeded(value=None)))
+
+    # A turn that stopped short is under way no more; one the model finished is,
+    # until ``AgentIdle``: what its calls owe is still to come.
+    def _end_turn(self, outcome: Outcome[None]) -> None:
+        """Tell that the model's work on the turn stopped, and that each message it took in ended so."""
+        if not isinstance(outcome, Succeeded):
+            self.turn_under_way = False  # pragma: no mutate[truthiness]
+        self.publish(ModelIdle(outcome=outcome))
+        self._end_messages(outcome)
+
+    # Whoever sent a message and waits takes its end from here, whatever became of
+    # it: a turn's end tells only of what a turn took in.
+    def _end_messages(self, outcome: Outcome[None]) -> None:
+        """End each message taken in since the last turn ended as ``outcome``."""
+        taken = [
+            message
+            for e in self._requests
+            if e.stage == "in_turn"
+            and isinstance(
+                message := e.request,
+                UserMessage | AgentMessage | SystemMessage | ToolMessage,
+            )
+        ]
+        for message in taken:
+            self._end(message, _message_ending(message, outcome))
+
+    def _cancelled(self, request: _Request) -> _Ending:
+        """Return the ending of ``request`` that says it was stopped first."""
+        match request:
+            case SessionCompact():
+                return SessionCompactCompleted(
+                    outcome=Cancelled(),
+                    tape_len_before=len(self.tape),
+                )
+            case SessionClear():
+                return SessionClearCompleted(outcome=Cancelled())
+            case SessionPrune():
+                return SessionPruneCompleted(outcome=Cancelled())
+            case _:
+                return _message_ending(request, Cancelled())
 
     async def _on_model_response_error(
         self,
-        item: ModelResponseError,
+        exc: BaseException,
         *,
+        ended: ModelResponseCompleted | None,
         later: Sequence[RuntimeEvent],
     ) -> bool:
-        """Compact, suspend, end the turn, or drop the failure; return whether ``later`` was put back."""
-        exc = item.exception
-        wake = (
-            await self._after_failure(exc) if self._called_model is self.model else None
+        """Tell the call's end, unless it was told (``ended`` is ``None``); then call again, compact, suspend, or stop the turn; return whether ``later`` was put back."""
+        resets = (
+            await self._after_failure(exc)
+            if self._called_model is self.model
+            else dict[str, datetime]()
         )
+        # Told whatever the turn does next: a call's end is never the turn's.
+        self.model_call = None
+        if ended is not None:
+            self.publish(ended)
         # A failure of a model switched away from says nothing of the one in use:
         # the gate asks it, at once.
         if self._called_model is not self.model:
-            self.model_call = None
-            _ = self._drain_mid_stream_queue()
+            _ = await self._release(ModelResponseCompleted)
             return False
-        # A request too long for the window is compaction's job: compact,
-        # and let the gate call again, under the same breaker.
+        # A request too long for the window is compaction's job: compact, and let
+        # the gate call again, under the same breaker. Started here, not queued:
+        # the gate would call the model first, for the compaction to cancel.
         if (
             isinstance(exc, ContextOverflowError)
             and self.compactor is not None
             and self._auto_compactions < 2
         ):
             logger.warning("model context overflowed; compacting: %s", exc)
-            self.model_call = None
             self._auto_compactions += 1
-            self.inbox.push_front(Compact(trigger="auto"), *later)
-            return True
+            await self._on_compact(SessionCompact(trigger="auto"))
+            return False
         # A long rate limit or outage, for an agent that waits them out: hold the
         # model call until the advised time, backing off to 5 minutes, then call
         # again; 60 in a row end the turn.
@@ -1689,146 +1420,214 @@ class Runtime:
             and self.persistent_retry
             and self._retries < 60
         ):
-            self.model_call = None
             delay = (
-                max(exc.retry_after_sec, min(5.0 * (1 << self._retries), 300.0))
-                if wake is None
-                else max(wake - time.time(), 0.0)
+                max(min(resets.values()).timestamp() - time.time(), 0.0)
+                if resets
+                else max(exc.retry_after_sec, min(5.0 * (1 << self._retries), 300.0))
             )
             self._retries += 1
             self.service_suspended_until = time.time() + delay
             self.publish(
-                ModelCallSuspended(
+                ModelResponseSuspended(
                     exception=exc,
-                    until=self.service_suspended_until,
-                    attempt=self._retries,
+                    retry_at=datetime.fromtimestamp(self.service_suspended_until, UTC),
+                    failures_in_a_row=self._retries,
+                    provider=self.model.provider.name if resets else "",
+                    reset_at_by_login=resets,
                 ),
             )
             # Input typed during the failed stream is part of what the retry asks.
-            _ = self._drain_mid_stream_queue()
-            # Any input wakes the loop; ``SaveSession`` changes nothing else.
+            _ = await self._release(ModelResponseCompleted)
+            # Any input wakes the loop; ``SessionSaveDue`` changes nothing else.
             self._retry_timer = asyncio.get_running_loop().call_later(
                 delay,
                 self.inbox.push_back,
-                SaveSession(),
+                SessionSaveDue(),
             )
             return False
-        logger.debug(
-            "runtime model response error: error=%s "
-            "model_call=%s compact_task=%s running_tools=%d "
-            "cohort=%d detached=%d",
-            type(exc).__name__,
-            self.model_call is not None,
-            self.compact_task is not None,
-            len(self.running_tools),
-            len(self.cohort),
-            len(self.detached),
-        )
-        self.model_call = None
         self._end_suspension()
-        # The error is shown, never put in the context.
-        committed = self._drain_mid_stream_queue()
-        self.publish(item)
-        if not committed:
-            self._failed = True
-            self.inbox.push_front(Await.failure(), *later)
-            self._awaiting_user = True
-            return True
-        return False
+        # The error is shown, never put in the context. What the user typed as the
+        # call ran is answered next: the turn it was typed into stopped first.
+        if self._holding(ModelResponseCompleted):
+            self._end_turn(Failed(exception=exc))
+            _ = await self._release(ModelResponseCompleted)
+            return False
+        self.inbox.push_front(*later, gate=Await.failure())
+        # After the gate, as a clear's end is told.
+        self._end_turn(Failed(exception=exc))
+        return True
 
-    def _on_kill(self, item: Kill) -> None:
-        """Cancel the call ``item`` names, or every call."""
+    def _on_kill(self, item: ToolHalt) -> None:
+        """Cancel the call ``item`` names, or every call, and tell whether any was."""
         cid = item.call_id
+        running = {*self.running_tools, *self.detached}
+        stopped = bool(running) if cid is None else cid in running
         if cid is None:
-            logger.debug(
-                "runtime kill all tools: running_tools=%d cohort=%d detached=%d",
-                len(self.running_tools),
-                len(self.cohort),
-                len(self.detached),
-            )
             self._stop_all_tools(mode="kill")
             self._cancel_detached()
         elif cid in self.running_tools:
-            logger.debug("runtime kill tool: call_id=%s", cid)
-            self._stop_tool(cid, mode="kill")
-        else:
-            # Its own late result then matches nothing; the model is told it was
-            # cancelled instead.
-            task = self.detached.pop(cid, None)
-            if task is not None:
-                logger.debug("runtime kill detached tool: call_id=%s", cid)
-                self._kill_detached(cid, task)
-            else:
-                logger.debug("runtime kill missed tool: call_id=%s", cid)
+            _ = self._stop_tool(cid, mode="kill")
+            # A wait a kill ends ends cancelled, as ``_stop_all_tools`` ends it.
+            self._cohort_left(Cancelled())
+        elif cid in self.detached:
+            self._kill_detached(self._calls[cid])
+        self.publish(
+            ToolHaltCompleted(
+                outcome=Succeeded(value=None) if stopped else Cancelled(),
+            ),
+        )
 
-    def _on_detach(self, item: Detach) -> None:
-        """Answer each waited-on call of the group with a stub, and let it run on."""
-        for member in self._groups[item.call_id]:
-            mid = member.call_id
-            if mid not in self.cohort:
-                continue
-            logger.debug("runtime tool detached: call_id=%s", mid)
-            self._stop_tool(mid, mode="detach")
-        if not self.cohort:
-            self._cohort_seen = False  # pragma: no mutate[truthiness]
+    # The group goes as one, whichever of its calls is named: one finished already
+    # still names its group.
+    def _on_detach(self, item: ToolDetach) -> None:
+        """Answer each waited-on call of the named call's group with a stub, and let it run on."""
+        group = next(
+            (
+                c.group
+                for c in self._calls.values()
+                if any(m.call_id == item.call_id for m in c.group)
+            ),
+            (),
+        )
+        stubs = {
+            m.call_id: self._stop_tool(m.call_id, mode="detach")
+            for m in group
+            if m.call_id in self.running_tools
+        }
+        if stubs:
+            self._cohort_left(Cancelled())
+        named = stubs.get(item.call_id)
+        self.publish(
+            ToolDetachCompleted(
+                outcome=Cancelled() if named is None else Succeeded(value=named),
+            ),
+        )
 
-    # A wake while the model works, or while calls it waits on run, is dropped: what
-    # the call wrote waits for the next wake, which shows it as well.
-    def _on_wake(self, item: Wake) -> None:
-        """Show the model what a long call wrote, as its schedule says; arm the next wake."""
-        cid = item.call_id
-        watch = self._watches.get(cid)
-        if watch is None or watch.ended:
+    # A result is taken once. A waited-on call's is read whole; a detached call's
+    # goes forward, to a caller of ``foreground`` or as a delivery. What came for a
+    # call answered already (cancelled, or cleared) is dropped.
+    # A pending record that ends a call is a relayed call's stub, which runs on
+    # elsewhere; a call's news while it runs is asked for by ``wake``.
+    def _take_result(self, result: ToolMessage) -> None:
+        """Take in a call's result: into the turn, or forward."""
+        call = self._calls.get(result.call_id)
+        if call is None or call.status == "answered" or result.state == "pending":
             return
+        waited_on = call.status == "waited"
+        call.status = "answered"
+        if waited_on:
+            # The model waits on it: it is due now, whatever its tool said.
+            result = dataclasses.replace(result, due_after=None)
+            self.tape.append_history(result)
+            self._stand(result, "in_turn")
+        else:
+            self._deliver(call, result)
+        self.publish(result)
+        self.publish(
+            ToolCallCompleted(
+                outcome=Cancelled()
+                if result.state == "cancelled"
+                else Succeeded(value=result),
+            ),
+        )
+        if waited_on:
+            self._cohort_left(Succeeded(value=None))
+        self._forget(call)
+
+    # A caller of :meth:`foreground` takes the result as its own answer, so delivering
+    # it forward as well would tell the model twice.
+    def _deliver(self, call: _Call, result: ToolMessage) -> None:
+        """Hand a detached call's result to whoever waits for it, else hold it for the next round."""
+        result = self._unseen(call, result)
+        waiting = [w for w in call.foreground_waiters if not w.done()]
+        for waiter in waiting:
+            waiter.set_result(result)
+        # A cancellation the context already answers, as a ``ToolHalt`` of a
+        # waited-on call does, is not told again.
+        cid = call.call.call_id
+        told = result.state == "cancelled" and any(
+            isinstance(e, ToolMessage) and e.call_id == cid and e.state != "pending"
+            for e in self.tape.context().messages
+        )
+        if not waiting and not told:
+            self._stand(result, "held", result.due_after or ModelResponseStarted)
+
+    # Its stub answered the call already: the request sends this as the user's side
+    # (``as_sent``), so it may follow the model's turn directly.
+    def _append_late(self, message: ToolMessage) -> None:
+        """Append a call's later message, its news or its result, and tell it."""
+        self.tape.append_history(message)
+        self._stand(message, "in_turn")
+
+    # A timer runs it between the loop's passes, so it reads the runtime and asks;
+    # only the loop changes it. While the runtime waits for the user it asks
+    # nothing, nor for a note while the model works, a compaction runs, or calls
+    # are waited on: what the call wrote waits for the next wake, which shows it
+    # as well. A call whose tool wakes no one, or that can never run apart, was
+    # never armed (``_run_tool_and_post``); it is detached only with its group.
+    def _wake(self, cid: str, watch: _Watch, forced: bool) -> None:
+        """Ask to detach the armed calls waited on, or to tell the model what ``cid`` wrote; arm its next wake."""
         # A model call since this wake was armed warmed the cache again.
-        forced = item.forced and watch.cached in (None, self._last_request)
-        if forced or watch.fresh:
-            if cid in self.cohort:
-                logger.debug("runtime wake detaches the cohort: call_id=%s", cid)
-                self._detach_waking()
-            elif (
-                self.model_call is None
-                and self.compact_task is None
-                and not self.cohort
-            ):
-                self._note(
-                    SystemMessage(
-                        timestamp=now_timestamp(),
-                        content=self._progress(cid, watch),
-                        subtype="wake",
-                        call_id=cid,
-                    ),
-                )
+        forced = forced and watch.cached in (None, self._last_request)
+        if (forced or watch.fresh) and not self.inbox.gate_armed:
+            if cid in self.running_tools:
+                for waited, c in self._calls.items():
+                    if (
+                        c.status == "waited"
+                        and c.watch is not None
+                        and c.watch.timer is not None
+                    ):
+                        self.push(ToolDetach(call_id=waited))
+            elif not self.at_work:
+                self._owe(watch)
         self._arm(cid, watch)
 
-    # A call whose tool wakes no one, or that can never run apart, was never armed
-    # (``_run_tool_and_post``), and is waited for.
-    def _detach_waking(self) -> None:
-        """Detach each cohort call armed to wake the model."""
-        for cid in [c for c in self.running_tools if c in self.cohort]:
-            watch = self._watches.get(cid)
-            if watch is None or watch.timer is None:
-                continue
-            self._stop_tool(cid, mode="detach")
-        if not self.cohort:
-            self._cohort_seen = False  # pragma: no mutate[truthiness]
+    # What it wrote is read when the model is told, not here: a model call that
+    # starts first loses none of it.
+    def _owe(self, watch: _Watch) -> None:
+        """Have the loop tell the model what ``watch``'s call wrote, once the model is free."""
+        watch.waking = True
+        # Any input makes the loop pass; ``SessionSaveDue`` changes nothing else.
+        self.push(SessionSaveDue())
 
     def _arm(self, cid: str, watch: _Watch) -> None:
-        """Set the next wake of the call ``cid``, if its tool's schedule has one."""
-        schedule = self.detach_schedule.of(watch.name)
+        """Set the next wake of the call ``cid``, if its schedule has one."""
+        schedule = self._schedule(watch)
         if schedule is None:
             return
         now = time.monotonic()
-        cache_left = self._cache_left(now)
-        gap, forced = schedule.gap(now - watch.started, cache_left_sec=cache_left)
+        cache_left = self._cache_bound(watch, now)
+        next_wake = schedule.delay_sec_until_next_wake(
+            now - watch.started,
+            cache_left_sec=cache_left,
+        )
+        forced = next_wake.fires_even_without_new_output
         watch.cached = (
             self._last_request if forced and cache_left < schedule.max_gap_sec else None
         )
         watch.timer = asyncio.get_running_loop().call_later(
-            gap,
-            self.push,
-            Wake(call_id=cid, forced=forced),
+            next_wake.delay_sec,
+            self._wake,
+            cid,
+            watch,
+            forced,
         )
+
+    def _schedule(self, watch: _Watch) -> WakeSchedule | None:
+        """Return when ``watch``'s call wakes the model: as the call said, else as its tool's schedule says."""
+        if watch.every_sec is None:
+            return self.wake_schedules.per_tool.get(
+                watch.name,
+                self.wake_schedules.default,
+            )
+        # The longest gap is the first, so every gap is the period, and every wake
+        # is due whatever the call wrote.
+        return WakeSchedule(first_gap_sec=watch.every_sec, max_gap_sec=watch.every_sec)
+
+    # A call that said how often it is looked at is looked at then, whatever the cache.
+    def _cache_bound(self, watch: _Watch, now: float) -> float:
+        """Return how long a wake of ``watch``'s call may wait for the prompt cache's sake."""
+        return math.inf if watch.every_sec is not None else self._cache_left(now)
 
     # Past its lifetime the cache is cold already, and no wake can keep it.
     def _cache_left(self, now: float) -> float:
@@ -1855,9 +1654,9 @@ class Runtime:
 
     # The model read the rest at its wakes, and the record keeps all of it. A view
     # the tool gave, such as a child's reply, is the tool's to say, and stays.
-    def _unseen(self, result: ToolResult) -> ToolResult:
+    def _unseen(self, call: _Call, result: ToolMessage) -> ToolMessage:
         """Return a detached call's result reading what the model has not seen of it."""
-        watch = self._watches.pop(result.call_id, None)
+        watch = call.watch
         if (
             watch is None
             or not watch.seen
@@ -1869,190 +1668,227 @@ class Runtime:
         shown = dataclasses.replace(result, shown=None, stdout=(tail,), stderr=())
         return dataclasses.replace(result, shown=shown.text())
 
-    async def _on_compact(self, item: Compact) -> None:
-        """Start a compaction, unless one runs; what the user typed goes into it."""
-        if self.compact_task and not self.compact_task.done():
-            logger.debug("runtime compact ignored while compact_task active")
+    # While one is under way, started and its ending not yet told, every reader that
+    # shows it takes the next ending for its: one asked for meanwhile is held, and
+    # ends after it has run. The runtime's own is its duplicate: the one under way
+    # does its work, so it ends at once, and no reader is told.
+    async def _on_compact(self, item: SessionCompact) -> None:
+        """Start a compaction, or hold it for after the one under way; what the user typed goes into it."""
+        self._opened(item)
+        if self._compacting is not None:
+            if item.trigger == "auto":
+                entry = self._opened(item)
+                self._requests.remove(entry)
+                if entry.ended is not None and not entry.ended.done():
+                    entry.ended.set_result(Cancelled())
+            else:
+                self._stand(item, "held", SessionCompactCompleted)
             return
-        self._compaction = item.trigger
-        logger.debug(
-            "runtime compact start: model_call=%s "
-            "running_tools=%d cohort=%d detached=%d args=%r",
-            self.model_call is not None,
-            len(self.running_tools),
-            len(self.cohort),
-            len(self.detached),
-            item.args,
-        )
+        self._compacting = item
+        self._compaction_trigger = item.trigger
         self._cancel_model()
         self._stop_all_tools(mode="detach")
         # A compaction calls the model too: not on a spent login.
         await self._before_call(turn_start=False)
-        # What the user typed goes into what is compacted; only ``Clear`` discards it.
-        for staged in self._queued:
-            self._commit_user(_message_from_queued(staged))
-        self._queued.clear()
-        _ = self._drain_mid_stream_queue()
-        self.compact_task = asyncio.create_task(self._compact_and_post(item.args))
+        # What the user typed goes into what is compacted; only ``SessionClear`` discards it.
+        _ = await self._release(ModelIdle, ModelResponseCompleted)
+        self.compact_task = asyncio.create_task(self._compact_and_post(item))
         self.compact_task.add_done_callback(
             log_task_exception(logger, "compaction task crashed"),
         )
-        started = CompactStarted()
-        self.append_history(started)
+        started = SessionCompactStarted()
+        self.tape.append_history(started)
         self.publish(started)
 
-    def _on_model_response_complete(self, item: ModelResponseComplete) -> None:
-        """Record the reply and start its calls, unless a newer call replaced its own."""
-        if item.generation not in (-1, self._model_call_generation):
-            logger.debug(
-                "runtime stale model response ignored: generation=%d current=%d",
-                item.generation,
-                self._model_call_generation,
-            )
+    def _was_abandoned(
+        self,
+        item: ModelMessage | ModelResponseCompleted | SessionCompactCompleted,
+    ) -> bool:
+        """Return whether ``item`` is what a stopped call or compaction queued; forget it."""
+        for at, abandoned in enumerate(self._abandoned):
+            if abandoned is item:
+                del self._abandoned[at]
+                return True
+        return False
+
+    async def _on_compacted(self, item: SessionCompactCompleted) -> None:
+        """Take in the ending the compaction under way queued; start the next held."""
+        request = self._compacting
+        if request is None:
             return
+        self._end_compaction(request, item)
+        # The first held starts; the rest are held again behind it.
+        _ = await self._release(SessionCompactCompleted)
+
+    # One the runtime stopped is not taped: the tape is as its ending says it stood.
+    def _end_compaction(
+        self,
+        request: SessionCompact,
+        ending: SessionCompactCompleted,
+    ) -> None:
+        """Take in how the compaction under way, ``request``, ended, and tell it."""
+        self.compact_task = None
+        self._compacting = None
+        if isinstance(ending.outcome, Succeeded):
+            self.compactions += 1
+        else:
+            self._compaction_trigger = ""
+        if not isinstance(ending.outcome, Cancelled):
+            self.tape.append_history(ending)
+        self._end(request, ending)
+
+    # The call ended as its reply was taken in. A failure to start what the reply
+    # asked for is the turn's, not a second ending of the call.
+    async def _on_model_message(
+        self,
+        item: ModelMessage,
+        *,
+        later: Sequence[RuntimeEvent],
+    ) -> bool:
+        """Record the reply and start its calls; return whether ``later`` was put back, as a failure to start them may."""
+        reply, refusals = self._take_reply(item)
+        try:
+            await self._start_what_it_asked(reply, refusals)
+        except Exception as exc:  # noqa: BLE001 -- The turn stops on it, as on a failed call.
+            log_exception_or_warning(logger, "starting a reply's calls raised", exc)
+            return await self._on_model_response_error(exc, ended=None, later=later)
+        return False
+
+    def _take_reply(self, item: ModelMessage) -> tuple[Response, dict[str, str]]:
+        """Record the reply and tell that its call ended; return it as recorded, and the calls it refuses."""
         self._auto_compactions = 0
         self._retries = 0
         self.model_call = None
-        msg = _stamped(
-            self._rewrite_calls(self._sanitize_forged_arrivals(item.response)),
-        )
-        self._gate_calls(msg)
+        rewritten, refusals = self._rewrite_calls(item.response)
+        msg = _stamped(rewritten)
+        self._gate_calls(msg, refusals)
         cut_in = (
             self.before_tool_spawn(msg) if self.before_tool_spawn is not None else None
         )
-        self.append_history(msg)
+        self.tape.append_history(msg)
         # Observers see the turn as recorded, rewrites included.
-        self.publish(dataclasses.replace(item, response=msg))
+        self.publish(ModelResponseCompleted(outcome=Succeeded(value=msg)))
         if cut_in is not None:
-            self._mid_stream_queue.append(cut_in)
+            self._stand(cut_in, "held", ModelResponseCompleted)
+        return msg, refusals
+
+    # What the user sent as the reply streamed is answered next; the reply's calls
+    # run on, detached, and no wait on them begins.
+    async def _start_what_it_asked(
+        self,
+        msg: Response,
+        refusals: dict[str, str],
+    ) -> None:
+        """Start the reply's calls; with none, the model finished its turn."""
         if calls(msg.records):
-            # What the user sent as the reply streamed is answered next; the reply's
-            # calls run on, detached, and no wait on them begins.
-            cut = bool(self._mid_stream_queue)
-            self._start_calls(calls(msg.records), waited=not cut)
+            cut = self._holding(ModelResponseCompleted)
+            self._start_calls(calls(msg.records), refusals=refusals, detached=cut)
             if cut:
-                self._stop_all_tools(mode="detach")
-                _ = self._drain_mid_stream_queue()
-        elif not self._drain_mid_stream_queue():
-            self.publish(ModelIdle())
+                _ = await self._release(ModelResponseCompleted)
+        elif not await self._release(ModelResponseCompleted):
+            self._end_turn(Succeeded(value=None))
 
     async def _advance(self) -> None:
-        """Run what a batch leaves due: scheduled work, staged input, a model call."""
-        if self._scheduled and not self.at_work:
-            scheduled = self._scheduled
-            self._scheduled = []
-            for work in scheduled:
-                await self._run_scheduled(work)
-
-        if not self.cohort and self._cohort_seen:
-            logger.debug(
-                "runtime cohort complete: running_tools=%d detached=%d",
-                len(self.running_tools),
-                len(self.detached),
-            )
-            self.publish(CohortComplete())
-            self._cohort_seen = False  # pragma: no mutate[truthiness]
-
-        # What the user sent as the reply streamed, if no ending of the reply
-        # took it in already.
-        if self._mid_stream_queue and self.model_call is None and not self.cohort:
-            _ = self._drain_mid_stream_queue()
-
-        # Staged input waits until the model is done, not merely between
-        # rounds: a tool result still to answer means it is not.
+        """Act on what the batch left due: prunes, held messages, deliveries, wakes, then a model call."""
+        if self.at_work:
+            self.publish(SessionSaveDue())
+            return
+        _ = await self._release(ToolCohortCompleted)
+        # A held message waits until the model is done, not merely between
+        # rounds: a tool result still to answer means it is not. Those due at
+        # ``ModelIdle`` go first; those due at ``AgentIdle`` wait for every call
+        # that still owes its result, and for the round a finished call's result
+        # is about to start.
         if (
-            not self.at_work
-            and not self._should_call_model()
-            and (self._queued or self._deferred)
+            not self._should_call_model()
+            and not await self._release(ModelIdle)
+            and not (self._owes_a_result() or self._holding(ModelResponseStarted))
         ):
-            # Queued first; deferred waits for the idle after it.
-            staged = self._queued or self._deferred
-            for waiting in staged:
-                self._commit_user(_message_from_queued(waiting))
-            staged.clear()
+            _ = await self._release(AgentIdle)
+        if not self.inbox.gate_armed:
+            self._tell_wakes()
+            # A delivery drives its own round; it is committed at the model gate,
+            # so what it commits is what the model is sent.
+            _ = await self._release(ModelResponseStarted)
+            if self._should_call_model():
+                await self._start_round()
+        self.publish(SessionSaveDue())
 
-        # A delivery drives its own round; the rest ride one that content
-        # drives.
-        if (
-            self._pending_commits
-            and self._ready_to_advance
-            and (self._should_call_model() or self._has_waking_commit())
-        ):
-            self._flush_pending()
+    # What a call is owed a telling of rides the round about to start, or starts one.
+    def _tell_wakes(self) -> None:
+        """Note what each call a wake asked about wrote since the model last looked."""
+        for cid, call in self._calls.items():
+            watch = call.watch
+            if watch is not None and watch.waking and call.status != "answered":
+                watch.waking = False  # pragma: no mutate[truthiness]
+                news = ToolMessage(
+                    call_id=cid,
+                    timestamp=now_timestamp(),
+                    state="pending",
+                    stdout=(self._progress(cid, watch),),
+                )
+                self._append_late(news)
+                self.publish(news)
 
-        # Prune first: a drop that brings the context back under the
-        # compaction trigger spares the compaction.
-        if (
-            self.prune is not None
-            and self._ready_to_advance
-            and self._should_call_model()
-        ):
+    # Prune first: a drop that brings the context back under the compaction trigger
+    # spares the compaction. Compact when the compactor says the request would not
+    # fit; twice with no model call between means compacting does not help, so the
+    # call goes ahead and the provider's error says why.
+    async def _start_round(self) -> None:
+        """Prune, compact, or call the model, whichever the context is due."""
+        if self.prune is not None:
             _ = self.prune()
-        # Compact first when the compactor says the next request would not fit.
-        # Twice with no model call between means compacting does not help, so
-        # the call goes ahead and the provider's error says why.
-        compact_first = (
-            self._ready_to_advance
-            and self._should_call_model()
-            and self.compactor is not None
+        if (
+            self.compactor is not None
             and self.compact_due is not None
             and self._auto_compactions < 2
             and self.compact_due()
-        )
-        if compact_first:
+        ):
             self._auto_compactions += 1
-            self.inbox.push_back(Compact(trigger="auto"))
+            self.inbox.push_back(SessionCompact(trigger="auto"))
         elif (
-            self._ready_to_advance
-            and self._should_call_model()
-            and (
-                self.service_suspended_until is None
-                or time.time() >= self.service_suspended_until
-            )
+            self.service_suspended_until is None
+            or time.time() >= self.service_suspended_until
         ):
             await self._call_model()
-
-        self.publish(SaveSession())
 
     async def _call_model(self) -> None:
         """Start a model call; a context past repair waits for the user instead."""
         if self.context_updates is not None:
             for note in self.context_updates():
-                self.append_history(note)
-        logger.debug(
-            "runtime model call start: history=%d detached=%d queued=%d",
-            len(self.context().messages),
-            len(self.detached),
-            len(self._queued),
-        )
-        exc = self._context_validation_error()
+                match note:
+                    case SessionContextUpdate():
+                        self._update_context(note)
+                    case AgentMessage():
+                        self.tape.append_history(note)
+                        self.publish(note)
+                    case SystemMessage():
+                        self.tape.append_history(note)
+        exc = self.tape.repair()
         if exc is not None:
             # Raised, it would repeat every pass on the same tape; the user is told,
-            # and the runtime waits for them.
+            # and the runtime waits for them. No call was made, so none ends: the
+            # turn stops.
             log_exception_or_warning(
                 logger,
                 "model-call gate context unrepairable",
                 exc,
             )
-            # The gate first, as for ``Clear``.
-            self.inbox.push_front(Await.recovery())
-            self.publish(ModelResponseError(exception=exc))
-            self._awaiting_user = True
-        else:
-            # Whatever released a failure's wait, or ended a suspension's, the turn
-            # goes on, on the model asked now.
-            self._failed = False  # pragma: no mutate[truthiness]
-            self.service_suspended_until = None
-            await self._before_call(turn_start=self._steps == 0)
-            self._called_model = self.model
-            model_call: asyncio.Task[None] = asyncio.create_task(
-                self._stream_and_post(self._next_generation()),
-            )
-            self.model_call = model_call
-            model_call.add_done_callback(
-                log_task_exception(logger, "model-call task crashed"),
-            )
-            self.publish(ModelCallStarted())
+            self.inbox.push_front(gate=Await.recovery())
+            self._end_turn(Failed(exception=exc))
+            return
+        # Whatever released a failure's wait, or ended a suspension's, the turn goes
+        # on, on the model asked now.
+        self.service_suspended_until = None
+        await self._before_call(turn_start=self._steps == 0)
+        self._called_model = self.model
+        self._streamed_chars = 0
+        self.model_call = asyncio.create_task(self._stream_and_post())
+        self.model_call.add_done_callback(
+            log_task_exception(logger, "model-call task crashed"),
+        )
+        self.turn_under_way = True
+        self.publish(ModelResponseStarted())
 
     # The hooks are advisory: one that raises is logged, and the runtime goes on
     # as without it, or the turn would hang with no call in flight to end it.
@@ -2065,247 +1901,160 @@ class Runtime:
         except Exception as exc:  # noqa: BLE001 -- An advisory hook must not stop the call.
             log_exception_or_warning(logger, "before_call raised", exc)
 
-    async def _after_failure(self, exc: BaseException) -> float | None:
-        """Ask ``after_failure`` about ``exc``; a failure of its own is logged, as ``None``."""
+    async def _after_failure(self, exc: BaseException) -> Mapping[str, datetime]:
+        """Ask ``after_failure`` about ``exc``; a failure of its own is logged, as no resets."""
+        none: dict[str, datetime] = {}
         if self.after_failure is None:
-            return None
+            return none
         try:
             return await self.after_failure(exc)
         except Exception as raised:  # noqa: BLE001 -- An advisory hook must not hang the turn.
             log_exception_or_warning(logger, "after_failure raised", raised)
-            return None
-
-    def pending_mid_stream(self) -> Sequence[UserMessage | AgentToAgentMessage]:
-        """Return what the user sent while the model streams, in order.
-
-        Returns:
-          pending: The messages; they join the context once the reply ends, its
-            calls detached.
-
-        """
-        return tuple(self._mid_stream_queue)
+            return none
 
     # A note rides a round that real content drives and drives none itself, so the entry
-    # that decides is the last turn before any trailing notes; a nudge or a wake alone
-    # drives one.
+    # that decides is the last turn before any trailing notes; a nudge alone drives one.
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""
-        messages = self.context().messages
+        messages = self.tape.context().messages
         at = _last_turn(messages)
         trailing = messages[0 if at is None else at + 1 :]
-        if any(isinstance(m, SystemMessage) and m.subtype in _WAKING for m in trailing):
+        if any(isinstance(m, SystemMessage) and m.subtype == "nudge" for m in trailing):
             return True
         return at is not None and isinstance(
             messages[at],
-            (UserMessage, AgentToAgentMessage, ToolResult),
+            (UserMessage, AgentMessage, ToolMessage),
         )
-
-    # Splices are valid one by one, but together they can still leave a call or a
-    # result unpaired; then the whole context is rebuilt repaired.
-    def _assert_alternation_invariant(self) -> None:
-        """Repair unpaired recorded calls and results; rebuild the context if still invalid."""
-        self._repair_history_record_orphans()
-        try:
-            validate_context(self.context().messages)
-            return
-        except InvalidContextError as exc:
-            logger.warning(
-                "context invariant still violated after repair; "
-                "applying rescue barrier: %s",
-                exc,
-            )
-        self._rescue_context()
-        validate_context(self.context().messages)
-
-    def _rescue_context(self) -> None:
-        """Append a splice hiding the whole tape and showing the context repaired."""
-        resolved = self.context()
-        sanitized = splice_safe_repair(resolved.messages)
-        self.append_splice(
-            mask=full_tape_mask(self.tape),
-            insert_after=None,
-            payload=tuple(sanitized),
-            strategy="context_rescue",
-            paired_externally=unpaired_call_ids(sanitized),
-            # The repair drops what cannot be paired.
-            discards_content=True,
-        )
-
-    # Only recorded events are repaired here: a call answered ``[interrupted]`` beside
-    # its turn, a result with no call hidden. An unpaired entry a splice shows is left
-    # to the rebuild.
-    def _repair_history_record_orphans(self) -> None:
-        """Pair each recorded call left unanswered; hide each recorded result with no call."""
-        resolved = self.context()
-        messages = resolved.messages
-        origins = resolved.origins
-        unmatched_per_am: list[tuple[TapeRef | None, list[str]]] = []
-        # An ordered set.
-        pending: dict[str, None] = {}
-        am_repair_anchor: TapeRef | None = None  # pragma: no mutate -- unread till set.
-        hr_orphan_refs: list[TapeRef] = []
-
-        for idx, entry in enumerate(messages):
-            # No one's turn: a note neither opens nor closes a tool pair.
-            if isinstance(entry, (SystemMessage, TurnContext)):
-                continue
-            origin = origins[idx]
-            origin_record = self._tape_by_ref.get(origin)
-            origin_is_hr = isinstance(origin_record, ReferrableTapeEvent)
-            if isinstance(entry, Response):
-                _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
-                am_repair_anchor = origin if origin_is_hr else None
-                pending.update(dict.fromkeys(tc.call_id for tc in calls(entry.records)))
-            elif isinstance(entry, ToolResult):
-                if entry.call_id not in pending:
-                    if origin_is_hr:
-                        hr_orphan_refs.append(origin)
-                    continue
-                del pending[entry.call_id]
-            else:
-                _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
-        _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
-
-        for anchor, missing_ids in unmatched_per_am:
-            if anchor is None:
-                continue
-            payload = tuple(
-                ToolResult(call_id=cid, state="failed", stderr=("[interrupted]",))
-                for cid in missing_ids
-            )
-            # Their calls are in the recorded turn at ``anchor``.
-            self.append_splice(
-                insert_after=anchor,
-                payload=payload,
-                strategy="orphan_tool_use_repair",
-                paired_externally=frozenset(missing_ids),
-            )
-        for orphan in hr_orphan_refs:
-            self.append_splice(
-                mask=(
-                    MaskRange(
-                        session_id=orphan.session_id,
-                        lo=orphan.ordinal,
-                        hi=orphan.ordinal,
-                    ),
-                ),
-                strategy="orphan_tool_result_repair",
-            )
 
     def _note(self, note: SystemMessage) -> None:
-        """Append a note that drives the model to history, and publish it."""
-        self.append_history(note)
+        """Append the harness's message for the model to history, and publish it."""
+        self.tape.append_history(note)
+        self._stand(note, "in_turn")
         self.publish(note)
+
+    def _update_context(self, update: SessionContextUpdate) -> None:
+        """Put ``update``'s context in force, and tell it."""
+        self.tape.append_history(update.context)
+        self.publish(
+            SessionContextUpdateCompleted(outcome=Succeeded(value=update.context)),
+        )
 
     # Each message stays its own record, as it was sent and shown; the request merges
     # adjacent ones, as providers need.
-    def _commit_user(self, message: UserMessage | AgentToAgentMessage) -> None:
+    def _commit_user(self, message: UserMessage | AgentMessage) -> None:
         """Append ``message`` to history and publish it."""
         self.turns += 1
         self._steps = 0
         self.turn_started_ms = int(time.time() * 1_000)
-        self.append_history(message)
+        # A call's later message that came first, held for the next round, is told
+        # first: the model reads them in the order they happened.
+        for earlier in self._take(ModelResponseStarted):
+            if isinstance(earlier, ToolMessage):
+                self._commit_due(earlier)
+        self.tape.append_history(message)
+        self._stand(message, "in_turn")
         self.publish(message)
 
-    # The call is answered now, by a stub, and its task registered as detached, so
-    # its own result, if it comes, is delivered forward.
+    # The record says what was said, not how long it was held. It ends as the
+    # message sent does: whoever sent that one holds it, not the record.
+    def _commit_due(self, message: _Message) -> None:
+        """Commit a held message as one sent with no wait."""
+        taken = dataclasses.replace(message, due_after=None)
+        self._opened(message).request = taken
+        match taken:
+            case ToolMessage():
+                self._append_late(taken)
+            case SystemMessage():
+                self._note(taken)
+            case UserMessage() | AgentMessage():
+                self._commit_user(taken)
+
     # A detached call's stub holds what it wrote so far. The call leaves the cohort
     # before its stub is published: an observer reading the runtime as it hears the
     # stub sees the call apart, not still waited on.
-    def _stop_tool(self, cid: str, *, mode: Literal["detach", "kill"]) -> None:
-        """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
-        task = self.running_tools.pop(cid)
-        self.cohort.discard(cid)
-        self.detached[cid] = task
+    def _stop_tool(self, cid: str, *, mode: Literal["detach", "kill"]) -> ToolMessage:
+        """Answer a waited-on call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it; return the stub."""
+        call = self._calls[cid]
+        call.status = "apart"
         match mode:
             case "kill":
-                state, shown = "cancelled", self.markers.cancelled
+                state, shown = "cancelled", self.stubs.cancelled
             case "detach":
-                watch = self._watches.get(cid)
-                wrote = "" if watch is None else self._look(watch)
+                wrote = "" if call.watch is None else self._look(call.watch)
                 state = "pending"
                 shown = (
-                    f"{self.markers.detached}\n{wrote}"
-                    if wrote
-                    else self.markers.detached
+                    f"{self.stubs.detached}\n{wrote}" if wrote else self.stubs.detached
                 )
-        stub = ToolResult(
+        stub = ToolMessage(
             call_id=cid,
             timestamp=now_timestamp(),
             state=state,
             shown=shown,
         )
-        self.append_history(stub)
+        self.tape.append_history(stub)
         self.publish(stub)
         if mode == "kill":
-            self._stop(cid, task)
+            self._stop(call)
+        return stub
 
     def _stop_all_tools(self, *, mode: Literal["detach", "kill"]) -> None:
-        """Run :meth:`_stop_tool` for every cohort tool; reset cohort state."""
-        for cid in list(self.running_tools):
-            self._stop_tool(cid, mode=mode)
-        self.cohort.clear()
-        self._cohort_seen = False
+        """Run :meth:`_stop_tool` for every waited-on call; the wait on them ends cancelled."""
+        stopped = list(self.running_tools)
+        for cid in stopped:
+            _ = self._stop_tool(cid, mode=mode)
+        if stopped:
+            self._cohort_left(Cancelled())
 
+    def _cohort_left(self, outcome: Outcome[None]) -> None:
+        """Tell that the wait on the reply's calls ended, once none is waited on."""
+        if not self.running_tools:
+            self.publish(ToolCohortCompleted(outcome=outcome))
+
+    # Told here, as the call is cancelled, so its ending comes before whatever the
+    # cancelling leads to: its task takes the cancel only once the loop next turns,
+    # and a call started meanwhile would be told first. One already done returned
+    # what it queued, a reply or a failure, which is taken later or behind a gate:
+    # the call ends here instead, and that is dropped when its turn comes.
     def _cancel_model(self) -> None:
-        """Cancel any model call; its late reply is then dropped."""
-        if self.model_call:
-            self.model_call.cancel()
-            self.model_call = None
-            _ = self._next_generation()
+        """Cancel any model call; it ends cancelled, once, whatever it had queued."""
+        call = self.model_call
+        if call is None:
+            return
+        queued = _queued_by(call)
+        if call.cancel():
+            self.publish(
+                ModelResponseCompleted(
+                    outcome=Cancelled(),
+                    chars_streamed_before_cancel=self._streamed_chars,
+                ),
+            )
+        elif queued is not None:
+            self._abandoned.append(queued)
+            self.publish(ModelResponseCompleted(outcome=Cancelled()))
+        self.model_call = None
 
-    def _next_generation(self) -> int:
-        """Return a new model call generation; a reply from an older one is dropped."""
-        self._model_call_generation += 1
-        return self._model_call_generation
-
+    # One whose work is done ends as it did: its ending, queued and not yet taken, is
+    # taken here, and dropped when its turn in the inbox comes.
     def _cancel_model_and_compaction(self) -> None:
         """Cancel any model call and compaction; their late results are then dropped."""
         self._cancel_model()
+        queued = _queued_by(self.compact_task)
+        # A cancel does nothing to one that finished.
         if self.compact_task is not None:
-            compact_task = self.compact_task
-            if not compact_task.done():
-                self._compact_generation += 1
-                self._compaction = ""
-                compact_task.cancel()
-                self.publish(
-                    CompactFailed(
-                        exception=asyncio.CancelledError(),
-                        tape_len=len(self.tape),
-                    ),
-                )
-            self.compact_task = None
-
-    # A call the model makes may copy a delivery, id and all, where a provider lets it
-    # name its calls: two turns would then share a call id. The old ``arrived`` name
-    # is renamed too, as a journal that holds it may still be copied.
-    def _sanitize_forged_arrivals(self, msg: Response) -> Response:
-        """Rewrite model-forged delivery call ids into a safe namespace."""
-        found = calls(msg.records)
-        if not any(_forged(tc, markers=self.markers) for tc in found):
-            return msg
-        # Another call of the same reply may already hold a renamed id.
-        used_ids = {tc.call_id for tc in found if not _forged(tc, markers=self.markers)}
-        rewritten: list[AssistantMessage | Thinking | ToolCall] = []
-        for record in msg.records:
-            if not isinstance(record, ToolCall) or not _forged(
-                record,
-                markers=self.markers,
-            ):
-                rewritten.append(record)
-                continue
-            safe_id = f"{self.markers.mimic}{self._mimic_counter}"
-            self._mimic_counter += 1
-            while safe_id in used_ids:
-                safe_id = f"{self.markers.mimic}{self._mimic_counter}"
-                self._mimic_counter += 1
-            logger.debug(
-                "runtime forged delivery id rewritten: %s -> %s",
-                record.call_id,
-                safe_id,
-            )
-            rewritten.append(dataclasses.replace(record, call_id=safe_id))
-        return dataclasses.replace(msg, records=tuple(rewritten))
+            _ = self.compact_task.cancel()
+        request = self._compacting
+        cancelled = SessionCompactCompleted(
+            outcome=Cancelled(),
+            tape_len_before=len(self.tape),
+        )
+        if queued is not None:
+            self._abandoned.append(queued)
+        if request is not None:
+            self._end_compaction(request, queued if queued is not None else cancelled)
+        # Those held for it are stopped with it: none of them started.
+        for held in self._take(SessionCompactCompleted):
+            if isinstance(held, SessionCompact):
+                self._end(held, cancelled)
 
     # The model's history should show the tool it should have used: a Bash call that
     # is exactly other tools' jobs becomes their calls before it is recorded, so
@@ -2318,13 +2067,19 @@ class Runtime:
     # calls after it may start somewhere else.
     #
     # A provider may number its calls anew in each reply. The call's id names it
-    # in every registry here, and names the delivery of a detached result, so a
-    # call under an id an earlier call has would take that call's entries, and
-    # its own result would be dropped as delivered already. It gets ``<id>_<n>``.
-    def _rewrite_calls(self, msg: Response) -> Response:
-        """Return ``msg`` with repeated ids replaced and other tools' Bash calls rewritten."""
+    # here, and names each later message of a call run apart, so a call under an id
+    # an earlier call has gets ``<id>_<n>``.
+    def _rewrite_calls(self, msg: Response) -> tuple[Response, dict[str, str]]:
+        """Return ``msg`` with repeated ids replaced and other tools' Bash calls rewritten, and the refusals by call id."""
         records: list[AssistantMessage | Thinking | ToolCall] = []
-        taken = {*self._calls, *self._parent_assistant_refs, *self._forwarded_call_ids}
+        refusals: dict[str, str] = {}
+        in_context = {
+            tc.call_id
+            for entry in self.tape.context().messages
+            if isinstance(entry, Response)
+            for tc in calls(entry.records)
+        }
+        taken = {*self._calls, *in_context}
         used = taken | {r.call_id for r in calls(msg.records)}
         # The reply's calls run side by side and share the shell's directory: one
         # that moves it may land before any other, whatever its place in the reply.
@@ -2353,7 +2108,7 @@ class Runtime:
                     ),
                 )
                 logger.debug(
-                    "runtime repeated call id replaced: %s -> %s",
+                    "runtime repeated call id replaced: %s -> %s",  # pragma: no mutate[diagnostic-text]
                     given.call_id,
                     record.call_id,
                 )
@@ -2377,11 +2132,7 @@ class Runtime:
             rewritten = bash.rewrite(record.arguments)
             if isinstance(rewritten, (Rewrite, tuple)):
                 # Each rewritten call keeps any request to run in the background.
-                timing = {
-                    k: v
-                    for k, v in record.arguments.items()
-                    if k in ("background", "delay")
-                }
+                timing = controls(record.arguments)
                 ids = _fresh_ids(record.call_id, used=used)
                 records.extend(
                     dataclasses.replace(
@@ -2396,60 +2147,59 @@ class Runtime:
                 )
                 continue
             if isinstance(rewritten, str):
-                self._refusals[record.call_id] = rewritten
+                refusals[record.call_id] = rewritten
             records.append(record)
-        return dataclasses.replace(msg, records=tuple(records))
+        return dataclasses.replace(msg, records=tuple(records)), refusals
 
     # Every tool is offered, so the gate holds here, and again in the context. It is
     # the gate the model was told when it called: observers of the reply may close it
     # for the next round, as the round cap does, and must not refuse this one's calls.
-    def _gate_calls(self, msg: Response) -> None:
+    def _gate_calls(self, msg: Response, refusals: dict[str, str]) -> None:
         """Refuse each call in ``msg`` of a tool ``allowed`` withholds now."""
         if self.allowed is None:
             return
         for tc in calls(msg.records):
             if tc.name in self.tools and tc.name not in self.allowed:
-                self._refusals.setdefault(
+                refusals.setdefault(
                     tc.call_id,
                     f"{tc.name} is not available to this agent.",
                 )
 
     # The line the module docstring describes. Each call is its own task, waiting
-    # on the tasks of the earlier calls it contends with, so a ``Kill`` stops one
-    # call and the next starts once it has stopped. ``waited`` false starts the
-    # cohort only to detach it at once: no wait begins, so ``CohortStarted`` is not
-    # told.
-    def _start_calls(self, tool_calls: Sequence[ToolCall], *, waited: bool) -> None:
+    # on the tasks of the earlier calls it contends with, so a ``ToolHalt`` stops one
+    # call and the next starts once it has stopped. ``detached`` starts the calls
+    # answered by stubs: no wait begins, so ``ToolCohortStarted`` is not told.
+    def _start_calls(
+        self,
+        tool_calls: Sequence[ToolCall],
+        *,
+        refusals: dict[str, str],
+        detached: bool,
+    ) -> None:
         """Run a reply's calls, each after the earlier ones it contends with."""
-        delays = {
-            tc.call_id: delay
-            for tc in tool_calls
-            if (delay := self._background_delay(tc)) is not None
-        }
-        cohort = [tc for tc in tool_calls if tc.call_id not in delays]
-        if cohort:
-            self._cohort_seen = True
-            logger.debug(
-                "runtime cohort start: tools=%s",
-                [(tc.call_id, tc.name) for tc in cohort],
-            )
-            self.cohort.update(tc.call_id for tc in cohort)
         now = time.time()
-        waited_on: list[tuple[str | None, asyncio.Task[None]]] = []
-        tasks: dict[str, asyncio.Task[None]] = {}
-        groups: list[list[ToolCall]] = []
-        by_key: dict[str, list[ToolCall]] = {}
+        started: list[_Call] = []
+        groups: list[list[_Call]] = []
+        by_key: dict[str, list[_Call]] = {}
         for tc in tool_calls:
             cid = tc.call_id
-            key = self._serialize_key(tc)
-            delay = delays.get(cid)
+            delay = self._background_delay(tc, refusals)
+            key = self._serialize_key(tc, refusals)
             # A call answered without running waits for nothing.
             after = (
                 []
-                if cid in self._refusals or tc.name not in self.tools
+                if cid in refusals or tc.name not in self.tools
                 else [
-                    *(t for k, t in waited_on if _contend(key, k)),
-                    *(t for t, k in self._stopping.items() if _contend(key, k)),
+                    *(
+                        c.task
+                        for c in started
+                        if not c.background and _contend(key, c.key)
+                    ),
+                    *(
+                        c.task
+                        for c in self._calls.values()
+                        if c.stopping and _contend(key, c.key)
+                    ),
                 ]
             )
             task = asyncio.create_task(
@@ -2466,143 +2216,156 @@ class Runtime:
                     f" {tc.name!r} crashed",
                 ),
             )
-            task.add_done_callback(lambda _, cid=cid: self._forget(cid))
-            self._calls[cid] = _Call(
+            call = _Call(
                 call=tc,
-                started=now,
                 key=key,
+                task=task,
                 background=delay is not None,
+                status="waited" if delay is None and not detached else "apart",
+                refusal=refusals.get(cid),
             )
-            tasks[cid] = task
-            if delay is not None:
-                self._start_background(tc, task)
+            task.add_done_callback(lambda _, call=call: self._forget(call))
+            self._calls[cid] = call
+            if call.background:
+                self._answer(
+                    call,
+                    f"{self.stubs.background_prefix}{tc.name} as job {cid}]",
+                )
                 continue
-            self.running_tools[cid] = task
-            waited_on.append((key, task))
+            started.append(call)
+            # A ``"*"`` call ends every group before it, and is one of its own: the
+            # next ends it in turn.
             if key == "*":
                 groups.extend(by_key.values())
                 by_key = {}
-            if key is None or key == "*":
-                groups.append([tc])
+            if key is None:
+                groups.append([call])
             else:
-                by_key.setdefault(key, []).append(tc)
+                by_key.setdefault(key, []).append(call)
         groups.extend(by_key.values())
         for members in groups:
-            self._start_group(tuple(members), [tasks[m.call_id] for m in members])
+            group = tuple(c.call for c in members)
+            for c in members:
+                c.group = group
+        if detached:
+            for call in started:
+                self._answer(call, self.stubs.detached)
         # Told once the calls are registered: an observer reading the runtime as it
         # hears the start, as the status line does, sees them running.
-        if cohort and waited:
-            self.publish(CohortStarted())
+        elif started:
+            self.publish(ToolCohortStarted())
 
-    def _forget(self, call_id: str) -> None:
-        """Drop what the runtime knows of ``call_id``, once its task has ended."""
-        del self._calls[call_id]
+    def _answer(self, call: _Call, stub: str) -> None:
+        """Answer ``call``, which runs apart, with ``stub``."""
+        result = ToolMessage(
+            call_id=call.call.call_id,
+            timestamp=now_timestamp(),
+            state="pending",
+            shown=stub,
+        )
+        self.tape.append_history(result)
+        self.publish(result)
 
-    # A group is what detaches as one: the calls of one key between ``"*"`` calls.
-    def _start_group(
+    def _forget(self, call: _Call) -> None:
+        """Drop ``call`` once its task has ended and its result is taken in."""
+        cid = call.call.call_id
+        if (
+            call.status == "answered"
+            and call.task.done()
+            and self._calls.get(cid) is call
+        ):
+            del self._calls[cid]
+
+    def _background_delay(
         self,
-        group: tuple[ToolCall, ...],
-        tasks: Sequence[asyncio.Task[None]],
-    ) -> None:
-        """Know ``group`` by each of its calls until they have all stopped."""
-        for tc in group:
-            self._groups[tc.call_id] = group
-        done = asyncio.gather(*tasks, return_exceptions=True)
-        done.add_done_callback(lambda _: self._end_group(group))
-
-    def _end_group(self, group: tuple[ToolCall, ...]) -> None:
-        """Forget ``group``, once every call in it has stopped."""
-        for tc in group:
-            # A later reply may reuse the id while this group runs on, detached.
-            if self._groups.get(tc.call_id) is group:
-                del self._groups[tc.call_id]
-
-    def _background_delay(self, call: ToolCall) -> float | None:
+        call: ToolCall,
+        refusals: dict[str, str],
+    ) -> float | None:
         """Return the delay ``call`` asks to run in the background after, or ``None``."""
         tool = self.tools.get(call.name)
         if tool is None or not self.allow_background or not backgroundable(tool):
             return None
         try:
+            _ = wake_period(call.arguments)
             return background_delay(call.arguments)
         except (TypeError, ValueError) as exc:
-            self._refusals[call.call_id] = str(exc)
+            refusals[call.call_id] = str(exc)
             return None
 
-    def _start_background(self, call: ToolCall, task: asyncio.Task[None]) -> None:
-        """Answer ``call``, which ``task`` runs apart, with a stub."""
-        self.detached[call.call_id] = task
-        stub = ToolResult(
-            call_id=call.call_id,
-            timestamp=now_timestamp(),
-            state="pending",
-            shown=f"{self.markers.running}{call.name} as job {call.call_id}]",
-        )
-        self.append_history(stub)
-        self.publish(stub)
+    def _serialize_key(self, call: ToolCall, refusals: dict[str, str]) -> str | None:
+        """Return the serialization key, refusing calls whose scheduling fails."""
+        if call.call_id in refusals:
+            return None
+        tool = self.tools.get(call.name)
+        if tool is None:
+            return None
+        try:
+            return tool.serialize_key(
+                self.tool_context,
+                without_controls(call.arguments)
+                if backgroundable(tool)
+                else call.arguments,
+            )
+        except Exception as exc:  # noqa: BLE001 -- Scheduling failures must answer the call without stopping dispatch.
+            refusals[call.call_id] = describe(exc)
+            return None
 
-    def _stop(self, call_id: str, task: asyncio.Task[None]) -> None:
-        """Cancel ``task``; until it stops, a later contending call waits for it."""
+    def _stop(self, call: _Call) -> None:
+        """Cancel ``call``'s task; until it stops, a later contending call waits for it."""
         # A task already done, its result still queued, has nothing to stop.
-        if task.cancel():
-            self._stopping[task] = self._calls[call_id].key
-            task.add_done_callback(lambda _: self._stopping.pop(task, None))
+        _ = call.task.cancel()
 
-    def _drain_mid_stream_queue(self) -> bool:
-        """Commit and publish any buffered mid-stream input; return whether any was."""
-        buffered = self._mid_stream_queue
-        self._mid_stream_queue = []
-        for message in buffered:
-            self._commit_user(message)
-        return bool(buffered)
-
-    # With no call registered, a cancelled task's late result matches nothing and is
-    # dropped; each call is told it was cancelled instead.
     def _cancel_detached(self) -> None:
-        """Cancel and forget every detached task, reporting each cancellation."""
-        killed = dict(self.detached)
-        self.detached.clear()
-        for cid, task in killed.items():
-            self._kill_detached(cid, task)
+        """Cancel every detached call, delivering each one's cancellation."""
+        for cid in tuple(self.detached):
+            self._kill_detached(self._calls[cid])
 
     # The call was answered with a stub saying it still runs, so the model is told it
     # was killed. A finished task already delivered its own result, or will.
-    def _kill_detached(self, cid: str, task: asyncio.Task[None]) -> None:
+    def _kill_detached(self, call: _Call) -> None:
         """Cancel a detached call's task and deliver its cancellation."""
-        if task.done():
+        if call.task.done() or call.status == "answered" or call.stopping:
             return
-        self._stop(cid, task)
-        self._deliver_detached(
-            ToolResult(
-                call_id=cid,
+        self._stop(call)
+        self._deliver(
+            call,
+            ToolMessage(
+                call_id=call.call.call_id,
                 timestamp=now_timestamp(),
                 state="cancelled",
-                shown=self.markers.cancelled,
+                shown=self.stubs.cancelled,
             ),
         )
+        call.status = "answered"
 
-    # A finished task removes itself; one cancelled before it ran a step does not.
-    def _collect_detached(self) -> None:
-        """Clean up detached tasks that completed or were cancelled."""
-        for cid in [c for c, t in self.detached.items() if t.done()]:
-            del self.detached[cid]
-
-    async def _stream_and_post(self, generation: int) -> None:
-        """Stream a model response, posting chunks and the final response."""
-        self._streamed_chars = 0
+    # Queues how the call ended and returns what it queued: the reply, or the
+    # failure. A call cancelled returns ``None``.
+    async def _stream_and_post(self) -> ModelMessage | ModelResponseCompleted | None:
+        """Stream a model response; queue how the call ended, and return it."""
+        queued: ModelMessage | ModelResponseCompleted
         try:
             response = await self._reply()
-            self.inbox.push_back(
-                ModelResponseComplete(response=response, generation=generation),
-            )
         except asyncio.CancelledError:
-            # Published, not queued: the Halt that cancelled the stream holds
-            # the inbox until the user types, and the display must stop now.
-            self.publish(
-                ModelResponseCancelled(output_chars_estimate=self._streamed_chars),
+            # A call ``_cancel_model`` cancelled was told to have ended there, and is
+            # the runtime's call no longer.
+            if not _cut_off(self.model_call):
+                return None
+            # No one stopped this one: its stream ended cancelled of itself. That is
+            # a call that failed, and a failure frees the model and waits.
+            queued = ModelResponseCompleted(
+                outcome=Failed(
+                    exception=DisconnectedError(
+                        "The reply was cut off before it finished.",
+                    ),
+                ),
             )
         except Exception as exc:  # noqa: BLE001 -- Model-call failures from adapters must be routed into the runtime error record.
             log_exception_or_warning(logger, "model call failed", exc)
-            self.inbox.push_back(ModelResponseError(exception=exc))
+            queued = ModelResponseCompleted(outcome=Failed(exception=exc))
+        else:
+            queued = ModelMessage(response=response)
+        self.inbox.push_back(queued)
+        return queued
 
     def request(
         self,
@@ -2626,17 +2389,14 @@ class Runtime:
         """
         return self.tagged(
             Request(
-                # The runtime's note opens the first block: it never changes, so it
-                # caches with the prompt under one mark. It tells the model to call
-                # the tool deliveries are made under, so without that tool it would
-                # send the model to a tool it does not have.
-                system=_noted(self.system, note=self.markers.note)
-                if self.markers.delivery in self.tools
-                else self.system,
+                system=self.system,
                 records=[
                     *(
                         record
-                        for entry in coalesce_roles(self.context().messages)
+                        for entry in coalesce_roles(
+                            as_sent(self.tape.context().messages),
+                            keep_senders_apart=self.model.capability.keeps_user_turns_apart,
+                        )
                         for record in (
                             entry.records if isinstance(entry, Response) else (entry,)
                         )
@@ -2671,7 +2431,7 @@ class Runtime:
         """
         return dataclasses.replace(
             request,
-            compaction=self._compaction,
+            compaction=self._compaction_trigger,
             session=self.conversation,
             agent=self.agent or self.conversation,
             parent=self.parent,
@@ -2710,14 +2470,20 @@ class Runtime:
         self._last_request = time.monotonic()
         snapshot = self.token_accounting.capture(request, model=self._called_model)
         # Only the first call after a compaction is told of it.
-        self._compaction = ""
+        self._compaction_trigger = ""
         async for event in self._called_model.stream(request):
             if isinstance(event, TextChunk):
                 self._streamed_chars += len(event.text)
                 self.inbox.push_back(
-                    ModelResponseThinking(text=event.text, record=event.record)
+                    ModelResponseThinkingStreamed(
+                        text=event.text,
+                        response_record_index=event.record,
+                    )
                     if event.thinking
-                    else ModelResponsePartial(text=event.text, record=event.record),
+                    else ModelResponseTextStreamed(
+                        text=event.text,
+                        response_record_index=event.record,
+                    ),
                 )
             else:
                 response = event
@@ -2730,24 +2496,6 @@ class Runtime:
             response,
             measurement=self.token_accounting.observe(snapshot, tokens=response.tokens),
         )
-
-    def _serialize_key(self, call: ToolCall) -> str | None:
-        """Return the serialization key, refusing calls whose scheduling fails."""
-        if call.call_id in self._refusals:
-            return None
-        tool = self.tools.get(call.name)
-        if tool is None:
-            return None
-        try:
-            return tool.serialize_key(
-                self.tool_context,
-                without_controls(call.arguments)
-                if backgroundable(tool)
-                else call.arguments,
-            )
-        except Exception as exc:  # noqa: BLE001 -- Scheduling failures must answer the call without stopping dispatch.
-            self._refusals[call.call_id] = describe(exc)
-            return None
 
     # It waits on tasks, not a lock, so order never rests on lock fairness. A call
     # killed before it starts was answered by whatever killed it.
@@ -2765,65 +2513,31 @@ class Runtime:
             await asyncio.sleep(
                 wake_at - time.time(),
             )  # house-ignore[sleep] -- The schedule.
-        self._calls[call.call_id].waiting = False
-        await self._run_tool_and_post(call)
+        self._calls[call.call_id].sleeping = False
+        await self._run_tool_and_post(self._calls[call.call_id])
 
-    # A failure or a cancellation is still a result, so every call is answered; a call
-    # detached meanwhile is delivered forward.
-    async def _run_tool_and_post(
-        self,
-        call: ToolCall,
-    ) -> None:
-        """Run one tool invocation, post the ``ToolResult`` to the inbox."""
-        if call.name == self.markers.arrived:
-            # No tool has this name; the model copied a delivery. Its answer waits
-            # for the next real round, so it spends no round of its own.
-            logger.debug("runtime detached-arrived mimic: call_id=%s", call.call_id)
-            self.inbox.push_back(
-                LazyEvent(
-                    payload=ToolResult(
-                        call_id=call.call_id,
-                        timestamp=now_timestamp(),
-                        state="failed",
-                        stderr=(
-                            (
-                                f"{self.markers.arrived} is not callable; detached "
-                                "results arrive automatically."
-                            ),
-                        ),
-                    ),
-                ),
-            )
-            return
+    # A failure or a cancellation is still a result, so every call is answered; the
+    # loop decides where it goes, by what the call is when it arrives.
+    async def _run_tool_and_post(self, running: _Call) -> None:
+        """Run one tool invocation, post the ``ToolMessage`` to the inbox."""
+        call = running.call
         tool = self.tools.get(call.name)
-        refused = self._refusals.pop(call.call_id, None)
-        if tool is None or refused is not None:
-            logger.debug(
-                "runtime tool not run: call_id=%s tool=%s refused=%s",
-                call.call_id,
-                call.name,
-                refused is not None,
-            )
+        if tool is None or running.refusal is not None:
             self.inbox.push_back(
-                ToolResult(
+                ToolMessage(
                     call_id=call.call_id,
                     timestamp=now_timestamp(),
                     state="failed",
                     stderr=(
-                        refused
-                        if refused is not None
+                        running.refusal
+                        if running.refusal is not None
                         else f"Unknown tool: {call.name}",
                     ),
                 ),
             )
             return
-        result: ToolResult
+        result: ToolMessage
         try:
-            logger.debug(
-                "runtime tool start: call_id=%s tool=%s",
-                call.call_id,
-                call.name,
-            )
             arguments = (
                 without_controls(call.arguments)
                 if backgroundable(tool)
@@ -2836,16 +2550,19 @@ class Runtime:
                 )
             else:
                 streaming_result = tool.call(self.tool_context, arguments)
-                running = self._calls[call.call_id]
                 running.result_future = streaming_result.result
-                watch = _Watch(name=call.name, started=time.monotonic())
-                self._watches[call.call_id] = watch
-                # A job the model asked for apart, and a tool that manages jobs,
-                # never wake it.
-                if (
-                    not running.background
-                    and self.allow_background
-                    and backgroundable(tool)
+                takes_controls = self.allow_background and backgroundable(tool)
+                watch = _Watch(
+                    name=call.name,
+                    started=time.monotonic(),
+                    runs_until_stopped=streaming_result.runs_until_stopped,
+                    every_sec=wake_period(call.arguments) if takes_controls else None,
+                )
+                running.watch = watch
+                # A job the model asked for apart wakes it only if the call said
+                # when; a tool that manages jobs never does.
+                if takes_controls and (
+                    not running.background or watch.every_sec is not None
                 ):
                     self._arm(call.call_id, watch)
                 try:
@@ -2858,165 +2575,102 @@ class Runtime:
                     )
                 finally:
                     watch.end()
+                # The tool says when its result is due; a relayed record may say so.
+                if result.due_after is None:
+                    result = dataclasses.replace(
+                        result,
+                        due_after=streaming_result.due_after,
+                    )
         except asyncio.CancelledError:
-            result = ToolResult(call_id=call.call_id, state="cancelled")
+            result = ToolMessage(call_id=call.call_id, state="cancelled")
         except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
-            result = ToolResult(
+            result = ToolMessage(
                 call_id=call.call_id,
                 state="failed",
                 stderr=(describe(exc),),
             )
-        if result.state == "failed":
-            # A failure made here ends ``stderr`` with ``describe(error)``; a record
-            # made elsewhere may hold none. Only the error's type is logged: the
-            # message may hold the tool's output.
-            logger.debug(
-                "runtime tool failed: call_id=%s tool=%s error=%s",
-                call.call_id,
-                call.name,
-                str(result.stderr[-1]).partition(":")[0] if result.stderr else "",
-            )
         if result.state == "cancelled":
-            logger.debug(
-                "runtime tool cancelled: call_id=%s tool=%s",
-                call.call_id,
-                call.name,
-            )
-            result = dataclasses.replace(result, shown=self.markers.cancelled)
-        result = dataclasses.replace(result, timestamp=now_timestamp())
-        if call.call_id in self.detached:
-            logger.debug(
-                "runtime tool complete detached: call_id=%s tool=%s is_error=%s",
-                call.call_id,
-                call.name,
-                result.is_error,
-            )
-            del self.detached[call.call_id]
-            self.inbox.push_back(DetachedResult(result=result))
-        else:
-            logger.debug(
-                "runtime tool complete cohort: call_id=%s tool=%s is_error=%s",
-                call.call_id,
-                call.name,
-                result.is_error,
-            )
-            self.inbox.push_back(result)
-        for event in self._calls[call.call_id].events_after_result:
+            result = dataclasses.replace(result, shown=self.stubs.cancelled)
+        self.inbox.push_back(dataclasses.replace(result, timestamp=now_timestamp()))
+        for event in running.events_after_result:
             self.inbox.push_back(event)
 
-    # A compaction cancelled by ``Halt`` or ``Clear`` has its failure published
-    # already, so its late outcome is dropped.
-    async def _compact_and_post(self, args: str) -> None:
-        """Run the compactor and adopt its splice."""
-        generation = self._compact_generation
+    # Queues how the compaction ended and returns what it queued, as a model call
+    # does. One a ``ModelHalt``, ``SessionClear`` or ``SessionQuit`` stopped was told
+    # to have ended there, and returns ``None``: the runtime waits for it no more.
+    async def _compact_and_post(
+        self,
+        request: SessionCompact,
+    ) -> SessionCompactCompleted | None:
+        """Run the compactor and adopt its splice; queue how ``request`` ended."""
+        queued = await self._compacted(request)
+        if queued is not None:
+            self.inbox.push_back(queued)
+        return queued
+
+    # What the tape refuses of the splice is a failure as what the compactor raises
+    # is: either way the tape is as it was.
+    async def _compacted(
+        self,
+        request: SessionCompact,
+    ) -> SessionCompactCompleted | None:
+        """Run the compactor and adopt its splice; return how it went, ``None`` if stopped."""
         if self.compactor is None:
-            self.inbox.push_back(CompactComplete())
-            return
+            return SessionCompactCompleted(outcome=Succeeded(value=SessionCompacted()))
         tape_len = len(self.tape)
         tape_snapshot = tuple(self.tape)
-        context_snapshot = self.context().messages
         try:
             override = await self.compactor.compact(
                 tape_snapshot,
-                context_snapshot,
+                self.tape.context().messages,
                 self.model,
-                self.mint_ref,
-                custom_instructions=args or None,
+                self.tape.mint_ref,
+                custom_instructions=request.summary_must_keep or None,
             )
+            if self.compact_task is not asyncio.current_task():
+                return None
+            override = widen_barrier_mask(override, tape_snapshot)
+            self.tape.adopt_record(override, discards_content=True)
         except asyncio.CancelledError:
-            return
+            # As a model call's: stopped by the runtime it was told there; cut off
+            # by no one, it failed.
+            if not _cut_off(self.compact_task):
+                return None
+            return SessionCompactCompleted(
+                outcome=Failed(
+                    exception=DisconnectedError(
+                        "The summary was cut off before it finished.",
+                    ),
+                ),
+                tape_len_before=tape_len,
+            )
         except Exception as exc:  # noqa: BLE001 -- Compaction adapter failures must be routed into the runtime error record.
             log_exception_or_warning(logger, "compaction failed", exc)
-            if generation == self._compact_generation:
-                self.inbox.push_back(
-                    CompactFailed(exception=exc, tape_len=tape_len),
-                )
-            return
-        if generation != self._compact_generation:
-            return
-        override = widen_barrier_mask(override, tape_snapshot)
-        self.adopt_record(override, discards_content=True)
-        self.inbox.push_back(CompactComplete.from_override(override))
-
-
-def _widen_mask_ranges(
-    mask: tuple[MaskRange, ...],
-    tape: Sequence[TapeRecord],
-) -> tuple[MaskRange, ...]:
-    """Return ``mask`` widened over ``tape`` without filling existing gaps."""
-    if not tape:
-        return mask
-    ordinals_by_session: dict[str, list[int]] = {}
-    for record in tape:
-        ordinals_by_session.setdefault(record.ref.session_id, []).append(
-            record.ref.ordinal,
+            if self.compact_task is not asyncio.current_task():
+                return None
+            return SessionCompactCompleted(
+                outcome=Failed(exception=exc),
+                tape_len_before=tape_len,
+            )
+        return SessionCompactCompleted(
+            outcome=Succeeded(value=SessionCompacted.from_splice(override)),
         )
-    preserved_gaps_by_session = _preserved_mask_gaps_by_session(mask)
-    widened: list[MaskRange] = []
-    for sid, ordinals in ordinals_by_session.items():
-        ordinals.sort()
-        preserved_gaps = preserved_gaps_by_session.get(sid, ())
-        start: int | None = None
-        previous: int | None = None
-        for ordinal in ordinals:
-            if any(lo < ordinal < hi for lo, hi in preserved_gaps):
-                if start is not None and previous is not None:
-                    widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
-                    start = None
-                continue
-            if start is None:
-                start = ordinal
-            previous = ordinal
-        if start is not None and previous is not None:
-            widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
-    return tuple(widened)
 
 
-def _preserved_mask_gaps_by_session(
-    mask: tuple[MaskRange, ...],
-) -> dict[str, tuple[tuple[int, int], ...]]:
-    """Return ordinal gaps between sorted mask ranges, per session_id."""
-    per_session: dict[str, list[MaskRange]] = {}
-    for r in mask:
-        per_session.setdefault(r.session_id, []).append(r)
-    return {
-        sid: tuple(
-            (left.hi, right.lo)
-            for left, right in pairwise(sorted(ranges, key=lambda r: r.lo))
-            if left.hi + 1 < right.lo
-        )
-        for sid, ranges in per_session.items()
-    }
-
-
-def _noted(system: tuple[str, ...], *, note: str) -> tuple[str, ...]:
-    """Return ``system`` with ``note`` opening its first block."""
-    if not system:
-        return (note,)
-    first, *rest = system
-    return (f"{note}\n\n{first}", *rest)
-
-
-def _entry_text(entry: ModelContextEvent) -> str:
-    """Return the provider-visible text of one context entry."""
-    if isinstance(entry, ToolResult):
-        return entry.text()
-    if isinstance(entry, TurnContext):
-        return entry.text()
-    if isinstance(entry, Response):
-        return "".join(
-            r.content or "" for r in entry.records if isinstance(r, AssistantMessage)
-        )
-    return entry.content or ""
-
-
-# ``isdecimal``, not ``isdigit``: ``"²".isdigit()`` is true, and ``int`` refuses it.
-def _mimic_index(cid: str, *, prefix: str) -> int | None:
-    """Return the ``N`` of a ``<prefix>N`` id, or ``None``."""
-    if not cid.startswith(prefix):
+# A task that crashed, or was cancelled, queued nothing.
+def _queued_by[T](task: asyncio.Task[T | None] | None) -> T | None:
+    """Return what ``task`` queued as it ended; ``None`` while it runs, or for none."""
+    if task is None or not task.done() or task.cancelled() or task.exception():
         return None
-    suffix = cid.removeprefix(prefix)
-    return int(suffix) if suffix.isdecimal() else None
+    return task.result()
+
+
+# The runtime clears its hold on a task before it cancels it, and whoever else
+# cancels a task (a loop shutting down) leaves it marked as being cancelled.
+def _cut_off(held: asyncio.Task[object] | None) -> bool:
+    """Return whether the running task, the one ``held``, ended cancelled of itself."""
+    task = asyncio.current_task()
+    return task is not None and held is task and not task.cancelling()
 
 
 def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
@@ -3024,9 +2678,17 @@ def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
     return tuple(t.__name__ for t in types)
 
 
-def _item_names(items: Sequence[object]) -> tuple[str, ...]:
-    """Return event class names for compact debug logging."""
-    return tuple(type(item).__name__ for item in items)
+def _message_ending(message: _Message, outcome: Outcome[None]) -> _Ending:
+    """Return the ending of ``message``, as ``outcome`` says it went."""
+    match message:
+        case UserMessage():
+            return UserMessageCompleted(outcome=outcome)
+        case AgentMessage():
+            return AgentMessageCompleted(outcome=outcome)
+        case SystemMessage():
+            return SystemMessageCompleted(outcome=outcome)
+        case ToolMessage():
+            return ToolMessageCompleted(outcome=outcome)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -3034,76 +2696,119 @@ class _RunningJob:
     """A tool call the runtime is running, as ``Runtime.jobs`` lists it."""
 
     call: ToolCall
-    started: float
-    state: Literal["running", "sleeping", "detached"]
+    status: Literal["running", "sleeping", "detached"]
+    runs_until_stopped: bool
     runtime: Runtime
+
+    # Every call the runtime runs was stamped as its reply was taken in.
+    @property
+    def elapsed_sec(self) -> float:
+        """How long since the model asked for the call."""
+        asked = self.call.timestamp
+        return 0.0 if asked is None else (datetime.now(UTC) - asked).total_seconds()
 
     def cancel(self) -> None:
         """Ask the runtime to cancel the call."""
-        self.runtime.push(Kill(call_id=self.call.call_id))
+        self.runtime.push(ToolHalt(call_id=self.call.call_id))
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _PendingCommit:
-    """What waits for the next model round to be committed.
+type _Message = UserMessage | AgentMessage | SystemMessage | ToolMessage
 
-    - ``"pairing"``: the answer to a ``DetachedArrived`` call the model made,
-      inserted beside the call.
-    - ``"forward"``: a detached call's result, delivered as a new arrival turn.
-    """
+# What may wait, held for a moment to come; a clear never waits.
+type _Held = SessionCompact | SessionPrune | _Message
 
-    kind: Literal["pairing", "forward"]
-    entry: ToolResult
+type _Request = _Held | SessionClear
 
 
+# What a held request waits for, named by the state told when it comes, as
+# ``due_after`` names its own: the reply streaming now to end; the model to be done;
+# the agent to be done; the next model round, for a detached call's result; nothing
+# at work, the cohort done, for a prune; the compaction under way to end.
+type _Until = type[
+    ModelResponseCompleted
+    | ModelIdle
+    | AgentIdle
+    | ModelResponseStarted
+    | ToolCohortCompleted
+    | SessionCompactCompleted
+]
+
+type _Ending = (
+    SessionCompactCompleted
+    | SessionClearCompleted
+    | SessionPruneCompleted
+    | UserMessageCompleted
+    | AgentMessageCompleted
+    | SystemMessageCompleted
+    | ToolMessageCompleted
+)
+
+
+# ``stage`` is where it stands: ``held`` until the state ``until`` is told,
+# ``in_turn`` (it ends as the turn does), or ``open`` (acted on, or yet to be).
+# Each is itself, as its request is: ``list.remove`` must take this one, not one
+# whose request is equal field for field.
+@dataclass(slots=True, kw_only=True, eq=False)
+class _Taken:
+    """A request taken in and not yet ended, what whoever asked it awaits, and where it stands."""
+
+    request: _Request
+    ended: asyncio.Future[Outcome[SessionCompacted] | Outcome[None]] | None = None
+    stage: Literal["open", "held", "in_turn"] = "open"
+    until: _Until | None = None
+    owed: bool = True
+    """Whether its ending is still to be told: a second hold of one request owes none."""
+
+
+# ``result_future`` is the task the tool runs in, for most tools, so the tool sees it
+# as ``asyncio.current_task()``. ``group`` is what detaches as one: the calls of one
+# key between ``"*"`` calls. ``status`` is where the call stands for the model: it
+# waits on it; a stub answered it and it runs apart; or its result is taken in, or
+# stands taken (a kill, a clear). ``sleeping`` is the task's own: not yet started.
 @dataclass(slots=True, kw_only=True)
 class _Call:
-    """A call the runtime runs, as ``Runtime.jobs`` lists it."""
+    """A call the runtime runs, and where it stands."""
 
     call: ToolCall
-    started: float
-    """When it was asked for, in seconds since the epoch."""
-
     key: str | None
-    """What it touches, its ``serialize_key``."""
-
-    background: bool = False
-    """Whether the model asked to run it apart, with ``background`` or ``delay``."""
-
-    waiting: bool = True
-    """Whether it still waits for the calls before it, or for its delay."""
-
+    task: asyncio.Task[None]
+    background: bool
+    status: Literal["waited", "apart", "answered"]
+    refusal: str | None
+    group: tuple[ToolCall, ...] = ()
+    sleeping: bool = True
     result_future: asyncio.Future[object] | None = None
-    """The future of the tool's result, set once the tool starts. For most tools it
-    is the task the tool runs in, so the tool sees it as ``asyncio.current_task()``."""
-
+    watch: _Watch | None = None
+    foreground_waiters: list[asyncio.Future[ToolMessage]] = dataclasses.field(
+        default_factory=list[asyncio.Future[ToolMessage]],
+    )
     events_after_result: list[RuntimeEvent] = dataclasses.field(
         default_factory=list[RuntimeEvent],
     )
-    """Events to queue right after the call's result; see ``Runtime.push_after``."""
+
+    # A later call that contends with it waits until it has stopped.
+    @property
+    def stopping(self) -> bool:
+        """Whether the call was cancelled and its task has not yet stopped."""
+        return not self.task.done() and self.task.cancelling() > 0
 
 
+# ``seen`` counts the ``items`` the model has read; ``cached`` is the model call
+# whose cache deadline set the armed wake; ``waking`` says a wake asked to tell the
+# model what the call wrote.
 @dataclass(slots=True, kw_only=True)
 class _Watch:
     """What a running call wrote, how much of it the model has read, and its next wake."""
 
     name: str
-    """The call's tool."""
-
     started: float
-    """When the tool started, by ``time.monotonic``."""
-
+    runs_until_stopped: bool = False
+    every_sec: float | None = None
     items: list[object] = dataclasses.field(default_factory=list[object])
-    """Every item the call wrote, both streams in the order written."""
-
     seen: int = 0
-    """How many of ``items`` the model has read."""
-
     timer: asyncio.TimerHandle | None = None
     cached: float | None = None
-    """The model call whose cache deadline set the armed wake; ``None`` if none did."""
-
-    ended: bool = False
+    waking: bool = False
 
     @property
     def fresh(self) -> bool:
@@ -3116,10 +2821,15 @@ class _Watch:
         self.items.append(item)
 
     def end(self) -> None:
-        """Note that the tool ended; its next wake never comes."""
-        self.ended = True
+        """Cancel the next wake: the tool ended."""
         if self.timer is not None:
             self.timer.cancel()
+
+
+# A call that has yet to start has said nothing of itself.
+def _runs_until_stopped(call: _Call) -> bool:
+    """Return whether the call's tool said it ends only when it is stopped."""
+    return call.watch is not None and call.watch.runs_until_stopped
 
 
 def _cache_key(model: Model) -> tuple[str, str]:
@@ -3149,26 +2859,6 @@ def _contend(key: str | None, earlier: str | None) -> bool:
     return earlier is not None and (key in (earlier, "*") or earlier == "*")
 
 
-def _message_from_queued(
-    item: UserQueuedMessage
-    | UserDeferredMessage
-    | AgentSendQueuedMessage
-    | AgentSendDeferredMessage,
-) -> UserMessage | AgentToAgentMessage:
-    if isinstance(item, (AgentSendQueuedMessage, AgentSendDeferredMessage)):
-        return AgentToAgentMessage(
-            sender=item.sender,
-            content=item.text,
-            attachments=item.attachments,
-        )
-    return UserMessage(content=item.text, attachments=item.attachments)
-
-
-def _forged(call: ToolCall, *, markers: Markers) -> bool:
-    """Return whether the model made ``call`` as a delivery: under its id, or the old name."""
-    return call.name == markers.arrived or call.call_id.endswith(markers.arrival)
-
-
 def _fresh_ids(call_id: str, *, used: set[str]) -> Iterator[str]:
     """Yield ``call_id``, then ``<call_id>_<n>`` for each ``n`` not yet ``used``; mark each."""
     yield call_id
@@ -3185,18 +2875,7 @@ def _last_turn(messages: Sequence[ModelContextEvent]) -> int | None:
         (
             i
             for i in range(len(messages) - 1, -1, -1)
-            if not isinstance(messages[i], (SystemMessage, TurnContext))
+            if not isinstance(messages[i], (SystemMessage, SessionContext))
         ),
         None,
     )
-
-
-def _flush_unmatched(
-    pending: dict[str, None],
-    unmatched: list[tuple[TapeRef | None, list[str]]],
-    anchor: TapeRef | None,
-) -> None:
-    """Move pending tool ids into the repair list and clear the pending map."""
-    if pending:
-        unmatched.append((anchor, list(pending)))
-    pending.clear()

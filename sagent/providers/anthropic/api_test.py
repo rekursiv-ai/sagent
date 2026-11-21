@@ -761,6 +761,8 @@ def test_the_api_offers_both_cache_lifetimes_and_retries_itself() -> None:
     assert row.thinking_output == {"none", "text", "redacted"}
     assert row.retries_internally
     assert not row.account_auth
+    # The API joins adjacent user turns: 58 input tokens for two as for one.
+    assert not row.keeps_user_turns_apart
 
 
 def test_the_catalog_is_read_once_per_section() -> None:

@@ -1,7 +1,7 @@
 """The summary compactor: starts the session over from a summary of it.
 
 The runtime calls :meth:`SummaryCompactor.compact` when it handles a
-``Compact``: on ``run``, or on its own before a model call the compactor says
+``SessionCompact``: on ``run``, or on its own before a model call the compactor says
 is due. The summary keeps a recent tail verbatim when asked, restores the skills
 the window loaded, and lists the jobs still running. It brings back no file the
 model read: the model reads again, in one turn, what it still needs, as
@@ -36,7 +36,6 @@ import asyncio
 import logging
 import math
 import re
-import time
 
 from treekle import PlainTree, from_plain, json_dumps, mutable
 
@@ -53,13 +52,16 @@ from sagent.runtime.tape import (
     unpaired_call_ids,
 )
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
+    Cancelled,
+    Failed,
+    SessionContext,
+    Succeeded,
     SystemMessage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
 )
 from sagent.tools.skill import Skill
@@ -216,12 +218,12 @@ class SummaryCompactor:
         if ceiling <= 0:
             return False
         runtime = self._agent.runtime
-        entries = runtime.context().messages
+        entries = runtime.tape.context().messages
         size = sum(map(len, runtime.system)) + sum(len(text(e)) for e in entries)
         size += sum(
             len(attachment.data) * 4 / 3
             for entry in entries
-            if isinstance(entry, (UserMessage, AgentToAgentMessage, ToolResult))
+            if isinstance(entry, (UserMessage, AgentMessage, ToolMessage))
             for attachment in entry.attachments
         )
         return size >= byte_share * ceiling
@@ -247,7 +249,7 @@ class SummaryCompactor:
                 0,
                 self._request_size(self._agent.model, request) - self._system_tokens(),
             )
-        resolved = runtime.context()
+        resolved = runtime.tape.context()
         spliced = {r.ref for r in runtime.tape if isinstance(r, ContextSplice)}
         return _request_tokens(
             self._agent.model,
@@ -321,28 +323,19 @@ class SummaryCompactor:
           instructions: What the summary must keep.
 
         Raises:
-          Exception: What the compaction raised, as ``CompactFailed`` carried it.
+          Exception: What the compaction raised, as its ``Failed`` outcome carried it.
+          asyncio.CancelledError: The compaction was cancelled.
 
         """
-        done = asyncio.Event()
-        failed: list[BaseException] = []
-
-        def observe(event: types.RuntimeEvent) -> None:
-            if isinstance(event, types.CompactComplete):
-                done.set()
-            elif isinstance(event, types.CompactFailed):
-                failed.append(event.exception)
-                done.set()
-
-        runtime = self._agent.runtime
-        runtime.observers.append(observe)
-        try:
-            runtime.push(types.Compact(args=instructions))
-            await done.wait()
-        finally:
-            runtime.observers.remove(observe)
-        if failed:
-            raise failed[0]
+        match await self._agent.runtime.ask(
+            types.SessionCompact(summary_must_keep=instructions),
+        ):
+            case Failed(exception=exc):
+                raise exc
+            case Cancelled():
+                raise asyncio.CancelledError
+            case Succeeded():
+                pass
 
     async def compact(
         self,
@@ -369,13 +362,13 @@ class SummaryCompactor:
         instructions = custom_instructions or ""
         with _at_effort(summarizer, self._effort):
             if self.style == "session-audit":
-                payload, strategy, reason, kept = await self._audit(
+                replacement, strategy, reason, kept = await self._audit(
                     summarizer,
                     list(context),
                     instructions,
                 )
             else:
-                payload, strategy, reason, kept = await self._summarize(
+                replacement, strategy, reason, kept = await self._summarize(
                     summarizer,
                     list(context),
                     instructions,
@@ -385,13 +378,13 @@ class SummaryCompactor:
             ref=mint_ref(),
             mask=full_tape_mask(tape),
             insert_after=None,
-            payload=payload,
+            replacement=replacement,
             strategy=strategy,
-            token_before=_request_tokens(summarizer, context),
-            token_after=_tokens(summarizer, payload),
-            fallback_reason=reason,
-            preserved_tail_count=kept,
-            paired_externally=unpaired_call_ids(payload),
+            masked_tokens=_request_tokens(summarizer, context),
+            replacement_tokens=_tokens(summarizer, replacement),
+            summary_fallback_reason=reason,
+            entries_kept_verbatim=kept,
+            paired_externally=unpaired_call_ids(replacement),
         )
 
     def _tail_len(self, history: Sequence[ModelContextEvent]) -> int:
@@ -432,20 +425,20 @@ class SummaryCompactor:
         if guidance := instructions.strip():
             body = _append_user_guidance(body, guidance)
         if not to_summarize:
-            payload = self._enrich(
+            replacement = self._enrich(
                 coalesce_roles([*to_keep, *pending]),
                 history=history,
             )
-            if not self._fits_payload(payload, [*to_keep, *pending]):
+            if not self._fits_replacement(replacement, [*to_keep, *pending]):
                 raise ContextOverflowError("no nonempty prefix fits a summary call")
             return (
-                payload,
+                replacement,
                 "summary_fallback",
                 "nothing to summarize",
                 len(to_keep) + len(pending),
             )
 
-        payload, reason = await self._prefixes(
+        replacement, reason = await self._prefixes(
             model,
             to_summarize,
             instruction=_summary_prompt(body),
@@ -462,7 +455,7 @@ class SummaryCompactor:
         )
         kept = len(to_keep) + len(pending)
         logger.info("compacted %d entries, kept %d", len(to_summarize), kept)
-        return payload, "summary", reason, kept
+        return replacement, "summary", reason, kept
 
     def _render_summary(
         self,
@@ -475,14 +468,14 @@ class SummaryCompactor:
         history: list[ModelContextEvent],
     ) -> tuple[ModelContextEvent, ...]:
         summary = "\n\n".join(s.content or "" for s in summaries)
-        payload = self._resumed(
+        replacement = self._resumed(
             summary,
             direction=direction,
             to_keep=[*remaining, *to_keep] if direction == "from" else to_keep,
         )
         if direction == "up_to":
-            payload = coalesce_roles([*payload, *remaining, *pending])
-        return self._enrich(payload, history=history)
+            replacement = coalesce_roles([*replacement, *remaining, *pending])
+        return self._enrich(replacement, history=history)
 
     def _resumed(
         self,
@@ -519,7 +512,7 @@ class SummaryCompactor:
         summary = _summary(response) if response is not None else None
         if summary is None:
             raise ContextOverflowError("the session audit failed")
-        payload, reason = await self._prefixes(
+        replacement, reason = await self._prefixes(
             model,
             [UserMessage(content=summary)],
             instruction=_summary_prompt(self._body(to_keep=False, direction="from")),
@@ -527,7 +520,7 @@ class SummaryCompactor:
             pending=to_keep,
         )
         logger.info("audited %d session lines, kept %d", len(lines), len(to_keep))
-        return payload, "session_audit", reason, len(to_keep)
+        return replacement, "session_audit", reason, len(to_keep)
 
     def _render_audit(
         self,
@@ -538,8 +531,8 @@ class SummaryCompactor:
         history: list[ModelContextEvent],
     ) -> tuple[ModelContextEvent, ...]:
         content = "\n\n".join(text(entry) for entry in [*summaries, *remaining])
-        payload = self._resumed(content, direction="from", to_keep=to_keep)
-        return self._enrich(payload, history=history)
+        replacement = self._resumed(content, direction="from", to_keep=to_keep)
+        return self._enrich(replacement, history=history)
 
     # An audit too long for one request has its older half summarized first, as a
     # compaction would, until the rest fits; each round must shrink it, or it fails.
@@ -602,7 +595,10 @@ class SummaryCompactor:
         remaining: list[ModelContextEvent] = list(coalesce_roles(history))
         pass_size = self._size(model, remaining)
         reason = ""
-        while force or not self._fits_payload(render(summaries, remaining), pending):
+        while force or not self._fits_replacement(
+            render(summaries, remaining),
+            pending,
+        ):
             if not remaining:
                 size = self._size(model, summaries)
                 if not summaries or size >= pass_size:
@@ -748,9 +744,9 @@ class SummaryCompactor:
             <= size + limits.context_tokens - limits.max_request_tokens
         )
 
-    def _fits_payload(
+    def _fits_replacement(
         self,
-        payload: Sequence[ModelContextEvent],
+        replacement: Sequence[ModelContextEvent],
         pending: Sequence[ModelContextEvent],
     ) -> bool:
         """Leave room for the pending input or the next compaction, whichever is larger."""
@@ -762,7 +758,7 @@ class SummaryCompactor:
             self._agent.runtime.request(max_response_tokens=0),
             records=[
                 record
-                for entry in payload
+                for entry in replacement
                 for record in (
                     entry.records if isinstance(entry, Response) else (entry,)
                 )
@@ -863,20 +859,20 @@ class SummaryCompactor:
             raise RuntimeError("The model ended its stream without a reply.")
         measurement = runtime.token_accounting.observe(snapshot, tokens=reply.tokens)
         self._agent.charge(
-            reply.spend.total,
-            by=runtime.tool_context.label,
+            reply.spend,
+            label=runtime.tool_context.label,
             measurement=measurement,
         )
         return replace(reply, measurement=measurement)
 
     def _enrich(
         self,
-        payload: tuple[ModelContextEvent, ...],
+        replacement: tuple[ModelContextEvent, ...],
         *,
         history: Sequence[ModelContextEvent],
     ) -> tuple[ModelContextEvent, ...]:
-        """Return ``payload`` with the skills in use restored and the running jobs named."""
-        entries = list(payload)
+        """Return ``replacement`` with the skills in use restored and the running jobs named."""
+        entries = list(replacement)
         skills, restored = self._skills_note(history)
         if skills:
             _append_to_first_user(entries, skills, skills=restored)
@@ -964,7 +960,7 @@ def text(entry: ModelContextEvent) -> str:
       text: Its words, a call's arguments as JSON, a result's text.
 
     """
-    if isinstance(entry, (ToolResult, TurnContext)):
+    if isinstance(entry, (ToolMessage, SessionContext)):
         return entry.text()
     if isinstance(entry, Response):
         return "".join(
@@ -982,7 +978,7 @@ def _trailing_user_tail_len(history: Sequence[ModelContextEvent]) -> int:
     for entry in reversed(history):
         if not isinstance(
             entry,
-            (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext),
+            (UserMessage, AgentMessage, SystemMessage, SessionContext),
         ):
             break
         count += 1
@@ -1136,10 +1132,10 @@ def _skills_loaded(history: Sequence[ModelContextEvent]) -> list[str]:
                 if r.name == "Skill"
                 and isinstance(name := r.arguments.get("skill"), str)
             )
-        elif isinstance(entry, ToolResult) and entry.call_id in loads:
+        elif isinstance(entry, ToolMessage) and entry.call_id in loads:
             if entry.state == "done" and not entry.is_error:
                 seen.append(loads[entry.call_id])
-        elif isinstance(entry, (UserMessage, AgentToAgentMessage)):
+        elif isinstance(entry, (UserMessage, AgentMessage)):
             # Restored blocks are written newest first. The names ride with the
             # message, not its text, which a user could have pasted.
             restored = from_plain(
@@ -1153,9 +1149,8 @@ def _skills_loaded(history: Sequence[ModelContextEvent]) -> list[str]:
 
 def _jobs_note(jobs: Mapping[str, Job]) -> str:
     """Return the jobs still running, as a note; ``""`` for none."""
-    now = time.time()
     lines = [
-        f"- [{call_id}] {job.call.name}: {job.state} ({int(now - job.started)}s since started)"
+        f"- [{call_id}] {job.call.name}: {job.status} ({int(job.elapsed_sec)}s since started)"
         for call_id, job in jobs.items()
     ]
     if not lines:
@@ -1173,7 +1168,7 @@ def _append_to_first_user(
     """Append ``text`` to the first user message, or start the entries with one."""
     extra: dict[str, PlainTree] = {"skills": list(skills)} if skills else {}
     for i, entry in enumerate(entries):
-        if isinstance(entry, (UserMessage, AgentToAgentMessage)):
+        if isinstance(entry, (UserMessage, AgentMessage)):
             joined = f"{entry.content}\n\n{text}" if entry.content is not None else text
             entries[i] = replace(entry, content=joined, extra={**entry.extra, **extra})
             return
@@ -1188,18 +1183,22 @@ def _extract(records: Iterable[SessionRecord]) -> list[str]:
     lines: list[str] = []
     for record in records:
         if isinstance(record, UserMessage):
-            who, said = "USER: ", _markers(record.content or "", record.attachments)
-        elif isinstance(record, AgentToAgentMessage):
-            who, said = f"{record.sender} to {record.recipient}: ", record.content or ""
+            who = "USER: " if record.sender is None else f"USER {record.sender}: "
+            words = _markers(record.content or "", record.attachments)
+        elif isinstance(record, AgentMessage):
+            who, words = (
+                f"{record.sender} to {record.recipient}: ",
+                record.content or "",
+            )
         elif isinstance(record, AssistantMessage):
-            who, said = "AGENT: ", record.content or ""
+            who, words = "AGENT: ", record.content or ""
         elif isinstance(record, ToolCall):
             args = json_dumps(mutable(record.arguments))[:200]
-            who, said = "TOOL ", f"{record.name} {args}"
+            who, words = "TOOL ", f"{record.name} {args}"
         else:
             continue
-        if said:
-            lines.append(f"L{len(lines) + 1} {who}{said}")
+        if words:
+            lines.append(f"L{len(lines) + 1} {who}{words}")
     return lines
 
 
@@ -1269,7 +1268,7 @@ def _tokens(model: Model, entries: Sequence[ModelContextEvent]) -> int:
     return int(chars / model.capability.approx_chars_per_token) + sum(
         model.attachment_tokens(attachment)
         for entry in entries
-        if isinstance(entry, (UserMessage, AgentToAgentMessage, ToolResult))
+        if isinstance(entry, (UserMessage, AgentMessage, ToolMessage))
         for attachment in entry.attachments
     )
 

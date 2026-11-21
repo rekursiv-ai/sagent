@@ -38,16 +38,16 @@ from sagent.providers.resources import SharedResources
 from sagent.providers.testing import refuse_browsers
 from sagent.providers.types import HasLogin
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -244,7 +244,7 @@ async def test_a_turn_starts_claude_with_our_tools_only(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_said("Hello"))
+    claude.script(_reply_output("Hello"))
     model = _model(shared)
     request = Request(
         system=("Be terse.", "Be kind."),
@@ -316,7 +316,7 @@ async def test_a_new_user_line_reaches_the_running_claude(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_said("Hello"), _said("Again"))
+    claude.script(_reply_output("Hello"), _reply_output("Again"))
     model = _model(shared)
     first = Request(records=(UserMessage(content="hi"),))
     response = _response(await _stream(model, first))
@@ -325,11 +325,11 @@ async def test_a_new_user_line_reaches_the_running_claude(
             *first.records,
             *response.records,
             UserMessage(content="more"),
-            AgentToAgentMessage(sender="lead", content="ping"),
-            AgentToAgentMessage(content="unsigned"),
-            AgentToAgentMessage(),
+            AgentMessage(sender="lead", content="ping"),
+            AgentMessage(content="unsigned"),
+            AgentMessage(),
             UserMessage(),
-            TurnContext(),
+            SessionContext(),
         ),
     )
     events = await _stream(model, second)
@@ -343,7 +343,7 @@ async def test_a_tool_call_is_held_until_its_result_is_answered(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script((*_calls("toolu_1", "Echo", {"text": "x"}), *_said("Done")))
+    claude.script((*_calls("toolu_1", "Echo", {"text": "x"}), *_reply_output("Done")))
     model = _model(shared)
     first = Request(records=(UserMessage(content="echo x"),), tools=(_Echo(),))
     response = _response(await _stream(model, first))
@@ -351,7 +351,7 @@ async def test_a_tool_call_is_held_until_its_result_is_answered(
     # The model calls our tool under the MCP server's name.
     assert response.records == (call,)
     assert response.stop_reason == "tool_use"
-    result = ToolResult(
+    result = ToolMessage(
         call_id="toolu_1",
         state="done",
         stdout=("x",),
@@ -375,17 +375,17 @@ async def test_notes_that_came_with_tool_results_reach_the_next_line_once(
         (
             *_calls("toolu_1", "Echo", {}),
             *_calls("toolu_2", "Echo", {}),
-            *_said("Done"),
+            *_reply_output("Done"),
         ),
-        _said("Noted"),
-        _said("Again"),
+        _reply_output("Noted"),
+        _reply_output("Again"),
     )
     model = _model(shared)
     records: tuple[SessionRecord, ...] = (UserMessage(content="go"),)
     records += _response(await _stream(model, Request(records=records))).records
     for call_id, note in (("toolu_1", "One changed."), ("toolu_2", "Two changed.")):
         records += (
-            ToolResult(
+            ToolMessage(
                 call_id=call_id,
                 state="done",
                 stdout=("ok",),
@@ -413,13 +413,13 @@ async def test_a_tool_results_images_are_shrunk_before_answering(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script((*_calls("toolu_1", "Echo", {}), *_said("Seen")))
+    claude.script((*_calls("toolu_1", "Echo", {}), *_reply_output("Seen")))
     model = _model(shared)
     first = Request(records=(UserMessage(content="look"),))
     (call,) = _response(await _stream(model, first)).records
     wide = Attachment(mime_descriptor="image/png", data=_png(2_600, 1))
     pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF-1.4")
-    result = ToolResult(
+    result = ToolMessage(
         call_id="toolu_1",
         state="done",
         stdout=(
@@ -447,7 +447,7 @@ async def test_a_change_the_process_cannot_hear_starts_a_fresh_claude(
     monkeypatch: pytest.MonkeyPatch,
     change: str,
 ) -> None:
-    claude.script(_said("Hello"), _said("Again"))
+    claude.script(_reply_output("Hello"), _reply_output("Again"))
     model = _model(shared)
     tools = (_Echo(),)
     first = Request(system=("S",), records=(UserMessage(content="hi"),), tools=tools)
@@ -511,7 +511,7 @@ async def test_results_for_only_some_held_calls_start_a_fresh_claude(
         ),
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {}},
     )
-    claude.script(two_calls, _said("Recovered"))
+    claude.script(two_calls, _reply_output("Recovered"))
     model = _model(shared)
     first = Request(records=(UserMessage(content="go"),))
     calls = _response(await _stream(model, first)).records
@@ -519,7 +519,7 @@ async def test_results_for_only_some_held_calls_start_a_fresh_claude(
         "toolu_1",
         "toolu_2",
     ]
-    result = ToolResult(
+    result = ToolMessage(
         call_id="toolu_1",
         state="done",
         stdout=("one",),
@@ -535,7 +535,9 @@ async def test_a_stream_event_with_no_event_is_skipped(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script([{"type": "stream_event"}, {"type": "system"}, *_said("Hello")])
+    claude.script(
+        [{"type": "stream_event"}, {"type": "system"}, *_reply_output("Hello")],
+    )
     events = await _stream(
         _model(shared),
         Request(records=(UserMessage(content="hi"),)),
@@ -548,12 +550,12 @@ async def test_a_call_that_never_reached_the_mount_starts_a_fresh_claude(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_calls("toolu_1", "Echo", {"text": "x"}), _said("Recovered"))
+    claude.script(_calls("toolu_1", "Echo", {"text": "x"}), _reply_output("Recovered"))
     shared.server.mounted.unanswerable = True
     model = _model(shared)
     first = Request(records=(UserMessage(content="echo x"),))
     (call,) = _response(await _stream(model, first)).records
-    result = ToolResult(
+    result = ToolMessage(
         call_id="toolu_1",
         state="done",
         stdout=("x",),
@@ -577,7 +579,7 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_said("Hello"))
+    claude.script(_reply_output("Hello"))
     records = (
         ContextClear(
             summary="We fixed the bug.",
@@ -586,18 +588,18 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
         ContextClear(history=(AssistantMessage(content="b"),)),
         # Messages that say nothing add no line.
         AssistantMessage(content=""),
-        AgentToAgentMessage(sender="lead", content=""),
-        AgentToAgentMessage(
+        AgentMessage(sender="lead", content=""),
+        AgentMessage(
             sender="lead",
             content="status?",
             attachments=(
                 Attachment(mime_descriptor="application/pdf", data=b"%PDF-1.4"),
             ),
         ),
-        AgentToAgentMessage(content="unsigned"),
+        AgentMessage(content="unsigned"),
         SystemMessage(content="Saved."),
         SystemMessage(content=None),
-        TurnContext(cwd="/work"),
+        SessionContext(cwd=Path("/work")),
         Thinking(content="hidden", encrypted="sig"),
         UserMessage(content="", attachments=(_png_attachment(),)),
         UserMessage(content="q"),
@@ -612,8 +614,8 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
             "Summary of the conversation so far:\nWe fixed the bug.",
             "User: a",
             "Assistant: b",
-            "Agent lead: status?",
-            "Agent: unsigned",
+            "User: [from lead]: status?",
+            "User: unsigned",
             "<system-reminder>\nSaved.\n</system-reminder>",
             "<system-reminder>\nWorking directory: /work\n</system-reminder>",
             "User: q",
@@ -791,7 +793,7 @@ async def test_claude_quiet_for_ten_minutes_has_dropped_the_turn(
     shared: _Resources,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    claude.script(_said("Hello"))
+    claude.script(_reply_output("Hello"))
     real = asyncio.wait_for
     waits: list[float | None] = []
 
@@ -807,16 +809,16 @@ async def test_claude_quiet_for_ten_minutes_has_dropped_the_turn(
 
 @pytest.mark.parametrize(
     "line",
-    [UserMessage, AgentToAgentMessage],
+    [UserMessage, AgentMessage],
     ids=["a person's", "another agent's"],
 )
 @pytest.mark.asyncio
 async def test_a_new_lines_images_and_pdfs_reach_the_running_claude(
     claude: _Stub,
     shared: _Resources,
-    line: type[UserMessage | AgentToAgentMessage],
+    line: type[UserMessage | AgentMessage],
 ) -> None:
-    claude.script(_said("Hello"), _said("A dot"))
+    claude.script(_reply_output("Hello"), _reply_output("A dot"))
     model = _model(shared)
     first = Request(records=(UserMessage(content="hi"),))
     reply = _response(await _stream(model, first)).records
@@ -887,7 +889,7 @@ async def test_a_quota_recheck_reaches_claude_despite_an_old_hold(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_said("restored"))
+    claude.script(_reply_output("restored"))
     model = _model(shared)
     key = f"claude@default/{model.capability.model_id}"
     shared.gate.hold(key, until=time.time() + 432_000.0)
@@ -927,7 +929,7 @@ async def test_a_failed_turn_leaves_the_next_to_a_fresh_claude(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script([{"type": "result", "is_error": True}], _said("Hello"))
+    claude.script([{"type": "result", "is_error": True}], _reply_output("Hello"))
     model = _model(shared)
     request = Request(records=(UserMessage(content="hi"),))
     with pytest.raises(RuntimeError):
@@ -941,7 +943,7 @@ async def test_closing_the_model_stops_claude_and_unmounts(
     claude: _Stub,
     shared: _Resources,
 ) -> None:
-    claude.script(_said("Hello"))
+    claude.script(_reply_output("Hello"))
     model = _model(shared)
     await _stream(model, Request(records=(UserMessage(content="hi"),)))
     (pid,) = claude.pids()
@@ -961,7 +963,7 @@ async def test_a_request_with_no_new_line_starts_a_fresh_claude(
     with_reply: bool,
 ) -> None:
     """A claude that already answered has nothing to answer anew."""
-    claude.script(_said("Hello"), _said("Hello again"))
+    claude.script(_reply_output("Hello"), _reply_output("Hello again"))
     model = _model(shared)
     first = Request(records=(UserMessage(content="hi"),))
     reply = _response(await _stream(model, first)).records
@@ -1109,7 +1111,7 @@ async def test_count_bills_a_tool_results_image_by_its_pixels_not_its_bytes() ->
 def _answered(*stdout: str | Attachment) -> Request:
     """Return a request whose one tool call was answered with ``stdout``."""
     call = ToolCall(call_id="toolu_1", name="Read", arguments={})
-    result = ToolResult(
+    result = ToolMessage(
         call_id="toolu_1",
         state="done",
         stdout=stdout,
@@ -1222,23 +1224,23 @@ class _Stub:
 
     def pids(self) -> list[int]:
         """Return each stub spoken to, in the order it was first spoken to."""
-        return list(dict.fromkeys(pid for pid, _ in self._said()))
+        return list(dict.fromkeys(pid for pid, _ in self._user_turns()))
 
     def processes(self) -> list[tuple[list[str], list[list[dict[str, object]]]]]:
         """Return each stub's arguments and the content of each line it read."""
-        said = self._said()
+        turns = self._user_turns()
         return [
             (
                 (self.dir / f"argv.{pid}").read_text().split("\0")[:-1],
-                [content for speaker, content in said if speaker == pid],
+                [content for speaker, content in turns if speaker == pid],
             )
             for pid in self.pids()
         ]
 
-    def _said(self) -> list[tuple[int, list[dict[str, object]]]]:
+    def _user_turns(self) -> list[tuple[int, list[dict[str, object]]]]:
         path = self.dir / "said"
         lines = path.read_text().splitlines() if path.exists() else []
-        said: list[tuple[int, list[dict[str, object]]]] = []
+        turns: list[tuple[int, list[dict[str, object]]]] = []
         for line in lines:
             pid, _, raw = line.partition(" ")
             message = json_loads(raw, dict[str, object])
@@ -1246,8 +1248,8 @@ class _Stub:
             body = from_plain(message["message"], dict[str, object])
             assert body["role"] == "user"
             content = from_plain(body["content"], list[dict[str, object]])
-            said.append((int(pid), content))
-        return said
+            turns.append((int(pid), content))
+        return turns
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1258,8 +1260,8 @@ class _Mount:
     offered: list[tuple[Tool, ...]] = field(
         default_factory=list[tuple["Tool", ...]],
     )
-    answered: list[tuple[ToolCall, ToolResult]] = field(
-        default_factory=list[tuple[ToolCall, ToolResult]],
+    answered: list[tuple[ToolCall, ToolMessage]] = field(
+        default_factory=list[tuple[ToolCall, ToolMessage]],
     )
     unanswerable: bool = False
     """Whether every call is one the CLI never made, as for a tool it lacks."""
@@ -1272,7 +1274,7 @@ class _Mount:
     async def called(self) -> ToolCall:
         raise AssertionError("The claude transport reads its calls from its output.")
 
-    async def answer(self, call: ToolCall, result: ToolResult) -> None:
+    async def answer(self, call: ToolCall, result: ToolMessage) -> None:
         if self.unanswerable:
             raise TimeoutError
         self.answered.append((call, result))
@@ -1402,7 +1404,7 @@ def _streamed(*events: Mapping[str, object]) -> list[dict[str, object]]:
     return [{"type": "stream_event", "event": dict(event)} for event in events]
 
 
-def _said(text: str) -> list[dict[str, object]]:
+def _reply_output(text: str) -> list[dict[str, object]]:
     """Return the output of a turn in which the model says ``text``."""
     return [
         *_streamed(
@@ -1472,6 +1474,17 @@ def _png(width: int, height: int) -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (width, height), "red").save(out, format="PNG")
     return out.getvalue()
+
+
+def test_a_person_who_is_not_the_session_s_user_is_named_as_an_agent_is() -> None:
+    bob = UserMessage(sender="bob", content="hi")
+
+    assert cli._prompt_line(bob) == "[from user bob]: hi"
+    # A fresh process hears the line as a running one does: one label, one way.
+    assert cli._transcript((bob, UserMessage(content="mine"))) == [
+        "User: [from user bob]: hi",
+        "User: mine",
+    ]
 
 
 def _png_attachment() -> Attachment:

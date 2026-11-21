@@ -53,7 +53,7 @@ from sagent.providers.openai import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted.calls import read_calls
 from sagent.providers.table import ModelTags
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
+from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 from sagent.types import AsyncResource
 
 
@@ -568,7 +568,7 @@ def _messages(request: Request) -> list[dict[str, object]]:
         said = wire.user_content(record)
         if said is not None:
             messages.append({"role": "user", "content": said[0]})
-        elif isinstance(record, ToolResult):
+        elif isinstance(record, ToolMessage):
             text = record.text()
             messages.append(
                 {

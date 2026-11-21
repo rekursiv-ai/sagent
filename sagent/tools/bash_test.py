@@ -24,7 +24,7 @@ import pytest
 
 from sagent.lib.posix.child import Child
 from sagent.lib.posix.pids import gone_within, running
-from sagent.session.types import BashResult, ToolResult
+from sagent.session.types import BashResult, ToolMessage
 from sagent.tools import bash
 from sagent.tools.bash import (
     Bash,
@@ -1530,7 +1530,7 @@ async def test_killing_the_calling_process_leaves_no_shell_behind(
 async def test_a_call_is_recorded_whole_and_the_shell_names_itself_bash(
     tmp_path: Path,
 ) -> None:
-    assert await _run(tmp_path, 'echo "$0"') == ToolResult(
+    assert await _run(tmp_path, 'echo "$0"') == ToolMessage(
         call_id="",
         state="done",
         stdout=("bash\n",),
@@ -1637,7 +1637,7 @@ async def test_a_job_slower_than_the_grace_is_killed_mid_cleanup(
     assert not (tmp_path / "got.term").exists()
 
 
-def _view(result: ToolResult) -> str:
+def _view(result: ToolMessage) -> str:
     """Return what the model reads of the output, less the ``[exit N]`` it ends with."""
     return re.sub(r"\n\[exit -?\d+\]$", "", result.text())
 
@@ -1775,7 +1775,7 @@ def _arguments(command: str) -> dict[str, PlainTree]:
     return {"command": command, "description": "Run it"}
 
 
-def _code(result: ToolResult[BashResult, str, str]) -> int | None:
+def _code(result: ToolMessage[BashResult, str, str]) -> int | None:
     """Return the exit code in ``result``."""
     tool_result = result.result
     assert tool_result is not None
@@ -1789,7 +1789,7 @@ async def _run(
     *,
     limit_ms: float | None = None,
     tool: Bash | None = None,
-) -> ToolResult[BashResult, str, str]:
+) -> ToolMessage[BashResult, str, str]:
     """Run ``command`` with ``tool`` in a fresh context at ``cwd``, as the model would."""
     arguments = _arguments(command)
     if limit_ms is not None:

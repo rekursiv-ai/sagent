@@ -13,7 +13,7 @@ import stat
 import pytest
 
 from sagent.lib.userdirs import state_dir
-from sagent.session.types import ToolResult, WriteResult
+from sagent.session.types import ToolMessage, WriteResult
 from sagent.tools import write
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext, settled
@@ -116,7 +116,7 @@ async def test_a_new_file_is_made_with_its_directories(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     result = await _write(context, "deep/er/notes.md", "hello\n")
     target = tmp_path / "deep" / "er" / "notes.md"
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=(f"Wrote {target}.",),
@@ -310,7 +310,7 @@ async def _write(
     context: ToolContext,
     file_path: str,
     content: str,
-) -> ToolResult:
+) -> ToolMessage:
     """Write ``content`` to ``file_path``; the runtime names the call."""
     result = await settled(
         Write().call(context, {"file_path": file_path, "content": content}),

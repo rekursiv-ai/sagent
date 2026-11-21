@@ -30,7 +30,7 @@ from sagent.session.types import (
     Attachment,
     BashResult,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools.display import ToolDisplay
@@ -81,7 +81,7 @@ async def test_held_calls_are_reported_once_each_oldest_first() -> None:
     assert isinstance(a.arguments, MappingProxyType)
     await mount.answer(
         a,
-        ToolResult(
+        ToolMessage(
             call_id=a.call_id,
             state="done",
             stdout=("A",),
@@ -90,7 +90,7 @@ async def test_held_calls_are_reported_once_each_oldest_first() -> None:
     )
     await mount.answer(
         b,
-        ToolResult(
+        ToolMessage(
             call_id=b.call_id,
             state="done",
             stdout=("B",),
@@ -112,7 +112,7 @@ async def test_called_waits_for_a_call() -> None:
     assert call.name == "Echo"
     await mount.answer(
         call,
-        ToolResult(
+        ToolMessage(
             call_id="",
             state="done",
             stdout=("x",),
@@ -131,7 +131,7 @@ async def test_an_answered_call_is_never_reported() -> None:
     known = ToolCall(call_id="c", name="Echo", arguments={"k": 1})
     await mount.answer(
         known,
-        ToolResult(
+        ToolMessage(
             call_id="c",
             state="done",
             stdout=("r",),
@@ -144,7 +144,7 @@ async def test_an_answered_call_is_never_reported() -> None:
     assert dict(reported.arguments) == {"k": 2}
     await mount.answer(
         reported,
-        ToolResult(
+        ToolMessage(
             call_id="",
             state="done",
             stdout=("s",),
@@ -164,7 +164,7 @@ async def test_an_answer_matches_its_call_by_name_and_arguments() -> None:
     call = ToolCall(call_id="c", name="Echo", arguments={"k": 1})
     await mount.answer(
         call,
-        ToolResult(
+        ToolMessage(
             call_id="c",
             state="done",
             stdout=("mine",),
@@ -187,7 +187,7 @@ async def test_an_answer_waits_for_its_call_to_arrive() -> None:
     answering = asyncio.ensure_future(
         mount.answer(
             call,
-            ToolResult(
+            ToolMessage(
                 call_id="c",
                 state="done",
                 stdout=("late",),
@@ -212,7 +212,7 @@ async def test_an_answer_to_a_call_never_made_times_out(
     with pytest.raises(TimeoutError):
         await mount.answer(
             call,
-            ToolResult(call_id="c", state="done", result=UncategorizedToolResult()),
+            ToolMessage(call_id="c", state="done", result=UncategorizedToolResult()),
         )
 
 
@@ -231,7 +231,7 @@ async def test_an_answer_to_a_call_the_cli_gave_up_on_is_dropped() -> None:
     call = ToolCall(call_id="c", name="Echo", arguments={})
     await mount.answer(
         call,
-        ToolResult(
+        ToolMessage(
             call_id="c",
             state="done",
             stdout=("x",),
@@ -243,7 +243,11 @@ async def test_an_answer_to_a_call_the_cli_gave_up_on_is_dropped() -> None:
         async with asyncio.timeout(0.01):
             await mount.answer(
                 call,
-                ToolResult(call_id="c", state="done", result=UncategorizedToolResult()),
+                ToolMessage(
+                    call_id="c",
+                    state="done",
+                    result=UncategorizedToolResult(),
+                ),
             )
 
 
@@ -269,7 +273,7 @@ async def test_a_result_reaches_the_cli_with_its_images_and_error_flag() -> None
     pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF")
     holding = asyncio.ensure_future(mount.hold("Bash", arguments={}))
     call = await mount.called()
-    result = ToolResult(
+    result = ToolMessage(
         call_id=call.call_id,
         state="failed",
         stdout=(
@@ -299,7 +303,7 @@ async def test_a_result_with_no_error_flag_is_no_error() -> None:
     call = await mount.called()
     await mount.answer(
         call,
-        ToolResult(
+        ToolMessage(
             call_id=call.call_id,
             state="done",
             stdout=("ok",),
@@ -337,7 +341,7 @@ async def test_a_cli_lists_a_mounts_tools_and_its_call_waits_for_the_caller() ->
             assert (call.name, dict(call.arguments)) == ("Echo", {"text": "hi"})
             await mount.answer(
                 call,
-                ToolResult(
+                ToolMessage(
                     call_id="",
                     state="done",
                     stdout=("hi!",),

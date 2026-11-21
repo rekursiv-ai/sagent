@@ -11,6 +11,7 @@ several match picks from:
     (actions)        quit, exit, help, clear, compact, halt, kill, send, ...
     model.*          the agent's model: AgentModel
     tool.NAME.*      each tool's display: ToolDisplaySettings
+    tool.Recall.*    the server and the session Recall searches: RecallSettings
     runtime.*        when a call detaches, how a rate limit waits: RuntimeSettings
     screen.*         whether reasoning shows: ScreenSettings
     mcp.*            the MCP servers, added, removed, signed in: McpSettings
@@ -34,7 +35,7 @@ agent and on each it sends a line to; every other is refused with one line, and
 
 Typical usage example:
 
-  commands = Commands(agent, catalog=catalog, say=scrollback.show, screen=printer,
+  commands = Commands(agent, catalog=catalog, print_output=scrollback.show, screen=printer,
                       panes=panes)
   done = await commands("/compact keep the API design")
 """
@@ -52,7 +53,6 @@ import fnmatch
 import logging
 import os
 import re
-import time
 
 from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
@@ -60,7 +60,10 @@ from sagent.lib.userdirs import config_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
 from sagent.providers.types import HasLogin, HasLogins
 from sagent.runtime import types
-from sagent.session.types import UserMessage
+from sagent.session.types import (
+    AgentIdle,
+    UserMessage,
+)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
 from sagent.settings.harvest import harvest
@@ -68,10 +71,12 @@ from sagent.settings.match import match
 from sagent.settings.types import Setting
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.mcp_settings import McpSettings
+from sagent.tools.recall import Recall
 from sagent.tools.remote_settings import RemoteSettings
 from sagent.tui.prompt import Panes
 from sagent.tui.render import error_text
 from sagent.tui.settings.model import AgentModel
+from sagent.tui.settings.recall import RecallSettings
 from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.settings.screen import ScreenSettings
 from sagent.tui.settings.tool import ToolDisplaySettings
@@ -116,7 +121,7 @@ class Commands:
     Args:
       agent: What the commands change.
       catalog: Where the model's settings find models.
-      say: Where each command says what it did.
+      print_output: Where each command says what it did.
       screen: Whether reasoning shows; ``/screen.thinking`` flips it.
       panes: What waits, emptied by ``/kill all``.
       team: The agents reachable by label; ``None`` for a lone agent.
@@ -133,7 +138,7 @@ class Commands:
         agent: Agent,
         *,
         catalog: ModelCatalog,
-        say: Callable[[CommandOutput], None],
+        print_output: Callable[[CommandOutput], None],
         screen: ThinkingView,
         panes: Panes,
         team: Team | None = None,
@@ -146,7 +151,7 @@ class Commands:
         self.agent = agent
         self.team = team
         self.catalog = catalog
-        self.say = say
+        self.print_output = print_output
         self.screen = screen
         self.panes = panes
         self.focus = focus
@@ -161,8 +166,8 @@ class Commands:
         """Return what exports settings, each after where it is mounted, in order.
 
         Returns:
-          owners: These actions, the model, each tool, the runtime, the screen,
-            then the MCP servers.
+          owners: These actions, the model, each tool, where Recall searches, the
+            runtime, the screen, then the MCP servers.
 
         """
         tools = self.agent.runtime.tools
@@ -173,11 +178,16 @@ class Commands:
                 (("tool", name), ToolDisplaySettings(tools=tools, name=name))
                 for name in tools
             ),
+            *(
+                (("tool", name), RecallSettings(tools=tools))
+                for name, tool in tools.items()
+                if isinstance(tool, Recall)
+            ),
             (("runtime",), RuntimeSettings(runtime=self.agent.runtime)),
             (("screen",), ScreenSettings(view=self.screen, theme=self.theme)),
             *owners_without_agent(
                 cwd=self.agent.runtime.tool_context.origin,
-                say=self.say,
+                print_output=self.print_output,
             ),
         ]
 
@@ -409,7 +419,7 @@ class Commands:
         # not run as whatever allowed setting its letters happen to spell.
         setting = match(harvest(self.owners()), typed)
         if setting is None:
-            self._say("error", f"unknown command: /{typed}; see /help")
+            self._print_output("error", f"unknown command: /{typed}; see /help")
             return self.done
         await self._run(setting, args.strip())
         return self.done
@@ -427,17 +437,21 @@ class Commands:
         key = ".".join(setting.name)
         shown = f"/{key}"
         if self.allowed is not None and not self.allowed.allows(setting.name):
-            self._say("error", f"{shown} {self.allowed.refusal}")
+            self._print_output("error", f"{shown} {self.allowed.refusal}")
             return
         if not args and setting.value is not None:
-            self._say("note", _valued(setting.value, setting.options), command=shown)
+            self._print_output(
+                "note",
+                _valued(setting.value, setting.options),
+                command=shown,
+            )
             return
         rolls = setting.value is not None and not any(
             setting.name[: len(own)] == own for own in _OWN
         )
         given = self._given(key) if rolls and args == "default" else None
         chosen = args if given is None else given
-        if not await apply_setting(setting, chosen, say=self.say):
+        if not await apply_setting(setting, chosen, print_output=self.print_output):
             return
         if rolls and self.team is not None and self._label in self.team:
             self.team.choose(self._label, key, None if args == "default" else args)
@@ -478,7 +492,7 @@ class Commands:
         try:
             _ = await take(args)
         except ValueError as e:
-            self._say("error", error_text(e), command=f"{self._label} /{key}")
+            self._print_output("error", error_text(e), command=f"{self._label} /{key}")
             return
         if self.team is not None:
             await self._roll(self.team, key, args)
@@ -493,14 +507,14 @@ class Commands:
             if key not in mine:
                 await self.take(key, args)
 
-    def _say(
+    def _print_output(
         self,
         tone: Literal["line", "note", "error"],
         text: str,
         *,
         command: str = "",
     ) -> None:
-        self.say(CommandOutput(text=text, tone=tone, command=command))
+        self.print_output(CommandOutput(text=text, tone=tone, command=command))
 
     def _spawn(self, name: str, work: Coroutine[object, object, None]) -> None:
         """Run ``work`` as a task; a failure prints under ``name``."""
@@ -510,7 +524,7 @@ class Commands:
         def done(t: asyncio.Task[None]) -> None:
             self._tasks.discard(t)
             if not t.cancelled() and (e := t.exception()) is not None:
-                self._say("error", error_text(e), command=name)
+                self._print_output("error", error_text(e), command=name)
 
         task.add_done_callback(done)
 
@@ -586,7 +600,7 @@ class Commands:
             commands = self._children[label] = Commands(
                 team[label],
                 catalog=self.catalog,
-                say=self.say,
+                print_output=self.print_output,
                 screen=self.screens(label) if self.screens is not None else self.screen,
                 panes=Panes(),
                 team=team,
@@ -643,7 +657,7 @@ class Commands:
         if not args:
             raise SettingError("needs an ID, a LABEL, or all")
         if args == "all":
-            self.agent.runtime.push(types.Kill())
+            self.agent.runtime.push(types.ToolHalt())
             self.panes.clear()
             return "cancelled all tool calls"
         if args in jobs:
@@ -724,14 +738,13 @@ class Commands:
     async def _jobs(self, args: str) -> str:
         del args
         jobs = self.agent.runtime.jobs
-        now = time.time()
         children = self.team.persistent() if self.team is not None else []
         return "\n".join(
             [
                 f"{len(jobs)} running tool call(s), {len(children)} persistent agent(s)",
                 *(
-                    f"  {call_id:<28s}  {job.call.name:<16s}  {job.state:<9s}"
-                    f"  {now - job.started:.0f}s"
+                    f"  {call_id:<28s}  {job.call.name:<16s}  {job.status:<9s}"
+                    f"  {job.elapsed_sec:.0f}s"
                     for call_id, job in jobs.items()
                 ),
                 *(f"  {label:<28s}  persistent agent" for label in children),
@@ -741,7 +754,7 @@ class Commands:
     async def _defer(self, args: str) -> str:
         if not args:
             raise SettingError("needs TEXT")
-        self.agent.runtime.push(types.UserDeferredMessage(text=args))
+        self.agent.runtime.push(UserMessage(content=args, due_after=AgentIdle))
         return ""
 
 
@@ -787,19 +800,19 @@ class Allowed:
 def owners_without_agent(
     *,
     cwd: Path,
-    say: Callable[[CommandOutput], None],
+    print_output: Callable[[CommandOutput], None],
 ) -> list[tuple[tuple[str, ...], HasSettings]]:
     """Return the owners that need no agent, so run from the shell with no model.
 
     Args:
       cwd: The working directory, which names the project.
-      say: Where they say what they do along the way, such as a sign-in's page.
+      print_output: Where they say what they do along the way, such as a sign-in's page.
 
     Returns:
       owners: Each owner, after where it is mounted.
 
     """
-    show = partial(_say_note, say)
+    show = partial(_print_note, print_output)
     serve = ServeDirs(
         secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
         state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
@@ -815,14 +828,14 @@ async def apply_setting(
     setting: Setting,
     args: str,
     *,
-    say: Callable[[CommandOutput], None],
+    print_output: Callable[[CommandOutput], None],
 ) -> bool:
     """Apply ``args`` to ``setting``; say what it did, or why it could not.
 
     Args:
       setting: What was named.
       args: What followed its name.
-      say: Where it is said, each saying ``/NAME`` as its command.
+      print_output: Where it is printed, each output naming ``/NAME`` as its command.
 
     Returns:
       done: Whether it applied.
@@ -830,12 +843,12 @@ async def apply_setting(
     """
     shown = f"/{'.'.join(setting.name)}"
     try:
-        said = await setting.apply(args)
+        applied = await setting.apply(args)
     except ValueError as e:
-        say(CommandOutput(text=error_text(e), tone="error", command=shown))
+        print_output(CommandOutput(text=error_text(e), tone="error", command=shown))
         return False
-    if said:
-        say(CommandOutput(text=said.rstrip(), tone="note", command=shown))
+    if applied:
+        print_output(CommandOutput(text=applied.rstrip(), tone="note", command=shown))
     return True
 
 
@@ -880,8 +893,8 @@ def help_text(
     )
 
 
-def _say_note(say: Callable[[CommandOutput], None], text: str) -> None:
-    say(CommandOutput(text=text, tone="note"))
+def _print_note(print_output: Callable[[CommandOutput], None], text: str) -> None:
+    print_output(CommandOutput(text=text, tone="note"))
 
 
 def _login_parser() -> ActionParser:

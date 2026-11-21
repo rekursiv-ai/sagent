@@ -17,6 +17,9 @@ import pytest
 
 from sagent.lib.userdirs import config_dir
 from sagent.runtime import types
+from sagent.session.types import (
+    AgentIdle,
+)
 from sagent.tools.bash import Bash
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.console import (
@@ -780,8 +783,8 @@ def test_a_halt_is_bold_red_between_rules(width: int, rule: int) -> None:
     assert "".join(_visible(r) for r in raw).count("─") == 2 * rule
 
 
-def _status(text: str) -> types.StatusChanged:
-    return types.StatusChanged(text=text)
+def _status(text: str) -> types.SessionTitleChanged:
+    return types.SessionTitleChanged(title=text)
 
 
 def test_the_title_is_an_osc_on_a_terminal_stderr(
@@ -803,7 +806,7 @@ def test_the_title_is_written_only_when_it_changes(
     title = Title()
     title(_status("a"))
     title(_status(" a "))
-    title(types.AgentIdle())
+    title(AgentIdle())
     title(_status("b"))
     assert tty.getvalue() == "\x1b]0;a\x07\x1b]0;b\x07"
 

@@ -40,7 +40,7 @@ from sagent.session.types import (
     Thinking,
     TokenUsage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -550,19 +550,19 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
             AssistantMessage(content=" both."),
             ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a"}),
             ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b"}),
-            ToolResult(
+            ToolMessage(
                 call_id="toolu_a",
                 state="done",
                 stdout=("x = 1",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="toolu_b",
                 state="done",
                 stdout=("gone",),
                 result=UncategorizedToolResult(exit_code=1),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="toolu_c",
                 state="done",
                 result=UncategorizedToolResult(exit_code=1),
@@ -603,7 +603,7 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
             UserMessage(content="b"),
             AssistantMessage(content="c"),
             ToolCall(call_id="x", name="Read"),
-            ToolResult(
+            ToolMessage(
                 call_id="x",
                 state="done",
                 stdout=("r",),

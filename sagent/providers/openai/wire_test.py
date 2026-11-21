@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import base64
@@ -27,13 +28,13 @@ from sagent.model.types import Request
 from sagent.providers.openai import wire
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     Attachment,
     ContextClear,
+    SessionContext,
     SystemMessage,
     TokenUsage,
-    TurnContext,
     UserMessage,
 )
 
@@ -141,11 +142,15 @@ def test_user_content_is_what_each_record_says_on_the_users_side() -> None:
         (image,),
     )
     assert wire.user_content(UserMessage()) == ("", ())
+    # A person other than the session's user is named, as another agent is.
     assert wire.user_content(
-        AgentToAgentMessage(content="done", sender="worker", attachments=(image,)),
+        UserMessage(content="hi", sender="bob", attachments=(image,)),
+    ) == ("[from user bob]: hi", (image,))
+    assert wire.user_content(
+        AgentMessage(content="done", sender="worker", attachments=(image,)),
     ) == ("[from worker]: done", (image,))
-    assert wire.user_content(AgentToAgentMessage(content="anon")) == ("anon", ())
-    assert wire.user_content(AgentToAgentMessage(sender="worker")) == (
+    assert wire.user_content(AgentMessage(content="anon")) == ("anon", ())
+    assert wire.user_content(AgentMessage(sender="worker")) == (
         "[from worker]: ",
         (),
     )
@@ -153,13 +158,13 @@ def test_user_content_is_what_each_record_says_on_the_users_side() -> None:
         "<system-reminder>\nnote\n</system-reminder>",
         (),
     )
-    assert wire.user_content(TurnContext(cwd="/w")) == (
+    assert wire.user_content(SessionContext(cwd=Path("/w"))) == (
         "<system-reminder>\nWorking directory: /w\n</system-reminder>",
         (),
     )
     for unsaid in (
         SystemMessage(content=""),
-        TurnContext(),
+        SessionContext(),
         AssistantMessage(content="mine"),
         TokenUsage(),
     ):
@@ -190,7 +195,7 @@ def test_cache_key_is_one_uuid_per_conversation() -> None:
     later = Request(
         system=("Be terse.",),
         records=(
-            TurnContext(cwd="/w"),
+            SessionContext(cwd=Path("/w")),
             UserMessage(content="fix it"),
             AssistantMessage(content="done"),
             UserMessage(content="again"),

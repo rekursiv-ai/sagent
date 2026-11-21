@@ -664,6 +664,7 @@ providers:
     sends: [thinking_effort, thinking_budget, thinking_output, service_tier,
             cache_ttl_sec, manage_context_server_side]
     retries_internally: true
+    keeps_user_turns_apart: true
     thinking: {effort: [none, low]}
     models:
       example-1.0: {account_auth: true}
@@ -687,6 +688,7 @@ providers:
     assert row.thinking_off_max_effort == "low"
     assert row.retries_internally
     assert row.account_auth
+    assert row.keeps_user_turns_apart
     assert row.service_tier == {"auto", "default", "priority"}
     assert row.prices.window == 1000
     # A card applies to prompts past its threshold, up to the next card's.

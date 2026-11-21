@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import asyncio
-import time
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.formatted_text import FormattedText
@@ -91,25 +90,23 @@ class Row:
     """The job's call; ``""`` on an agent's row."""
 
 
-def rows(team: Lineage, *, focused: str, now: float | None = None) -> list[Row]:
+def rows(team: Lineage, *, focused: str) -> list[Row]:
     """Return the tree's rows: each root, then what is under it, depth first.
 
     Args:
       team: The agents.
       focused: The agent the screen shows; its row is marked ``●``.
-      now: The epoch time jobs are timed to; the clock's when omitted.
 
     Returns:
       rows: An agent's row, its jobs' rows, then its children's, in join order.
 
     """
-    at = time.time() if now is None else now
     under: dict[str | None, list[str]] = {}
     for label in team:
         under.setdefault(team.parent(label), []).append(label)
     out: list[Row] = []
     # pragma: no mutate start -- a root draws no branch, so its lead is never read.
-    _walk(team, under, None, lead="", focused=focused, now=at, out=out)
+    _walk(team, under, None, lead="", focused=focused, out=out)
     # pragma: no mutate end
     return out
 
@@ -270,7 +267,6 @@ def _walk(
     *,
     lead: str,
     focused: str,
-    now: float,
     out: list[Row],
 ) -> None:
     """Add each child of ``parent`` to ``out``: its row, its jobs, then its children."""
@@ -305,8 +301,8 @@ def _walk(
                     text=tool.summary(job.call.arguments)
                     if tool is not None
                     else job.call.name,
-                    state=job.state,
-                    detail=elapsed(max(now - job.started, 0.0)),
+                    state=job.status,
+                    detail=elapsed(max(job.elapsed_sec, 0.0)),
                     call_id=call_id,
                 ),
             )
@@ -316,6 +312,5 @@ def _walk(
             label,
             lead=below,
             focused=focused,
-            now=now,
             out=out,
         )

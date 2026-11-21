@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
-from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
 
+import asyncio
 import math
 import time
 
@@ -19,8 +18,9 @@ from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import (
     Pruner,
     Saving,
+    client_policy,
     cut,
-    drop,
+    eligible,
     expired,
     idle,
     left_in,
@@ -43,16 +43,19 @@ from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.runtime import types
 from sagent.runtime.tape import ContextSplice
-from sagent.runtime.types import Markers
 from sagent.session.types import (
     AssistantMessage,
     BashResult,
+    Cancelled,
     EditResult,
+    Failed,
     LineSpan,
+    Outcome,
     ReadResult,
+    Succeeded,
     SystemMessage,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
     WriteResult,
@@ -61,10 +64,11 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Sequence
+    from collections.abc import Collection, Sequence
     from pathlib import Path
 
     from sagent.agent.types import Factory, Shrinker
+    from sagent.model.types import Response
     from sagent.runtime.types import ModelContextEvent
     from sagent.session.types import SessionRecord
 
@@ -86,7 +90,6 @@ def _agent(
     tmp_path: Path,
     *,
     price: TokenPrice | None = _CACHED,
-    stub: str | None = None,
     window: int = 200_000,
     compactor: Factory[Shrinker] = NoShrinker,
 ) -> tuple[Agent, Pruner, ScriptedProvider]:
@@ -112,7 +115,7 @@ def _agent(
     agent = Agent(
         model=provider["priced"],
         compactor=compactor,
-        pruner=Pruner if stub is None else partial(Pruner, stub=stub),
+        pruner=Pruner,
         tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
     )
@@ -133,7 +136,7 @@ def _turns(*results: str, tail: str = "done", requests: int = 0) -> list[Session
     for i, content in enumerate(results):
         records.append(ToolCall(call_id=f"c{i}", name="Read"))
         records.append(
-            ToolResult(
+            ToolMessage(
                 call_id=f"c{i}",
                 state="done",
                 stdout=(content,),
@@ -155,7 +158,7 @@ def _read(
     """Return a Read of ``ranges`` of ``path``, 1000 tokens long; all of it when none."""
     return [
         ToolCall(call_id=call_id, name="Read", arguments={"file_path": path}),
-        ToolResult(
+        ToolMessage(
             call_id=call_id,
             state="done",
             stdout=("x" * 4000, *(LineSpan(start=s, count=n) for s, n in ranges)),
@@ -169,14 +172,14 @@ def _unnamed(call_id: str, tool: str) -> list[SessionRecord]:
     tool_result = ReadResult(exit_code=1) if tool == "Read" else BashResult(exit_code=1)
     return [
         ToolCall(call_id=call_id, name=tool),
-        ToolResult(call_id=call_id, state="done", stderr=("no",), result=tool_result),
+        ToolMessage(call_id=call_id, state="done", stderr=("no",), result=tool_result),
     ]
 
 
 def _shell(call_id: str, command: str) -> list[SessionRecord]:
     return [
         ToolCall(call_id=call_id, name="Bash", arguments={"command": command}),
-        ToolResult(
+        ToolMessage(
             call_id=call_id,
             state="done",
             stdout=("o" * 4000,),
@@ -187,12 +190,12 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
 
 def _ids(context: Sequence[ModelContextEvent], indices: Collection[int]) -> set[str]:
     return {
-        entry.call_id for i in indices if isinstance(entry := context[i], ToolResult)
+        entry.call_id for i in indices if isinstance(entry := context[i], ToolMessage)
     }
 
 
 def _results(agent: Agent) -> dict[str, str]:
-    return {r.call_id: r.text() for r in agent.session if isinstance(r, ToolResult)}
+    return {r.call_id: r.text() for r in agent.session if isinstance(r, ToolMessage)}
 
 
 def _prunes(agent: Agent) -> list[ContextSplice]:
@@ -257,7 +260,7 @@ def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> Non
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="read", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="read",
             state="done",
             stdout=("x" * 4000,),
@@ -266,7 +269,7 @@ def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> Non
         AssistantMessage(content="ok"),
         UserMessage(content="next"),
         ToolCall(call_id="unread", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="unread",
             state="done",
             stdout=("y" * 4000,),
@@ -334,7 +337,7 @@ def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
     context: list[ModelContextEvent] = [
         reply(calls=[r]) if isinstance(r, ToolCall) else r
         for r in records
-        if isinstance(r, ToolCall | ToolResult)
+        if isinstance(r, ToolCall | ToolMessage)
     ]
 
     assert _ids(context, superseded(context)) == gone
@@ -343,9 +346,9 @@ def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
 def test_a_result_is_idle_since_its_file_was_last_named() -> None:
     context = [
         reply(calls=[ToolCall(call_id="a", name="Read", arguments={"file_path": _P})]),
-        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
+        ToolMessage(call_id="a", state="done", result=ReadResult(path=_P)),
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        ToolResult(
+        ToolMessage(
             call_id="g",
             state="done",
             stdout=("hit",),
@@ -360,7 +363,7 @@ def test_a_result_is_idle_since_its_file_was_last_named() -> None:
                 ),
             ],
         ),
-        ToolResult(
+        ToolMessage(
             call_id="s",
             state="done",
             stdout=("line",),
@@ -375,14 +378,14 @@ def test_a_result_is_idle_since_its_file_was_last_named() -> None:
                 ),
             ],
         ),
-        ToolResult(
+        ToolMessage(
             call_id="e",
             state="done",
             result=EditResult(path="/repo/y.py"),
         ),
         reply("done"),
     ]
-    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolMessage)}
     k = reads(context)
 
     quiet = idle(context)
@@ -459,7 +462,7 @@ def _read_turn(
         *_turns(requests=before),
         UserMessage(content="look"),
         ToolCall(call_id="g", name="Grep", arguments={"pattern": "x", "path": named}),
-        ToolResult(
+        ToolMessage(
             call_id="g",
             state="done",
             stdout=("hit",),
@@ -473,11 +476,11 @@ def _read_turn(
 def test_a_file_result_naming_no_file_is_idle_since_it_came() -> None:
     context = [
         reply(calls=[ToolCall(call_id="e", name="Edit")]),
-        ToolResult(call_id="e", state="done", result=EditResult()),
+        ToolMessage(call_id="e", state="done", result=EditResult()),
         reply(
             calls=[ToolCall(call_id="g", name="Grep", arguments={"pattern": "None"})],
         ),
-        ToolResult(
+        ToolMessage(
             call_id="g",
             state="done",
             stdout=("hit",),
@@ -493,7 +496,7 @@ def test_a_file_result_naming_no_file_is_idle_since_it_came() -> None:
 def test_a_file_named_only_before_its_result_is_idle_since_it_came() -> None:
     context = [
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        ToolResult(
+        ToolMessage(
             call_id="g",
             state="done",
             stdout=("hit",),
@@ -503,10 +506,10 @@ def test_a_file_named_only_before_its_result_is_idle_since_it_came() -> None:
             "editing",
             calls=[ToolCall(call_id="e", name="Edit", arguments={"file_path": _P})],
         ),
-        ToolResult(call_id="e", state="done", result=EditResult(path=_P)),
+        ToolMessage(call_id="e", state="done", result=EditResult(path=_P)),
         reply("done"),
     ]
-    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolMessage)}
 
     assert idle(context)[at["e"]] == reads(context)[at["e"]] < reads(context)[at["g"]]
 
@@ -519,10 +522,10 @@ def test_a_file_result_after_one_naming_no_file_is_still_followed() -> None:
                 ToolCall(call_id="a", name="Read", arguments={"file_path": _P}),
             ],
         ),
-        ToolResult(call_id="e", state="done", result=WriteResult()),
-        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
+        ToolMessage(call_id="e", state="done", result=WriteResult()),
+        ToolMessage(call_id="a", state="done", result=ReadResult(path=_P)),
         reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
-        ToolResult(
+        ToolMessage(
             call_id="g",
             state="done",
             stdout=("hit",),
@@ -530,15 +533,19 @@ def test_a_file_result_after_one_naming_no_file_is_still_followed() -> None:
         ),
         reply("done"),
     ]
-    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolMessage)}
 
     assert idle(context)[at["a"]] == reads(context)[at["g"]] < reads(context)[at["a"]]
 
 
 @pytest.mark.parametrize("server", [False, True])
-def test_with_no_policy_to_prune_by_nothing_is_planned(server: bool) -> None:
+def test_with_no_policy_to_prune_by_nothing_is_planned(
+    tmp_path: Path,
+    *,
+    server: bool,
+) -> None:
     context = [
-        ToolResult(
+        ToolMessage(
             call_id="a",
             state="done",
             stdout=("x" * 64,),
@@ -546,28 +553,25 @@ def test_with_no_policy_to_prune_by_nothing_is_planned(server: bool) -> None:
         ),
         reply("done"),
     ]
-    splice = Mock()
-    agent = Mock(
-        spec=Agent,
-        model=Mock(
-            settings=ModelSettings(
-                pruning=PruningPolicy(keep_recent=0) if server else None,
-                manage_context_server_side=server,
-            ),
+    agent = Agent(
+        model=ScriptedProvider(
             capability=ModelCapability(limits=ModelLimits(max_request_tokens=16)),
-        ),
-        session=Mock(compactor=Mock(spec=NoShrinker)),
-        runtime=Mock(
-            observers=[],
-            context=Mock(return_value=Mock(messages=context)),
-            append_splice=splice,
-        ),
+        )["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
     )
-    pruner = Pruner(agent, stub="gone")
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0) if server else None,
+        manage_context_server_side=server,
+    )
+    for entry in context:
+        _ = agent.runtime.tape.append_history(entry)
+    before = list(agent.runtime.tape)
+    pruner = Pruner(agent)
 
     assert not pruner.should_run()
     assert not pruner.prune()
-    splice.assert_not_called()
+    assert list(agent.runtime.tape) == before
 
 
 def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
@@ -578,8 +582,8 @@ def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
                 ToolCall(call_id="numeric", name="Read", arguments={"file_path": "2"}),
             ],
         ),
-        ToolResult(call_id="a", state="done", result=ReadResult(path=_P)),
-        ToolResult(
+        ToolMessage(call_id="a", state="done", result=ReadResult(path=_P)),
+        ToolMessage(
             call_id="numeric",
             state="done",
             result=ReadResult(path="2"),
@@ -645,7 +649,7 @@ def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
     agent.session.append(
         UserMessage(content="go"),
         ToolCall(call_id="early", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="early",
             state="done",
             stdout=("e" * 40_000,),
@@ -654,7 +658,7 @@ def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
         AssistantMessage(content="a" * 40_000),
         UserMessage(content="more"),
         ToolCall(call_id="late", name="Read"),
-        ToolResult(
+        ToolMessage(
             call_id="late",
             state="done",
             stdout=("l" * 40_000,),
@@ -676,7 +680,9 @@ def test_an_expired_cache_makes_any_drop_pay(
     agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    agent.runtime.publish(types.ModelResponseComplete(response=reply("ok")))
+    agent.runtime.publish(
+        types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
+    )
 
     now[0] += 300.0
     assert not pruner.should_run()  # Still warm at its lifetime.
@@ -684,6 +690,30 @@ def test_an_expired_cache_makes_any_drop_pay(
 
     assert pruner.prune()
     assert _results(agent) == {"c0": _STUB, "c1": _STUB}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [Cancelled(), Failed(exception=RuntimeError("down"))],
+    ids=["cancelled", "failed"],
+)
+def test_a_call_that_brought_no_reply_warms_no_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Outcome[Response],
+) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    agent.runtime.publish(
+        types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
+    )
+    now[0] += 301.0
+
+    agent.runtime.publish(types.ModelResponseCompleted(outcome=outcome))
+
+    assert pruner.should_run()
 
 
 def test_without_a_cache_discount_every_drop_pays(tmp_path: Path) -> None:
@@ -754,195 +784,6 @@ def test_an_hour_long_cache_prices_its_rewrite_at_the_hour_rate(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("policy", "server", "kept"),
-    [
-        (None, False, {"c0", "c1", "c2", "c3"}),
-        (PruningPolicy(keep_recent=0), True, {"c0", "c1", "c2", "c3"}),
-        (PruningPolicy(keep_recent=1), False, {"c3"}),
-        (PruningPolicy(keep_recent=9), False, {"c0", "c1", "c2", "c3"}),
-        (PruningPolicy(keep_recent=0, keep_tools=frozenset({"Memory"})), False, {"c1"}),
-    ],
-)
-async def test_the_policy_says_which_results_may_go(
-    monkeypatch: pytest.MonkeyPatch,
-    policy: PruningPolicy | None,
-    server: bool,
-    kept: set[str],
-) -> None:
-    async def schedule(work: Callable[[], Awaitable[None]]) -> None:
-        await work()
-
-    context = [
-        reply(
-            calls=[
-                ToolCall(call_id=f"c{i}", name="Memory" if i == 1 else "Read")
-                for i in range(4)
-            ],
-        ),
-        *(
-            ToolResult(
-                call_id=f"c{i}",
-                state="done",
-                stdout=(str(i) * 2,),
-                result=UncategorizedToolResult(),
-            )
-            for i in range(4)
-        ),
-        reply("done"),
-    ]
-    scheduled = AsyncMock(side_effect=schedule)
-    runtime = Mock(
-        observers=[],
-        context=Mock(return_value=Mock(messages=context)),
-        schedule=scheduled,
-    )
-    agent = Mock(
-        spec=Agent,
-        model=Mock(
-            settings=ModelSettings(pruning=policy, manage_context_server_side=server),
-        ),
-        runtime=runtime,
-    )
-    pruner = Pruner(agent, stub="_")
-    dropped = Mock()
-    monkeypatch.setattr(pruner_module, "drop", dropped)
-
-    await pruner.run()
-
-    scheduled.assert_awaited_once()
-    dropped.assert_called_once_with(
-        runtime,
-        [i + 1 for i in range(4) if f"c{i}" not in kept],
-        stub="_",
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_small_result_or_a_stub_is_never_dropped(tmp_path: Path) -> None:
-    agent, pruner, _ = _agent(tmp_path, stub="[gone]")
-    pending = ToolResult(call_id="c1", state="pending", stdout=(Markers().detached,))
-    async with agent:
-        agent.session.append(
-            UserMessage(content="go"),
-            ToolCall(call_id="c0", name="Read"),
-            ToolResult(
-                call_id="c0",
-                state="done",
-                stdout=("tiny",),
-                result=UncategorizedToolResult(),
-            ),
-            ToolCall(call_id="c1", name="Bash"),
-            pending,
-            ToolCall(call_id="c2", name="Read"),
-            ToolResult(
-                call_id="c2",
-                state="done",
-                stdout=("x" * 400,),
-                result=UncategorizedToolResult(exit_code=1),
-            ),
-            AssistantMessage(content="started"),
-        )
-
-        await pruner.run()
-
-    results = {r.call_id: r for r in agent.session if isinstance(r, ToolResult)}
-    assert results["c0"].text() == "tiny"
-    assert results["c1"] == pending
-    assert (results["c2"].text(), results["c2"].is_error) == ("[gone]", True)
-
-
-@pytest.mark.parametrize(
-    ("entry", "can"),
-    [
-        (UserMessage(content="x" * 400), False),
-        (SystemMessage(content="x" * 400, subtype="reminder"), False),
-        (SystemMessage(content="[talk c1]\n" + "x" * 400, subtype="wake"), True),
-        (ToolResult(call_id="c", state="cancelled", shown=Markers().cancelled), False),
-        (ToolResult(call_id="c", state="done", stdout=("x" * 400,)), True),
-    ],
-    ids=["user", "reminder", "wake", "killed", "result"],
-)
-def test_only_a_tool_s_output_that_a_drop_shrinks_is_prunable(
-    entry: ModelContextEvent,
-    *,
-    can: bool,
-) -> None:
-    assert prunable(entry, stub="[gone]") is can
-
-
-@pytest.mark.asyncio
-async def test_a_long_call_s_news_goes_as_its_output_would(tmp_path: Path) -> None:
-    """A stub holding what a detached call wrote, and a wake's news, are output too."""
-    agent, pruner, _ = _agent(tmp_path, stub="[gone]")
-    news = "[talk c1 still running after 15s]\n" + "y" * 400
-    async with agent:
-        agent.session.append(
-            UserMessage(content="go"),
-            ToolCall(call_id="c1", name="Bash"),
-            ToolResult(
-                call_id="c1",
-                state="pending",
-                shown=f"{Markers().detached}\n" + "x" * 400,
-            ),
-            AssistantMessage(content="waiting"),
-            SystemMessage(content=news, subtype="wake"),
-            SystemMessage(content="z" * 400, subtype="reminder"),
-            AssistantMessage(content="still waiting"),
-        )
-
-        await pruner.run()
-
-    results = {r.call_id: r for r in agent.session if isinstance(r, ToolResult)}
-    notes = [
-        r for r in agent.runtime.context().messages if isinstance(r, SystemMessage)
-    ]
-    # Each keeps its first line: which call it is, and what became of it.
-    assert (results["c1"].text(), results["c1"].state) == (
-        f"{Markers().detached}\n[gone]",
-        "pending",
-    )
-    assert [(n.subtype, n.content) for n in notes] == [
-        ("wake", "[talk c1 still running after 15s]\n[gone]"),
-        ("reminder", "z" * 400),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_wakes_after_a_result_do_not_push_it_out_of_the_newest_kept(
-    tmp_path: Path,
-) -> None:
-    """``keep_recent`` counts tool results; a long call's news is not one."""
-    agent, pruner, _ = _agent(tmp_path, stub="[gone]")
-    agent.model.settings = replace(
-        agent.model.settings,
-        pruning=PruningPolicy(keep_recent=1, expiry=0.0),
-    )
-    wakes = [
-        SystemMessage(
-            content=f"[talk c9 still running after {s}s]\n" + "y" * 400,
-            subtype="wake",
-        )
-        for s in (15, 30)
-    ]
-    async with agent:
-        agent.session.append(
-            UserMessage(content="go"),
-            ToolCall(call_id="c0", name="Read"),
-            ToolResult(call_id="c0", state="done", stdout=("x" * 400,)),
-            AssistantMessage(content="read it"),
-            wakes[0],
-            AssistantMessage(content="waiting"),
-            wakes[1],
-            AssistantMessage(content="still"),
-        )
-
-        await pruner.run()
-
-    assert _results(agent) == {"c0": "x" * 400}
-
-
-@pytest.mark.asyncio
 async def test_a_forced_prune_forgets_the_files_read_and_runs_once(
     tmp_path: Path,
 ) -> None:
@@ -982,7 +823,7 @@ async def test_the_runtime_prunes_before_a_model_call_that_it_pays_for(
         assert await agent.send("next") == "noted"
 
     (request,) = provider.requests
-    sent = [r for r in request.records if isinstance(r, ToolResult)]
+    sent = [r for r in request.records if isinstance(r, ToolMessage)]
     assert [r.text() for r in sent] == [_STUB]
 
 
@@ -1120,37 +961,6 @@ def test_a_saving_needs_a_result_to_drop() -> None:
         _ = saving([1.0], [], stub=0.0, prices=None, left=1.0)
 
 
-def test_only_a_tool_result_may_be_dropped(tmp_path: Path) -> None:
-    agent, _, _ = _agent(tmp_path)
-    agent.session.append(*_turns("x" * 400))
-    with pytest.raises(ValueError, match="Entry 0 is no tool output"):
-        drop(agent.runtime, [0], stub="gone")
-    drop(agent.runtime, [], stub="gone")
-    drop(agent.runtime, [2], stub="gone")
-    assert _results(agent) == {"c0": "gone"}
-
-
-def test_a_drop_replaces_what_an_earlier_drop_kept(tmp_path: Path) -> None:
-    agent, _, _ = _agent(tmp_path)
-    agent.session.append(
-        *_turns("x" * 400, "y" * 400),
-        ToolCall(call_id="lost", name="Read"),
-        UserMessage(content="next"),
-        AssistantMessage(content="ok"),
-    )
-    at = [
-        i
-        for i, e in enumerate(agent.runtime.context().messages)
-        if isinstance(e, ToolResult)
-    ]
-
-    drop(agent.runtime, at[:1], stub="gone")
-    drop(agent.runtime, at[1:], stub="gone")
-
-    assert _results(agent) == {"c0": "gone", "c1": "gone"}
-    assert [p.paired_externally for p in _prunes(agent)] == [frozenset({"lost"})] * 2
-
-
 def test_nothing_eligible_is_nothing_to_cut() -> None:
     assert (
         cut(
@@ -1210,7 +1020,7 @@ def test_the_compactor_s_own_trigger_is_the_limit(tmp_path: Path) -> None:
     compacting.session.append(*records)
     plain, plain_pruner, _ = _agent(tmp_path, price=None, window=4000)
     plain.session.append(*records)
-    held = sum(sizes(compacting.model, compacting.runtime.context().messages))
+    held = sum(sizes(compacting.model, compacting.runtime.tape.context().messages))
     assert limit_tokens(compacting) < held < limit_tokens(plain)
 
     assert compacting_pruner.should_run()
@@ -1270,9 +1080,9 @@ def test_a_drop_at_the_trigger_averts_compaction_unexpired(tmp_path: Path) -> No
     records = _turns("x" * 8000)
     agent.session.append(*records)
     # Padded to the 3,000-token trigger exactly.
-    held = sum(sizes(agent.model, agent.runtime.context().messages))
+    held = sum(sizes(agent.model, agent.runtime.tape.context().messages))
     agent.session.append(UserMessage(content="p" * int((3000 - held) * 4)))
-    assert sum(sizes(agent.model, agent.runtime.context().messages)) == 3000
+    assert sum(sizes(agent.model, agent.runtime.tape.context().messages)) == 3000
 
     assert pruner.prune()
     assert _results(agent) == {"c0": _STUB}
@@ -1287,21 +1097,279 @@ def test_a_model_with_no_cache_has_none_to_go_cold(
     agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    agent.runtime.publish(types.ModelResponseComplete(response=reply("ok")))
+    agent.runtime.publish(
+        types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
+    )
     now[0] += 1.0
 
     assert not pruner.should_run()
 
 
+@dataclass(slots=True, kw_only=True)
+class _Asked:
+    """A pruner over a real agent whose runtime ends each prune with ``outcome``."""
+
+    pruner: Pruner
+    asked: list[types.SessionPrune]
+
+
+def _asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Outcome[None],
+    *context: ModelContextEvent,
+    keep_recent: int = 0,
+) -> _Asked:
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=keep_recent),
+    )
+    for entry in context:
+        _ = agent.runtime.tape.append_history(entry)
+    asked: list[types.SessionPrune] = []
+
+    async def ask(request: types.SessionPrune) -> Outcome[None]:
+        asked.append(request)
+        return outcome
+
+    monkeypatch.setattr(agent.runtime, "ask", ask)
+    return _Asked(pruner=Pruner(agent), asked=asked)
+
+
 @pytest.mark.asyncio
-async def test_a_pruner_takes_no_instructions() -> None:
-    scheduled = AsyncMock()
-    pruner = Pruner(Mock(spec=Agent, runtime=Mock(observers=[], schedule=scheduled)))
+async def test_a_pruner_takes_no_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _asked(tmp_path, monkeypatch, Succeeded(value=None))
 
     with pytest.raises(ValueError, match=r"^A pruner takes no instructions\.$"):
-        await pruner.run("keep the plan")
+        await runtime.pruner.run("keep the plan")
 
-    scheduled.assert_not_awaited()
+    assert runtime.asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_forced_prune_asks_the_runtime_for_all_the_policy_lets_go(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _asked(
+        tmp_path,
+        monkeypatch,
+        Succeeded(value=None),
+        reply(calls=[ToolCall(call_id="c0", name="Read")]),
+        ToolMessage(call_id="c0", state="done", stdout=("x" * 400,)),
+        ToolMessage(call_id="c9", state="pending", stdout=("wake\n" + "y" * 400,)),
+        reply("done"),
+    )
+
+    await runtime.pruner.run()
+
+    assert runtime.asked == [
+        types.SessionPrune(
+            call_ids=("c0", "c9"),
+            reason="every output the policy lets go",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_forced_prune_names_no_call_with_an_output_the_policy_keeps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call run apart has several outputs, and a prune names the call: all of them."""
+    runtime = _asked(
+        tmp_path,
+        monkeypatch,
+        Succeeded(value=None),
+        reply(calls=[ToolCall(call_id="c9", name="Bash")]),
+        ToolMessage(call_id="c9", state="pending", shown="[detached]"),
+        reply("waiting"),
+        ToolMessage(call_id="c9", state="pending", stdout=("news\n" + "y" * 400,)),
+        reply("still waiting"),
+        ToolMessage(call_id="c9", state="done", stdout=("z" * 400,)),
+        reply("done"),
+        keep_recent=1,
+    )
+
+    await runtime.pruner.run()
+
+    assert runtime.asked == [
+        types.SessionPrune(call_ids=(), reason="every output the policy lets go"),
+    ]
+
+
+def _result(call_id: str, text: str = "x" * 400) -> ToolMessage:
+    return ToolMessage(call_id=call_id, state="done", stdout=(text,))
+
+
+def _wake(call_id: str, text: str = "x" * 400) -> ToolMessage:
+    return ToolMessage(
+        call_id=call_id,
+        state="pending",
+        stdout=(f"[talk {call_id} still running after 15s]\n{text}",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy", "server", "client"),
+    [
+        (None, False, None),
+        (PruningPolicy(keep_recent=1), False, PruningPolicy(keep_recent=1)),
+        (PruningPolicy(keep_recent=1), True, None),
+    ],
+    ids=["no-policy", "the-client-prunes", "the-server-prunes"],
+)
+def test_the_client_prunes_by_the_policy_unless_the_server_does(
+    policy: PruningPolicy | None,
+    server: bool,
+    client: PruningPolicy | None,
+) -> None:
+    settings = ModelSettings(pruning=policy, manage_context_server_side=server)
+    assert client_policy(settings) == client
+
+
+def test_an_entry_is_read_by_each_reply_after_it() -> None:
+    context = [
+        UserMessage(content="go"),
+        reply(calls=[ToolCall(call_id="c0", name="Read")]),
+        _result("c0"),
+        reply("done"),
+        UserMessage(content="more"),
+    ]
+    assert reads(context) == [2, 1, 1, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("entry", "can"),
+    [
+        (UserMessage(content="x" * 400), False),
+        (SystemMessage(content="x" * 400, subtype="reminder"), False),
+        (_wake("c1"), True),
+        (ToolMessage(call_id="c1", state="pending"), False),
+        (
+            ToolMessage(call_id="c", state="cancelled", shown=types.Stubs().cancelled),
+            False,
+        ),
+        (ToolMessage(call_id="c", state="done", stdout=("tiny",)), False),
+        (ToolMessage(call_id="c", state="done", stdout=("sixsix",)), False),
+        (ToolMessage(call_id="c", state="done", stdout=("x" * 400,)), True),
+    ],
+    ids=[
+        "user",
+        "reminder",
+        "wake",
+        "empty-wake",
+        "killed",
+        "small",
+        "as-long-as-the-stub",
+        "result",
+    ],
+)
+def test_only_a_tool_s_output_that_a_drop_shrinks_is_prunable(
+    entry: ModelContextEvent,
+    *,
+    can: bool,
+) -> None:
+    assert prunable(entry, stub="[gone]") is can
+
+
+@pytest.mark.parametrize(
+    ("policy", "kept"),
+    [
+        (None, {"c0", "c1", "c2", "c3"}),
+        (PruningPolicy(keep_recent=0), set[str]()),
+        (PruningPolicy(keep_recent=1), {"c3"}),
+        (PruningPolicy(keep_recent=9), {"c0", "c1", "c2", "c3"}),
+        (PruningPolicy(keep_recent=0, keep_tools=frozenset({"Memory"})), {"c1"}),
+    ],
+    ids=["no-policy", "none-kept", "the-newest", "more-than-there-are", "a-kept-tool"],
+)
+def test_the_policy_says_which_results_may_go(
+    policy: PruningPolicy | None,
+    kept: set[str],
+) -> None:
+    context = [
+        reply(
+            calls=[
+                ToolCall(call_id=f"c{i}", name="Memory" if i == 1 else "Read")
+                for i in range(4)
+            ],
+        ),
+        *(_result(f"c{i}", str(i) * 2) for i in range(4)),
+        reply("done"),
+    ]
+    assert eligible(context, policy, stub="_") == [
+        i + 1 for i in range(4) if f"c{i}" not in kept
+    ]
+
+
+def test_an_output_no_reply_has_followed_may_not_go() -> None:
+    context = [
+        reply(calls=[ToolCall(call_id="c0", name="Read")]),
+        _result("c0"),
+        reply(calls=[ToolCall(call_id="c1", name="Read")]),
+        _result("c1"),
+    ]
+    assert eligible(context, PruningPolicy(keep_recent=0), stub="_") == [1]
+
+
+def test_an_output_a_drop_would_not_shrink_may_not_go() -> None:
+    context = [
+        reply(calls=[ToolCall(call_id="c0", name="Read")]),
+        _result("c0", "tiny"),
+        ToolMessage(call_id="c1", state="pending", shown=types.Stubs().detached),
+        _result("c2"),
+        reply("done"),
+    ]
+    assert eligible(context, PruningPolicy(keep_recent=0), stub="[gone]") == [3]
+
+
+def test_a_long_call_s_news_may_go_and_is_no_result_to_keep() -> None:
+    """``keep_recent`` counts tool results; a wake after one does not push it out."""
+    context = [
+        reply(calls=[ToolCall(call_id="c0", name="Read")]),
+        _result("c0"),
+        reply("read it"),
+        _wake("c9"),
+        SystemMessage(content="x" * 400, subtype="reminder"),
+        reply("waiting"),
+        _wake("c9"),
+        reply("still"),
+    ]
+    assert eligible(context, PruningPolicy(keep_recent=1), stub="[gone]") == [3, 6]
+
+
+@pytest.mark.asyncio
+async def test_a_forced_prune_that_fails_raises_what_stopped_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _asked(
+        tmp_path,
+        monkeypatch,
+        Failed(exception=ValueError("no such entry")),
+    )
+
+    with pytest.raises(ValueError, match=r"^no such entry$"):
+        await runtime.pruner.run()
+
+
+@pytest.mark.asyncio
+async def test_a_forced_prune_the_runtime_quit_before_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _asked(tmp_path, monkeypatch, Cancelled())
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.pruner.run()
 
 
 if __name__ == "__main__":

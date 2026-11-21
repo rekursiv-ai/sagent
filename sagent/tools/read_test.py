@@ -16,7 +16,7 @@ from PIL import Image
 import pypdfium2 as pdfium
 import pytest
 
-from sagent.session.types import LineSpan, ReadResult, ToolResult
+from sagent.session.types import LineSpan, ReadResult, ToolMessage
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.read import Read, _count
 from sagent.tools.types import ToolContext, parse, settled
@@ -918,7 +918,7 @@ async def test_a_file_that_is_no_memory_carries_no_age(
 async def _read(
     cwd: Path,
     **arguments: PlainTree,
-) -> ToolResult:
+) -> ToolMessage:
     """Read with ``arguments`` in a fresh context at ``cwd``; the runtime names the call."""
     streaming_result = Read().call(ToolContext(cwd=cwd), arguments)
     result = await settled(streaming_result)

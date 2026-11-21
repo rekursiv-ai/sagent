@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.recording import RecordingPrinter, Said
+from sagent.tui.recording import PrintedEntry, RecordingPrinter
 from sagent.tui.types import Header, Printer
 
 
@@ -26,21 +26,21 @@ def test_every_kind_is_one_entry_with_its_display_and_its_cut() -> None:
     printer.failed("f", header=read)
     printer.halt("h")
     assert printer.entries == [
-        Said(kind="line", text="l"),
-        Said(kind="note", text="c: n"),
-        Said(kind="user", text="u"),
-        Said(kind="agent", text="w→me: a"),
-        Said(kind="markdown", text="m"),
-        Said(kind="thinking", text="[t]"),
-        Said(kind="call", text="Read a.py", display=_SHOWN),
-        Said(kind="output", text="o", display=_SHOWN),
-        Said(kind="diff", text="a.py\n@@ -1 +1 @@\n-a\n+b", lines=(1, 1)),
-        Said(kind="error", text="e"),
-        Said(kind="call", text="Read a.py", display=_SHOWN),
-        Said(kind="failed", text="f"),
-        Said(kind="halt", text="h"),
+        PrintedEntry(kind="line", text="l"),
+        PrintedEntry(kind="note", text="c: n"),
+        PrintedEntry(kind="user", text="u"),
+        PrintedEntry(kind="agent", text="w→me: a"),
+        PrintedEntry(kind="markdown", text="m"),
+        PrintedEntry(kind="thinking", text="[t]"),
+        PrintedEntry(kind="call", text="Read a.py", display=_SHOWN),
+        PrintedEntry(kind="output", text="o", display=_SHOWN),
+        PrintedEntry(kind="diff", text="a.py\n@@ -1 +1 @@\n-a\n+b", lines=(1, 1)),
+        PrintedEntry(kind="error", text="e"),
+        PrintedEntry(kind="call", text="Read a.py", display=_SHOWN),
+        PrintedEntry(kind="failed", text="f"),
+        PrintedEntry(kind="halt", text="h"),
     ]
-    assert printer.said[:2] == [("line", "l"), ("note", "c: n")]
+    assert printer.printed[:2] == [("line", "l"), ("note", "c: n")]
     assert printer.displays == [_SHOWN, _SHOWN, _SHOWN]
     assert printer.cuts == [(1, 1)]
 

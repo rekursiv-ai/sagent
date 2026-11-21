@@ -70,7 +70,7 @@ from sagent.lib.userdirs import config_dir, state_dir
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     UncategorizedToolResult,
     stored_record,
 )
@@ -632,8 +632,8 @@ async def test_upgrade_preserves_accepted_remote_work_without_replaying_it(
                 await local.until(lambda _: peer in a.outside)
                 a.send("a", peer, "after upgrade")
                 messages = await b["b"].runtime.inbox.drain()
-            assert [m for m in messages if isinstance(m, AgentToAgentMessage)] == [
-                AgentToAgentMessage(
+            assert [m for m in messages if isinstance(m, AgentMessage)] == [
+                AgentMessage(
                     sender=f"a#{local_a.session_id}",
                     recipient="b",
                     content="after upgrade",
@@ -1690,7 +1690,7 @@ async def test_reply_debts_survive_a_resumable_disconnect(
             a.send("a", target, "request")
             async with asyncio.timeout(5):
                 messages = await b["b"].runtime.inbox.drain()
-            assert any(isinstance(m, AgentToAgentMessage) for m in messages)
+            assert any(isinstance(m, AgentMessage) for m in messages)
             dropped, live = (
                 (sender, second) if disconnected == "sender" else (receiver, first)
             )
@@ -1717,8 +1717,7 @@ async def test_reply_debts_survive_a_resumable_disconnect(
             async with asyncio.timeout(5):
                 messages = await a["a"].runtime.inbox.drain()
             assert any(
-                isinstance(m, AgentToAgentMessage) and m.content == "reply"
-                for m in messages
+                isinstance(m, AgentMessage) and m.content == "reply" for m in messages
             )
             assert a.owes(target) == {}
             assert b.owes("b") == {}

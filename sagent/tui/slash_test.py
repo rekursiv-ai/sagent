@@ -35,7 +35,8 @@ from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentIdle,
+    AgentMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -44,7 +45,13 @@ from sagent.settings.harvest import harvest
 from sagent.settings.types import Setting
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.mcp_settings import McpSettings
-from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
+from sagent.tools.recall import Recall
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 from sagent.tui import slash
 from sagent.tui.prompt import Panes, Staged
 from sagent.tui.recording import RecordingPrinter
@@ -64,7 +71,6 @@ if TYPE_CHECKING:
         ProviderResources,
     )
     from sagent.settings.types import HasSettings
-    from sagent.tools.types import ToolContext
 
 
 @pytest.fixture(autouse=True)
@@ -272,7 +278,7 @@ class _Desk:
         self.commands = Commands(
             self.agent,
             catalog=self.catalog,
-            say=Scrollback(self.printer, tools=self.agent.tools).show,
+            print_output=Scrollback(self.printer, tools=self.agent.tools).show,
             screen=self.printer,
             panes=self.panes,
             team=self.team,
@@ -326,7 +332,7 @@ async def test_theme_edits_are_live_terminal_settings_not_inherited_choices() ->
     assert desk.team.choices == {}
     await desk.commands("/screen.theme.default.thinking italic magenta")
     assert desk.commands.theme.current.name == "user1"
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "note",
         "[/screen.theme.default.thinking] user1.thinking: italic magenta",
     )
@@ -341,13 +347,13 @@ async def test_theme_edits_preserve_the_teams_independent_messaging_choice() -> 
     await desk.commands("/screen.theme paper")
     await desk.commands("/screen.theme.paper.status bold cyan")
     await desk.commands("/peer-messaging")
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "note",
         "[/peer-messaging] off   (on, off, default)",
     )
     await desk.commands("/send kid /peer-messaging default")
     await desk.commands("/peer-messaging invalid")
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "error",
         "[/peer-messaging] 'invalid' is not one of: on, off, default",
     )
@@ -372,7 +378,7 @@ async def test_a_line_naming_what_is_not_allowed_is_refused_and_changes_nothing(
     await desk.commands("/send kid /screen.thinking show")
     await desk.commands("/kid.screen.thinking show")
     await desk.commands("/thinking.effort none")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("error", "/screen.thinking is not available here"),
         ("error", "/screen.thinking is not available here"),
         ("error", "/screen.thinking is not available here"),
@@ -386,7 +392,7 @@ async def test_a_line_naming_what_is_not_allowed_is_refused_and_changes_nothing(
 async def test_a_send_that_is_not_allowed_runs_nothing_on_the_agent_it_names() -> None:
     desk, _ = _teamed("kid", allowed=replace(_ALLOWED, names=frozenset({"help"})))
     await desk.commands("/kid.help")
-    assert desk.printer.said == [("error", "/send is not available here")]
+    assert desk.printer.printed == [("error", "/send is not available here")]
     await desk.commands.aclose()
 
 
@@ -411,7 +417,7 @@ async def test_help_lists_only_what_a_line_may_reach() -> None:
     await desk.commands("/help")
     listed = [
         row.split()[0]
-        for row in desk.printer.said[-1][1].split("\n")
+        for row in desk.printer.printed[-1][1].split("\n")
         if row.startswith("  /")
     ]
     assert listed == [
@@ -428,16 +434,16 @@ def action_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Commands, Mock, list[CommandOutput]]:
     runtime = Mock(tool_context=Mock(label="Agent"))
-    said: list[CommandOutput] = []
+    printed: list[CommandOutput] = []
     commands = Commands(
         Mock(spec=Agent, runtime=runtime),
         catalog=Mock(spec=ModelCatalog),
-        say=said.append,
+        print_output=printed.append,
         screen=_View(),
         panes=Panes(),
     )
     monkeypatch.setattr(Commands, "owners", Mock(return_value=[((), commands)]))
-    return commands, runtime, said
+    return commands, runtime, printed
 
 
 @pytest.mark.asyncio
@@ -489,6 +495,30 @@ async def test_an_unknown_command_points_at_help(
 
 def _names(desk: _Desk) -> list[str]:
     return [".".join(s.name) for s in harvest(desk.commands.owners())]
+
+
+def test_where_recall_searches_is_exported_only_with_recall_among_the_tools() -> None:
+    desk = _Desk()
+    assert [n for n in _names(desk) if n.startswith("tool.Recall.")] == []
+
+    desk.agent.runtime.tools["Recall"] = Recall(
+        team=Team(catalog=desk.catalog),
+        url="https://trax.example",
+    )
+
+    names = _names(desk)
+    own = [n for n in names if n.startswith("tool.Recall.") and ".display." not in n]
+    assert own == ["tool.Recall.url", "tool.Recall.session"]
+    # The settings read the tool the agent holds.
+    assert [
+        s.value()
+        for s in harvest(desk.commands.owners())
+        if s.name == ("tool", "Recall", "url") and s.value is not None
+    ] == ["https://trax.example"]
+    assert names.index("tool.Recall.display.command.lines") < names.index(own[0])
+    assert names.index(own[1]) < next(
+        i for i, n in enumerate(names) if n.startswith("runtime.")
+    )
 
 
 def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> None:
@@ -580,11 +610,17 @@ def test_the_actions_that_say_more_say_it() -> None:
     assert longer["login"] == slash._login_parser().format_help()
 
 
-def test_the_login_action_reads_flags_at_the_prompt_and_the_shell() -> None:
+def test_the_login_action_reads_flags_at_the_prompt_and_the_shell(
+    tmp_path: Path,
+) -> None:
+    catalog = ModelCatalog(factories={"scripted": ScriptedProvider})
     commands = Commands(
-        Mock(spec=Agent, runtime=Mock(tool_context=Mock(label="Agent"))),
-        catalog=Mock(spec=ModelCatalog),
-        say=Mock(),
+        Agent(
+            model=catalog["scripted"]["scripted"],
+            tool_context=ToolContext(cwd=tmp_path, label="Agent"),
+        ),
+        catalog=catalog,
+        print_output=list[CommandOutput]().append,
         screen=_View(),
         panes=Panes(),
     )
@@ -602,11 +638,11 @@ def test_the_login_action_reads_flags_at_the_prompt_and_the_shell() -> None:
     assert {(s.cli, s.flags) for s in others} == {(False, frozenset())}
 
 
-def _setting(*, usage: str = "", said: str = "", fails: bool = False) -> Setting:
+def _setting(*, usage: str = "", applied: str = "", fails: bool = False) -> Setting:
     async def apply(args: str) -> str:
         if fails:
             raise SettingError(f"no {args}")
-        return said
+        return applied
 
     return Setting(name=("x",), help_short="what x is", usage=usage, apply=apply)
 
@@ -650,10 +686,18 @@ async def test_a_child_keeps_the_choice_it_made_before_its_commands_were() -> No
 
 @pytest.mark.asyncio
 async def test_applying_a_setting_says_what_it_did_or_why_not() -> None:
-    said: list[CommandOutput] = []
-    assert await slash.apply_setting(_setting(said="  done \n"), "a", say=said.append)
-    assert not await slash.apply_setting(_setting(fails=True), "a", say=said.append)
-    assert said == [
+    printed: list[CommandOutput] = []
+    assert await slash.apply_setting(
+        _setting(applied="  done \n"),
+        "a",
+        print_output=printed.append,
+    )
+    assert not await slash.apply_setting(
+        _setting(fails=True),
+        "a",
+        print_output=printed.append,
+    )
+    assert printed == [
         CommandOutput(text="  done", tone="note", command="/x"),
         CommandOutput(text="no a", tone="error", command="/x"),
     ]
@@ -695,8 +739,11 @@ def test_the_runtime_and_mcp_settings_act_on_this_agent(tmp_path: Path) -> None:
     assert isinstance(mcp, McpSettings)
     assert mcp.cwd == desk.agent.runtime.tool_context.origin
     _ = mcp.show("hi")
-    assert desk.printer.said == [("note", "hi")]
-    (_, alone), *_ = owners_without_agent(cwd=tmp_path, say=desk.commands.say)
+    assert desk.printer.printed == [("note", "hi")]
+    (_, alone), *_ = owners_without_agent(
+        cwd=tmp_path,
+        print_output=desk.commands.print_output,
+    )
     assert isinstance(alone, McpSettings)
     assert alone.cwd == tmp_path
 
@@ -705,11 +752,11 @@ def test_the_runtime_and_mcp_settings_act_on_this_agent(tmp_path: Path) -> None:
 def help_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Commands, list[CommandOutput]]:
-    said: list[CommandOutput] = []
+    printed: list[CommandOutput] = []
     commands = Commands(
         Mock(spec=Agent, runtime=Mock(tool_context=Mock(label="Agent"))),
         catalog=Mock(spec=ModelCatalog),
-        say=said.append,
+        print_output=printed.append,
         screen=_View(),
         panes=Panes(),
     )
@@ -746,7 +793,7 @@ def help_commands(
         (("mcp",), mcp),
     ]
     monkeypatch.setattr(Commands, "owners", Mock(return_value=owners))
-    return commands, said
+    return commands, printed
 
 
 @pytest.mark.asyncio
@@ -795,15 +842,15 @@ async def test_help_on_one_setting_says_all_it_knows(
 
 
 def test_what_an_owner_with_no_agent_shows_is_said_as_a_note(tmp_path: Path) -> None:
-    said: list[CommandOutput] = []
-    owners = dict(owners_without_agent(cwd=tmp_path, say=said.append))
+    printed: list[CommandOutput] = []
+    owners = dict(owners_without_agent(cwd=tmp_path, print_output=printed.append))
     assert list(owners) == [("mcp",), ("host",), ("remote",)]
     mcp, host = owners[("mcp",)], owners[("host",)]
     assert isinstance(mcp, McpSettings)
     assert isinstance(host, HostSettings)
     mcp.show("Open https://sign.in")
     host.show("Serving")
-    assert said == [
+    assert printed == [
         CommandOutput(text="Open https://sign.in", tone="note"),
         CommandOutput(text="Serving", tone="note"),
     ]
@@ -834,14 +881,14 @@ async def test_a_bare_setting_shows_its_value_and_a_bare_action_runs() -> None:
     await desk.commands("/effort")
     await desk.commands("/thinking")
     await desk.commands("/halt")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "note",
             "[/model.thinking.effort] none (default)   (default, none, low, high)",
         ),
         ("note", "[/model.thinking] effort=none budget=none output=none"),
     ]
-    assert desk.pushed() == [types.Halt()]
+    assert desk.pushed() == [types.ModelHalt()]
 
 
 @pytest.mark.asyncio
@@ -860,7 +907,7 @@ async def test_a_setting_answers_to_its_name_its_last_segments_or_its_letters(
     desk = _Desk(provider="deep")
     await desk.commands(line)
     assert desk.agent.model.settings.thinking_effort == "high"
-    assert desk.printer.said == [("note", "[/model.thinking.effort] high")]
+    assert desk.printer.printed == [("note", "[/model.thinking.effort] high")]
 
 
 @pytest.mark.asyncio
@@ -868,7 +915,7 @@ async def test_a_value_a_setting_refuses_changes_nothing() -> None:
     desk = _Desk(provider="deep")
     await desk.commands("/effort max")
     assert desk.agent.model.settings.thinking_effort == "none"
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("error", "[/model.thinking.effort] 'max' is not one of: none, low, high"),
     ]
 
@@ -879,7 +926,7 @@ async def test_the_screen_shows_or_hides_reasoning_and_the_model_is_untouched() 
     await desk.commands("/screen.thinking hide")
     assert desk.printer.show_thinking is False
     assert desk.agent.model.settings.thinking_output == "none"
-    assert desk.printer.said == [("note", "[/screen.thinking] hide (default)")]
+    assert desk.printer.printed == [("note", "[/screen.thinking] hide (default)")]
 
 
 @pytest.mark.asyncio
@@ -1033,7 +1080,7 @@ async def test_defer_queues_text_and_refuses_an_empty_message(
     assert await commands("/defer  later please ") is False
     assert await commands("/defer") is False
     assert runtime.mock_calls == [
-        ("push", (types.UserDeferredMessage(text="later please"),), {}),
+        ("push", (UserMessage(due_after=AgentIdle, content="later please"),), {}),
     ]
     assert said == [CommandOutput(tone="error", command="/defer", text="needs TEXT")]
 
@@ -1063,7 +1110,7 @@ async def test_kill_cancels_one_call_or_all_and_all_empties_the_panes(
         CommandOutput(tone="note", command="/kill", text="cancelled c1"),
         CommandOutput(tone="note", command="/kill", text="cancelled all tool calls"),
     ]
-    assert runtime.mock_calls == [("push", (types.Kill(),), {})]
+    assert runtime.mock_calls == [("push", (types.ToolHalt(),), {})]
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1143,7 @@ async def test_kill_stops_a_persistent_child() -> None:
     await desk.commands("/kill reviewer")
     await asyncio.gather(*desk.commands._tasks)
     assert "reviewer" not in desk.team
-    assert desk.printer.said == [("note", "[/kill] stopping reviewer")]
+    assert desk.printer.printed == [("note", "[/kill] stopping reviewer")]
     del members
 
 
@@ -1111,14 +1158,14 @@ async def test_tasks_lists_running_calls_and_persistent_children(
         "c2": Mock(
             spec=types.Job,
             call=call("Echo", "c2"),
-            started=95.0,
-            state="running",
+            elapsed_sec=5.0,
+            status="running",
         ),
         "c1": Mock(
             spec=types.Job,
             call=call("Read", "c1"),
-            started=93.0,
-            state="sleeping",
+            elapsed_sec=7.0,
+            status="sleeping",
         ),
     }
     persistent = Mock(return_value=["reviewer", "writer"])
@@ -1362,10 +1409,10 @@ async def test_send_runs_a_command_on_each_agent_named() -> None:
     desk, members = _teamed("a", "b")
     await desk.commands("/send all /halt")
     await desk.commands("/send a /effort")
-    assert desk.pushed(members["a"]) == [types.Halt()]
-    assert desk.pushed(members["b"]) == [types.Halt()]
+    assert desk.pushed(members["a"]) == [types.ModelHalt()]
+    assert desk.pushed(members["b"]) == [types.ModelHalt()]
     assert desk.pushed() == []
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/model.thinking.effort] none (default)   (default, none)"),
     ]
 
@@ -1441,14 +1488,14 @@ async def test_send_to_a_relation_reaches_its_agents_and_is_owed_a_reply() -> No
 
     for label in ("a", "b"):
         (message,) = desk.pushed(members[label])
-        assert message == AgentToAgentMessage(
+        assert message == AgentMessage(
             sender="user",
             recipient=label,
             content="status?",
         )
         assert desk.team.owes(label) == {"user": "status?"}
-    assert desk.printer.said[0] == ("note", "[/send] user→a, b: status?")
-    assert len(desk.printer.said) == 4
+    assert desk.printer.printed[0] == ("note", "[/send] user→a, b: status?")
+    assert len(desk.printer.printed) == 4
 
 
 @pytest.mark.asyncio
@@ -1457,15 +1504,15 @@ async def test_label_dot_setting_is_send_to_that_agent() -> None:
     await desk.commands("/a.halt")
     await desk.commands("/children.halt")
     await desk.commands("/nobody.halt")
-    assert desk.pushed(members["a"]) == [types.Halt(), types.Halt()]
-    assert desk.printer.said[-1] == (
+    assert desk.pushed(members["a"]) == [types.ModelHalt(), types.ModelHalt()]
+    assert desk.printer.printed[-1] == (
         "error",
         "unknown command: /nobody.halt; see /help",
     )
     # Only the first dot names the agent: the rest is the setting's own.
     await desk.commands("/a.model.thinking.effort")
-    tone, said = desk.printer.said[-1]
-    assert (tone, said.startswith("[/model.thinking.effort] ")) == ("note", True)
+    tone, text = desk.printer.printed[-1]
+    assert (tone, text.startswith("[/model.thinking.effort] ")) == ("note", True)
 
 
 @pytest.mark.asyncio
@@ -1493,13 +1540,13 @@ async def test_send_parent_from_a_root_starts_its_watcher_once(
         inbox = [
             m.content or ""
             for m in watcher.runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
+            if isinstance(m, AgentMessage)
         ]
         assert inbox[0].startswith("<skill name='watch' source='builtin'>")
         assert inbox[1:] == ["keep it honest", "and brief"]
         assert watcher.system_prompt == desk.agent.system_prompt
         assert list(watcher.tools) == [*desk.agent.tools, "AgentSend"]
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "note",
             "[/send] started watcher, watching Agent\nuser→watcher: keep it honest",
@@ -1531,7 +1578,7 @@ async def test_a_watcher_refuses_a_value_that_is_not_on_or_off(
     async with team:
         await desk.commands("/send parent hi")
         await desk.commands("/parent.watcher maybe")
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "error",
         "[/watcher] 'maybe' is not one of: on, off",
     )
@@ -1543,13 +1590,13 @@ async def test_send_parent_from_a_child_reaches_its_spawner() -> None:
     commands = Commands(
         members["a"],
         catalog=desk.catalog,
-        say=desk.commands.say,
+        print_output=desk.commands.print_output,
         screen=desk.printer,
         panes=Panes(),
         team=desk.team,
     )
     await commands("/send parent done")
-    assert [m.content for m in desk.pushed() if isinstance(m, AgentToAgentMessage)] == [
+    assert [m.content for m in desk.pushed() if isinstance(m, AgentMessage)] == [
         "done",
     ]
 
@@ -1597,7 +1644,7 @@ def _rolled(*labels: tuple[str, str]) -> tuple[_Desk, dict[str, _View]]:
     desk.commands = Commands(
         desk.agent,
         catalog=catalog,
-        say=desk.commands.say,
+        print_output=desk.commands.print_output,
         screen=screen("Agent"),
         panes=desk.panes,
         team=team,
@@ -1719,11 +1766,11 @@ async def test_a_choice_can_be_taken_without_a_team_to_roll_it_to(
     )
     owners = Mock(return_value=[((), owner)])
     monkeypatch.setattr(Commands, "owners", owners)
-    said: list[CommandOutput] = []
+    printed: list[CommandOutput] = []
     commands = Commands(
         Mock(spec=Agent),
         catalog=Mock(spec=ModelCatalog),
-        say=said.append,
+        print_output=printed.append,
         screen=_View(),
         panes=Panes(),
     )
@@ -1732,7 +1779,7 @@ async def test_a_choice_can_be_taken_without_a_team_to_roll_it_to(
 
     applied.assert_awaited_once_with("chosen")
     assert commands.team is None
-    assert said == []
+    assert printed == []
 
 
 @pytest.mark.asyncio
@@ -1748,7 +1795,7 @@ async def test_a_choice_a_child_cannot_take_says_why_and_stops_there() -> None:
     await child.take("tool.Nope.display.output.lines", "1")
 
     assert _shown(screens) == {"Agent": True, "a": True}
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "error",
             "[a /screen.thinking] 'maybe' is not one of: default, show, hide",
@@ -1777,7 +1824,7 @@ async def test_effort_rolls_to_the_closest_each_child_offers_and_on_down() -> No
         "high",
         "max",
     ]
-    assert [e for e in desk.printer.said if e[0] == "error"] == []
+    assert [e for e in desk.printer.printed if e[0] == "error"] == []
 
 
 @pytest.mark.asyncio
@@ -1798,7 +1845,7 @@ async def test_an_agent_outside_the_team_rolls_nothing() -> None:
     outsider = Commands(
         Agent(model=desk.catalog["scripted"]["scripted"]),
         catalog=desk.catalog,
-        say=desk.commands.say,
+        print_output=desk.commands.print_output,
         screen=_View(),
         panes=Panes(),
         team=desk.team,
@@ -1825,7 +1872,7 @@ async def test_send_quit_stops_that_agent() -> None:
     await desk.commands("/send a /quit")
     await asyncio.gather(*desk.commands._tasks)
     assert "a" not in desk.team
-    assert desk.printer.said == [("note", "[/send] stopping a")]
+    assert desk.printer.printed == [("note", "[/send] stopping a")]
     del members
 
 
@@ -1848,10 +1895,10 @@ async def test_a_command_run_on_an_agent_reaches_its_team_but_not_these_panes() 
     await desk.commands("/send a /halt b")
     await desk.commands("/send a /kill all")
     await desk.commands("/send a /halt a")
-    assert desk.pushed(members["b"]) == [types.Halt()]
-    assert desk.pushed(members["a"]) == [types.Kill()]
+    assert desk.pushed(members["b"]) == [types.ModelHalt()]
+    assert desk.pushed(members["a"]) == [types.ToolHalt()]
     assert desk.panes.queue == Staged(text="mine")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/halt] halted b"),
         ("note", "[/kill] cancelled all tool calls"),
         ("error", "[/halt] no agent 'a'; agents: Agent, b"),
@@ -1889,7 +1936,7 @@ async def test_a_failed_stop_prints_under_its_name(
     monkeypatch.setattr(desk.team, "stop", broken)
     await desk.commands("/kill a")
     await asyncio.gather(*desk.commands._tasks, return_exceptions=True)
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/kill] stopping a"),
         ("error", "[/kill a] RuntimeError: stuck a"),
     ]
@@ -1902,7 +1949,7 @@ async def test_a_bare_model_names_what_each_name_resolved_to() -> None:
     await desk.commands("/provider")
     await desk.commands("/context")
     await desk.commands("/account")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "note",
             "[/model] wide/wide-1.0+fullcontext+nothink",  # codespell:ignore nothink
@@ -1923,7 +1970,7 @@ async def test_model_switches_and_keeps_what_the_new_model_still_offers() -> Non
     await desk.commands("/model scripted/scripted")
     assert desk.agent.model.provider.name == "scripted"
     assert desk.agent.model.settings.thinking_effort == "none"
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/model] deep/deep+fullcontext+highthink"),
         (
             "note",
@@ -1946,7 +1993,7 @@ async def test_a_model_s_effort_tag_is_applied_after_its_settings_are_kept() -> 
     assert desk.agent.model.settings.thinking_effort == "high"
     await desk.commands("/model deep+xhigh")
     assert desk.agent.model.settings.thinking_effort == "high"
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "error",
         (
             "[/model] ValueError: thinking_effort='xhigh' is not offered by deep;"
@@ -1964,7 +2011,7 @@ async def test_context_picks_the_window_and_a_switch_keeps_it() -> None:
     assert desk.agent.model.settings.context_size.tokens == 200_000
     await desk.commands("/model wide+258k")
     assert desk.agent.model.settings.context_size.tokens == 258_000
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/model.context] 200k"),
         ("note", "[/model] wide/wide-1.0+200k+nothink"),  # codespell:ignore nothink
         ("note", "[/model] wide/wide-1.0+258k+nothink"),  # codespell:ignore nothink
@@ -1977,7 +2024,7 @@ async def test_provider_keeps_the_model_where_the_new_one_serves_it() -> None:
     await desk.commands("/provider deep")
     assert desk.agent.model.provider.name == "deep"
     assert (
-        desk.printer.said
+        desk.printer.printed
         == [
             (
                 "note",
@@ -2007,7 +2054,7 @@ async def test_an_unknown_model_leaves_the_model_alone(line: str, error: str) ->
     before = desk.agent.model
     await desk.commands(line)
     assert desk.agent.model is before
-    assert desk.printer.said == [("error", error)]
+    assert desk.printer.printed == [("error", error)]
 
 
 @pytest.mark.asyncio
@@ -2020,7 +2067,7 @@ async def test_thinking_sets_the_catalog_s_axes_and_the_model_shows_them() -> No
         desk.agent.model.settings.thinking_output,
     ) == ("auto", "text")
     assert (
-        desk.printer.said
+        desk.printer.printed
         == [
             ("note", "[/model.thinking] effort=none budget=auto output=text"),
             (
@@ -2041,7 +2088,7 @@ async def test_tool_changes_a_tool_s_display_where_the_agent_reads_it() -> None:
     assert tool.display.output == DisplaySpec(lines=(3, 1))
     assert tool.display.command == ToolDisplay().command
     assert desk.agent.runtime.tools["Echo"] is tool
-    assert desk.printer.said == [("note", "[/tool.Echo.display.output.lines] 3,1")]
+    assert desk.printer.printed == [("note", "[/tool.Echo.display.output.lines] 3,1")]
 
 
 @pytest.mark.asyncio
@@ -2066,7 +2113,7 @@ async def test_tool_says_what_it_cannot_change(line: str, error: str) -> None:
     before = desk.agent.tools["Echo"]
     await desk.commands(line)
     assert desk.agent.tools["Echo"] is before
-    assert desk.printer.said == [("error", error)]
+    assert desk.printer.printed == [("error", error)]
 
 
 @pytest.mark.asyncio
@@ -2078,7 +2125,7 @@ async def test_peer_participation_is_chosen_inherited_and_validated() -> None:
     assert not team.peer_messaging("Agent")
     child = await desk.commands.child_commands(team, "child")
     await child("/peer-messaging")
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "note",
         "[/peer-messaging] off   (on, off, default)",
     )
@@ -2087,7 +2134,7 @@ async def test_peer_participation_is_chosen_inherited_and_validated() -> None:
     await child("/peer-messaging default")
     assert not team.peer_messaging("child")
     await child("/peer-messaging invalid")
-    assert desk.printer.said[-1][0] == "error"
+    assert desk.printer.printed[-1][0] == "error"
     await desk.commands("/peer-messaging default")
     assert team.peer_messaging("child")
 
@@ -2102,9 +2149,9 @@ async def test_login_signs_in_and_sends_what_waited() -> None:
     assert isinstance(provider, _Signing)
     assert provider.signed_in == 1
     assert desk.agent.model is model, "a plain sign-in keeps the agent's model"
-    assert desk.pushed() == [types.UserDeferredMessage(text="after login")]
+    assert desk.pushed() == [UserMessage(due_after=AgentIdle, content="after login")]
     assert desk.panes.deferred is None
-    assert desk.printer.said == [("note", "[/login] signing signed in")]
+    assert desk.printer.printed == [("note", "[/login] signing signed in")]
 
 
 @pytest.mark.asyncio
@@ -2122,7 +2169,7 @@ async def test_login_precedence_orders_the_logins_of_the_model_s_provider() -> N
     assert provider.logins.order() == ("home",)
     await desk.commands("/login.precedence off")
     assert provider.logins.precedence() is None
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/login.precedence] default,home,work"),
         ("note", "[/login.precedence] signing: work,default"),
         ("note", "[/login.precedence] signing: home"),
@@ -2136,7 +2183,7 @@ async def test_login_precedence_refuses_a_provider_that_keeps_no_logins() -> Non
     await desk.commands("/login.precedence")
     await desk.commands("/login.precedence work")
     await desk.commands("/login.precedence a b c")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/login.precedence] "),
         ("error", "[/login.precedence] scripted keeps no logins to order"),
         ("error", "[/login.precedence] give [PROVIDER] ACCOUNT,... or [PROVIDER] off"),
@@ -2154,8 +2201,8 @@ async def test_login_precedence_takes_a_provider_by_any_name_it_answers_to() -> 
     await desk.commands("/login.precedence sgn work")
     await desk.commands("/login.precedence nope work")
     assert provider.logins.precedence() == ("work",)
-    assert desk.printer.said[0] == ("note", "[/login.precedence] signing: work")
-    kind, text = desk.printer.said[1]
+    assert desk.printer.printed[0] == ("note", "[/login.precedence] signing: work")
+    kind, text = desk.printer.printed[1]
     assert kind == "error"
     assert "unknown provider 'nope'" in text
 
@@ -2176,12 +2223,12 @@ async def test_login_precedence_reads_a_list_as_a_person_types_it() -> None:
     await desk.commands("/login.precedence gs,work")
     assert provider.logins.precedence() == ("gs", "work")
     await desk.commands("/login.precedence zed,work")
-    assert desk.printer.said[-1] == (
+    assert desk.printer.printed[-1] == (
         "note",
         "[/login.precedence] signing: work (no login saved: zed)",
     )
     await desk.commands("/login.precedence zed,yo,work")
-    assert desk.printer.said[-1][1].endswith("(no login saved: zed,yo)")
+    assert desk.printer.printed[-1][1].endswith("(no login saved: zed,yo)")
     # A comma after spaces still lists accounts; it names no provider.
     await desk.commands("/login.precedence work  ,default")
     assert provider.logins.precedence() == ("work", "default")
@@ -2198,7 +2245,7 @@ async def test_login_precedence_says_saved_of_a_login_signed_out() -> None:
         provider.logins.path(account).write_text("{}")
     await provider.logins.sign_out("work")
     await desk.commands("/login.precedence work,default")
-    assert desk.printer.said == [("note", "[/login.precedence] signing: default")]
+    assert desk.printer.printed == [("note", "[/login.precedence] signing: default")]
 
 
 @pytest.mark.asyncio
@@ -2210,7 +2257,7 @@ async def test_login_precedence_refuses_a_list_it_cannot_read(line: str) -> None
     assert isinstance(provider, _Signing)
     await desk.commands(f"/login.precedence {line}")
     assert provider.logins.precedence() is None
-    ((kind, text),) = desk.printer.said
+    ((kind, text),) = desk.printer.printed
     assert kind == "error"
     assert text.endswith("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
 
@@ -2251,7 +2298,7 @@ async def test_native_login_refuses_named_accounts_before_authentication(
     assert isinstance(provider, _NativeSigning)
     assert provider.signed_in == int(allowed)
     assert desk.catalog.account == (None if allowed else selected)
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/login] native signed in")
         if allowed
         else (
@@ -2267,7 +2314,7 @@ async def test_login_retries_the_turn_a_failure_stopped() -> None:
     desk = _Desk(provider="signing")
     desk.agent.runtime.service_suspended_until = time.time() + 60.0
     await desk.commands("/login")
-    assert desk.pushed() == [types.Retry()]
+    assert desk.pushed() == [types.ModelRetry()]
 
 
 @pytest.mark.asyncio
@@ -2293,7 +2340,9 @@ async def test_a_failed_login_says_why_and_keeps_what_waits(
     await desk.commands("/login")
     assert desk.pushed() == []
     assert desk.panes.deferred == Staged(text="after login")
-    assert desk.printer.said == [("error", f"[/login] {type(error).__name__}: {error}")]
+    assert desk.printer.printed == [
+        ("error", f"[/login] {type(error).__name__}: {error}"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2301,7 +2350,7 @@ async def test_login_on_a_provider_without_one_says_so() -> None:
     desk = _Desk()
     before = desk.agent.model
     await desk.commands("/login")
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("error", "[/login] scripted has no interactive sign-in"),
     ]
     assert desk.agent.model is before
@@ -2357,7 +2406,7 @@ async def test_an_account_moves_the_agent_onto_it_and_login_signs_in_as_it() -> 
     assert provider is desk.catalog["signing"]
     assert isinstance(provider, _Signing)
     assert (provider.account, provider.signed_in) == ("work", 1)
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         ("note", "[/model.provider.account] work"),
         ("note", "[/login] signing signed in as work"),
     ]
@@ -2410,7 +2459,7 @@ async def test_an_account_the_model_cannot_move_onto_leaves_both_as_they_were() 
     assert desk.agent.model is before
     assert desk.catalog.account is None
     assert desk.catalog["signing"] is before.provider
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "error",
             "[/model.provider.account] UnknownModelError: No model 'scripted'.",
@@ -2425,7 +2474,7 @@ async def test_login_refuses_an_option_it_does_not_take() -> None:
     provider = desk.agent.model.provider
     assert isinstance(provider, _Signing)
     assert provider.signed_in == 0
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "error",
             "[/login] unrecognized arguments: --headles; see sagent login --help",
@@ -2437,10 +2486,10 @@ async def test_login_refuses_an_option_it_does_not_take() -> None:
 async def test_login_help_is_its_parsers() -> None:
     desk = _Desk(provider="signing")
     await desk.commands("/login --help")
-    ((tone, said),) = desk.printer.said
+    ((tone, text),) = desk.printer.printed
     assert tone == "note"
-    assert said.startswith("[/login] usage: sagent login [-h]")
-    assert "[--headless | --no-headless]" in said
+    assert text.startswith("[/login] usage: sagent login [-h]")
+    assert "[--headless | --no-headless]" in text
     provider = desk.agent.model.provider
     assert isinstance(provider, _Signing)
     assert provider.signed_in == 0
@@ -2451,7 +2500,7 @@ async def test_an_account_that_is_no_name_is_refused() -> None:
     desk = _Desk(provider="signing")
     await desk.commands("/account ../x")
     assert desk.catalog.account is None
-    assert desk.printer.said == [
+    assert desk.printer.printed == [
         (
             "error",
             (

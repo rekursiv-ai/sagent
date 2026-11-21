@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Final, Generic, Literal, cast
 from typing_extensions import TypeVar
@@ -23,7 +24,7 @@ import pytest
 from sagent.session.types import (
     Attachment,
     Splice,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
 )
 from sagent.tools.display import ToolDisplay
@@ -137,7 +138,7 @@ async def test_a_structured_tool_writes_typed_items_beside_its_text() -> None:
 
     result = await settled(tool.call(_CONTEXT, {}), call_id="c1")
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="c1",
         state="done",
         stdout=("Edited a.py.", edit),
@@ -224,7 +225,7 @@ async def test_a_failed_call_s_record_ends_stderr_with_the_error() -> None:
 
     result = await settled(tool.call(_CONTEXT, {}), call_id="c1")
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="c1",
         state="failed",
         stderr=("ValueError: no",),
@@ -343,7 +344,7 @@ async def test_a_cancelled_call_stops_its_tool_and_keeps_its_output() -> None:
     result = await waiting
 
     assert result_future.cancelled()
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="c1",
         state="cancelled",
         stdout=("out\n",),
@@ -367,7 +368,7 @@ async def test_a_stream_that_breaks_fails_the_call_once_its_tool_has_stopped() -
         call_id="c1",
     )
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="c1",
         state="failed",
         stdout=("out\n",),
@@ -408,11 +409,11 @@ async def test_a_call_cancelled_twice_still_waits_for_its_tool_to_stop() -> None
 @pytest.mark.asyncio
 async def test_a_tool_that_relays_a_record_has_it_returned_for_this_call() -> None:
     """As RemoteTool: the call ran elsewhere, and the tool's result is its record."""
-    far = ToolResult(call_id="far", state="failed", stderr=("no such file",))
+    far = ToolMessage(call_id="far", state="failed", stderr=("no such file",))
     out, err = Stream[object](), Stream[object]()
     out.close()
     err.close()
-    relayed = asyncio.Future[ToolResult]()
+    relayed = asyncio.Future[ToolMessage]()
     relayed.set_result(far)
 
     result = await settled(
@@ -420,7 +421,7 @@ async def test_a_tool_that_relays_a_record_has_it_returned_for_this_call() -> No
         call_id="here",
     )
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="here",
         state="failed",
         stderr=("no such file",),
@@ -439,7 +440,7 @@ async def test_a_live_call_is_recorded_once_its_streams_end() -> None:
 
     stop.set()
 
-    assert await waiting == ToolResult(
+    assert await waiting == ToolMessage(
         call_id="",
         state="done",
         stdout=("out\n",),
@@ -473,14 +474,14 @@ async def test_a_tool_that_leaves_its_streams_open_is_recorded_when_it_ends(
         result = await settled(streaming_result)
 
     assert result == (
-        ToolResult(
+        ToolMessage(
             call_id="",
             state="failed",
             stdout=("out\n",),
             stderr=("err\n", "ValueError: no"),
         )
         if fails
-        else ToolResult(
+        else ToolMessage(
             call_id="",
             state="done",
             stdout=("out\n",),
@@ -521,7 +522,7 @@ async def test_each_item_is_seen_as_it_is_read_while_the_tool_runs() -> None:
 
     stop.set()
 
-    assert await waiting == ToolResult(
+    assert await waiting == ToolMessage(
         call_id="",
         state="done",
         stdout=("epoch 1\n", "done\n"),
@@ -548,7 +549,7 @@ async def test_a_view_goes_to_the_record_beside_every_item(
         ToolStreamingResult(result=done, stdout=out, stderr=err, shown=view),
     )
 
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("a\n", "b\n", "c\n"),
@@ -567,6 +568,16 @@ async def test_whole_output_passes_its_view_to_the_record() -> None:
     )
     result = await settled(whole_output(output))
     assert (result.stdout, result.shown) == (("a\n", "b\n"), "b\n")
+
+
+@pytest.mark.asyncio
+async def test_work_ends_of_itself_unless_it_is_said_to_run_until_stopped() -> None:
+    output = ToolOutput(result=UncategorizedToolResult())
+
+    assert [
+        whole_output(output).runs_until_stopped,
+        whole_output(output, runs_until_stopped=True).runs_until_stopped,
+    ] == [False, True]
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
@@ -593,6 +604,18 @@ async def test_work_writes_to_the_stdout_it_is_given_as_it_goes(*, fails: bool) 
 
 
 @pytest.mark.asyncio
+async def test_work_writes_to_the_stderr_it_is_given_too() -> None:
+    stderr = Stream[str]()
+    stderr.write("half\n")
+    output = ToolOutput(stderr=("all\n",), result=UncategorizedToolResult())
+
+    streaming_result = whole_output(output, stderr=stderr)
+
+    assert streaming_result.stderr is stderr
+    assert (await settled(streaming_result)).stderr == ("half\n", "all\n")
+
+
+@pytest.mark.asyncio
 async def test_an_output_that_is_already_whole_is_written_as_it_is() -> None:
     """A tool with its answer at hand, such as a refusal, needs no coroutine."""
     output = ToolOutput(
@@ -601,7 +624,7 @@ async def test_an_output_that_is_already_whole_is_written_as_it_is() -> None:
         result=UncategorizedToolResult(exit_code=2),
     )
 
-    assert await settled(whole_output(output), call_id="c1") == ToolResult(
+    assert await settled(whole_output(output), call_id="c1") == ToolMessage(
         call_id="c1",
         state="done",
         stdout=("out",),
@@ -841,7 +864,7 @@ def _holding[R](record: R, **fields: object) -> R:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Boxed[T]:
-    """A generic record, as ``ToolResult`` is."""
+    """A generic record, as ``ToolMessage`` is."""
 
     item: T
     items: tuple[T, ...] = ()
@@ -866,8 +889,8 @@ class _Defaulted(Generic[_Item_co]):
         (_Boxed, _Boxed(item=_Other(name="a"), items=("b", 1))),
         (_Defaulted, _Defaulted(item="a")),
         (
-            ToolResult[UncategorizedToolResult, Splice | str, str],
-            ToolResult(call_id="1", state="done", stdout=("a", Splice(after="b"))),
+            ToolMessage[UncategorizedToolResult, Splice | str, str],
+            ToolMessage(call_id="1", state="done", stdout=("a", Splice(after="b"))),
         ),
     ],
     ids=["object", "parameterized", "bare", "defaulted", "tool-result"],
@@ -895,8 +918,8 @@ def test_checked_takes_anything_for_a_type_parameter_with_no_default() -> None:
         (_Boxed[int], _holding(_Boxed(item=1), name=2), "x.name"),
         (_Defaulted, _Defaulted(item=1), "x.item"),
         (
-            ToolResult[UncategorizedToolResult, Splice | str, str],
-            ToolResult(call_id="1", state="done", stderr=(Splice(after="b"),)),
+            ToolMessage[UncategorizedToolResult, Splice | str, str],
+            ToolMessage(call_id="1", state="done", stderr=(Splice(after="b"),)),
             "x.stderr",
         ),
     ],
@@ -919,12 +942,17 @@ _INNER: Final = _Inner(name="a")
     [
         (Annotated[int, "A count."], 1, 1),
         (bytes, b"\x00", b"\x00"),
+        (datetime, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)),
+        (Path, Path("/w"), Path("/w")),
         (tuple[int, str], [1, "a"], (1, "a")),
         (frozenset[str], {"a"}, frozenset({"a"})),
         (Mapping[str, int], {"a": 1}, {"a": 1}),
         (_Inner, _INNER, _INNER),
         (_Inner, _Deeper(name="a", count=2), _Deeper(name="a", count=2)),
         (_Inner | _Other | None, _INNER, _INNER),
+        (type[_Inner | _Other] | None, _Other, _Other),
+        (type[_Inner], _Inner, _Inner),
+        (type[_Inner], _Deeper, _Deeper),
     ],
 )
 def test_checked_takes_what_wire_records_hold(
@@ -939,6 +967,8 @@ def test_checked_takes_what_wire_records_hold(
     ("hint", "value", "message"),
     [
         (bytes, "a", "'x' must be bytes, got 'a'"),
+        (datetime, "2026-01-01", "'x' must be datetime, got '2026-01-01'"),
+        (Path, "/w", "'x' must be Path, got '/w'"),
         (tuple[str, ...], b"ab", "'x' must be array"),
         (tuple[int, str], (1,), "'x' must be 2 items, got"),
         (tuple[int, str], (1, 2), "'x' must be string, got 2"),
@@ -954,6 +984,13 @@ def test_checked_takes_what_wire_records_hold(
         (_Inner | _Other, _holding(_Inner(name="a"), name=1), r"^'x\.name'[^_]*$"),
         (_Other | None, _INNER, "'x' must be a record of its type, got _Inner"),
         (int, "y" * 1000, r"^'x' must be integer, got .{0,60}$"),
+        # A class named nowhere in ``type[...]``, or an instance of one, is neither.
+        (
+            type[_Inner | _Other],
+            str,
+            r"'x' must be one of \['_Inner', '_Other'\], got <class 'str'>",
+        ),
+        (type[_Inner], _INNER, r"'x' must be one of \['_Inner'\], got _Inner\("),
     ],
 )
 def test_checked_says_where_a_value_is_not_of_its_type(

@@ -88,7 +88,7 @@ from sagent.host.wire import (
 )
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.posix.child import Child, finish
-from sagent.session.types import ToolResult
+from sagent.session.types import ToolMessage
 from sagent.types import AsyncResource
 
 
@@ -945,7 +945,7 @@ class Server(AsyncResource):
                 session,
                 Result(
                     id=message.id,
-                    record=ToolResult(
+                    record=ToolMessage(
                         call_id="",
                         state="failed",
                         stderr=(f"This session is ending: {session.reason}.",),
@@ -957,7 +957,7 @@ class Server(AsyncResource):
                 session,
                 Result(
                     id=message.id,
-                    record=ToolResult(
+                    record=ToolMessage(
                         call_id="",
                         state="failed",
                         stderr=(f"{self._name} does not offer {message.tool}.",),
@@ -1041,7 +1041,7 @@ class Server(AsyncResource):
                 session,
                 Result(
                     id=call_id,
-                    record=ToolResult(
+                    record=ToolMessage(
                         call_id="",
                         state="failed",
                         stderr=("The host of this session stopped.",),

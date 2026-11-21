@@ -172,8 +172,8 @@ class Directives:
     _framed: set[str] = field(default_factory=set[str], init=False)
     _read: set[str] = field(default_factory=set[str], init=False)
 
-    skipped: list[str] = field(default_factory=list[str], init=False)
-    """Why each file left unread was, in the order they were reached."""
+    skipped: list[Path] = field(default_factory=list[Path], init=False)
+    """Each file left unread, in the order they were reached; the log says why."""
 
     def start(self) -> str:
         """Forget the last window; return the root's unconditional files, as one section.
@@ -418,7 +418,7 @@ def _discover(
     cfg: AgentsMdConfig,
     seen: set[str],
     *,
-    skipped: list[str],
+    skipped: list[Path],
 ) -> list[_File]:
     """Return every directive file not in ``seen``, lowest precedence first; add each."""
     out: list[_File] = []
@@ -454,7 +454,7 @@ def _read_project(
     seen: set[str],
     cfg: AgentsMdConfig,
     *,
-    skipped: list[str],
+    skipped: list[Path],
 ) -> list[_File]:
     """Return one directory's project and local files, in their order, each governing ``d``."""
     name = Path(cfg.filename)
@@ -474,7 +474,7 @@ def _read_dir(
     tier: Tier,
     seen: set[str],
     cfg: AgentsMdConfig,
-    skipped: list[str],
+    skipped: list[Path],
 ) -> list[_File]:
     """Return every ``.md`` file under ``d``, sorted."""
     if not d.is_dir():
@@ -495,11 +495,11 @@ def _read(
     *,
     seen: set[str],
     cfg: AgentsMdConfig,
-    skipped: list[str],
+    skipped: list[Path],
     depth: int = 0,
     globs: tuple[str, ...] = (),
 ) -> list[_File]:
-    """Return ``path`` and what it includes, each once; add why to ``skipped`` if not."""
+    """Return ``path`` and what it includes, each once; add each unread to ``skipped``."""
     if depth >= cfg.max_depth:
         return []
     try:
@@ -514,12 +514,16 @@ def _read(
     except (OSError, UnicodeDecodeError):
         return []
     # A rule whose ``paths:`` cannot be read would govern every path.
+    # The warning names the file, so the error need not.
     try:
-        meta, body = frontmatter(raw, source=str(resolved))
+        meta, body = frontmatter(raw)
     except yaml.YAMLError as e:
-        why = f"Skipping {resolved}: its frontmatter will not parse: {e}"
-        logger.warning(why)
-        skipped.append(why)
+        logger.warning(
+            "Skipping %s: its frontmatter will not parse: %s",  # pragma: no mutate[diagnostic-text]
+            resolved,
+            e,
+        )
+        skipped.append(resolved)
         return []
     body = _strip_comments(body)
     if not body.strip():

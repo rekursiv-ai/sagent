@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock
 
@@ -18,17 +19,18 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.model.types import Response
 from sagent.runtime import types
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     ContextClear,
     EditResult,
+    SessionContext,
     SessionRecord,
     Splice,
+    Succeeded,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -97,7 +99,7 @@ def _replayed(
     )
     printer = RecordingPrinter(show_thinking=show_thinking)
     replay(agent, Scrollback(printer, tools={"Echo": _Echo()}))
-    return printer.said
+    return printer.printed
 
 
 _FOOTER = ("line", "── resumed · 1 messages · scripted/scripted ──")
@@ -110,8 +112,8 @@ def test_an_empty_session_redraws_nothing() -> None:
 def test_messages_redraw_as_their_bars() -> None:
     said = _replayed(
         UserMessage(content="hi"),
-        AgentToAgentMessage(sender="Agent_0", content="done"),
-        AgentToAgentMessage(),
+        AgentMessage(sender="Agent_0", content="done"),
+        AgentMessage(),
         UserMessage(),
     )
     assert said == [
@@ -125,7 +127,7 @@ def test_messages_redraw_as_their_bars() -> None:
 
 def test_what_only_the_model_reads_is_not_redrawn() -> None:
     said = _replayed(
-        TurnContext(cwd="/w", model="m"),
+        SessionContext(cwd=Path("/w"), model="m"),
         SystemMessage(content="rules"),
         UserMessage(content="hi"),
     )
@@ -135,7 +137,7 @@ def test_what_only_the_model_reads_is_not_redrawn() -> None:
 def test_a_note_that_drove_the_model_redraws_as_it_drew_live() -> None:
     said = _replayed(
         UserMessage(content="hi"),
-        SystemMessage(content="[talk t1 still running after 15s]", subtype="wake"),
+        SystemMessage(content="[talk t1 still running after 15s]", subtype="nudge"),
     )
     assert said == [
         ("user", "hi"),
@@ -183,19 +185,19 @@ def test_a_call_redraws_by_its_tool_and_its_result_by_that_tool_s_display() -> N
             UserMessage(content="go"),
             call("Echo", "1", text="a"),
             call("Gone", "2"),
-            ToolResult(
+            ToolMessage(
                 call_id="1",
                 state="done",
                 stdout=("said a",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="2",
                 state="done",
                 stdout=("from gone",),
                 result=UncategorizedToolResult(),
             ),
-            ToolResult(
+            ToolMessage(
                 call_id="3",
                 state="done",
                 stdout=("orphan",),
@@ -205,7 +207,7 @@ def test_a_call_redraws_by_its_tool_and_its_result_by_that_tool_s_display() -> N
         ),
     )
     replay(agent, Scrollback(printer, tools={"Echo": _Echo()}))
-    assert printer.said == [
+    assert printer.printed == [
         ("user", "go"),
         ("call", "Echo a"),
         ("call", "Gone"),
@@ -249,7 +251,7 @@ def test_only_the_sessions_current_window_is_redrawn() -> None:
     scrollback = Scrollback(printer, tools={})
     scrollback.show(UserMessage(content="already drawn"))
     replay(agent, scrollback)
-    assert printer.said == [
+    assert printer.printed == [
         ("user", "already drawn"),
         ("user", "what happened"),
         ("user", "kept"),
@@ -280,22 +282,20 @@ def test_the_footer_names_the_thinking_and_effort_in_force() -> None:
     agent = Mock(spec=Agent, session=(UserMessage(content="hi"),), model=model)
     printer = RecordingPrinter()
     replay(agent, Scrollback(printer, tools={}))
-    assert printer.said[-1] == (
+    assert printer.printed[-1] == (
         "line",
         "── resumed · 1 messages · scripted/deep · thinking=auto · effort=low ──",
     )
 
 
-def test_a_taped_delivery_redraws_only_its_result_and_counts_once() -> None:
+def test_a_detached_result_redraws_under_its_call_and_counts_once() -> None:
     said = _replayed(
         UserMessage(content="go"),
         call("Echo", "1", text="a"),
-        ToolResult(call_id="1", state="pending", stdout=("[detached]",)),
+        ToolMessage(call_id="1", state="pending", stdout=("[detached]",)),
         AssistantMessage(content="later"),
-        UserMessage(content="[detached tool 1 completed]"),
-        ToolCall(call_id="1:detached", name="DetachedArrived"),
-        ToolResult(
-            call_id="1:detached",
+        ToolMessage(
+            call_id="1",
             state="done",
             stdout=("late",),
             result=UncategorizedToolResult(),
@@ -352,22 +352,22 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
         call("Echo", "1", text="a"),
         call("Fix", "2"),
     )
-    echo = ToolResult(
+    echo = ToolMessage(
         call_id="1",
         state="done",
         stdout=("a",),
         result=UncategorizedToolResult(),
     )
-    edit = ToolResult(
+    edit = ToolMessage(
         call_id="2",
         state="done",
         stdout=("Edited a.py.", Splice(before="x = 1", after="x = 2", start=3)),
         result=EditResult(path="a.py"),
     )
     background = call("Slow", "3", background=True)
-    pending = ToolResult(call_id="3", state="pending", stdout=("[detached]",))
+    pending = ToolMessage(call_id="3", state="pending", stdout=("[detached]",))
     later = reply("The slow one runs in the background.")
-    arrived = ToolResult(
+    arrived = ToolMessage(
         call_id="3",
         state="done",
         stdout=("finally done",),
@@ -377,20 +377,28 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
     live, replayed = _live_and_replayed(
         [
             UserMessage(content="go"),
-            types.ModelResponseThinking(text="Read it first.\n\n"),
-            types.ModelResponseThinking(text="Then fix line three."),
-            types.ModelResponsePartial(text="Reading **a.py**.\n\n", record=1),
-            types.ModelResponsePartial(text="- then fix it", record=1),
-            types.ModelResponseComplete(response=first),
-            types.CohortStarted(),
+            types.ModelResponseThinkingStreamed(text="Read it first.\n\n"),
+            types.ModelResponseThinkingStreamed(text="Then fix line three."),
+            types.ModelResponseTextStreamed(
+                text="Reading **a.py**.\n\n",
+                response_record_index=1,
+            ),
+            types.ModelResponseTextStreamed(
+                text="- then fix it",
+                response_record_index=1,
+            ),
+            types.ModelResponseCompleted(outcome=Succeeded(value=first)),
+            types.ToolCohortStarted(),
             echo,
             edit,
-            types.ModelResponseComplete(response=_turn(background)),
+            types.ModelResponseCompleted(
+                outcome=Succeeded(value=_turn(background)),
+            ),
             pending,
-            types.CohortStarted(),
-            types.ModelResponseComplete(response=later),
-            types.DetachedResult(result=arrived),
-            types.ModelResponseComplete(response=done),
+            types.ToolCohortStarted(),
+            types.ModelResponseCompleted(outcome=Succeeded(value=later)),
+            arrived,
+            types.ModelResponseCompleted(outcome=Succeeded(value=done)),
         ],
         records=[
             UserMessage(content="go"),
@@ -400,14 +408,7 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
             background,
             pending,
             *later.records,
-            UserMessage(content="[detached tool 3 completed]"),
-            ToolCall(call_id="3:detached", name="BackgroundTask"),
-            ToolResult(
-                call_id="3:detached",
-                state="done",
-                stdout=("finally done",),
-                result=UncategorizedToolResult(),
-            ),
+            arrived,
             *done.records,
         ],
         tools={
@@ -430,8 +431,6 @@ def test_streamed_scrollback_equals_replay_from_supplied_records() -> None:
         assert shown in live
     assert live.count("∴ Thinking") == 1
     assert live.count("finally done") == 1
-    assert "detached tool" not in live
-    assert "DetachedArrived" not in live
 
 
 def test_text_after_a_call_in_one_turn_replays_where_it_streamed() -> None:
@@ -440,7 +439,7 @@ def test_text_after_a_call_in_one_turn_replays_where_it_streamed() -> None:
         call("Echo", "1", text="a"),
         AssistantMessage(content="After."),
     )
-    result = ToolResult(
+    result = ToolMessage(
         call_id="1",
         state="done",
         stdout=("a",),
@@ -450,12 +449,12 @@ def test_text_after_a_call_in_one_turn_replays_where_it_streamed() -> None:
     live, replayed = _live_and_replayed(
         [
             UserMessage(content="go"),
-            types.ModelResponsePartial(text="Before."),
-            types.ModelResponsePartial(text="After.", record=2),
-            types.ModelResponseComplete(response=first),
-            types.CohortStarted(),
+            types.ModelResponseTextStreamed(text="Before."),
+            types.ModelResponseTextStreamed(text="After.", response_record_index=2),
+            types.ModelResponseCompleted(outcome=Succeeded(value=first)),
+            types.ToolCohortStarted(),
             result,
-            types.ModelResponseComplete(response=done),
+            types.ModelResponseCompleted(outcome=Succeeded(value=done)),
         ],
         records=[UserMessage(content="go"), *first.records, result, *done.records],
         tools={"Echo": _Echo()},

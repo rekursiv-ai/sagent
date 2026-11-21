@@ -35,6 +35,7 @@ from sagent.tools.paper_search import PaperSearch
 from sagent.tools.plan import Plan
 from sagent.tools.play_audio import PlayAudio
 from sagent.tools.read import Read
+from sagent.tools.recall import Recall
 from sagent.tools.remote import RemoteTool
 from sagent.tools.skill import Skill
 from sagent.tools.web_browser import WebBrowser
@@ -81,6 +82,7 @@ TOOLS: Final = (
     "AgentSend",
     "AgentSelf",
     "AgentSession",
+    "Recall",
     "Skill",
     "BackgroundTask",
     "RemoteTool",
@@ -132,6 +134,7 @@ def builders(
         "AgentSend": lambda: AgentSend(team=team),
         "AgentSelf": lambda: AgentSelf(team=team),
         "AgentSession": lambda: AgentSession(team=team),
+        "Recall": lambda: Recall(team=team),
         "Skill": lambda: Skill(tiers=tiers),
         "BackgroundTask": BackgroundTask,
     }

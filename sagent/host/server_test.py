@@ -64,7 +64,7 @@ from sagent.host.wire import (
     received,
 )
 from sagent.lib.posix.child import Child
-from sagent.session.types import ReadResult, ToolResult, UncategorizedToolResult
+from sagent.session.types import ReadResult, ToolMessage, UncategorizedToolResult
 from sagent.tools.read import Read
 from sagent.tools.remote import Link, RemoteSession
 
@@ -214,7 +214,7 @@ async def test_a_pause_stops_output_only_during_handoff(
     server._suspending = suspending
     result = Result(
         id="1",
-        record=ToolResult(
+        record=ToolMessage(
             call_id="",
             state="done",
             stdout=("hello\n",),
@@ -531,7 +531,7 @@ async def test_a_client_gets_only_the_tools_granted_and_asked_for(
         encoded(
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="failed",
                     stderr=("gpu1 does not offer Gate.",),
@@ -579,7 +579,7 @@ async def test_a_reconnect_gets_what_finished_while_it_was_gone(
     session.running.add("1")
     result = Result(
         id="1",
-        record=ToolResult(
+        record=ToolMessage(
             call_id="",
             state="done",
             stdout=("done",),
@@ -721,7 +721,7 @@ async def test_a_host_that_pauses_while_the_server_suspends_ends_its_pump(
     server._suspending = True
     later = Result(
         id="r1",
-        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+        record=ToolMessage(call_id="", state="done", result=UncategorizedToolResult()),
     )
     host.reader.feed_data(encoded(Paused()) + encoded(later))
 
@@ -1107,7 +1107,7 @@ async def test_ending_a_session_waits_for_its_pump_to_answer_calls(
         encoded(
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="failed",
                     stderr=("The host of this session stopped.",),
@@ -1170,7 +1170,7 @@ async def test_a_host_whose_stream_fails_ends_the_session(
         encoded(
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="failed",
                     stderr=("The host of this session stopped.",),
@@ -1200,7 +1200,7 @@ async def test_a_session_that_is_ending_takes_no_more_calls(tmp_path: Path) -> N
         encoded(
             Result(
                 id="1",
-                record=ToolResult(
+                record=ToolMessage(
                     call_id="",
                     state="failed",
                     stderr=("This session is ending: revoked.",),
@@ -1233,7 +1233,7 @@ async def test_a_session_that_is_ending_takes_no_more_calls(tmp_path: Path) -> N
     assert sent[-1] == encoded(
         Result(
             id="held",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="failed",
                 stderr=("The host of this session stopped.",),
@@ -1365,7 +1365,7 @@ async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
     )
     result = Result(
         id="r1",
-        record=ToolResult(call_id="", state="done", result=UncategorizedToolResult()),
+        record=ToolMessage(call_id="", state="done", result=UncategorizedToolResult()),
     )
     said = (
         Peers(labels=("Agent_0",)),
@@ -2188,7 +2188,7 @@ async def test_inherited_worker_socket_restores_calls_and_local_registrations(
     held = encoded(
         Result(
             id="2",
-            record=ToolResult(
+            record=ToolMessage(
                 call_id="",
                 state="done",
                 result=UncategorizedToolResult(),

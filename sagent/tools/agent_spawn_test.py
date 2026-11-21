@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -38,15 +39,20 @@ from sagent.providers.catalog import CachedModel, ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
-from sagent.runtime.types import DetachSchedule, RuntimeEvent
+from sagent.runtime.types import RuntimeEvent, ToolWakeSchedules
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
+    AgentIdle,
+    AgentMessage,
     AgentSpawnResult,
-    AgentToAgentMessage,
     AssistantMessage,
+    Cancelled,
     ContextClear,
+    Failed,
+    Outcome,
+    Succeeded,
     SystemMessage,
-    ToolResult,
+    ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -177,10 +183,11 @@ class _Seen:
         replies = [
             i
             for i, e in enumerate(self.events)
-            if isinstance(e, types.ModelResponseComplete)
+            if isinstance(e, types.ModelResponseCompleted)
+            and isinstance(e.outcome, Succeeded)
         ]
         return bool(replies) and any(
-            isinstance(e, types.AgentIdle) for e in self.events[replies[-1] :]
+            isinstance(e, AgentIdle) for e in self.events[replies[-1] :]
         )
 
     async def until(self, done: Callable[[], bool]) -> None:
@@ -192,8 +199,8 @@ class _Seen:
 
     async def idle(self) -> None:
         """Wait until the agent goes idle once more."""
-        idles = self.count(types.AgentIdle)
-        await self.until(lambda: self.count(types.AgentIdle) > idles)
+        idles = self.count(AgentIdle)
+        await self.until(lambda: self.count(AgentIdle) > idles)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -271,7 +278,7 @@ async def _spawn(
     arguments: dict[str, PlainTree],
     *,
     label: str = "Agent",
-) -> ToolResult:
+) -> ToolMessage:
     streaming_result = setup.spawn.call(
         ToolContext(cwd=tmp_path, label=label),
         arguments,
@@ -282,7 +289,7 @@ async def _spawn(
     return result
 
 
-def _spawn_result(result: ToolResult) -> AgentSpawnResult:
+def _spawn_result(result: ToolMessage) -> AgentSpawnResult:
     """Return the ``AgentSpawnResult`` of a spawn's record."""
     spawn_result = result.result
     assert isinstance(spawn_result, AgentSpawnResult)
@@ -300,15 +307,15 @@ def _session(agent: Agent) -> RuntimeSession:
     return session
 
 
-async def _messages(agent: Agent, count: int) -> list[AgentToAgentMessage]:
+async def _messages(agent: Agent, count: int) -> list[AgentMessage]:
     """Wait, a turn of the loop at a time, until ``count`` messages reach ``agent``."""
-    got: list[AgentToAgentMessage] = []
+    got: list[AgentMessage] = []
     async with asyncio.timeout(5):
         while len(got) < count:
             got.extend(
                 e
                 for e in agent.runtime.inbox.drain_nowait()
-                if isinstance(e, AgentToAgentMessage)
+                if isinstance(e, AgentMessage)
             )
             await asyncio.sleep(0)
     return got
@@ -407,7 +414,7 @@ async def test_a_grandchild_spends_from_each_agent_above_once(tmp_path: Path) ->
         reply("done", spend=TokenCost(response=0.25)),
     )
     setup.parent.max_spend_usd = 1.0
-    setup.parent.charge(0.4, by="Agent")
+    setup.parent.charge(TokenCost(request=0.4), label="Agent")
     async with setup.team:
         _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "mid"})
         _ = await _spawn(
@@ -421,7 +428,11 @@ async def test_a_grandchild_spends_from_each_agent_above_once(tmp_path: Path) ->
         assert grand.max_spend_usd == pytest.approx(0.6)
         assert mid.spend_usd == pytest.approx(0.25)
         assert setup.parent.spend_usd == pytest.approx(0.65)
-    assert [(e.usd, e.by) for e in setup.seen if isinstance(e, types.Charged)] == [
+    assert [
+        (e.spend.total, e.label)
+        for e in setup.seen
+        if isinstance(e, types.SessionSpendCharged)
+    ] == [
         (0.4, "Agent"),
         (0.25, "grand"),
     ]
@@ -463,7 +474,7 @@ async def test_a_child_tells_its_parent_when_it_stops_but_not_after_its_spawn(
         (told,) = await _messages(setup.parent, 1)
 
     assert after_spawn == []
-    assert told == AgentToAgentMessage(
+    assert told == AgentMessage(
         sender="helper",
         recipient="Agent",
         content="[helper is idle] did more",
@@ -489,7 +500,11 @@ async def test_a_spawn_detaches_at_its_childs_first_quota_wait() -> None:
         (RateLimitedError("spent"), 2),
     ):
         waits(
-            types.ModelCallSuspended(exception=exception, until=0.0, attempt=attempt),
+            types.ModelResponseSuspended(
+                exception=exception,
+                retry_at=datetime.fromtimestamp(0.0, UTC),
+                failures_in_a_row=attempt,
+            ),
         )
 
     assert detached == [task]
@@ -511,10 +526,10 @@ async def test_a_spawn_in_flight_detaches_its_own_call_when_its_child_waits_on_q
         )
         await wait.started.wait()
         setup.team["Agent_0"].runtime.publish(
-            types.ModelCallSuspended(
+            types.ModelResponseSuspended(
                 exception=RateLimitedError("spent"),
-                until=0.0,
-                attempt=1,
+                retry_at=datetime.fromtimestamp(0.0, UTC),
+                failures_in_a_row=1,
             ),
         )
 
@@ -541,7 +556,7 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
     result = await _spawn(setup, tmp_path, {"prompt": "count the TODOs"})
 
     spawn_result = _spawn_result(result)
-    assert result == ToolResult(
+    assert result == ToolMessage(
         call_id="",
         state="done",
         stdout=("looking\n", "Read\n", "three TODOs\n"),
@@ -553,32 +568,33 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
             model="scripted",
             state="completed",
             tokens=15,
+            spend=spawn_result.spend,
             duration_sec=spawn_result.duration_sec,
             tool_calls=1,
         ),
     )
+    assert spawn_result.spend is not None
+    assert spawn_result.spend.total == 0.5
     assert spawn_result.duration_sec is not None
     assert 0.0 <= spawn_result.duration_sec < 60.0
     assert list(setup.team) == ["Agent", "Agent_0"]
-    (done,) = [e for e in setup.seen if isinstance(e, types.ChildDoneEvent)]
-    assert (done.label, done.tokens, done.cost) == ("Agent_0", 15, 0.5)
-    assert 0.0 <= done.elapsed <= spawn_result.duration_sec
     forwarded = [e for e in setup.seen if isinstance(e, types.ChildEvent)]
     assert {e.label for e in forwarded} == {"Agent_0"}
-    assert [type(e.inner) for e in forwarded] == [
-        types.ModelResponseComplete,
-        ToolResult,
-        types.ModelResponseComplete,
+    assert [type(e.event) for e in forwarded] == [
+        types.ModelResponseCompleted,
+        ToolMessage,
+        types.ModelResponseCompleted,
     ]
     # A child's move to another login is the parent's to show too.
     child = setup.team["Agent_0"].runtime
-    switched = types.LoginSwitched(provider="scripted", was="default", now="work")
-    spent = types.LoginsSpent(provider="scripted", resets=())
+    switched = types.LoginSwitched(
+        provider="scripted",
+        from_login="default",
+        to_login="work",
+    )
     child.publish(switched)
-    child.publish(spent)
-    assert [e.inner for e in setup.seen if isinstance(e, types.ChildEvent)][-2:] == [
+    assert [e.event for e in setup.seen if isinstance(e, types.ChildEvent)][-1:] == [
         switched,
-        spent,
     ]
     first = setup.children.requests[0]
     # One conversation to vendors, the child a named agent within it.
@@ -640,7 +656,10 @@ def test_a_call_is_written_as_the_first_line_of_its_tool_s_summary() -> None:
         def write(self, item: str) -> None:
             written.append(item)
 
-    say = agent_spawn._Say(stdout=_Written(), tools={"Sum": _Summed(name="Sum")})
+    reply_writer = agent_spawn._ReplyWriter(
+        stdout=_Written(),
+        tools={"Sum": _Summed(name="Sum")},
+    )
     response = Response(
         records=(
             AssistantMessage(content=""),
@@ -652,9 +671,28 @@ def test_a_call_is_written_as_the_first_line_of_its_tool_s_summary() -> None:
         stop_reason="tool_use",
     )
 
-    say(types.ModelResponseComplete(response=response))
+    reply_writer(types.ModelResponseCompleted(outcome=Succeeded(value=response)))
 
     assert written == ["Sum 7\n", "Gone\n"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [Cancelled(), Failed(exception=RuntimeError("down"))],
+    ids=["cancelled", "failed"],
+)
+def test_a_call_that_brought_no_reply_is_neither_said_nor_counted(
+    outcome: Outcome[Response],
+) -> None:
+    reply_writer = agent_spawn._ReplyWriter(stdout=Stream[str](), tools={})
+    tally = agent_spawn._Tally()
+    ended = types.ModelResponseCompleted(outcome=outcome)
+
+    reply_writer(ended)
+    tally(ended)
+
+    assert reply_writer.last == ""
+    assert tally == agent_spawn._Tally()
 
 
 @pytest.mark.asyncio
@@ -682,7 +720,6 @@ async def test_a_child_that_fails_says_why_and_stays(tmp_path: Path) -> None:
     assert result.stdout[-1] == "ValueError: model down"
     assert _spawn_result(result).exit_code == 1
     assert list(setup.team) == ["Agent", "worker"]
-    assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
 
 
 @pytest.mark.asyncio
@@ -749,7 +786,7 @@ async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
         results = [
             r
             for r in parent.session
-            if isinstance(r, ToolResult) and r.call_id == "spawn"
+            if isinstance(r, ToolMessage) and r.call_id == "spawn"
         ]
         result = arrived if arrived is not None else results[-1]
         if restricted and tools == ["Grep"]:
@@ -767,7 +804,7 @@ async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
             else None
         )
         assert child.allowed == expected
-        (read,) = (r for r in child.session if isinstance(r, ToolResult))
+        (read,) = (r for r in child.session if isinstance(r, ToolMessage))
         assert read.is_error is (tools in (["Grep"], []))
         assert read.text() == (
             "Read is not available to this agent." if tools in (["Grep"], []) else "ok"
@@ -804,7 +841,7 @@ async def test_final_round_watchers_inherit_configured_permissions(
         (result,) = (
             r
             for r in parent.session
-            if isinstance(r, ToolResult) and r.call_id == "watch"
+            if isinstance(r, ToolMessage) and r.call_id == "watch"
         )
         assert result.is_error is False, result.text()
         watcher = setup.team["watcher"]
@@ -826,7 +863,6 @@ async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> 
         assert (await task).state == "cancelled"
         await asyncio.wait_for(wait.stopped.wait(), timeout=5)
         assert list(setup.team) == ["Agent", "Agent_0"]
-    assert any(isinstance(e, types.ChildDoneEvent) for e in setup.seen)
 
 
 @pytest.mark.asyncio
@@ -1014,10 +1050,11 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
     _ = read.write_text("x")
     mine.files.saw(read)
     parent.runtime.persistent_retry = True
-    parent.runtime.detach_schedule = DetachSchedule(tools={"Bash": None})
+    parent.runtime.wake_schedules = ToolWakeSchedules(per_tool={"Bash": None})
     parent.environment = False
     parent.allowed = frozenset({"Grep"})
     parent.account = "work"
+    parent.user = "ann"
     async with setup.team:
         _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
         assert await setup.spawn.watch("Agent") == "watcher"
@@ -1039,9 +1076,13 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
             assert not context.files.recent()
             assert context.label == label
             assert heir.runtime.persistent_retry is True
-            assert heir.runtime.detach_schedule == DetachSchedule(tools={"Bash": None})
+            assert heir.runtime.wake_schedules == ToolWakeSchedules(
+                per_tool={"Bash": None},
+            )
             assert heir.environment is False
             assert heir.agents_md is parent.agents_md
+            # Whose session it is: a person's message is told apart in each of them.
+            assert heir.user == "ann"
             assert isinstance(heir.session.compactor, SummaryCompactor)
 
 
@@ -1155,7 +1196,7 @@ async def test_a_child_asked_again_is_nudged_until_it_replies_by_agentsend(
         await seen.idle()
 
     assert result.text() == "first answer"
-    assert told == AgentToAgentMessage(
+    assert told == AgentMessage(
         sender="helper",
         recipient="Agent",
         content="done",
@@ -1990,7 +2031,7 @@ async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
         told = [
             m.content or ""
             for m in team["watcher"].runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
+            if isinstance(m, AgentMessage)
         ]
         assert "This root's own way to watch." in told[0]
 
@@ -2020,7 +2061,7 @@ async def test_a_watcher_of_an_agent_with_no_skill_tool_reads_its_tiers_alone(
         told = [
             m.content or ""
             for m in team["watcher"].runtime.inbox.drain_nowait()
-            if isinstance(m, AgentToAgentMessage)
+            if isinstance(m, AgentMessage)
         ]
         assert "Planted." not in told[0]
         assert "source='builtin'" in told[0]
@@ -2060,7 +2101,7 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
             spawn.call(context, {"prompt": "keep me honest", "watch": True}),
         )
 
-        assert started == ToolResult(
+        assert started == ToolMessage(
             call_id="",
             state="done",
             stdout=("Started your watcher, watcher; it owes you a reply.",),
@@ -2078,7 +2119,7 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
                 told = [
                     r.content or ""
                     for r in team["watcher"].session
-                    if isinstance(r, AgentToAgentMessage)
+                    if isinstance(r, AgentMessage)
                 ]
         assert owed[0] == {"Agent": "keep me honest"}
         assert told[0].startswith("<skill name='watch' source='builtin'>")
@@ -2116,7 +2157,7 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             assert kept.parent.parent == tmp_path / "parent"
             assert setup.team.resolve("parent", by="Agent") == ["watcher"]
             assert watcher.system_prompt == "the parent's prompt"
-            assert isinstance(first, AgentToAgentMessage)
+            assert isinstance(first, AgentMessage)
             assert first.content == "how\n\n[watch]\n> user: hi"
 
 
@@ -2137,14 +2178,14 @@ async def test_a_watcher_comes_back_on_resume_and_is_sent_only_what_is_new(
             watcher = setup.team["watcher"]
             # It saw "before" already: nothing is new until "after".
             assert not any(
-                isinstance(m, AgentToAgentMessage)
+                isinstance(m, AgentMessage)
                 for m in watcher.runtime.inbox.drain_nowait()
             )
             setup.parent.session.append(UserMessage(content="after"))
-            setup.parent.runtime.publish(types.AgentIdle())
+            setup.parent.runtime.publish(AgentIdle())
 
             (told,) = watcher.runtime.inbox.drain_nowait()
-            assert isinstance(told, AgentToAgentMessage)
+            assert isinstance(told, AgentMessage)
             assert told.content == "[watch]\n> user: after"
 
             await setup.team.stop("watcher")
@@ -2170,7 +2211,7 @@ async def test_a_new_watcher_is_sent_the_window_its_root_sees_not_earlier_ones(
             _ = await setup.spawn.watch("Agent", before="how")
 
             (first,) = setup.team["watcher"].runtime.inbox.drain_nowait()
-            assert isinstance(first, AgentToAgentMessage)
+            assert isinstance(first, AgentMessage)
             assert first.content is not None
             assert "> user: new" in first.content
             assert "old" not in first.content
@@ -2190,12 +2231,12 @@ async def test_a_watcher_stopped_and_started_again_is_sent_each_update_once(
             _ = watcher.runtime.inbox.drain_nowait()
 
             setup.parent.session.append(UserMessage(content="after"))
-            setup.parent.runtime.publish(types.AgentIdle())
+            setup.parent.runtime.publish(AgentIdle())
 
             told = [
                 m.content
                 for m in watcher.runtime.inbox.drain_nowait()
-                if isinstance(m, AgentToAgentMessage)
+                if isinstance(m, AgentMessage)
             ]
             assert told == ["[watch]\n> user: after"]
 

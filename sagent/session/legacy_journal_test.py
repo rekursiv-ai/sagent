@@ -5,6 +5,7 @@ The tests after ``_AT`` read one old record at a time; those before it, a whole 
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import base64
@@ -27,8 +28,8 @@ from sagent.session.legacy_journal import (
     upgrade,
 )
 from sagent.session.types import (
+    AgentMessage,
     AgentSpawnResult,
-    AgentToAgentMessage,
     AssistantMessage,
     Attachment,
     BashResult,
@@ -38,7 +39,7 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
+    ToolMessage,
     UncategorizedToolResult,
     UserMessage,
     WebFetchResult,
@@ -120,10 +121,10 @@ def _texts(path: Path) -> list[str]:
         r.content or ""
         if isinstance(
             r,
-            UserMessage | AssistantMessage | AgentToAgentMessage | SystemMessage,
+            UserMessage | AssistantMessage | AgentMessage | SystemMessage,
         )
         else r.text()
-        if isinstance(r, ToolResult)
+        if isinstance(r, ToolMessage)
         else f"call {r.call_id}"
         if isinstance(r, ToolCall)
         else type(r).__name__
@@ -197,7 +198,7 @@ def test_a_tape_converts_to_what_its_model_last_saw(tmp_path: Path) -> None:
     assert isinstance(clear, ContextClear)
     assert clear.extra == {"spend_usd": 0.75, "converted_from": str(path)}
     assert _texts(path) == ["go", "reading", "call c1", "the file", "done"]
-    (result,) = [r for r in history if isinstance(r, ToolResult)]
+    (result,) = [r for r in history if isinstance(r, ToolMessage)]
     assert result.state == "done"
 
 
@@ -369,9 +370,9 @@ def test_an_update_rewrites_the_result_it_names(tmp_path: Path) -> None:
         {"kind": "update", "id": 7, "content": "real", "is_error": True},
         {"kind": "update", "id": 99, "content": "nowhere"},
     )
-    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
+    (result,) = [r for r in _history(path) if isinstance(r, ToolMessage)]
     assert (result.text(), result.is_error, result.state) == ("real", True, "done")
-    assert result.timestamp == "2026-09-21T14:13:20+00:00"
+    assert result.timestamp == _AT
 
 
 def test_records_without_refs_take_the_next_ordinal(tmp_path: Path) -> None:
@@ -558,7 +559,7 @@ def test_a_spawn_result_names_the_child_its_label_started(tmp_path: Path) -> Non
         {"kind": "persistent_agent", "label": "rev", "session_dir": "/p/s/3640f519"},
         _result(1, "sp", "started"),
     )
-    (result,) = [r for r in _history(path) if isinstance(r, ToolResult)]
+    (result,) = [r for r in _history(path) if isinstance(r, ToolMessage)]
     assert result.result == AgentSpawnResult(agent_id="3640f519", agent_kind="rev")
 
 
@@ -660,7 +661,7 @@ def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
     )
     (called,) = [r for r in history if isinstance(r, ToolCall)]
     assert (called.name, called.arguments) == ("read", {"file_path": "a"})
-    (result,) = [r for r in history if isinstance(r, ToolResult)]
+    (result,) = [r for r in history if isinstance(r, ToolMessage)]
     assert result.is_error is True
 
 
@@ -696,7 +697,7 @@ def test_an_update_to_a_stand_in_marks_what_it_stood_for(tmp_path: Path) -> None
         {"kind": "update", "id": 4, "content": _DETACHED},
     )
     result = _history(path)[-1]
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolMessage)
     assert result.state == "pending"
 
 
@@ -785,7 +786,7 @@ def test_a_kindless_record_without_a_session_id_is_no_meta(tmp_path: Path) -> No
     assert isinstance(clear, ContextClear)
     assert clear.extra["spend_usd"] == 2.5
     assert clear.timestamp is not None
-    assert clear.timestamp.endswith("+00:00")
+    assert clear.timestamp.utcoffset() == timedelta(0)
 
 
 def test_a_v3_log_keeps_times_ids_lines_and_result_attachments(tmp_path: Path) -> None:
@@ -826,11 +827,11 @@ def test_a_v3_log_keeps_times_ids_lines_and_result_attachments(tmp_path: Path) -
         {"kind": "update", "id": 7, "content": "new"},
     )
     user, said, call, result = _history(path)
-    assert user == UserMessage(timestamp="2026-09-21T14:13:20+00:00", content="a\nb")
+    assert user == UserMessage(timestamp=_AT, content="a\nb")
     assert said == AssistantMessage(content="go")
     assert isinstance(call, ToolCall)
     assert call.name == "ls"
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolMessage)
     assert (result.text(), result.is_error) == ("new", False)
     assert result.attachments == (
         Attachment(mime_descriptor="image/png", data=b"\x89PNG"),
@@ -1015,7 +1016,7 @@ def test_old_sessions_are_found_under_the_per_user_root() -> None:
     assert find_old("fe") == [log]
 
 
-_AT = "2026-09-21T14:13:20+00:00"
+_AT = datetime(2026, 9, 21, 14, 13, 20, tzinfo=UTC)
 
 
 def _read(*records: dict[str, PlainTree]) -> list[SessionRecord]:
@@ -1049,8 +1050,8 @@ def _answer(call_id: str, content: str, **fields: PlainTree) -> dict[str, PlainT
     return _entry("tool_result", call_id=call_id, content=content, **fields)
 
 
-def _results(records: list[SessionRecord]) -> list[ToolResult]:
-    return [r for r in records if isinstance(r, ToolResult)]
+def _results(records: list[SessionRecord]) -> list[ToolMessage]:
+    return [r for r in records if isinstance(r, ToolMessage)]
 
 
 def _part(descriptor: str, content: PlainTree = None) -> dict[str, PlainTree]:
@@ -1104,7 +1105,7 @@ def test_every_kind_keeps_its_time_and_attachments() -> None:
 
     assert user == UserMessage(timestamp=_AT, content="u", attachments=png)
     assert note == SystemMessage(timestamp=_AT, content="n", subtype="reminder")
-    assert peer == AgentToAgentMessage(
+    assert peer == AgentMessage(
         timestamp=_AT,
         content="p",
         attachments=png,
@@ -1112,7 +1113,7 @@ def test_every_kind_keeps_its_time_and_attachments() -> None:
     )
     assert said == AssistantMessage(timestamp=_AT, content="said")
     assert call == ToolCall(timestamp=_AT, call_id="c1", name="Grep")
-    assert result == ToolResult(
+    assert result == ToolMessage(
         timestamp=_AT,
         call_id="c1",
         state="done",
@@ -1124,7 +1125,7 @@ def test_every_kind_keeps_its_time_and_attachments() -> None:
 
 def test_a_peer_with_no_source_names_no_sender() -> None:
     (peer,) = _read(_entry("agent_send", text="p"))
-    assert peer == AgentToAgentMessage(content="p")
+    assert peer == AgentMessage(content="p")
 
 
 def test_an_attachment_that_is_no_strict_base64_is_dropped(
@@ -1152,7 +1153,7 @@ def test_a_value_of_the_wrong_type_reads_as_none_given() -> None:
     )
     assert user == UserMessage(content="")
     assert said == AssistantMessage(content="x")
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolMessage)
     assert result.is_error is False
 
 
@@ -1168,10 +1169,10 @@ def test_a_value_of_the_wrong_type_reads_as_none_given() -> None:
 def test_each_kind_of_thinking_keeps_its_turns_time(
     block: dict[str, PlainTree],
 ) -> None:
-    thinking = legacy_journal._thinking(block, "2026-01-01T00:00:00Z")
+    thinking = legacy_journal._thinking(block, _AT)
 
     assert thinking is not None
-    assert thinking.timestamp == "2026-01-01T00:00:00Z"
+    assert thinking.timestamp == _AT
 
 
 def test_a_turn_splits_into_thinking_text_and_calls_each_sealed() -> None:
@@ -1296,7 +1297,7 @@ def test_an_entry_s_spawn_result_names_its_child() -> None:
 
     results = [entries.read(_answer(i, "ok")) for i in ("s1", "s2")]
 
-    assert [r.result for r in results if isinstance(r, ToolResult)] == [
+    assert [r.result for r in results if isinstance(r, ToolMessage)] == [
         AgentSpawnResult(
             agent_id="3640f519",
             agent_kind="rev",
@@ -1315,7 +1316,7 @@ def test_an_update_keeps_what_it_rewrote() -> None:
         failed=False,
         timestamp=_AT,
         attachments=png,
-    ) == ToolResult(
+    ) == ToolMessage(
         timestamp=_AT,
         call_id="c",
         state="done",
@@ -1323,6 +1324,25 @@ def test_an_update_keeps_what_it_rewrote() -> None:
         result=UncategorizedToolResult(),
         extra={"is_error": False},
     )
+
+
+def test_a_result_with_no_text_has_no_output() -> None:
+    assert legacy_journal._Entries().result("c", "", failed=False) == ToolMessage(
+        call_id="c",
+        state="done",
+        result=UncategorizedToolResult(),
+        extra={"is_error": False},
+    )
+
+
+def test_what_a_turn_thought_is_at_the_turns_time() -> None:
+    turn = legacy_journal._Entries()._turn(
+        {"thinking_blocks": [{"thinking": "hm"}]},
+        text="",
+        timestamp=_AT,
+    )
+
+    assert turn.records == (Thinking(timestamp=_AT, content="hm"),)
 
 
 @pytest.mark.parametrize(
@@ -1334,10 +1354,10 @@ def test_an_update_keeps_what_it_rewrote() -> None:
         (True, None),
         ("x", None),
         (1_000_000_000, None),
-        (1_000_000_000.5, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000.5, datetime(2001, 9, 9, 1, 46, 40, 500_000, UTC)),
         (1_000_000_000_000_000, None),
         (1_790_000_000_000, None),
-        (1_000_000_000_500_000_000, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000_500_000_000, datetime(2001, 9, 9, 1, 46, 40, 500_000, UTC)),
         (1_000_000_000_000_000_000, None),
         (1e300, None),
     ],
@@ -1358,7 +1378,7 @@ def test_an_update_keeps_what_it_rewrote() -> None:
 )
 def test_a_time_is_kept_only_when_it_names_a_date(
     raw: PlainTree,
-    when: str | None,
+    when: datetime | None,
 ) -> None:
     assert legacy_journal._time(raw) == when
 
@@ -1413,7 +1433,7 @@ def test_a_v3_session_reads_like_history() -> None:
         Thinking(content="t", encrypted="s"),
         AssistantMessage(content="reading"),
         ToolCall(call_id="c1", name="read", arguments={"file_path": "a"}),
-        ToolResult(
+        ToolMessage(
             call_id="c1",
             state="done",
             stdout=("line\nfailed", png),
@@ -1421,7 +1441,7 @@ def test_a_v3_session_reads_like_history() -> None:
             extra={"is_error": True},
         ),
         AssistantMessage(content="ok"),
-        ToolResult(
+        ToolMessage(
             call_id="",
             state="done",
             stdout=("raw",),
@@ -1457,7 +1477,7 @@ def test_a_role_session_reads_like_history() -> None:
         Thinking(content="hm", encrypted="s"),
         ToolCall(call_id="t1", name="Bash", arguments={"command": "ls"}),
         ToolCall(call_id="t2", name="Bash", arguments={"command": "pwd"}),
-        ToolResult(
+        ToolMessage(
             call_id="t1",
             state="done",
             stdout=("[exit code: 2]",),

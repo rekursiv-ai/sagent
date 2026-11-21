@@ -48,15 +48,16 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Response, TextChunk
 from sagent.session.types import (
-    AgentToAgentMessage,
+    AgentMessage,
     AssistantMessage,
     ContextClear,
+    SessionContext,
     SystemMessage,
     Thinking,
     ToolCall,
-    ToolResult,
-    TurnContext,
+    ToolMessage,
     UserMessage,
+    labeled_text,
 )
 
 
@@ -511,17 +512,21 @@ def _parts(
 ) -> list[tuple[str, dict[str, object]]]:
     """Return the role and parts ``record`` becomes; none for bookkeeping records."""
     match record:
-        case UserMessage(content=text, attachments=attachments):
-            return [("user", p) for p in _said(text or "", attachments, limits=limits)]
-        case AgentToAgentMessage(content=text, sender=sender, attachments=attachments):
-            body = text if text is not None else ""
-            labeled = f"[from {sender}]: {body}" if sender is not None else body
-            return [("user", p) for p in _said(labeled, attachments, limits=limits)]
+        # Whoever is named is named: another agent, or a person not the session's user.
+        case UserMessage() | AgentMessage():
+            return [
+                ("user", p)
+                for p in _user_parts(
+                    labeled_text(record),
+                    record.attachments,
+                    limits=limits,
+                )
+            ]
         # A harness note is no one's turn; it rides the user side, marked.
         case SystemMessage(content=str() as text) if text:
             note = f"<system-reminder>\n{text}\n</system-reminder>"
             return [("user", {"text": note})]
-        case TurnContext() if record.text():
+        case SessionContext() if record.text():
             note = f"<system-reminder>\n{record.text()}\n</system-reminder>"
             return [("user", {"text": note})]
         case AssistantMessage(content=str() as text) if text:
@@ -531,7 +536,7 @@ def _parts(
                 "functionCall": {"name": name, "args": mutable(arguments)},
             }
             return [("model", _signed(call, extra=record.extra))]
-        case ToolResult():
+        case ToolMessage():
             text = record.text()
             if record.is_error and text:
                 text = f"[Error] {text}"
@@ -561,7 +566,7 @@ def _parts(
             return []
 
 
-def _said(
+def _user_parts(
     text: str,
     attachments: Sequence[Attachment],
     *,

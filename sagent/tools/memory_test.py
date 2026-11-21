@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.session.types import ToolResult
+    from sagent.session.types import ToolMessage
 
 
 def test_summary_names_the_action_and_the_memory(tmp_path: Path) -> None:
@@ -490,7 +490,7 @@ async def _save(
     source: str = "user",
     description: str = "",
     content: str = "x",
-) -> ToolResult:
+) -> ToolMessage:
     """Save ``name``; its description defaults to its name."""
     return await settled(
         memory.call(

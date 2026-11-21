@@ -1,7 +1,7 @@
 """What a client, a tool server and a tool host say to each other: one JSON line each.
 
 A message is a dataclass, written as a session record is (``stored_plain``), so
-a tool's result crosses whole and typed: a ``ToolResult`` arrives as
+a tool's result crosses whole and typed: a ``ToolMessage`` arrives as
 one, its attachments' bytes included.
 
 ::
@@ -61,7 +61,7 @@ from wesearch.fetch.gate import Admission, GatePolicy
 from sagent.agent.team import MessageKind
 from sagent.session.types import (
     KnownToolResult,
-    ToolResult,
+    ToolMessage,
     current_plain,
     record_classes,
     stored_plain,
@@ -116,7 +116,7 @@ __all__ = [
 
 VERSION: Final = 3
 """The protocol; a client and server of different versions refuse each other.
-Version 2 sends a tool call's ``Result.record`` as a ``ToolResult``; version 3
+Version 2 sends a tool call's ``Result.record`` as a ``ToolMessage``; version 3
 adds ``Progress``, which an older client could not read."""
 
 MAX_LINE_BYTES: Final = 256 << 20
@@ -251,7 +251,7 @@ class Result:
     """What a call did."""
 
     id: str
-    record: ToolResult
+    record: ToolMessage
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
