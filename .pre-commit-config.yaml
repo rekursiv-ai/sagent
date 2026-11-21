@@ -542,7 +542,7 @@ repos:
         require_serial: true
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool basedpyright
-        exclude: |
+        exclude: &basedpyright-exclude |
           (?x)^(
             typings/
             |(.*/)?typings/stubs/
@@ -560,6 +560,8 @@ repos:
         require_serial: true
         pass_filenames: false
         types_or: [python, pyi]
+        # The spool's, so the gate never runs when its spool was skipped.
+        exclude: *basedpyright-exclude
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
           uv --quiet run --frozen --group pre-commit python -m codedoctor typecheck
