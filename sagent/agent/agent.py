@@ -265,8 +265,8 @@ class Agent(AsyncResource):
         return self.runtime.model
 
     # The agent owns the models assigned to it. One assigned away from may still be
-    # streaming, so it closes once the context naming its successor is in force: the
-    # runtime puts it there just before it calls the new one.
+    # streaming, so it closes once no call can be on it: the next call starts on its
+    # successor, or the agent rests (``_observe``).
     @model.setter
     def model(self, model: Model) -> None:
         old, self.runtime.model = self.runtime.model, model

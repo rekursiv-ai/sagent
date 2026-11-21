@@ -493,7 +493,31 @@ def _contents(
                 turns[-1][1].append(part)
             else:
                 turns.append((role, [part]))
+    # A model's calls are answered before anything else the user side says: a note
+    # taped among a turn's results is read after them. Images keep their response.
+    for role, parts in turns:
+        if role == "user" and any("functionResponse" in part for part in parts):
+            answered = _answers(parts)
+            parts[:] = [*answered, *(p for p in parts if not _in(p, answered))]
     return [{"role": role, "parts": parts} for role, parts in turns]
+
+
+def _answers(parts: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """Return each function response of ``parts`` with the images that follow it."""
+    answered: list[dict[str, object]] = []
+    following = False
+    for part in parts:
+        if "functionResponse" in part:
+            following = True
+        elif "inlineData" not in part:
+            following = False
+        if following:
+            answered.append(part)
+    return answered
+
+
+def _in(part: dict[str, object], parts: Sequence[dict[str, object]]) -> bool:
+    return any(part is each for each in parts)
 
 
 def _calls(records: Sequence[SessionRecord]) -> Iterator[ToolCall]:

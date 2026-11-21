@@ -116,8 +116,8 @@ __all__ = [
 
 VERSION: Final = 3
 """The protocol; a client and server of different versions refuse each other.
-Version 2 sends a tool call's ``Result.record`` as a ``ToolMessage``; version 3
-adds ``Progress``, which an older client could not read."""
+Version 2 sends a tool call's ``Result.record`` as its session record (today a
+``ToolMessage``); version 3 adds ``Progress``, which an older client could not read."""
 
 MAX_LINE_BYTES: Final = 256 << 20
 """The longest line read: a result carrying a PDF's pages is many megabytes."""

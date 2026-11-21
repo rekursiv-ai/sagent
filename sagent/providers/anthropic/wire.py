@@ -503,6 +503,10 @@ def _messages(
             "redacted_thinking",
         ):
             blocks.append({"type": "text", "text": "."})
+        # And a user turn with anything before its tool results: a note or a
+        # message taped among a turn's results is read after them.
+        if role == "user":
+            blocks.sort(key=lambda block: block["type"] != "tool_result")
     if turns:
         blocks = turns[-1][1]
         blocks[-1] = {**blocks[-1], "cache_control": _cache_mark(settings)}

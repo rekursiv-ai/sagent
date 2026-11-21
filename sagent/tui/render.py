@@ -455,9 +455,9 @@ class Scrollback:
         elif isinstance(event, AgentMessage):
             p.agent(event.sender or "agent", recipient=label, text=event.content or "")
 
-    # The runtime hides a result with no call from the model
-    # (``Runtime._repair_history_record_orphans``); under the call printed last it
-    # would read as that call's. Only its failure shows, at the indent.
+    # The runtime hides a result with no call from the model (``Tape.repair``); under
+    # the call printed last it would read as that call's. Only its failure shows, at
+    # the indent.
     def _orphaned(self, result: ToolMessage, *, agent: str = "") -> None:
         """Print a result whose call this scrollback never saw: a failure, at the indent."""
         if not result.is_error:

@@ -333,6 +333,23 @@ def test_tool_ids_are_renamed_consistently_within_a_request() -> None:
     assert [r["tool_use_id"] for r in results] == ["toolu_1", "toolu_0"]
 
 
+def test_a_turn_s_tool_results_come_before_anything_else_said_on_the_user_side() -> (
+    None
+):
+    """The API refuses text before a tool_result in the turn after the calls."""
+    messages = _messages(
+        [
+            UserMessage(content="go"),
+            ToolCall(call_id="a", name="Echo"),
+            SystemMessage(content="later", subtype="nudge"),
+            ToolMessage(call_id="a", state="done", stdout=("ok",)),
+            UserMessage(content="and?"),
+        ],
+    )
+    kinds = [block["type"] for block in _blocks(messages[2])]
+    assert kinds == ["tool_result", "text", "text"]
+
+
 def test_a_tool_result_carries_its_error_flag_and_its_text() -> None:
     messages = _messages(
         [
