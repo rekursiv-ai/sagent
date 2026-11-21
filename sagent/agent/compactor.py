@@ -61,6 +61,7 @@ from sagent.session.types import (
     SessionContext,
     Succeeded,
     SystemMessage,
+    Thinking,
     ToolCall,
     ToolMessage,
     UserMessage,
@@ -375,6 +376,11 @@ class SummaryCompactor:
                     instructions,
                     keep=self._tail_len(context),
                 )
+        if model.provider.name in ("anthropic", "anthisub"):
+            # The new summary changes the prefix that seals retained thinking.
+            cleaned = _without_rebound_thinking(payload)
+            kept = max(0, kept - (len(payload) - len(cleaned)))
+            payload = cleaned
         return ContextSplice(
             ref=mint_ref(),
             mask=full_tape_mask(tape),
@@ -1276,3 +1282,25 @@ def _request_tokens(
             asked = max(0, entry.tokens.total - system)
             return asked + _tokens(model, context[i + 1 :])
     return _tokens(model, context) + unbilled
+
+
+def _without_rebound_thinking(
+    entries: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
+    """Keep compacted content, not thinking bound to its replaced prefix.
+
+    Original journal records and Response usage remain unchanged.
+    """
+    cleaned: list[ModelContextEvent] = []
+    for entry in entries:
+        if isinstance(entry, Thinking):
+            continue
+        cleaned.append(
+            replace(
+                entry,
+                records=tuple(r for r in entry.records if not isinstance(r, Thinking)),
+            )
+            if isinstance(entry, Response)
+            else entry
+        )
+    return tuple(cleaned)
