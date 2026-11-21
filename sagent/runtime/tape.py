@@ -35,6 +35,7 @@ from sagent.session.types import (
     ToolCall,
     ToolMessage,
     UserMessage,
+    as_sent,
     labeled_text,
     pairings,
 )
@@ -42,6 +43,8 @@ from sagent.session.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from sagent.session.types import SessionRecord
 
 
 __all__ = [
@@ -59,6 +62,7 @@ __all__ = [
     "mask_contains_ref",
     "mask_ranges_overlap",
     "merge_mask_ranges",
+    "sent_records",
     "splice_safe_repair",
     "unpaired_call_ids",
 ]
@@ -317,6 +321,26 @@ def parts_model_turns(entry: SystemMessage | SessionContext) -> bool:
 
     """
     return bool(entry.text() if isinstance(entry, SessionContext) else entry.content)
+
+
+# Every request a model is sent goes through here: the turn's own call and each
+# call a compaction makes, so a call's later messages never reach a provider as a
+# second result of it.
+def sent_records(entries: Sequence[ModelContextEvent]) -> list[SessionRecord]:
+    """Return ``entries`` as a request's records, each later message user text.
+
+    Args:
+      entries: A context, or part of one.
+
+    Returns:
+      records: Each model turn's records in its place, in order.
+
+    """
+    return [
+        record
+        for entry in as_sent(entries)
+        for record in (entry.records if isinstance(entry, Response) else (entry,))
+    ]
 
 
 def coalesce_roles(

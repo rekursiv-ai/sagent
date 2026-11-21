@@ -5,7 +5,14 @@ It also holds the hypothesis properties of the request, coalescing, and rescue p
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -15,6 +22,7 @@ from typing import Literal, Self, override
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import math
 import os
@@ -101,6 +109,7 @@ from sagent.runtime.types import (
     SessionQuitCompleted,
     SessionSaveDue,
     Stubs,
+    SystemMessageCompleted,
     ToolCallCompleted,
     ToolCohortCompleted,
     ToolCohortStarted,
@@ -124,8 +133,10 @@ from sagent.session.types import (
     Failed,
     ModelIdle,
     SessionContext,
+    SessionRecord,
     Succeeded,
     SystemMessage,
+    Thinking,
     ToolCall,
     ToolMessage,
     UncategorizedToolResult,
@@ -1965,6 +1976,202 @@ async def _while_halted(actions: Sequence[str]) -> None:
     assert "resume" in h.user_texts(1)[-1].split("\n\n")
     if "clear" in actions:
         assert [e for e in h.history() if isinstance(e, ToolMessage)] == []
+
+
+# Each call's one result comes right after the model turn that made it, before anything
+# else is said; no call goes unanswered.
+def _wire_violation(records: Sequence[SessionRecord]) -> str | None:
+    """Return how ``records`` break a provider's pairing rule, or ``None``."""
+    turn_calls: set[str] = set()
+    answered: set[str] = set()
+    in_turn = False
+    for record in records:
+        if isinstance(record, ToolCall | AssistantMessage | Thinking):
+            if not in_turn and turn_calls - answered:
+                return f"a model turn while {sorted(turn_calls - answered)} are open"
+            if not in_turn:
+                turn_calls.clear()
+                in_turn = True
+            if isinstance(record, ToolCall):
+                turn_calls.add(record.call_id)
+            continue
+        in_turn = False
+        if isinstance(record, ToolMessage):
+            if record.call_id in answered:
+                return f"a second result for {record.call_id!r}"
+            if record.call_id not in turn_calls:
+                return f"a result for {record.call_id!r} after its turn"
+            answered.add(record.call_id)
+        elif turn_calls - answered:
+            return f"{type(record).__name__} while {sorted(turn_calls - answered)} are open"
+    open_calls = turn_calls - answered
+    return f"{sorted(open_calls)} open at the end" if open_calls else None
+
+
+_LAW_ACTIONS = st.sampled_from(
+    [
+        "user",
+        "user due at rest",
+        "user due when the model rests",
+        "agent",
+        "nudge",
+        "model halt",
+        "kill one",
+        "kill all",
+        "detach one",
+        "retry",
+        "clear",
+        "compact",
+        "prune one",
+        "release",
+        "talk",
+        "talk ends",
+        "spin",
+    ],
+)
+
+
+def _law_reply(kinds: Sequence[int], ids: Iterator[int]) -> Reply:
+    """Return a reply that says text, or calls each tool ``kinds`` names."""
+    if not kinds:
+        return reply("ok")
+    names = ("echo", "slow", "talk")
+    return reply(
+        calls=[
+            call(names[kind % 3], f"c{next(ids)}", background=kind >= 3)
+            for kind in kinds
+        ],
+    )
+
+
+async def _laws_hold(actions: Sequence[str], replies: Sequence[Sequence[int]]) -> None:
+    """Take ``actions`` on a runtime; check after each that every request was sendable."""
+    ids = itertools.count()
+    slow = Gated(name="slow", hold=True)
+    talk = Talking()
+    script = [_law_reply(kinds, ids) for kinds in replies] + [reply("ok")] * 200
+    async with Harness(
+        *script,
+        tools=[Gated(), slow, talk],
+        compactor=Summarizer(),
+    ) as h:
+        talk.wakes = h.runtime
+
+        def known() -> list[str]:
+            return [c.call_id for e in h.history() for c in calls(_records(e))]
+
+        for at, action in enumerate(actions):
+            match action:
+                case "user":
+                    h.push(_user(f"u{at}"))
+                case "user due at rest":
+                    h.push(UserMessage(content=f"u{at}", due_after=AgentIdle))
+                case "user due when the model rests":
+                    h.push(UserMessage(content=f"u{at}", due_after=ModelIdle))
+                case "agent":
+                    h.push(AgentMessage(sender="peer", content=f"a{at}"))
+                case "nudge":
+                    h.push(SystemMessage(content=f"n{at}", subtype="nudge"))
+                case "model halt":
+                    h.push(ModelHalt())
+                case "kill one" if ids_ := known():
+                    h.push(ToolHalt(call_id=ids_[at % len(ids_)]))
+                case "kill all":
+                    h.push(ToolHalt())
+                case "detach one" if ids_ := known():
+                    h.push(ToolDetach(call_id=ids_[at % len(ids_)]))
+                case "retry":
+                    h.push(ModelRetry())
+                case "clear":
+                    h.push(SessionClear())
+                case "compact":
+                    h.push(SessionCompact())
+                case "prune one" if ids_ := known():
+                    h.push(SessionPrune(call_ids=(ids_[at % len(ids_)],)))
+                case "release":
+                    slow.release.set()
+                    slow.release = asyncio.Event()
+                case "talk":
+                    talk.write(f"line {at}\n")
+                case "talk ends":
+                    talk.end()
+                case _:
+                    pass
+            await spin(at % 7 * 5)
+            for i, request in enumerate(h.requests()):
+                violation = _wire_violation(request.records)
+                assert violation is None, (
+                    f"request {i} after {actions[: at + 1]}: {violation}"
+                )
+        # Say one last thing, which every wait gives way to, and let every call end:
+        # each the model makes from here on ends as soon as it starts.
+        slow.release.set()
+        h.push(_user("last"))
+
+        def at_rest() -> bool:
+            talk.end()
+            return (
+                h.runtime.model_call is None
+                and h.runtime.compact_task is None
+                and not h.runtime._calls
+                and h.runtime.inbox.empty()
+            )
+
+        await h.until(at_rest)
+        await spin()
+        for i, request in enumerate(h.requests()):
+            violation = _wire_violation(request.records)
+            assert violation is None, f"request {i} after {actions}: {violation}"
+        assert h.runtime._requests == [], f"left owed after {actions}"
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        SystemMessage(content="owed", subtype="nudge"),
+        UserMessage(content="when free", due_after=ModelIdle),
+        SystemMessage(content="owed", subtype="nudge", due_after=ModelIdle),
+    ],
+)
+@pytest.mark.asyncio
+async def test_nothing_is_said_between_a_waited_call_and_its_result(
+    said: UserMessage | SystemMessage,
+) -> None:
+    """A provider takes a call's result right after the turn that made it."""
+    slow = Gated(name="slow", hold=True)
+    async with Harness(
+        reply(calls=[call("slow", "c0")]),
+        reply("done"),
+        reply("and again"),
+        tools=[slow],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(slow.started))
+        h.push(said)
+        await spin()
+        slow.release.set()
+        await h.seen(_answered)
+        await spin()
+    assert [_wire_violation(r.records) for r in h.requests()] == [None] * len(
+        h.requests(),
+    )
+
+
+def _records(entry: ModelContextEvent) -> tuple[SessionRecord, ...]:
+    return entry.records if isinstance(entry, Response) else ()
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.lists(_LAW_ACTIONS, max_size=14),
+    st.lists(st.lists(st.integers(0, 5), max_size=2), max_size=10),
+)
+def test_every_request_any_inputs_lead_to_is_sendable_and_every_one_ends(
+    actions: list[str],
+    replies: list[list[int]],
+) -> None:
+    """The runtime's laws hold whatever comes, in whatever order."""
+    asyncio.run(_laws_hold(actions, replies))
 
 
 @settings(max_examples=25, deadline=None)
@@ -5406,6 +5613,34 @@ async def test_a_message_pushed_again_in_its_turn_still_ends_with_that_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_message_pushed_again_in_its_turn_leaves_nothing_owed_once_both_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Released while its first push is still in the turn, the second is its own entry."""
+    h = Harness()
+    blocking = Blocking(answers=[reply("first"), reply("again")])
+    monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
+    message = _user("go")
+    async with h:
+        asked = asyncio.ensure_future(h.runtime.ask(message))
+        await h.until(blocking.entered.is_set)
+        h.push(message)
+        await h.until(lambda: len(_held(h, ModelResponseCompleted)) == 1)
+        blocking.release.set()
+        await h.seen(_answered)
+        await h.seen(AgentIdle)
+        assert h.runtime._requests == []
+    assert await asked == Succeeded(value=None)
+
+
+def test_only_a_message_held_is_committed_as_one() -> None:
+    """Anything else held where a message is would be lost, so it is refused loudly."""
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    with pytest.raises(TypeError, match=r"^SessionClear is no message$"):
+        rt._commit_due(runtime._Taken(request=SessionClear()))
+
+
+@pytest.mark.asyncio
 async def test_a_halt_before_the_call_for_a_message_began_ends_the_message() -> None:
     """Taken in, then halted in the same pass: no call started, so no turn's end tells it."""
     async with Harness(reply("never")) as h:
@@ -5613,7 +5848,7 @@ def test_what_is_taken_from_its_wait_stands_open_waiting_for_nothing() -> None:
     runtime._stand(held, "held", ToolCohortCompleted)
     runtime._stand(kept, "held", ModelIdle)
 
-    assert runtime._take(ToolCohortCompleted) == [held]
+    assert [e.request for e in runtime._take(ToolCohortCompleted)] == [held]
 
     assert [(e.request, e.stage, e.until) for e in runtime._requests] == [
         (held, "open", None),
@@ -6534,6 +6769,11 @@ async def test_a_nudge_drives_a_round_for_an_idle_agent_and_none_for_a_busy_one(
         )
         h.push(SystemMessage(content="busy", subtype="nudge"))
         await spin()
+        # Moot, it ends there, cancelled: its asker is not left waiting.
+        assert [e for e in h.events if isinstance(e, SystemMessageCompleted)] == [
+            SystemMessageCompleted(outcome=Cancelled()),
+        ]
+        assert h.runtime._requests == []
         h.runtime.model_call.cancel()
         h.runtime.model_call = None
         h.push(SystemMessage(content="you owe a reply", subtype="nudge"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -665,6 +666,31 @@ async def test_the_summary_replaces_the_history_without_its_analysis(
     assert _instruction(request).startswith("CRITICAL: Produce plain text exclusively.")
     assert _instruction(request).rstrip().endswith("causing task failure.")
     assert "<user_guidance>" not in _instruction(request)
+
+
+@pytest.mark.asyncio
+async def test_a_summary_call_sends_a_long_call_s_later_messages_as_the_model_was_sent(
+    tmp_path: Path,
+) -> None:
+    """A provider takes one result per call, right after the turn that made it."""
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    history = [
+        UserMessage(content="go"),
+        reply(calls=[ToolCall(call_id="c1", name="Read")]),
+        ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+        reply("waiting"),
+        UserMessage(content="and?"),
+        reply("still waiting"),
+        ToolMessage(call_id="c1", state="done", stdout=("late",)),
+        reply("read it"),
+    ]
+
+    _ = await _compact(SummaryCompactor(agent), agent, history)
+
+    (request,) = provider.requests
+    results = Counter(r.call_id for r in request.records if isinstance(r, ToolMessage))
+    assert results == {"c1": 1}
+    assert any(t.startswith("[call c1 done]") for t in _texts(_sent(request)))
 
 
 def test_a_proactive_continuation_tells_the_model_to_carry_on() -> None:

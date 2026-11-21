@@ -49,6 +49,7 @@ from sagent.runtime.tape import (
     calls,
     coalesce_roles,
     full_tape_mask,
+    sent_records,
     unpaired_call_ids,
 )
 from sagent.session.types import (
@@ -705,14 +706,7 @@ class SummaryCompactor:
             )
         request = replace(
             self._agent.runtime.request(max_response_tokens=0),
-            records=[
-                record
-                for entry in entries
-                for record in (
-                    entry.records if isinstance(entry, Response) else (entry,)
-                )
-            ]
-            + [UserMessage(content=instruction)],
+            records=[*sent_records(entries), UserMessage(content=instruction)],
             purpose="compaction",
         )
         return replace(
@@ -756,13 +750,7 @@ class SummaryCompactor:
             return True
         request = replace(
             self._agent.runtime.request(max_response_tokens=0),
-            records=[
-                record
-                for entry in replacement
-                for record in (
-                    entry.records if isinstance(entry, Response) else (entry,)
-                )
-            ],
+            records=sent_records(replacement),
         )
         held = self._request_size(model, request)
         body = max(0, held - self._size(model, pending))
@@ -832,11 +820,7 @@ class SummaryCompactor:
         system = _asset("compactor_system").strip()
         request = Request(
             system=(system,),
-            records=[
-                r
-                for entry in records
-                for r in (entry.records if isinstance(entry, Response) else (entry,))
-            ],
+            records=sent_records(records),
             max_response_tokens=_room(
                 model,
                 _tokens(model, [SystemMessage(content=system), *records]),

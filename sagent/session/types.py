@@ -482,8 +482,8 @@ class ToolMessage(Generic[Result_co, StreamOut_co, StreamErr_co]):
     """As ``UserMessage.due_after``."""
 
     state: Literal["pending", "done", "failed", "cancelled"]
-    """``pending``: the tool still runs, and this record is a placeholder.
-    ``done``: the tool returned ``result``. ``failed``: the tool raised.
+    """``pending``: the tool still runs; this record is its placeholder, or news of
+    what it wrote since. ``done``: the tool returned ``result``. ``failed``: the tool raised.
     ``cancelled``: the call was stopped before the tool returned."""
 
     stdout: tuple[StreamOut_co, ...] = ()

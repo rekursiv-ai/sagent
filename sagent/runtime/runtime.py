@@ -89,6 +89,7 @@ from sagent.runtime.tape import (
     calls,
     coalesce_roles,
     full_tape_mask,
+    sent_records,
     unpaired_call_ids,
 )
 from sagent.runtime.types import (
@@ -772,7 +773,12 @@ class Runtime:
     # Every caller ends a request it took from ``_requests``, so one is always found.
     def _end(self, request: _Request, ending: _Ending) -> None:
         """End ``request`` as ``ending`` says: to whoever asked it, then to every observer."""
-        entry = next(e for e in self._requests if e.request is request)
+        self._ended(next(e for e in self._requests if e.request is request), ending)
+
+    # A request pushed twice stands twice: the hold that was acted on ends, not the
+    # first entry that names the same request.
+    def _ended(self, entry: _Taken, ending: _Ending) -> None:
+        """End the request ``entry`` holds, as :meth:`_end` does."""
         self._requests.remove(entry)
         if not entry.owed:
             return
@@ -834,7 +840,7 @@ class Runtime:
                 and entry.call_id == call_id
             ):
                 # Taken here, it is answered here: no round will end it.
-                self._end(entry, _message_ending(entry, Succeeded(value=None)))
+                self._ended(held, _message_ending(entry, Succeeded(value=None)))
                 return entry
         for entry in self.tape.context().messages:
             if (
@@ -1040,25 +1046,25 @@ class Runtime:
         """Return whether anything taken in waits for ``until``."""
         return any(e.stage == "held" and e.until == until for e in self._requests)
 
-    def _take(self, *states: _Until) -> list[_Held]:
-        """Remove and return what waits for any of ``states``, in the order it came."""
+    # Only ``_stand`` holds, and it holds no clear: a clear acts at once.
+    def _take(self, *states: _Until) -> list[_Taken]:
+        """Mark what waits for any of ``states`` as acted on, and return it, in the order it came."""
         taken = [e for e in self._requests if e.stage == "held" and e.until in states]
         for entry in taken:
             entry.stage, entry.until = "open", None
-        # Only ``_stand`` holds, and it takes no clear: a clear acts at once.
-        return [r for e in taken if not isinstance(r := e.request, SessionClear)]
+        return taken
 
     async def _release(self, *states: _Until) -> bool:
         """Act on what waits for any of ``states``, in order; return whether any did."""
         released = self._take(*states)
-        for request in released:
-            match request:
-                case SessionPrune():
-                    self._on_prune(request)
-                case SessionCompact():
-                    await self._on_compact(request)
-                case ToolMessage() | UserMessage() | AgentMessage() | SystemMessage():
-                    self._commit_due(request)
+        for entry in released:
+            match entry.request:
+                case SessionPrune() as prune:
+                    self._on_prune(prune)
+                case SessionCompact() as compact:
+                    await self._on_compact(compact)
+                case _:
+                    self._commit_due(entry)
         return bool(released)
 
     def pending_mid_stream(self) -> Sequence[UserMessage | AgentMessage]:
@@ -1192,7 +1198,7 @@ class Runtime:
             return
         self._awaited = None
         if item.due_after is not None:
-            self._commit_due(item)
+            self._commit_due(self._opened(item))
             return
         # The user writing during a suspension asks to try now.
         if isinstance(item, UserMessage):
@@ -1200,8 +1206,9 @@ class Runtime:
             self._end_suspension()
         if isinstance(item, SystemMessage):
             # A nudge to a busy agent is moot: it is told again at its next idle if
-            # it still owes.
-            if self.model_call is None:
+            # it still owes. Waiting on calls is busy too, and a note there would
+            # come between a call and its result, which no provider takes.
+            if self.model_call is None and not self.running_tools:
                 self._note(item)
             else:
                 self._end(item, SystemMessageCompleted(outcome=Cancelled()))
@@ -1251,7 +1258,7 @@ class Runtime:
         for event in (*later, *self.inbox.drain_nowait()):
             self._open_if_asked(event)
         for entry in tuple(self._requests):
-            self._end(entry.request, self._cancelled(entry.request))
+            self._ended(entry, self._cancelled(entry.request))
         if self._retry_timer is not None:
             self._retry_timer.cancel()
         self.publish(SessionQuitCompleted(outcome=Succeeded(value=None)))
@@ -1334,8 +1341,8 @@ class Runtime:
         if under_way:
             self._end_turn(Cancelled())
         self._end_messages(Cancelled())
-        for request in dropped:
-            self._end(request, self._cancelled(request))
+        for entry in dropped:
+            self._ended(entry, self._cancelled(entry.request))
         self._end(item, SessionClearCompleted(outcome=Succeeded(value=None)))
 
     # A turn that stopped short is under way no more; one the model finished is,
@@ -1947,20 +1954,24 @@ class Runtime:
         self._steps = 0
         self.turn_started_ms = int(time.time() * 1_000)
         # A call's later message that came first, held for the next round, is told
-        # first: the model reads them in the order they happened.
+        # first: the model reads them in the order they happened. Only a call's later
+        # message waits for the next round (``_deliver``).
         for earlier in self._take(ModelResponseStarted):
-            if isinstance(earlier, ToolMessage):
-                self._commit_due(earlier)
+            self._commit_due(earlier)
         self.tape.append_history(message)
         self._stand(message, "in_turn")
         self.publish(message)
 
     # The record says what was said, not how long it was held. It ends as the
     # message sent does: whoever sent that one holds it, not the record.
-    def _commit_due(self, message: _Message) -> None:
-        """Commit a held message as one sent with no wait."""
-        taken = dataclasses.replace(message, due_after=None)
-        self._opened(message).request = taken
+    def _commit_due(self, entry: _Taken) -> None:
+        """Commit the message ``entry`` held as one sent with no wait."""
+        match entry.request:
+            case ToolMessage() | UserMessage() | AgentMessage() | SystemMessage():
+                taken = dataclasses.replace(entry.request, due_after=None)
+            case _:
+                raise TypeError(f"{type(entry.request).__name__} is no message")
+        entry.request = taken
         match taken:
             case ToolMessage():
                 self._append_late(taken)
@@ -2051,10 +2062,10 @@ class Runtime:
             self._abandoned.append(queued)
         if request is not None:
             self._end_compaction(request, queued if queued is not None else cancelled)
-        # Those held for it are stopped with it: none of them started.
+        # Those held for it are stopped with it: none of them started. Only a
+        # compaction waits for another.
         for held in self._take(SessionCompactCompleted):
-            if isinstance(held, SessionCompact):
-                self._end(held, cancelled)
+            self._ended(held, cancelled)
 
     # The model's history should show the tool it should have used: a Bash call that
     # is exactly other tools' jobs becomes their calls before it is recorded, so
@@ -2391,15 +2402,13 @@ class Runtime:
             Request(
                 system=self.system,
                 records=[
-                    *(
-                        record
-                        for entry in coalesce_roles(
+                    # Told first, so a later message as user text merges with the
+                    # user's turn beside it.
+                    *sent_records(
+                        coalesce_roles(
                             as_sent(self.tape.context().messages),
                             keep_senders_apart=self.model.capability.keeps_user_turns_apart,
-                        )
-                        for record in (
-                            entry.records if isinstance(entry, Response) else (entry,)
-                        )
+                        ),
                     ),
                     *after,
                 ],

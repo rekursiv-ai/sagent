@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import io
 
 from PIL import Image
-from treekle import mutable
+from treekle import from_plain, mutable
 
 import pytest
 
@@ -24,6 +24,7 @@ from sagent.providers.openai import chat, wire
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
+    SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
@@ -533,6 +534,25 @@ def test_a_reply_is_billed_at_the_card_of_its_utc_date(
     reader.feed({"choices": [], "usage": {"completion_tokens": 1_000_000}})
 
     assert reader.response().spend.response == 2.0
+
+
+def test_what_is_said_among_a_turn_s_results_follows_them() -> None:
+    """A server takes a call's tool message right after the turn that made it."""
+    body = _encode(
+        Request(
+            records=(
+                UserMessage(content="go"),
+                ToolCall(call_id="a", name="Read"),
+                ToolCall(call_id="b", name="Read"),
+                ToolMessage(call_id="a", state="done", stdout=("1",)),
+                SystemMessage(content="later", subtype="nudge"),
+                ToolMessage(call_id="b", state="done", stdout=("2",)),
+                UserMessage(content="and?"),
+            ),
+        ),
+    )
+    roles = [m["role"] for m in from_plain(body["messages"], list[dict[str, object]])]
+    assert roles == ["user", "assistant", "tool", "tool", "user", "user"]
 
 
 def test_a_results_images_follow_its_run_of_results() -> None:

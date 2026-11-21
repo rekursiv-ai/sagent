@@ -77,6 +77,20 @@ def isolated_uploads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         wire._upload.cache_clear()
 
 
+def test_a_turn_s_function_responses_come_before_anything_else_said_by_the_user() -> (
+    None
+):
+    """A model's calls are answered first; a note taped among them is read after."""
+    contents = _contents(
+        UserMessage(content="go"),
+        ToolCall(call_id="a", name="Echo"),
+        SystemMessage(content="later", subtype="nudge"),
+        ToolMessage(call_id="a", state="done", stdout=("ok",)),
+    )
+    parts = from_plain(contents[2]["parts"], list[dict[str, object]])
+    assert [next(iter(part)) for part in parts] == ["functionResponse", "text"]
+
+
 def test_a_user_message_is_one_user_content_and_nothing_else() -> None:
     assert _encode(UserMessage(content="hello")) == {
         "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
