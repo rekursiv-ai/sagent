@@ -352,25 +352,6 @@ providers:
        cache_ttl_sec, manage_context_server_side]
     cache_ttl_sec: [300.0, 3600.0]
     retries_internally: true
-    models: &anthropic_models
-      fable-5.2:
-      fable-5.1:
-      fable-5.0:
-      mythos-5.2:
-      mythos-5.1:
-      mythos-5.0:
-      opus-5.5:
-      opus-5.0:
-      opus-4.8:
-      opus-4.7:
-      opus-4.6:
-      opus-4.5:
-      sonnet-5.5:
-      sonnet-5.0:
-      sonnet-4.6:
-      sonnet-4.5:
-      haiku-5.5:
-      haiku-4.5:
   # Claude Code on the subscription, as sagent's anthropic-cli runs it and as
   # Trackinizer prices a person's sessions (``session_usage.py``).
   anthropic-cli: &anthropic_cli
@@ -386,4 +367,3 @@ providers:
     # sealed-only display to match the API's redaction.
     thinking:
       output: [none, text]
-    models: *anthropic_models

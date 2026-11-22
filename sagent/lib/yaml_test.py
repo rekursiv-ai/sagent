@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 import yaml
 
-from sagent.lib.yaml import parse, split_frontmatter
+from sagent.lib.yaml import parse, position, split_frontmatter
 
 
 if TYPE_CHECKING:
@@ -143,6 +143,31 @@ def test_a_frontmatter_error_names_the_file_and_its_line() -> None:
 def test_a_frontmatter_error_without_a_source_names_only_the_line() -> None:
     with pytest.raises(ValueError, match=r"^line 3: the key 'a' is given twice\.$"):
         split_frontmatter("---\na: 1\na: 2\n---\nbody\n")
+
+
+@pytest.mark.parametrize("loader", [yaml.SafeLoader, yaml.CSafeLoader])
+def test_a_composed_node_and_a_scanned_token_say_where_they_are(
+    loader: type[yaml.SafeLoader | yaml.CSafeLoader],
+) -> None:
+    """Both parsers mark what they build, each with a mark class of its own."""
+    root = yaml.compose("a:\n  b: cc\n", Loader=loader)
+    assert isinstance(root, yaml.MappingNode)
+    ((_, inner),) = root.value
+    assert isinstance(inner, yaml.MappingNode)
+    ((_, value),) = inner.value
+    start, end = position(value), position(value, end=True)
+    assert (start.line, start.column, start.index) == (1, 5, 8)
+    assert (end.line, end.column, end.index) == (1, 7, 10)
+    (anchor,) = [t for t in yaml.scan("x: &k 1\n") if isinstance(t, yaml.AnchorToken)]
+    assert (position(anchor).line, position(anchor).column) == (0, 3)
+
+
+def test_a_node_built_by_hand_has_no_position() -> None:
+    """The representer builds nodes with no marks: only composing gives them one."""
+    with pytest.raises(ValueError, match=r"^ScalarNode has no start mark"):
+        position(yaml.ScalarNode("tag:yaml.org,2002:str", "x"))
+    with pytest.raises(ValueError, match=r"^ScalarNode has no end mark"):
+        position(yaml.ScalarNode("tag:yaml.org,2002:str", "x"), end=True)
 
 
 @pytest.mark.parametrize(("text", "passes"), [("a: [1, 2]\n", 0), ("a: '*'\n", 1)])

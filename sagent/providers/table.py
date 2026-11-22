@@ -51,10 +51,12 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "CatalogDocument",
     "HasModels",
     "ModelTable",
     "ModelTags",
     "models",
+    "tag_words",
 ]
 
 
@@ -107,28 +109,46 @@ class ModelTable(Mapping[str, ModelCapability]):
 
     @classmethod
     def from_yaml(cls, path: Traversable, *, section: str) -> Self:
-        """Read the models one provider serves from a vendor's catalog document.
-
-        Layers, lowest first: the reference row, the model's profile, the
-        model, the provider's section, and the section's entry for the model.
-        Each replaces whole fields, except that the section's ``thinking``
-        replaces only the axes it names. A model the section does not list is
-        not served. The section's ``roles`` replace the document's it names.
-        The section's ``sends`` names the settings the provider's requests
-        carry; each other one offers only the row's default, what the vendor
-        does unasked, since a choice nothing sends would change only the label.
+        """Read the models one provider serves from a vendor's catalog file.
 
         Args:
           path: The vendor's YAML document.
           section: The name of a section under ``providers``.
 
         Returns:
+          table: As ``from_text`` reads the file's text, named in errors.
+
+        """
+        return cls.from_text(path.read_text(), section=section, source=str(path))
+
+    @classmethod
+    def from_text(cls, text: str, *, section: str, source: str = "") -> Self:
+        """Read the models one provider serves from a vendor's catalog document.
+
+        Layers, lowest first: the reference row, the model's profile, the
+        model, the provider's section, and the section's entry for the model
+        under its ``models``. Each replaces whole fields, except that the
+        section's ``thinking`` replaces only the axes it names. A section
+        serves every model in the document but those its ``omits`` names, each
+        with the reason; the document's list is the only list of models, so a
+        model added there reaches every provider. The section's ``roles``
+        replace the document's it names.
+        The section's ``sends`` names the settings the provider's requests
+        carry; each other one offers only the row's default, what the vendor
+        does unasked, since a choice nothing sends would change only the label.
+
+        Args:
+          text: The vendor's YAML document.
+          section: The name of a section under ``providers``.
+          source: Where ``text`` came from, such as its path, named in errors.
+
+        Returns:
           table: The section's models, validated, and the document's roles.
 
         """
         document = from_plain(
-            parse(path.read_text(), source=str(path), aliases=True),
-            _CatalogDocument,
+            parse(text, source=source, aliases=True),
+            CatalogDocument,
         )
         for layer in (document.reference, *document.profiles.values()):
             _require_whole_thinking(layer)
@@ -143,15 +163,33 @@ class ModelTable(Mapping[str, ModelCapability]):
         if "sends" not in layer:
             raise ValueError(f"Section {section!r} does not say what it sends.")
         sends = frozenset(from_plain(layer.pop("sends"), list[ModelSettingName]))
-        listed = from_plain(
-            layer.pop("models", {}),
-            dict[str, dict[str, object] | None],
-        )
+        entries = from_plain(layer.pop("models", {}), dict[str, object])
+        # Before ``omits``, a section listed what it served as bare names.
+        if bare := sorted(k for k, v in entries.items() if v is None):
+            raise ValueError(
+                f"Section {section!r} lists models by bare name: {bare}. A section"
+                " now serves every model in the document but those its omits name;"
+                " delete the bare names, and put any model it leaves out under"
+                " omits, with why.",
+            )
+        overrides = from_plain(entries, dict[str, dict[str, object]])
+        omits = from_plain(layer.pop("omits", {}), dict[str, str])
         # A provider serving other models than the vendor's own names its own.
         roles = document.roles | from_plain(layer.pop("roles", {}), dict[str, str])
         named = [(from_plain(raw.get("model_id"), str), raw) for raw in document.models]
-        if unknown := sorted(set(listed) - {model_id for model_id, _ in named}):
-            raise ValueError(f"Section {section!r} lists unknown models: {unknown}.")
+        for model_id, why in omits.items():
+            if not why.strip():
+                raise ValueError(
+                    f"Section {section!r} omits {model_id!r} without saying why.",
+                )
+        known = {model_id for model_id, _ in named}
+        for key, given in (("overrides", overrides), ("omits", omits)):
+            if unknown := sorted(set(given) - known):
+                raise ValueError(
+                    f"Section {section!r} {key} unknown models: {unknown}.",
+                )
+        if both := sorted(set(omits) & set(overrides)):
+            raise ValueError(f"Section {section!r} both omits and overrides {both}.")
         rows = tuple(
             _unsent_fixed(
                 _model(
@@ -159,12 +197,12 @@ class ModelTable(Mapping[str, ModelCapability]):
                     document=document,
                     section=layer,
                     section_name=section,
-                    entry=listed[model_id] or {},
+                    entry=overrides.get(model_id, {}),
                 ),
                 sends=sends,
             )
             for model_id, raw in named
-            if model_id in listed
+            if model_id not in omits
         )
         return cls(rows=rows, roles=roles)
 
@@ -229,6 +267,12 @@ class ModelTable(Mapping[str, ModelCapability]):
             tags.effort is None and tags.service_tier is None and not tags.choices
         )
         capability = self.get(tags.model) if sized_only else None
+        families = self._families(self.roles.get(tags.model, tags.model))
+        if capability is None and len(families) > 1:
+            raise UnknownModelError(
+                f"Model {model_id!r} names more than one family:"
+                f" {', '.join(families)}; name one.",
+            )
         if capability is None:
             known = ", ".join([*self, *self.roles])
             raise UnknownModelError(
@@ -251,13 +295,43 @@ class ModelTable(Mapping[str, ModelCapability]):
     # ``opus-*``; ``opu`` names nothing, and ``gemini-flash`` never reaches
     # ``gemini-flash-lite-*``, a family of its own.
     def _named(self, name: str) -> ModelCapability | None:
-        """Return the row ``name`` means by exact name, vendor id, or family."""
+        """Return the row ``name`` means by exact name, vendor id, or one family."""
         row = self.exact(name)
         if row is not None:
             return row
+        families = self._families(name)
+        if len(families) != 1:
+            return None
         return next(
-            (row for row in self.rows if _in_family(row.model_id, name=name)),
+            (
+                row
+                for row in self.rows
+                if row.model_id.rpartition("-")[0] == families[0]
+                and _in_family(row.model_id, name=name)
+            ),
             None,
+        )
+
+    # ``neon`` is ``gemini-neon``, but ``pro`` ends both ``gpt-pro`` and ``o-pro``:
+    # which one it means is no row order's to decide.
+    def _families(self, name: str) -> tuple[str, ...]:
+        """Return the families ``name`` may mean: one named whole, else each it ends."""
+        known = tuple(
+            dict.fromkeys(
+                parsed[0]
+                for row in self.rows
+                if (parsed := _family_version(row.model_id)) is not None
+            ),
+        )
+        head, _, major = name.rpartition("-")
+        words = (name, head) if major.isdecimal() else (name,)
+        whole = tuple(family for family in known if family in words)
+        if whole:
+            return whole
+        return tuple(
+            family
+            for family in known
+            if any(_names_family(word, family=family) for word in words)
         )
 
 
@@ -438,6 +512,23 @@ class ModelTags:
         )
 
 
+def tag_words() -> dict[str, tuple[str, ...]]:
+    """Return each kind of tag and the words a model line spells it with.
+
+    Returns:
+      words: ``size``, ``effort``, and ``tier``, each word one ``ModelTags.parse``
+        reads as that kind; ``fast`` is ``priority``. Old spellings it still reads
+        (``+large``, ``+high``) are left out.
+
+    """
+    efforts = cast(tuple[ThinkingEffort, ...], literal_members(ThinkingEffort))
+    return {
+        "size": literal_members(ContextSizeName),
+        "effort": tuple(_effort_word(effort) for effort in efforts),
+        "tier": (*literal_members(ServiceTier), "fast"),
+    }
+
+
 def models(package: ModuleType, *, section: str) -> ModelTable:
     """Return a provider's user catalog, or its shipped catalog when none exists.
 
@@ -533,20 +624,28 @@ def _family_version(model_id: str) -> tuple[str, tuple[int, int]] | None:
     return family, (int(major), int(minor))
 
 
+# A family is named whole or by its last words: ``gemini-neon`` by ``neon``.
 def _in_family(model_id: str, *, name: str) -> bool:
     """Whether ``name`` is ``model_id``'s family, alone or with a major version."""
     # A caller's own id (``local-model``) has no family: ``local`` names nothing.
     if _family_version(model_id) is None:
         return False
     family, _, version = model_id.rpartition("-")
-    if name == family:
+    if _names_family(name, family=family):
         return True
     head, _, major = name.rpartition("-")
-    return head == family and (version == major or version.startswith(f"{major}."))
+    return _names_family(head, family=family) and (
+        version == major or version.startswith(f"{major}.")
+    )
+
+
+def _names_family(name: str, *, family: str) -> bool:
+    """Whether ``name`` is ``family`` or its last dash-separated words."""
+    return bool(name) and (name == family or family.endswith(f"-{name}"))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _CatalogDocument:
+class CatalogDocument:
     """A vendor's catalog document, before any model is resolved."""
 
     models: tuple[dict[str, object], ...]
@@ -637,7 +736,7 @@ def _require_restated_limits(
 def _model(
     raw: dict[str, object],
     *,
-    document: _CatalogDocument,
+    document: CatalogDocument,
     section: dict[str, object],
     section_name: str,
     entry: dict[str, object],

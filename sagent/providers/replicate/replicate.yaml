@@ -6,4 +6,3 @@ models: []
 providers:
   replicate:
     sends: []
-    models: {}

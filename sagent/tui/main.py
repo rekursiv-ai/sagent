@@ -571,7 +571,7 @@ async def run(
                     session.app.invalidate()
                 except Exception as e:
                     logger.warning("command %r failed", line, exc_info=True)
-                    printer.error(error_text(e))
+                    printer.error(error_text(e), prose=True)
         finally:
             for task in background:
                 task.cancel()

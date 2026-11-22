@@ -387,9 +387,15 @@ class ConsolePrinter:
                 theme=self.theme.current,
             )
 
-    def error(self, text: str) -> None:
-        """Write what failed outside any call, red after ``✗`` at the indent."""
-        self._failure(text, indent=self.indent)
+    def error(self, text: str, *, prose: bool = False) -> None:
+        """Write what failed outside any call, red after ``✗`` at the indent.
+
+        Args:
+          text: What failed.
+          prose: Whether it is a sentence, which breaks between words.
+
+        """
+        self._failure(text, indent=self.indent, prose=prose)
 
     def failed(self, text: str, *, header: Header | None = None) -> None:
         """Write how the call ``header`` names failed, red after ``✗``, under it."""
@@ -432,7 +438,7 @@ class ConsolePrinter:
         self.gap_owed = True
 
     # Every row keeps all its text, wrapped under the text, never under ``✗``.
-    def _failure(self, text: str, *, indent: str) -> None:
+    def _failure(self, text: str, *, indent: str, prose: bool = False) -> None:
         """Write ``text`` in red after ``indent``, its first row after ``✗``; never nothing."""
         self._gap()
         shown = text.rstrip("\n") if text.strip() else "<no error message>"
@@ -440,6 +446,7 @@ class ConsolePrinter:
             self._lines(shown, self.style.failure),
             first=Text(f"{indent}✗ ", style=self.style.failure),
             rest=Text(f"{indent}  ", style=self.style.failure),
+            prose=prose,
         )
 
     # A dropped run's marker always folds: cut with ``…``, it would hide the count it
@@ -456,6 +463,7 @@ class ConsolePrinter:
         prose: bool = False,
     ) -> None:
         """Print each line hung after ``rest``, the very first after ``first``."""
+        width = width or self.console.width
         for i, line in enumerate(lines):
             lead = first if i == 0 else rest
             if isinstance(line, Elided):
@@ -465,15 +473,20 @@ class ConsolePrinter:
                     marker,
                     first=lead,
                     rest=rest,
-                    width=width or self.console.width,
+                    width=width,
                 )
                 continue
+            # Words wrap under the column their line started in: a help row's
+            # under its words, not back under its name.
+            column = _column(line.plain) if prose else 0
+            if rest.cell_len + column > width // 2:
+                column = 0
             hang(
                 self.console,
                 line,
                 first=lead,
-                rest=rest,
-                width=width or self.console.width,
+                rest=rest + " " * column,
+                width=width,
                 limit=spec.width if spec is not None else 0,
                 overflow=spec.overflow if spec is not None else "fold",
                 prose=prose,
@@ -738,6 +751,15 @@ class Title:
     def frame(self) -> str:
         """Return the title shown now."""
         return self._text
+
+
+# Only an indented line is a listing's row: a sentence's double space after a period
+# would otherwise hang its rows mid-line.
+def _column(plain: str) -> int:
+    """Return where a line's words start: an indented row's second column, else its indent."""
+    indent = len(plain) - len(plain.lstrip(" "))
+    gap = re.search(r"\S {2,}(?=\S)", plain) if indent else None
+    return gap.end() if gap else indent
 
 
 # What a model or a tool wrote reaches the terminal here, and Rich keeps ESC: left in,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from importlib.resources import files
+from pathlib import Path
 
 import sys
 
@@ -51,6 +53,38 @@ def test_main_prints_disagreements_and_exits_1_only_for_them(
     assert [call.provider for call in calls] == ["anthropic"]
 
 
+def test_write_sets_each_mismatch_it_can_and_fails_only_on_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    written: list[tuple[Path, list[str]]] = []
+
+    def write(path: Path, findings: list[Finding]) -> list[Finding]:
+        written.append((path, [f.field for f in findings]))
+        return findings[1:]
+
+    _fake_checks(monkeypatch, sources=("b", "c", "a"))
+    monkeypatch.setattr(cli, "write", write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cli.py", "--provider", "google", "--provider", "openai", "--write"],
+    )
+    assert cli.main() == 1
+    # Each vendor's own document, each keeping what it wrote apart.
+    assert written == [
+        (Path(str(files(google) / "google.yaml")), ["f", "f"]),
+        (Path(str(files(openai) / "openai.yaml")), ["f", "f"]),
+    ]
+    assert capsys.readouterr().out.splitlines() == [
+        "mismatch google m-1.0 f: catalog=a source=c  https://u",
+        "mismatch openai m-1.0 f: catalog=a source=c  https://u",
+        "wrote 1 fact to google.yaml",
+        "wrote 1 fact to openai.yaml",
+        "2 mismatch, 0 waived, 0 unstated, 2 ok, 0 unreachable",
+    ]
+
+
 def test_verbose_prints_every_status_and_every_vendor_is_the_default(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -65,8 +99,9 @@ def test_verbose_prints_every_status_and_every_vendor_is_the_default(
         "waived   anthropic m-1.0 f: catalog=a source=w  https://u  (on purpose)",
         "mismatch anthropic m-1.0 f: catalog=a source=b  https://u",
     ]
-    assert lines[-1] == "3 mismatch, 3 waived, 3 unstated, 3 ok, 0 unreachable"
-    assert [call.provider for call in calls] == ["anthropic", "openai", "google"]
+    n = len(cli._checks())
+    assert lines[-1] == f"{n} mismatch, {n} waived, {n} unstated, {n} ok, 0 unreachable"
+    assert [call.provider for call in calls] == list(cli._checks())
 
 
 def test_an_unreachable_page_leaves_its_facts_unstated_and_fails_the_run(
@@ -183,7 +218,7 @@ def test_each_provider_is_checked_against_its_shipped_api_section(
 
 
 def test_every_vendor_is_wired_to_its_own_catalog_and_check() -> None:
-    checks = cli._checks()
+    checks = cli._every_check()
     assert {name: package for name, (package, _) in checks.items()} == {
         "anthropic": anthropic,
         "openai": openai,
@@ -194,6 +229,8 @@ def test_every_vendor_is_wired_to_its_own_catalog_and_check() -> None:
         check_openai,
         check_google,
     ]
+    # The default run reads only public pages: no section that needs a login.
+    assert list(cli._checks()) == ["anthropic", "openai", "google"]
 
 
 def test_fetch_sends_an_agent_follows_redirects_and_decodes_text(
@@ -228,9 +265,12 @@ def test_a_vendor_whose_pages_cannot_be_read_fails_alone(
     assert cli.main() == 1
     assert capsys.readouterr().out.splitlines()[-2:] == [
         "unreadable openai: zip() argument 2 is longer than argument 1",
-        "0 mismatch, 0 waived, 0 unstated, 2 ok, 0 unreachable, 1 unreadable",
+        (
+            f"0 mismatch, 0 waived, 0 unstated, {len(fakes) - 1} ok, 0 unreachable,"
+            " 1 unreadable"
+        ),
     ]
-    assert [call.provider for call in calls] == ["anthropic", "google"]
+    assert [call.provider for call in calls] == [p for p in fakes if p != "openai"]
 
 
 def test_fetch_records_an_error_status_and_reads_as_empty(

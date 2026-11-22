@@ -23,10 +23,17 @@ from sagent.providers import anthropic, google, openai
 from sagent.providers.table import ModelTable
 from sagent.scripts.check_catalog.sources import (
     Finding,
+    NewPrice,
+    NewRow,
+    _claude_ids,
     _count,
     _day,
+    _gemini_model_id,
     _gemini_rates,
     _month,
+    _new_prices,
+    _openai_model_id,
+    _text,
     check_anthropic,
     check_google,
     check_openai,
@@ -94,6 +101,29 @@ def test_a_day_is_read_or_left_unstated_never_raised(
     assert _day(text) == day
 
 
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(2.0, "2"), (0.1, "0.1"), (1.2345678, "1.2345678"), (1e-05, "1e-05")],
+)
+def test_a_rate_is_compared_and_written_exactly_never_rounded(
+    value: float,
+    text: str,
+) -> None:
+    """Six significant digits made 1.2345678 a mismatch the writer then rounded."""
+    assert _text(value) == text
+    assert float(_text(value)) == value
+
+
+def test_a_card_list_with_no_base_card_makes_no_row() -> None:
+    """A long-prompt card alone leaves short prompts unpriced: the table refuses it."""
+    meters = ("request", "response", "cache_write", "cache_write_1h", "cache_read")
+    stated = {f"price.auto.long.{m}": 1.0 for m in meters}
+    assert (
+        _new_prices(stated, unbilled=(), long_tokens=200_000, inherit=False, scaled=())
+        == ()
+    )
+
+
 def test_a_finding_is_ok_mismatch_waived_or_unstated() -> None:
     base = Finding(
         provider="p",
@@ -142,7 +172,8 @@ def test_every_waiver_names_a_shipped_row_and_a_compared_fact() -> None:
         ("openai", "sol-5.6"),
         ("openai", "gpt-5.6"),
     }
-    assert len(named) == 1 + 3 + 7 + 7
+    catalogued = sum(f == "catalogued" for _, _, f in named)
+    assert len(named) == 1 + catalogued + 7 + 7
     budgets = {m for _, m, f in named if f == "thinking_budget_default"}
     assert budgets == {
         "opus-4.8",
@@ -213,7 +244,7 @@ def test_every_row_s_model_counts_as_catalogued_not_only_the_last() -> None:
     # The price table lists both rows' models.
     findings = check_openai(
         ModelTable(rows=(_sol(), older)),
-        fetch=lambda url: pages[url],
+        fetch=lambda url: pages.get(url, ""),
         today=date(2026, 11, 18),
     )
     assert _uncatalogued(findings) == set()
@@ -711,7 +742,8 @@ def test_a_gemini_page_that_agrees_yields_every_fact_ok() -> None:
             "price.auto.response": "3.75",
             "price.auto.cache_read": "0.075",
             "price.auto.long.request": "1.5",
-            "price.auto.2027-01-01.request": "3",
+            # One spelling for a dated card, whichever vendor: the writer reads it.
+            "price.auto@2027-01-01.request": "3",
         },
     )
 
@@ -841,6 +873,109 @@ _CLAUDE_EFFORT = """\
 """
 
 
+def test_a_claude_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -> None:
+    """Opus 4.6 is in the thinking guide and not the table: its pages make its row."""
+    docs = "https://platform.claude.com/docs/en"
+    page = _claude_page().replace("Claude Haiku 5.5", "Claude Opus 4.6")
+    fast = "| Claude Opus 4.6 | $10 USD / MTok | $50 USD / MTok |\n"
+    findings = check_anthropic(
+        ModelTable(rows=(_haiku(),)),
+        fetch=lambda url: {
+            f"{docs}/build-with-claude/thinking.md": _CLAUDE_THINKING,
+            f"{docs}/build-with-claude/effort.md": _CLAUDE_EFFORT,
+            f"{docs}/about-claude/pricing.md": fast,
+            f"{docs}/models/haiku-5-5/overview.md": _claude_page(),
+            f"{docs}/models/opus-4-6/overview.md": page,
+        }.get(url, ""),
+        today=date(2026, 11, 18),
+    )
+    (absent,) = [f for f in findings if f.field == "catalogued"]
+    assert absent.row == NewRow(
+        model_id="opus-4.6",
+        wire_model_id="claude-opus-4-6",
+        knowledge_cutoff="2026-06",
+        limits={"max_request_tokens": 1_000_000, "max_response_tokens": 128_000},
+        thinking_effort=("low", "medium", "high", "max"),
+        thinking_effort_default="medium",
+        thinking_budget=("none", "auto", "fixed"),
+        thinking_budget_default="none",
+        prices=(
+            NewPrice(
+                service_tier="auto",
+                request=0.1,
+                response=0.5,
+                cache_write=0.125,
+                cache_write_1h=0.2,
+                cache_read=0.01,
+            ),
+            NewPrice(
+                service_tier="auto",
+                effective_prompt_tokens=100_000,
+                request=0.5,
+                response=2.5,
+                cache_write=0.625,
+                cache_write_1h=1.0,
+                cache_read=0.05,
+            ),
+            # Fast mode states input and output; its cache rates scale with them.
+            NewPrice(
+                service_tier="priority",
+                request=10.0,
+                response=50.0,
+                cache_write=12.5,
+                cache_write_1h=20.0,
+                cache_read=1.0,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "ids"),
+    [
+        ("Claude Opus 5.6", ("claude-opus-5-6", "opus-5.6")),
+        ("Claude Opus 5", ("claude-opus-5", "opus-5.0")),
+        ("Claude Mythos Preview", None),
+    ],
+)
+def test_a_claude_name_gives_its_api_id_and_catalog_name(
+    name: str,
+    ids: tuple[str, str] | None,
+) -> None:
+    assert _claude_ids(name) == ids
+
+
+@pytest.mark.parametrize(
+    ("wire", "model_id"),
+    [
+        ("gpt-6.3-sol", "sol-6.3"),
+        ("gpt-5.6", "gpt-5.6"),
+        ("gpt-5.4-mini", "gpt-mini-5.4"),
+        ("gpt-5-pro", "gpt-pro-5.0"),
+        ("gpt-4o", "gpt-omni-4.0"),
+        ("gpt-4o-mini", "gpt-omni-mini-4.0"),
+        ("o3", "o-3.0"),
+        ("o3-pro", "o-pro-3.0"),
+        ("chatgpt-4o-latest", None),
+    ],
+)
+def test_an_openai_id_gives_its_catalog_name(wire: str, model_id: str | None) -> None:
+    assert _openai_model_id(wire) == model_id
+
+
+@pytest.mark.parametrize(
+    ("wire", "model_id"),
+    [
+        ("gemini-5-krypton", "gemini-krypton-5.0"),
+        ("gemini-3.9-flash-lite", "gemini-flash-lite-3.9"),
+        ("gemini-3.1-pro-preview", "gemini-pro-3.1"),
+        ("gemini-embedding-001", None),
+    ],
+)
+def test_a_gemini_id_gives_its_catalog_name(wire: str, model_id: str | None) -> None:
+    assert _gemini_model_id(wire) == model_id
+
+
 def _claude_page() -> str:
     def rate(small: str, large: str) -> str:
         return (
@@ -949,9 +1084,10 @@ def _anthropic(
         f"{docs}/api/overview.md": overview,
         f"{docs}/models/{row.wire_model_id.removeprefix('claude-')}/overview.md": page,
     }
+    # As ``cli._fetch`` reads a page it cannot get: empty.
     return check_anthropic(
         ModelTable(rows=(row,)),
-        fetch=lambda url: pages[url],
+        fetch=lambda url: pages.get(url, ""),
         today=date(2026, 11, 18),
     )
 
@@ -1084,11 +1220,115 @@ def _openai(
         f"{docs}/guides/prompt-caching.md": caching,
         f"{docs}/models/{row.wire_model_id}.md": page,
     }
+    # As ``cli._fetch`` reads a page it cannot get: empty.
     return check_openai(
         ModelTable(rows=(row,)),
-        fetch=lambda url: pages[url],
+        fetch=lambda url: pages.get(url, ""),
         today=date(2026, 11, 18),
     )
+
+
+def test_a_gemini_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -> None:
+    """3.6 Flash is in the thinking guide and not the table: its pages make its row."""
+    row = _flash(model_id="gemini-flash-3.8", wire="gemini-3.8-flash")
+    docs = "https://aistudio.google.com/docs"
+    findings = _google(
+        row,
+        _gemini_page(),
+        extra={
+            f"{docs}/models/gemini-3.6-flash.md": _gemini_page(),
+            f"{docs}/models/gemini-2.5-flash-lite.md": _gemini_page(),
+        },
+    )
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    # A band's unstated meter is its base card's: Gemini states only what changes.
+    base = NewPrice(
+        service_tier="auto",
+        request=0.75,
+        response=3.75,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=0.075,
+    )
+    assert absent["gemini-3.6-flash"] == NewRow(
+        model_id="gemini-flash-3.6",
+        wire_model_id="gemini-3.6-flash",
+        knowledge_cutoff="2026-03",
+        limits={"max_request_tokens": 1_048_576, "max_response_tokens": 65_536},
+        thinking_effort=("min", "low", "medium", "high"),
+        thinking_effort_default="min",
+        prices=(
+            base,
+            replace(base, effective_prompt_tokens=200_000, request=1.5),
+            replace(base, effective_date="2027-01-01", request=3.0),
+        ),
+    )
+    # Off by default, with no level: a budget model, which levels misdescribe.
+    assert absent["gemini-2.5-flash-lite"] is None
+
+
+def test_an_openai_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -> None:
+    """A tier priced in part is left out: unpriced, it is unoffered, and flagged."""
+    docs = "https://developers.openai.com/api/docs"
+    findings = check_openai(
+        ModelTable(rows=(_sol(model_id="gpt-omni-4.0", wire="gpt-4o"),)),
+        fetch=lambda url: {
+            f"{docs}/pricing.md": _openai_prices(),
+            f"{docs}/guides/prompt-caching.md": _OPENAI_CACHING,
+            f"{docs}/models/gpt-6.1-sol.md": _openai_page(),
+        }.get(url, ""),
+        today=date(2026, 11, 18),
+    )
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    base = NewPrice(
+        service_tier="auto",
+        request=2.0,
+        response=10.0,
+        cache_write=2.5,
+        cache_write_1h=0.0,
+        cache_read=0.1,
+    )
+    assert absent["gpt-6.1-sol"] == NewRow(
+        model_id="sol-6.1",
+        wire_model_id="gpt-6.1-sol",
+        knowledge_cutoff="2026-04-30",
+        # The page's 922,000, less the 1,000 held back on 1.05M windows; the
+        # window wider than the input is the context the two share.
+        limits={
+            "max_request_tokens": 921_000,
+            "max_response_tokens": 128_000,
+            "max_context_tokens": 1_050_000,
+        },
+        thinking_effort=("low", "medium", "high", "xhigh", "max"),
+        thinking_effort_default="medium",
+        prices=(
+            base,
+            NewPrice(
+                service_tier="auto",
+                effective_prompt_tokens=272_000,
+                request=4.0,
+                response=15.0,
+                cache_write=5.0,
+                cache_write_1h=0.0,
+                cache_read=0.2,
+            ),
+        ),
+    )
+
+
+def test_a_model_whose_id_follows_no_naming_is_left_for_a_person() -> None:
+    row = _flash(model_id="gemini-flash-3.8", wire="gemini-3.8-flash")
+    thinking = _GEMINI_THINKING + "| gemini-embedding-001 | On (low) | low |\n"
+    findings = _google(row, _gemini_page(), thinking=thinking)
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    assert absent["gemini-embedding-001"] is None
+
+
+def test_a_gemini_model_whose_page_cannot_be_read_is_left_for_a_person() -> None:
+    row = _flash(model_id="gemini-flash-3.8", wire="gemini-3.8-flash")
+    findings = _google(row, _gemini_page())
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    assert absent["gemini-3.6-flash"] is None
 
 
 def _gemini_page() -> str:
@@ -1216,9 +1456,10 @@ def _google(
         f"{docs}/models/{row.wire_model_id}.md": page,
         **(extra or {}),
     }
+    # As ``cli._fetch`` reads a page it cannot get: empty.
     return check_google(
         ModelTable(rows=(row,)),
-        fetch=lambda url: pages[url],
+        fetch=lambda url: pages.get(url, ""),
         today=today,
     )
 

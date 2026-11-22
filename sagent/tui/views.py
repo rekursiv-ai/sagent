@@ -376,7 +376,7 @@ class Views:
         self._tasks.discard(task)
         if not task.cancelled() and (e := task.exception()) is not None:
             logger.warning("stopping an agent failed", exc_info=e)
-            self.printer.error(error_text(e))
+            self.printer.error(error_text(e), prose=True)
 
 
 class _Screen:

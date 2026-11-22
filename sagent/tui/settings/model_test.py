@@ -19,7 +19,7 @@ from sagent.model.exceptions import UnknownModelError
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins
-from sagent.providers.table import ModelTable, ModelTags
+from sagent.providers.table import ModelTable, ModelTags, tag_words
 from sagent.settings.harvest import harvest
 from sagent.tui.settings import model as model_settings
 from sagent.tui.settings.model import AgentModel
@@ -175,18 +175,23 @@ def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
             "whether the server rolls the history",
         ),
     ]
-    assert (
-        _setting(owner, "model").help_long
-        == (
-            "ACCOUNT@ signs providers in as that login. PROVIDER/ names the provider;"
-            " without it, the current one serves the model if it can, else the first"
-            " allowed one that does. Tags follow in any order: a context size"
-            " (smallcontext, midcontext, fullcontext, or a count such as 258k), an"
-            " effort (nothink, lowthink, medthink, highthink, xhighthink, and so on), a"  # codespell:ignore nothink
-            " tier (auto, default, flex, priority or fast, ultrafast). What the name"
-            " leaves out is kept from the model before."
-        )
-    )
+
+
+def test_the_model_s_help_names_every_tag_a_line_reads() -> None:
+    """The words come from the table that reads them, so neither can drift."""
+    owner, _, _ = _model()
+    rows = {
+        row.split()[0]: row
+        for row in _setting(owner, "model").help_long.splitlines()
+        if row.startswith("    ")
+    }
+    for kind, words in tag_words().items():
+        listed = rows[kind].removeprefix(f"    {kind}").replace(",", " ").split()
+        assert set(words) <= set(listed), (kind, words, listed)
+        for word in words:
+            tags = ModelTags.parse(f"opus+{word}")
+            assert tags.model == "opus", word
+    assert "default" in tag_words()["tier"]
 
 
 @pytest.mark.asyncio
@@ -235,7 +240,7 @@ def test_each_setting_shows_its_value_and_what_it_may_take() -> None:
         for s in harvest([(("model",), owner)])
     }
     assert shown == {
-        "model": ("vendor/wide-1.0+fullcontext+highthink", ()),
+        "model": ("vendor/wide-1.0+fullcontext+highthink", ("wide-1.0", "narrow-1.0")),
         "model.provider": ("vendor", ("vendor", "other")),
         "model.provider.account": ("default", ("default",)),
         "model.context": ("1m (default)", ("default", "smallcontext", "fullcontext")),

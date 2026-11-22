@@ -60,9 +60,14 @@ class ActionParser(argparse.ArgumentParser):
         super().__init__(
             prog=f"sagent {' '.join(name)}",
             description=description,
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-            allow_abbrev=False,
+            # A fixed width, not the terminal's: the help is sent and kept as is,
+            # and each reader's screen wraps it.
+            formatter_class=partial(argparse.RawDescriptionHelpFormatter, width=80),
+            allow_abbrev=False,  # pragma: no mutate[truthiness]
         )
+        # Python 3.14 colors help on a terminal, and the TUI shows the codes as
+        # text. Set here, not passed: 3.12's constructor takes no ``color``.
+        self.color = False  # pragma: no mutate[truthiness]
 
     def setting(
         self,
@@ -87,7 +92,10 @@ class ActionParser(argparse.ArgumentParser):
             name=name,
             help_short=help_short,
             help_long=self.format_help(),
-            usage=self.format_usage().partition(self.prog)[2].strip(),
+            # One line: argparse wraps a long usage at the help's width.
+            usage=" ".join(
+                self.format_usage().removeprefix(f"usage: {self.prog}").split(),
+            ),
             apply=partial(self._apply, run),
             cli=True,
             flags=self.options,

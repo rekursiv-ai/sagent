@@ -1179,50 +1179,21 @@ providers:
     # count 4 tokens more than the same text in one, so each stays its own.
     keeps_user_turns_apart: true
     models:
-      astra-6.2:
-      sol-6.2:
-      astra-6.0:
-      sol-6.1:
-      terra-6.1:
-      sol-6.0:
-      luna-6.0:
-      sol-5.6:
-      gpt-5.6:
-      luna-5.6:
-      terra-5.6:
-      gpt-5.5:
-      gpt-pro-5.5:
-      gpt-5.4:
       # A model off OpenAI's extended-retention list keeps its cache in memory,
       # 5 to 10 idle minutes.
-      gpt-pro-5.4:
+      gpt-pro-5.4: &in_memory
         cache_ttl_sec: [300.0]
-      gpt-mini-5.4:
-        cache_ttl_sec: [300.0]
-      gpt-nano-5.4:
-        cache_ttl_sec: [300.0]
-      gpt-5.2:
-      gpt-pro-5.2:
-        cache_ttl_sec: [300.0]
-      gpt-5.1:
-      gpt-5.0:
-      gpt-pro-5.0:
-        cache_ttl_sec: [300.0]
-      gpt-mini-5.0:
-        cache_ttl_sec: [300.0]
-      gpt-nano-5.0:
-        cache_ttl_sec: [300.0]
-      o-3.0:
-        cache_ttl_sec: [300.0]
-      o-pro-3.0:
-        cache_ttl_sec: [300.0]
-      gpt-4.1:
-      gpt-mini-4.1:
-        cache_ttl_sec: [300.0]
-      gpt-omni-4.0:
-        cache_ttl_sec: [300.0]
-      gpt-omni-mini-4.0:
-        cache_ttl_sec: [300.0]
+      gpt-mini-5.4: *in_memory
+      gpt-nano-5.4: *in_memory
+      gpt-pro-5.2: *in_memory
+      gpt-pro-5.0: *in_memory
+      gpt-mini-5.0: *in_memory
+      gpt-nano-5.0: *in_memory
+      o-3.0: *in_memory
+      o-pro-3.0: *in_memory
+      gpt-mini-4.1: *in_memory
+      gpt-omni-4.0: *in_memory
+      gpt-omni-mini-4.0: *in_memory
   openai-sub:
     sends: [thinking_effort, thinking_output, service_tier]
     # Measured from journals: no misses up to 30 minutes, 1 in 11 at 30 to 60.
@@ -1238,6 +1209,29 @@ providers:
       max_request_bytes: 536_870_912
       max_image_edge_px: 65_535
       truncates_at_context: true
+    # Measured 2026-11-22: a request to each with a ChatGPT login was refused, 400
+    # "The '<id>' model is not supported when using Codex with a ChatGPT account".
+    omits:
+      gpt-5.6: Codex refuses gpt-5.6 for a ChatGPT login (2026-11-22)
+      gpt-5.5: Codex refuses gpt-5.5 for a ChatGPT login (2026-11-22)
+      gpt-pro-5.5: Codex refuses gpt-5.5-pro for a ChatGPT login (2026-11-22)
+      gpt-5.4: Codex refuses gpt-5.4 for a ChatGPT login (2026-11-22)
+      gpt-pro-5.4: Codex refuses gpt-5.4-pro for a ChatGPT login (2026-11-22)
+      gpt-mini-5.4: Codex refuses gpt-5.4-mini for a ChatGPT login (2026-11-22)
+      gpt-nano-5.4: Codex refuses gpt-5.4-nano for a ChatGPT login (2026-11-22)
+      gpt-5.2: Codex refuses gpt-5.2 for a ChatGPT login (2026-11-22)
+      gpt-pro-5.2: Codex refuses gpt-5.2-pro for a ChatGPT login (2026-11-22)
+      gpt-5.1: Codex refuses gpt-5.1 for a ChatGPT login (2026-11-22)
+      gpt-5.0: Codex refuses gpt-5 for a ChatGPT login (2026-11-22)
+      gpt-pro-5.0: Codex refuses gpt-5-pro for a ChatGPT login (2026-11-22)
+      gpt-mini-5.0: Codex refuses gpt-5-mini for a ChatGPT login (2026-11-22)
+      gpt-nano-5.0: Codex refuses gpt-5-nano for a ChatGPT login (2026-11-22)
+      o-3.0: Codex refuses o3 for a ChatGPT login (2026-11-22)
+      o-pro-3.0: Codex refuses o3-pro for a ChatGPT login (2026-11-22)
+      gpt-4.1: Codex refuses gpt-4.1 for a ChatGPT login (2026-11-22)
+      gpt-mini-4.1: Codex refuses gpt-4.1-mini for a ChatGPT login (2026-11-22)
+      gpt-omni-4.0: Codex refuses gpt-4o for a ChatGPT login (2026-11-22)
+      gpt-omni-mini-4.0: Codex refuses gpt-4o-mini for a ChatGPT login (2026-11-22)
     models:
       # Bsearched 2026-11-18: the most input tokens served, by the server's
       # count; one more was refused (ContextOverflowError), as was 1,000,000.
@@ -1260,57 +1254,3 @@ providers:
           max_image_edge_px: 65_535
           truncates_at_context: true
       sol-6.1: *sub_1m_6_0
-      sol-6.0: &sub_272k
-        limits:
-          max_request_tokens: 272_000
-          max_context_tokens: 0
-          max_response_tokens: 32_000
-          max_request_bytes: 536_870_912
-          max_image_edge_px: 65_535
-          truncates_at_context: true
-      luna-6.0: *sub_272k
-      sol-5.6:
-      gpt-5.6:
-      luna-5.6:
-      terra-5.6:
-      # GPT-5.5 (2026-10-14), GPT-5.4 and 5.4 mini (2026-08-31), and GPT-5.2
-      # are retired from Codex for ChatGPT sign-in, so this endpoint omits them.
-      gpt-pro-5.5:
-        service_tier: [auto]
-        limits:
-          max_request_tokens: 272_000
-          max_context_tokens: 0
-          max_response_tokens: 32_000
-          max_request_bytes: 536_870_912
-          max_image_edge_px: 6_000
-          truncates_at_context: true
-      gpt-pro-5.4: &sub_272k_2048
-        service_tier: [auto]
-        limits:
-          max_request_tokens: 272_000
-          max_context_tokens: 0
-          max_response_tokens: 32_000
-          max_request_bytes: 536_870_912
-          max_image_edge_px: 2_048
-          truncates_at_context: true
-      gpt-nano-5.4: *sub_272k_2048
-      gpt-pro-5.2: *sub_272k_2048
-      gpt-5.1: &sub_272k_2048_all_tiers
-        limits:
-          max_request_tokens: 272_000
-          max_context_tokens: 0
-          max_response_tokens: 32_000
-          max_request_bytes: 536_870_912
-          max_image_edge_px: 2_048
-          truncates_at_context: true
-      gpt-4.1: *sub_272k_2048_all_tiers
-      gpt-mini-4.1: *sub_272k_2048_all_tiers
-      gpt-omni-4.0: &sub_omni
-        limits:
-          max_request_tokens: 128_000
-          max_context_tokens: 0
-          max_response_tokens: 16_384
-          max_request_bytes: 536_870_912
-          max_image_edge_px: 2_048
-          truncates_at_context: true
-      gpt-omni-mini-4.0: *sub_omni

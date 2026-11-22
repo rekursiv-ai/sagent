@@ -71,7 +71,3 @@ providers:
     retries_internally: true
     service_tier: [auto]
     manage_context_server_side: [false]
-    models:
-      qwen-27b-12gb-3.6:
-      qwen-27b-mtp-64k-3.6:
-      local-0.0:

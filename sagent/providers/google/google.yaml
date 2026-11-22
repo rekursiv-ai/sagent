@@ -119,14 +119,7 @@ models:
   profile: no_minimal
   thinking_effort_default: medium
   knowledge_cutoff: '2026-03'
-  # One window for input and output: an output cap past what the input leaves
-  # is cut to fit, not refused.
-  limits:
-    max_request_tokens: 1_048_576
-    max_context_tokens: 1_048_576
-    max_response_tokens: 65_536
-    max_request_bytes: 104_857_600
-    truncates_at_context: true
+  limits: *gemini_4
   prices:
   - service_tier: auto
     request: 2.0
@@ -306,38 +299,22 @@ providers:
   google:
     sends: [thinking_effort, thinking_budget, thinking_output]
     retries_internally: true
-    models:
-      gemini-neon-4.0:
-      gemini-hydrogen-4.0:
-      gemini-carbon-4.0:
-      gemini-argon-4.0:
-      gemini-pro-3.1:
-      gemini-pro-2.5:
-      gemini-flash-3.8:
-      gemini-flash-3.6:
-      gemini-flash-3.0:
-      gemini-flash-2.5:
-      gemini-flash-lite-3.5:
-      gemini-flash-lite-3.1:
-      gemini-flash-lite-2.5:
-  # ``agy``, as ``agy models`` listed them on 2026-10-27: 3.8 Flash alone, its effort
-  # the id's suffix (``gemini-3.8-flash-high``).
+  # ``agy``, as ``agy --model`` takes ids (1.5.14, 2026-11-22): each suffixed by its
+  # effort (``gemini-4-neon-high``), as sagent sends it. A model the login is not
+  # offered is refused as "not recognized as a known model", naming those it is.
   google-cli:
     sends: [thinking_effort]
     roles:
-      default: gemini-flash
-      best: gemini-flash
       utility: gemini-flash
-    # ``agy`` starts 3.8 Flash at its first-listed level, high.
-    thinking_effort_default: high
+    models:
+      # ``agy`` starts 3.8 Flash at its first-listed level, high.
+      gemini-flash-3.8:
+        thinking_effort_default: high
     # Its thoughts are not passed on; only the answer is.
     thinking:
-      effort: [low, medium, high]
       output: [none]
     manage_context_server_side: [true]
     # ``agy`` picks the cache lifetime, not sagent: a second turn read the cache
     # after 600 s, not after 900 s (1.5.1, 2026-11-16).
     cache_ttl_sec: [600.0]
     account_auth: true
-    models:
-      gemini-flash-3.8:

@@ -116,6 +116,10 @@ class CommandOutput:
     """The command that says it, as typed at the prompt (``/mcp.list``); the
     scrollback leads with it, the shell, where it was typed, does not."""
 
+    prose: bool = True
+    """Whether it is words, which break between words under the column each line
+    started in; a table, whose spaces are its columns, breaks at the edge."""
+
 
 type Live = (
     ModelResponseTextStreamed
@@ -362,8 +366,8 @@ class Printer(ThinkingView, Protocol):
           text: What it says.
           lead: Who says it, such as a child's ``Agent_0: ``; the rows after
             the first hang under the text.
-          prose: Whether it is a person's or a model's words, which break
-            between words; the harness's own text breaks at the edge.
+          prose: Whether it is words, which break between words under the
+            column each line started in; otherwise rows break at the edge.
 
         """
         ...
@@ -424,8 +428,15 @@ class Printer(ThinkingView, Protocol):
         """
         ...
 
-    def error(self, text: str) -> None:
-        """Write what failed outside any call: the model, a command."""
+    def error(self, text: str, *, prose: bool = False) -> None:
+        """Write what failed outside any call: the model, a command, a tool's text.
+
+        Args:
+          text: What failed.
+          prose: Whether it is a sentence, which breaks between words; a
+            tool's text breaks at the edge.
+
+        """
         ...
 
     def failed(self, text: str, *, header: Header | None = None) -> None:

@@ -21,5 +21,3 @@ models:
 providers:
   cloudflare:
     sends: []
-    models:
-      llama-small-3.2:

@@ -1779,6 +1779,46 @@ def test_a_reply_keeps_its_trailing_spaces_and_a_wordless_one_prints_nothing() -
     assert render.shown == 2
 
 
+def test_a_command_s_note_breaks_between_words() -> None:
+    """Help is prose: cut at the edge, ``serves`` read as ``se`` / ``rves``."""
+    printer = RecordingPrinter(width=24)
+    render = Scrollback(printer, tools=_tools())
+    render.show(
+        CommandOutput(
+            text="the current one serves the model",
+            tone="note",
+            command="/m",
+        ),
+    )
+    assert printer.text.splitlines() == ["[/m] the current one", "serves the model"]
+
+
+_TABLE = "col_a      col_b      col_c      col_d      col_e      col_f"
+
+
+@pytest.mark.parametrize("tone", ["note", "error"])
+def test_a_command_s_table_keeps_its_spacing_where_it_wraps(
+    tone: Literal["note", "error"],
+) -> None:
+    """Prose is the output's to say: a table's spaces are its columns."""
+    printer = RecordingPrinter(width=40)
+    render = Scrollback(printer, tools=_tools())
+    render.show(CommandOutput(text=_TABLE, tone=tone, prose=False))
+    first, second = (row.rstrip() for row in printer.text.splitlines()[:2])
+    lead = len("  ✗ ") if tone == "error" else 0
+    assert first[lead:] == _TABLE[: 40 - lead].rstrip()
+    assert second[lead:] == _TABLE[40 - lead :][: 40 - lead].rstrip()
+
+
+def test_a_tool_s_failure_with_no_call_keeps_its_spacing() -> None:
+    """What a tool wrote is no sentence, though no call of it is on screen."""
+    printer = RecordingPrinter(width=40)
+    render = Scrollback(printer, tools=_tools())
+    render(_result("9", _TABLE, is_error=True))
+    first = printer.text.splitlines()[0]
+    assert first[len("  ✗ ") :] == _TABLE[:36]
+
+
 def test_command_output_may_be_a_plain_line() -> None:
     render, printer = _renderer()
     render.show(CommandOutput(text="a", tone="line"))

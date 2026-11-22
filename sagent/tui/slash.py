@@ -224,6 +224,7 @@ class Commands:
                     apply=partial(a.run, self),
                     cli=a.cli,
                     flags=a.flags,
+                    prose=a.prose,
                 )
                 for a in self.actions()
             ]
@@ -338,6 +339,7 @@ class Commands:
                 name=("tasks",),
                 help_short="list running tool calls",
                 run=Commands._jobs,
+                prose=False,
             ),
             Action(
                 name=("login",),
@@ -770,6 +772,7 @@ class Action:
     value: Callable[[Commands], str] | None = None
     cli: bool = False
     flags: frozenset[str] = frozenset()
+    prose: bool = True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -848,7 +851,14 @@ async def apply_setting(
         print_output(CommandOutput(text=error_text(e), tone="error", command=shown))
         return False
     if applied:
-        print_output(CommandOutput(text=applied.rstrip(), tone="note", command=shown))
+        print_output(
+            CommandOutput(
+                text=applied.rstrip(),
+                tone="note",
+                command=shown,
+                prose=setting.prose,
+            ),
+        )
     return True
 
 
@@ -874,11 +884,11 @@ def help_text(
 
     """
     if not args:
-        return "\n".join(["sagent commands", *(_listed(s, spell) for s in settings)])
+        return _listing("sagent commands", settings, spell=spell)
     parts = tuple(args.split("."))
     under = [s for s in settings if s.name[: len(parts)] == parts and s.name != parts]
     if under and not any(s.name == parts for s in settings):
-        return "\n".join([f"{args} commands", *(_listed(s, spell) for s in under)])
+        return _listing(f"{args} commands", under, spell=spell)
     setting = match(settings, args)
     if setting is None:
         raise SettingError(f"no setting {args!r}")
@@ -924,11 +934,21 @@ def _valued(
     return value() + (f"   ({offered})" if offered else "")
 
 
-def _listed(setting: Setting, spell: Callable[[tuple[str, ...]], str]) -> str:
-    """Return ``setting``'s row in ``/help``: its name and usage, then what it is."""
-    head = f"{spell(setting.name)} {setting.usage}".rstrip()
-    return (
-        f"  {head:<32s}{setting.help_short}"
-        if len(head) < 32
-        else f"  {head}\n  {'':<32s}{setting.help_short}"
-    )
+# Names only: a usage beside each name pushed what it does onto a line of its
+# own; ``/help NAME`` shows the usage.
+def _listing(
+    title: str,
+    settings: Sequence[Setting],
+    *,
+    spell: Callable[[tuple[str, ...]], str],
+) -> str:
+    """Return ``title``, then one row per setting: its name, and what it does."""
+    named = [(spell(s.name), s.help_short) for s in settings]
+    column = min(max(len(name) for name, _ in named) + 2, 40)
+    rows = [
+        f"  {name:<{column}s}{says}"
+        if len(name) < column
+        else f"  {name}\n  {'':<{column}s}{says}"
+        for name, says in named
+    ]
+    return "\n".join([title, *rows])

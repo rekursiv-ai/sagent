@@ -2,14 +2,17 @@
 
 Reads every model's own page, the vendor's price page, and its thinking and
 effort guides, then prints each fact the catalog states that the vendor does not.
-A page that cannot be fetched leaves its facts unstated and is named. Exits 1
-when any fact disagrees without a recorded reason or any page is unreachable,
-so it can run on a schedule; it needs the network and is never a pre-commit hook.
+A section a login gates is checked only when named, against what its login is
+served now. A page that cannot be fetched leaves its facts unstated and is
+named. Exits 1 when any fact disagrees without a recorded reason or any page is
+unreachable, so it can run on a schedule; it needs the network and is never a
+pre-commit hook.
 
 Examples:
   python -m sagent.scripts.check_catalog
   python -m sagent.scripts.check_catalog --provider openai --provider google
   python -m sagent.scripts.check_catalog --provider anthropic --verbose
+  python -m sagent.scripts.check_catalog --write
 
 """
 
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from importlib.resources import files
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
@@ -24,6 +28,7 @@ import functools
 
 import pypdfium2 as pdfium
 
+from sagent.model.exceptions import AuthError
 from sagent.providers import anthropic, google, openai
 from sagent.providers.table import ModelTable
 from sagent.scripts.check_catalog.sources import (
@@ -33,9 +38,11 @@ from sagent.scripts.check_catalog.sources import (
     check_google,
     check_openai,
 )
+from sagent.scripts.check_catalog.write import write
 
 
 if TYPE_CHECKING:
+    from importlib.resources.abc import Traversable
     from types import ModuleType
 
     import httpx2
@@ -70,12 +77,17 @@ def main() -> int:
         today=now.date(),
         unreadable=unreadable,
     )
+    wrote: dict[str, int] = {}
+    if flags.write:
+        findings, wrote = _written(findings)
     shown: set[str] = {"mismatch"}
     if flags.verbose:
         shown |= {"ok", "unstated", "waived"}
     for finding in findings:
         if finding.status in shown:
             print(_line(finding))
+    for name, count in wrote.items():
+        print(f"wrote {count} fact{'' if count == 1 else 's'} to {name}")
     for url, error in unreachable.items():
         print(f"unreachable {url}: {error}")
     for provider, error in unreadable.items():
@@ -96,6 +108,7 @@ class Flags(Protocol):
 
     provider: list[str] | None
     verbose: bool
+    write: bool
 
 
 def check(
@@ -105,10 +118,11 @@ def check(
     today: date,
     unreadable: dict[str, str],
 ) -> list[Finding]:
-    """Return the findings for each provider's API section of its shipped catalog.
+    """Return the findings for each named section of its vendor's shipped catalog.
 
     Args:
-      providers: Vendor names, each a key of the checks: ``anthropic``, ``openai``.
+      providers: Section names, each a key of ``_every_check``: the API sections
+        (``anthropic``, ``openai``, ``google``) and those a login gates.
       fetch: Returns a URL's text.
       today: The day whose prices are compared.
       unreadable: Filled with each vendor whose pages no longer parse, and why;
@@ -120,15 +134,12 @@ def check(
     """
     findings: list[Finding] = []
     for provider in providers:
-        package, run = _checks()[provider]
+        package, run = _every_check()[provider]
         # The shipped document, not a user's override: the check is of what ships.
-        table = ModelTable.from_yaml(
-            files(package) / f"{provider}.yaml",
-            section=provider,
-        )
+        table = ModelTable.from_yaml(_document(package), section=provider)
         try:
             findings += run(table, fetch=fetch, today=today)
-        except ValueError as e:
+        except (ValueError, AuthError) as e:
             unreadable[provider] = str(e)
     return findings
 
@@ -138,8 +149,9 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         action="append",
-        choices=list(_checks()),
-        help="Vendor to check; repeat for several. Default: every vendor.",
+        choices=list(_every_check()),
+        help="Section to check; repeat for several. Default: each whose vendor's"
+        " pages state it, none that needs a login.",
     )
     parser.add_argument(
         "--verbose",
@@ -147,15 +159,35 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Also print facts that agree, that the vendor does not state, or that"
         " differ on purpose.",
     )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the vendor's facts into the shipped catalog: each value a model's"
+        " own row states, each model it lists and the catalog lacks, and each"
+        " section's omits; the rest are printed for a person.",
+    )
 
 
 def _checks() -> dict[str, tuple[ModuleType, _Check]]:
-    """Return each vendor's catalog package and check, by its API section's name."""
+    """Return each section the default run checks: those its vendors' pages state."""
     return {
         "anthropic": (anthropic, check_anthropic),
         "openai": (openai, check_openai),
         "google": (google, check_google),
     }
+
+
+# Run only when named: a check that needs a login fails wherever there is none.
+def _every_check() -> dict[str, tuple[ModuleType, _Check]]:
+    """Return every section that can be checked, the signed-in ones too."""
+    return {
+        **_checks(),
+    }
+
+
+def _document(package: ModuleType) -> Traversable:
+    """Return the catalog ``package`` ships: ``google`` holds ``google.yaml``."""
+    return files(package) / f"{package.__name__.rpartition('.')[2]}.yaml"
 
 
 class _Check(Protocol):
@@ -205,3 +237,20 @@ def _line(finding: Finding) -> str:
         f" {finding.field}: catalog={finding.catalog}"
         f" source={finding.source}  {finding.url}{reason}"
     )
+
+
+def _written(findings: list[Finding]) -> tuple[list[Finding], dict[str, int]]:
+    """Write each mismatch into its shipped document; return the rest and the counts."""
+    by_document: dict[Path, list[Finding]] = {}
+    for finding in findings:
+        if finding.status == "mismatch":
+            package, _ = _every_check()[finding.provider]
+            by_document.setdefault(Path(str(_document(package))), []).append(finding)
+    done: set[Finding] = set()
+    wrote: dict[str, int] = {}
+    for path, mismatches in by_document.items():
+        written = set(mismatches) - set(write(path, mismatches))
+        done |= written
+        if written:
+            wrote[path.name] = len(written)
+    return [f for f in findings if f not in done], wrote

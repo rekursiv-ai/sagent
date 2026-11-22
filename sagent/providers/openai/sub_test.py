@@ -15,6 +15,7 @@ from treekle import from_plain, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.model.types import Request, Response
 from sagent.providers.login import Logins
@@ -87,7 +88,22 @@ def test_the_subscription_serves_its_sections_clamped_models() -> None:
     assert luna.capability.limits.max_request_tokens == 272_000
     assert luna.capability.limits.max_response_tokens == 32_000
     assert sorted(luna.capability.service_tier) == ["auto", "priority"]
-    assert sorted(sub["gpt-nano-5.4"].capability.service_tier) == ["auto"]
+
+
+def test_the_subscription_serves_what_codex_answers_a_chatgpt_login() -> None:
+    """Measured 2026-11-22: each other catalogued id was refused as not supported."""
+    assert list(OpenAISub()) == [
+        "astra-6.2",
+        "sol-6.2",
+        "astra-6.0",
+        "sol-6.1",
+        "terra-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "luna-5.6",
+        "terra-5.6",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -282,9 +298,27 @@ def test_an_unidentified_reply_keeps_no_turn_routing_state(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("auth")
 async def test_no_temperature_is_sent_even_to_a_model_that_cannot_reason() -> None:
+    """The endpoint answers 400 "Unsupported parameter: temperature" for any model.
+
+    Codex serves a ChatGPT login no model that cannot reason, so a user's catalog
+    names one.
+    """
+    catalog = config_dir() / "rekursiv-ai" / "sagent" / "providers" / "openai-sub.yaml"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        "models:\n"
+        "- model_id: gpt-4.1\n"
+        "  wire_model_id: gpt-4.1\n"
+        "  limits: {max_request_tokens: 1000}\n"
+        "  prices: [{request: 2.0, response: 8.0}]\n"
+        "providers:\n"
+        "  openai-sub:\n"
+        "    sends: [thinking_effort, thinking_output, service_tier]\n",
+    )
     server = _Server(replies=[_ok()])
     async with _Served(server) as shared:
         model = OpenAISub(resources=shared)["gpt-4.1"]
+        assert model.capability.thinking_effort == {"none"}
         [event async for event in model.stream(_REQUEST)]
     assert "temperature" not in json_loads(
         server.requests[0].content,

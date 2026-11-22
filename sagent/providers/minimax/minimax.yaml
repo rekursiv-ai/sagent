@@ -152,10 +152,3 @@ providers:
     models:
       minimax-3.0:
         service_tier: [auto, priority]
-      minimax-2.7:
-      minimax-2.5:
-      minimax-2.1:
-      minimax-2.0:
-      minimax-highspeed-2.7:
-      minimax-highspeed-2.5:
-      minimax-highspeed-2.1:

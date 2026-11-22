@@ -43,7 +43,7 @@ from sagent.model.capability import (
     typed_text,
 )
 from sagent.providers.catalog import counterpart, successor
-from sagent.providers.table import ModelTags
+from sagent.providers.table import ModelTags, tag_words
 from sagent.providers.types import HasLogins, ModelCatalog
 from sagent.settings.exceptions import SettingError
 from sagent.settings.types import Setting
@@ -75,22 +75,32 @@ class AgentModel:
           settings: Each, named relative to where the model is mounted.
 
         """
+        words = tag_words()
         return [
             Setting(
                 name=(),
                 help_short="the model, by name, family, or role, with any tags",
-                help_long=(
-                    "ACCOUNT@ signs providers in as that login. PROVIDER/ names"
-                    " the provider; without it, the current one serves the model"
-                    " if it can, else the first allowed one that does. Tags follow"
-                    " in any order: a context size (smallcontext, midcontext,"
-                    " fullcontext, or a count such as 258k), an effort (nothink,"  # codespell:ignore nothink
-                    " lowthink, medthink, highthink, xhighthink, and so on), a"
-                    " tier (auto, default, flex, priority or fast, ultrafast)."
-                    " What the name leaves out is kept from the model before."
+                help_long="\n".join(
+                    [
+                        "  ACCOUNT@   the login to sign in as",
+                        (
+                            "  PROVIDER/  the provider; default: this one, else the"
+                            " first that serves it"
+                        ),
+                        (
+                            "  MODEL      a name, a family (neon), or a role (default,"
+                            " best, everyday, utility)"
+                        ),
+                        "  +TAG       any of, in any order:",
+                        f"    size     {', '.join(words['size'])}, or a count (258k)",
+                        f"    effort   {', '.join(words['effort'])}",
+                        f"    tier     {', '.join(words['tier'])}",
+                        "  What the line leaves out is kept from the model before.",
+                    ],
                 ),
                 usage="[ACCOUNT@][PROVIDER/]MODEL[+TAG...]",
                 value=self._described,
+                options=lambda: tuple(self.agent.model.provider),
                 apply=self._model,
                 cli=True,
             ),

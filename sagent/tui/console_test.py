@@ -1001,6 +1001,7 @@ def test_a_failure_keeps_its_text_but_the_final_newlines(
     kind: str,
     indent: str,
 ) -> None:
+    """Text that is not prose keeps even its trailing spaces: they may be a column's."""
     screen = _Pane(color=True)
     getattr(screen.printer, kind)("\nfailed X  \n")
     assert [_visible(r) for r in screen.raw()] == [
@@ -1337,6 +1338,7 @@ _PROSE: dict[str, tuple[Callable[[ConsolePrinter, str], None], str]] = {
     "user": (lambda p, s: p.user(s), "> "),
     "agent": (lambda p, s: p.agent("w", None, s), "w→me: "),
     "thinking": (lambda p, s: p.thinking(s, opens=False, closes=True), ""),
+    "error": (lambda p, s: p.error(s, prose=True), "✗ "),
     "header": (
         lambda p, s: p.call(Header(key="1", label="Bash " + s, display=_ALL)),
         "Bash ",
@@ -1361,9 +1363,25 @@ def test_prose_wraps_between_words(kind: str) -> None:
 # may be content, such as a column's alignment.
 _VERBATIM: dict[str, tuple[Callable[[ConsolePrinter, str], None], int, int]] = {
     "failed": (lambda p, s: p.failed(s), 6, 6),
-    "error": (lambda p, s: p.error(s), 4, 4),
     "note": (lambda p, s: p.note(s), 0, 0),
+    "error": (lambda p, s: p.error(s), 4, 4),
 }
+
+
+@pytest.mark.parametrize("kind", ["note", "error"])
+def test_prose_rows_continue_under_the_column_they_started_in(kind: str) -> None:
+    """A help row's words wrap under its words, not back under its name."""
+    screen = _Pane(width=30)
+    row = "  /name  what it does in many more words"
+    if kind == "note":
+        screen.printer.note(row, prose=True)
+    else:
+        screen.printer.error(row, prose=True)
+    lead = 0 if kind == "note" else len("  ✗ ")
+    column = lead + len("  /name  ")
+    rows = screen.rows()
+    assert len(rows) > 1
+    assert all(r.startswith(" " * column) and r[column] != " " for r in rows[1:]), rows
 
 
 @pytest.mark.parametrize("kind", list(_VERBATIM))
