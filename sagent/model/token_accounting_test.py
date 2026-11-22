@@ -30,6 +30,7 @@ from sagent.session.types import (
     ToolMessage,
     UncategorizedToolResult,
     UserMessage,
+    stored_plain,
 )
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
@@ -37,6 +38,8 @@ from sagent.tools.types import ToolContext
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from treekle import MutablePlainTree
 
 
 def test_prompt_counts_include_all_cache_pools_and_not_output() -> None:
@@ -436,6 +439,59 @@ def test_a_capture_hashes_as_a_fresh_one_does_and_a_changed_record_anew() -> Non
     assert snapshots[2].hashes[::2] == snapshots[1].hashes[::2]
 
 
+def test_a_capture_reuses_the_hashes_of_records_equal_to_the_last_captures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request is rebuilt for every call, its later messages told as new text."""
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    records = (UserMessage(content="a"), AssistantMessage(content="b"))
+    _ = accounting.capture(Request(records=records), model=model)
+    hashed = _hashed(monkeypatch)
+    later = UserMessage(content="c")
+    rebuilt = Request(records=(*(replace(r) for r in records), later))
+
+    snapshot = accounting.capture(rebuilt, model=model)
+
+    assert hashed == [later]
+    assert snapshot == TokenAccounting().capture(rebuilt, model=model)
+
+
+def test_a_request_estimate_hashes_each_record_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = ScriptedProvider()["scripted"]
+    records = (UserMessage(content="a" * 40), AssistantMessage(content="b" * 40))
+    request = Request(system=("s" * 40,), records=records)
+    hashed = _hashed(monkeypatch)
+
+    tokens = TokenAccounting().estimate_request(request, model=model)
+
+    assert tokens == 30
+    assert hashed == list(records)
+
+
+def test_a_measured_group_after_a_measured_prompt_counts_as_measured() -> None:
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    block = (AssistantMessage(content="answer"), UserMessage(content="next"))
+    first = Request(records=(UserMessage(content="first"),))
+    other = Request(records=(UserMessage(content="other"),))
+    for request, tokens in (
+        (first, 100),
+        (replace(first, records=(*first.records, *block)), 157),
+        (other, 300),
+    ):
+        accounting.observe(
+            accounting.capture(request, model=model),
+            tokens=TokenCount(request=tokens),
+        )
+
+    grown = replace(other, records=(*other.records, *block))
+
+    assert accounting.estimate_request(grown, model=model) == 357
+
+
 def test_accounting_lets_go_of_records_no_later_capture_holds() -> None:
     model = ScriptedProvider()["scripted"]
     accounting = TokenAccounting()
@@ -450,6 +506,18 @@ def test_accounting_lets_go_of_records_no_later_capture_holds() -> None:
 
     assert kept > held
     assert sys.getrefcount(old) == held
+
+
+def _hashed(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Return the records accounting hashes from now on, in order."""
+    hashed: list[object] = []
+
+    def counted(record: object) -> dict[str, MutablePlainTree]:
+        hashed.append(record)
+        return stored_plain(record)
+
+    monkeypatch.setattr("sagent.model.token_accounting.stored_plain", counted)
+    return hashed
 
 
 if __name__ == "__main__":

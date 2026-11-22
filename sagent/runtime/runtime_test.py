@@ -946,6 +946,29 @@ async def test_a_request_repeats_the_last_call_then_what_comes_after() -> None:
     assert later.records[-1] == _user("summarize")
 
 
+def test_a_request_for_part_of_the_context_is_sent_as_the_live_one_starts() -> None:
+    """A summary of a prefix reads the cache, and the sizes, the live request wrote."""
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    entries = (
+        _user("go"),
+        reply(calls=[call("echo", "c1")]),
+        ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+        reply("waiting"),
+        ToolMessage(call_id="c1", state="done", stdout=("late",)),
+        _user("and?"),
+        reply("read it"),
+    )
+    for entry in entries:
+        rt.tape.append_history(entry)
+    live = rt.request().records
+
+    part = rt.request(context=entries[:6], after=(_user("summarize"),)).records
+
+    assert part[:-1] == live[: len(part) - 1]
+    assert part[-1] == _user("summarize")
+    assert rt.request(context=entries).records == live
+
+
 @pytest.mark.asyncio
 async def test_a_call_to_a_tool_offered_but_not_allowed_is_refused() -> None:
     allowed, gated = Gated(name="allowed"), Gated(name="gated")
@@ -2227,9 +2250,15 @@ async def test_a_call_past_the_limit_is_answered_and_runs_on(
             h.push(_user("go"))
             await h.seen(_answered)
             assert [r.state for r in h.results("t1")] == ["pending"]
+            # A wake between the tool's last write and its result reaching the
+            # inbox tells that write as news, and the result then reads only what
+            # came after: so no wake may fire, or be owed, once it is released.
+            watch = h.runtime._calls["t1"].watch
+            assert watch is not None
+            assert watch.timer is not None
+            watch.timer.cancel()
+            await h.until(lambda: not watch.waking)
             tool.release.set()
-            # Not a count of idles: a wake every 10 ms can idle the model again
-            # before the released call's result is taken.
             await h.until(lambda: bool(_arrival(h, "t1")))
     assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
     assert [

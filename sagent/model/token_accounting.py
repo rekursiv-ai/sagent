@@ -82,13 +82,16 @@ class TokenAccounting:
             hashes=self._hashes(request.records),
         )
 
-    # Records are frozen, so the same record object always hashes the same; a record
-    # changed is a new object, and is hashed anew.
+    # Records are frozen values, so an equal record hashes the same. A request is
+    # rebuilt for every call, a later message told as a new ``UserMessage`` each
+    # time, so reuse by identity alone hashes the whole window again per call.
     def _hashes(self, records: Sequence[SessionRecord]) -> tuple[str, ...]:
         """Return each record's hash, reusing the last capture's for its leading run."""
         held = self._hashed
         same = 0
-        while same < min(len(held), len(records)) and held[same][0] is records[same]:
+        while same < min(len(held), len(records)) and (
+            held[same][0] is records[same] or held[same][0] == records[same]
+        ):
             same += 1
         hashes = (
             *(digest for _, digest in held[:same]),
@@ -187,8 +190,9 @@ class TokenAccounting:
                 matching,
                 key=lambda m: (m.tokenizer == snapshot.tokenizer, m.records),
             )
-            return best.prompt + self.estimate_block(
+            return best.prompt + self._block_tokens(
                 request.records[best.records :],
+                snapshot.hashes[best.records :],
                 model=model,
             )
         chars = sum(map(len, request.system)) + sum(
@@ -196,7 +200,7 @@ class TokenAccounting:
         )
         return int(
             chars / model.capability.approx_chars_per_token,
-        ) + self.estimate_block(request.records, model=model)
+        ) + self._block_tokens(request.records, snapshot.hashes, model=model)
 
     def estimate_block(
         self,
@@ -220,7 +224,20 @@ class TokenAccounting:
             for entry in entries
             for r in (entry.records if isinstance(entry, Response) else (entry,))
         )
-        hashes = tuple(_digest(stored_plain(r)) for r in records)
+        return self._block_tokens(
+            records,
+            tuple(_digest(stored_plain(r)) for r in records),
+            model=model,
+        )
+
+    def _block_tokens(
+        self,
+        records: Sequence[SessionRecord],
+        hashes: tuple[str, ...],
+        *,
+        model: Model,
+    ) -> int:
+        """Return ``estimate_block`` of ``records``, whose hashes are ``hashes``."""
         tokenizer = _tokenizer(model)
         total = at = 0
         sizes = sorted({size for size, _ in self._blocks}, reverse=True)

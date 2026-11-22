@@ -23,7 +23,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial
@@ -594,6 +594,12 @@ class SummaryCompactor:
         """Consume fitting prefixes; revisit summaries only after each pass ends."""
         summaries: list[UserMessage] = []
         remaining: list[ModelContextEvent] = list(coalesce_roles(history))
+        # Sent apart from what is selected after it, so each retained entry stays the
+        # record the instruction counts, and no summary merges into the next turn.
+        head = sent_records(
+            fixed,
+            keep_senders_apart=self._agent.runtime.model.capability.keeps_user_turns_apart,
+        )
         pass_size = self._size(model, remaining)
         reason = ""
         while force or not self._fits_replacement(
@@ -609,23 +615,23 @@ class SummaryCompactor:
                 remaining = list(summaries)
                 summaries = []
                 pass_size = size
-            prefix = [*fixed, *summaries]
+            retained = [*head, *summaries]
             response, summary, taken = await self._prefix_summary(
                 model,
                 remaining,
                 instruction=instruction,
-                retained=prefix,
+                retained=retained,
             )
             finished = _finished(response)
             if self._verify_summary:
                 try:
                     summary, finished = await self._verify(
                         model,
-                        [*prefix, *remaining[:taken]],
+                        remaining[:taken],
                         _reply(response),
                         summary=summary,
                         finished=finished,
-                        retained=prefix,
+                        retained=retained,
                     )
                 except Exception as exc:  # noqa: BLE001 -- The usable first summary stands if verification fails.
                     logger.warning(
@@ -645,29 +651,35 @@ class SummaryCompactor:
         remaining: list[ModelContextEvent],
         *,
         instruction: str,
-        retained: Sequence[ModelContextEvent],
+        retained: Sequence[SessionRecord],
     ) -> tuple[Response, str, int]:
         """Send the largest fitting safe prefix, returning only a validated summary."""
         safe = safe_boundaries(remaining)
         stops = [i for i in range(1, len(remaining) + 1) if safe[i]]
+        fits = partial(
+            self._prefix_fits,
+            model,
+            remaining,
+            instruction=instruction,
+            retained=retained,
+        )
         for attempt in range(self._max_attempts):
-            while True:
-                if not stops:
-                    raise ContextOverflowError("no nonempty prefix fits a summary call")
-                taken = stops[-1]
-                request = self._prefix_request(
-                    model,
-                    [*retained, *remaining[:taken]],
-                    instruction,
-                    retained=retained,
-                )
-                if self._fits_request(model, request):
-                    break
-                stops.pop()
+            # A measured size can undercut an estimate, so sizes need not grow with
+            # the prefix: this finds a stop that fits whose next one does not.
+            fitting = bisect_left(stops, True, key=lambda taken: not fits(taken))
+            if not fitting:
+                raise ContextOverflowError("no nonempty prefix fits a summary call")
+            taken = stops[fitting - 1]
+            request = self._prefix_request(
+                model,
+                remaining[:taken],
+                instruction,
+                retained=retained,
+            )
             try:
                 response = await self._stream(model, request)
             except ContextOverflowError:
-                stops.pop()
+                stops = stops[: fitting - 1]
                 continue
             except RetryableError as exc:
                 logger.warning(
@@ -685,28 +697,49 @@ class SummaryCompactor:
             f"summary failed after {self._max_attempts} attempts",
         )
 
+    def _prefix_fits(
+        self,
+        model: Model,
+        remaining: Sequence[ModelContextEvent],
+        taken: int,
+        *,
+        instruction: str,
+        retained: Sequence[SessionRecord],
+    ) -> bool:
+        """Return whether a summary call of ``remaining[:taken]`` fits."""
+        return self._fits_request(
+            model,
+            self._prefix_request(
+                model,
+                remaining[:taken],
+                instruction,
+                retained=retained,
+            ),
+        )
+
     def _prefix_request(
         self,
         model: Model,
         entries: Sequence[ModelContextEvent],
         instruction: str,
         *,
-        retained: Sequence[ModelContextEvent] = (),
+        retained: Sequence[SessionRecord] = (),
     ) -> Request:
-        """Keep the original frame and entries; distinguish retained context from input."""
+        """Return the live request's frame holding ``retained``, then ``entries`` as sent."""
         if retained:
-            count = sum(
-                len(entry.records) if isinstance(entry, Response) else 1
-                for entry in retained
-            )
             instruction += (
-                f"\n\nThe first {count} entries are already retained."
+                f"\n\nThe first {len(retained)} entries are already retained."
                 " Use them only as context; summarize only the newly selected"
                 " entries after them. Do not repeat the retained summaries."
             )
+        request = self._agent.runtime.request(
+            context=entries,
+            after=(UserMessage(content=instruction),),
+            max_response_tokens=0,
+        )
         request = replace(
-            self._agent.runtime.request(max_response_tokens=0),
-            records=[*sent_records(entries), UserMessage(content=instruction)],
+            request,
+            records=[*retained, *request.records],
             purpose="compaction",
         )
         return replace(
@@ -748,9 +781,9 @@ class SummaryCompactor:
         limits = model.capability.limits
         if limits.max_request_tokens <= 0:
             return True
-        request = replace(
-            self._agent.runtime.request(max_response_tokens=0),
-            records=sent_records(replacement),
+        request = self._agent.runtime.request(
+            context=replacement,
+            max_response_tokens=0,
         )
         held = self._request_size(model, request)
         body = max(0, held - self._size(model, pending))
@@ -781,12 +814,12 @@ class SummaryCompactor:
     async def _verify(
         self,
         model: Model,
-        entries: list[ModelContextEvent],
+        entries: Sequence[ModelContextEvent],
         raw: str,
         *,
         summary: str,
         finished: bool,
-        retained: Sequence[ModelContextEvent] = (),
+        retained: Sequence[SessionRecord] = (),
     ) -> tuple[str, bool]:
         """Ask the model to check the complete selected prefix without dropping input."""
         response = await self._stream(
@@ -820,7 +853,10 @@ class SummaryCompactor:
         system = _asset("compactor_system").strip()
         request = Request(
             system=(system,),
-            records=sent_records(records),
+            records=sent_records(
+                records,
+                keep_senders_apart=model.capability.keeps_user_turns_apart,
+            ),
             max_response_tokens=_room(
                 model,
                 _tokens(model, [SystemMessage(content=system), *records]),
