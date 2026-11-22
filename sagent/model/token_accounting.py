@@ -47,8 +47,9 @@ class RequestSnapshot:
 class TokenAccounting:
     """Reuse measured unchanged requests and appended groups before estimating text.
 
-    It holds the records of the last request it captured, and no older ones, to
-    reuse their hashes when the next request begins with the same records.
+    It holds the records it last hashed, and no older ones, to reuse their hashes
+    in the next sizing; and the hashes of measured-group candidates, until the next
+    measured call, to reuse them across the many sizings of one compaction.
     """
 
     def __init__(self) -> None:
@@ -56,6 +57,7 @@ class TokenAccounting:
         self._blocks: dict[tuple[int, str], dict[str, int]] = {}
         self._last: RequestMeasurement | None = None
         self._hashed: tuple[tuple[SessionRecord, str], ...] = ()
+        self._slices: dict[tuple[str, str], str] = {}
 
     @property
     def has_measurements(self) -> bool:
@@ -84,18 +86,19 @@ class TokenAccounting:
 
     # Records are frozen values, so an equal record hashes the same. A request is
     # rebuilt for every call, a later message told as a new ``UserMessage`` each
-    # time, so reuse by identity alone hashes the whole window again per call.
+    # time, so reuse by identity alone hashes the whole window again per call; and
+    # a window and the requests of it put the same records at other places, so
+    # reuse by place alone does too. ``held`` keeps each record alive, so no id in
+    # it names another object.
     def _hashes(self, records: Sequence[SessionRecord]) -> tuple[str, ...]:
-        """Return each record's hash, reusing the last capture's for its leading run."""
+        """Return each record's hash, reusing the last sizing's by identity or place."""
         held = self._hashed
-        same = 0
-        while same < min(len(held), len(records)) and (
-            held[same][0] is records[same] or held[same][0] == records[same]
-        ):
-            same += 1
-        hashes = (
-            *(digest for _, digest in held[:same]),
-            *(_digest(stored_plain(r)) for r in records[same:]),
+        by_id = {id(r): digest for r, digest in held}
+        hashes = tuple(
+            by_id.get(id(r))
+            or (held[i][1] if i < len(held) and held[i][0] == r else None)
+            or _digest(stored_plain(r))
+            for i, r in enumerate(records)
         )
         self._hashed = tuple(zip(records, hashes, strict=True))
         return hashes
@@ -117,6 +120,7 @@ class TokenAccounting:
             A delta measures the entire appended group, never its individual records.
 
         """
+        self._slices.clear()
         last = self._last
         start = 0
         delta = None
@@ -175,11 +179,8 @@ class TokenAccounting:
 
         """
         snapshot = self.capture(request, model=model)
-        hasher = hashlib.sha256()
-        prefixes = {hasher.hexdigest()}
-        for digest in snapshot.hashes:
-            hasher.update(digest.encode())
-            prefixes.add(hasher.hexdigest())
+        chain = _chain(snapshot.hashes)
+        prefixes = set(chain)
         matching = [
             m
             for m in self._prompts.values()
@@ -193,6 +194,7 @@ class TokenAccounting:
             return best.prompt + self._block_tokens(
                 request.records[best.records :],
                 snapshot.hashes[best.records :],
+                chain[best.records :],
                 model=model,
             )
         chars = sum(map(len, request.system)) + sum(
@@ -200,7 +202,7 @@ class TokenAccounting:
         )
         return int(
             chars / model.capability.approx_chars_per_token,
-        ) + self._block_tokens(request.records, snapshot.hashes, model=model)
+        ) + self._block_tokens(request.records, snapshot.hashes, chain, model=model)
 
     def estimate_block(
         self,
@@ -224,25 +226,29 @@ class TokenAccounting:
             for entry in entries
             for r in (entry.records if isinstance(entry, Response) else (entry,))
         )
-        return self._block_tokens(
-            records,
-            tuple(_digest(stored_plain(r)) for r in records),
-            model=model,
-        )
+        hashes = self._hashes(records)
+        return self._block_tokens(records, hashes, _chain(hashes), model=model)
 
     def _block_tokens(
         self,
         records: Sequence[SessionRecord],
         hashes: tuple[str, ...],
+        chain: tuple[str, ...],
         *,
         model: Model,
     ) -> int:
-        """Return ``estimate_block`` of ``records``, whose hashes are ``hashes``."""
+        """Return ``estimate_block`` of ``records``, whose hashes and chain are given."""
         tokenizer = _tokenizer(model)
         total = at = 0
         sizes = sorted({size for size, _ in self._blocks}, reverse=True)
         while at < len(records):
-            found = self._block(hashes, start=at, tokenizer=tokenizer, sizes=sizes)
+            found = self._block(
+                hashes,
+                chain,
+                start=at,
+                tokenizer=tokenizer,
+                sizes=sizes,
+            )
             if found is None:
                 total += _estimated(records[at], model=model)
                 at += 1
@@ -255,13 +261,17 @@ class TokenAccounting:
     def _block(
         self,
         hashes: tuple[str, ...],
+        chain: tuple[str, ...],
         *,
         start: int,
         tokenizer: str,
         sizes: list[int],
     ) -> tuple[int, int] | None:
         choices = [
-            (size, self._blocks.get((size, _prefix(hashes[start : start + size])), {}))
+            (
+                size,
+                self._blocks.get((size, self._slice(hashes, chain, start, size)), {}),
+            )
             for size in sizes
             if start + size <= len(hashes)
         ]
@@ -272,6 +282,23 @@ class TokenAccounting:
             if counts:
                 return size, next(reversed(counts.values()))
         return None
+
+    # The chain at both ends names the slice and everything before it, so a key
+    # never names two slices; a compaction's sizings share their leading records,
+    # and with them the slices of every group probed among them.
+    def _slice(
+        self,
+        hashes: tuple[str, ...],
+        chain: tuple[str, ...],
+        start: int,
+        size: int,
+    ) -> str:
+        """Return the hash of ``hashes[start : start + size]``, kept for reuse."""
+        key = (chain[start], chain[start + size])
+        found = self._slices.get(key)
+        if found is None:
+            found = self._slices[key] = _prefix(hashes[start : start + size])
+        return found
 
 
 def _tokenizer(model: Model) -> str:
@@ -291,6 +318,16 @@ def _digest(value: object) -> str:
 
 def _prefix(hashes: tuple[str, ...]) -> str:
     return hashlib.sha256("".join(hashes).encode()).hexdigest()
+
+
+def _chain(hashes: tuple[str, ...]) -> tuple[str, ...]:
+    """Return ``_prefix`` of each leading run of ``hashes``, the empty one first."""
+    hasher = hashlib.sha256()
+    chain = [hasher.hexdigest()]
+    for digest in hashes:
+        hasher.update(digest.encode())
+        chain.append(hasher.hexdigest())
+    return tuple(chain)
 
 
 def _tools(request: Request) -> tuple[tuple[object, ...], ...]:
