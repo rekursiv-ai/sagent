@@ -2250,17 +2250,14 @@ async def test_a_call_past_the_limit_is_answered_and_runs_on(
             h.push(_user("go"))
             await h.seen(_answered)
             assert [r.state for r in h.results("t1")] == ["pending"]
-            # A wake between the tool's last write and its result reaching the
-            # inbox tells that write as news, and the result then reads only what
-            # came after: so no wake may fire, or be owed, once it is released.
-            watch = h.runtime._calls["t1"].watch
-            assert watch is not None
-            assert watch.timer is not None
-            watch.timer.cancel()
-            await h.until(lambda: not watch.waking)
             tool.release.set()
             await h.until(lambda: bool(_arrival(h, "t1")))
-    assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
+    (arrived,) = _arrival(h, "t1")
+    # A wake between the tool's write and its result reaching the inbox tells the
+    # write as news, and the result then reads only what came after it.
+    read = "".join(m.text() for m in _late(h) if m.call_id == "t1")
+    assert read.count("REAL") == 1
+    assert arrived.text() in {"REAL", "(no new output)"}
     assert [
         type(e.outcome) for e in h.events if isinstance(e, ToolDetachCompleted)
     ] == [Succeeded]

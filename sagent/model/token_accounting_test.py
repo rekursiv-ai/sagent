@@ -14,7 +14,7 @@ from sagent.agent.agents_md import AgentsMdConfig
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCount
 from sagent.model.scripted import ScriptedProvider, reply
-from sagent.model.token_accounting import TokenAccounting
+from sagent.model.token_accounting import TokenAccounting, _prefix
 from sagent.model.types import Request, Response
 from sagent.session.jsonl import JsonlJournal, read_record, record_line
 from sagent.session.recording import RecordingJournal
@@ -455,6 +455,67 @@ def test_a_capture_reuses_the_hashes_of_records_equal_to_the_last_captures(
 
     assert hashed == [later]
     assert snapshot == TokenAccounting().capture(rebuilt, model=model)
+
+
+def test_a_record_the_last_sizing_hashed_is_not_hashed_again_wherever_it_stands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A summary's sizings move records about: the window, then requests of it."""
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    first, second, third = (UserMessage(content=t) for t in ("a", "b", "c"))
+    _ = accounting.capture(Request(records=(first, second)), model=model)
+    hashed = _hashed(monkeypatch)
+
+    _ = accounting.estimate_block((third, first, second), model=model)
+    _ = accounting.capture(Request(records=(first, second, third)), model=model)
+
+    assert hashed == [third]
+
+
+def test_a_measured_groups_slices_are_hashed_once_between_measured_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A summary sizes many prefixes of one window, each probing the same groups."""
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    block = (AssistantMessage(content="answer"), UserMessage(content="next"))
+    first = Request(records=(UserMessage(content="first"),))
+    for request, tokens in (
+        (first, 100),
+        (replace(first, records=(*first.records, *block)), 157),
+    ):
+        accounting.observe(
+            accounting.capture(request, model=model),
+            tokens=TokenCount(request=tokens),
+        )
+    other = Request(records=(UserMessage(content="other"), *block, *block))
+    sliced: list[tuple[str, ...]] = []
+
+    def counted(hashes: tuple[str, ...]) -> str:
+        sliced.append(hashes)
+        return _prefix(hashes)
+
+    assert accounting.estimate_request(other, model=model) > 114
+    monkeypatch.setattr("sagent.model.token_accounting._prefix", counted)
+
+    again = accounting.estimate_request(other, model=model)
+    unseen = sliced.copy()
+    unlike = (AssistantMessage(content="x" * 400), UserMessage(content="y" * 400))
+    changed = replace(other, records=(*other.records[:3], *unlike))
+    assert accounting.estimate_request(changed, model=model) > again
+    accounting.observe(
+        accounting.capture(other, model=model),
+        tokens=TokenCount(request=again),
+    )
+    sliced.clear()
+    _ = accounting.estimate_request(
+        replace(other, records=other.records[1:]),
+        model=model,
+    )
+
+    assert unseen == []
+    assert sliced
 
 
 def test_a_request_estimate_hashes_each_record_once(
