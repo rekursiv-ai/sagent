@@ -5,4 +5,3 @@ models: []
 providers:
   azure:
     sends: [thinking_effort, thinking_output, service_tier]
-    models: {}

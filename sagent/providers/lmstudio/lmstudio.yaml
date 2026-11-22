@@ -19,5 +19,3 @@ models:
 providers:
   lmstudio:
     sends: []
-    models:
-      llama-small-3.2:

@@ -32,5 +32,3 @@ models:
 providers:
   cohere:
     sends: []
-    models:
-      command-r-plus-2024.8:

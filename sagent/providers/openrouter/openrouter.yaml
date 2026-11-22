@@ -33,5 +33,3 @@ models:
 providers:
   openrouter:
     sends: [thinking_effort]
-    models:
-      mistral-small-4.0:

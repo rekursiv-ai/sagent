@@ -246,7 +246,7 @@ class Scrollback:
                 self._end()
                 if given.reset_at_by_login:
                     p.note(logins_spent_text(given))
-                p.error(suspended_text(given))
+                p.error(suspended_text(given), prose=True)
                 if failures == 1:
                     p.halt(
                         "agent waiting -- /account or /model to switch now,"
@@ -266,13 +266,19 @@ class Scrollback:
             ):
                 for path in context.skipped_instruction_files:
                     self._flush()
-                    p.error(f"Skipping {path}: see the log for why.")
+                    p.error(f"Skipping {path}: see the log for why.", prose=True)
             case types.SessionContextUpdateCompleted():
                 pass
-            case CommandOutput(text=text, tone=tone, command=command):
+            case CommandOutput(text=text, tone=tone, command=command, prose=prose):
                 self._flush()
                 said = f"[{command}] {text}" if command else text
-                {"line": p.line, "note": p.note, "error": p.error}[tone](said)
+                match tone:
+                    case "note":
+                        p.note(said, prose=prose)
+                    case "error":
+                        p.error(said, prose=prose)
+                    case "line":
+                        p.line(said)
             case (
                 UserMessage()
                 | AgentMessage()
@@ -301,7 +307,7 @@ class Scrollback:
         if isinstance(outcome, Cancelled):
             p.note("[interrupted]")
         elif isinstance(outcome, Failed):
-            p.error(error_text(outcome.exception))
+            p.error(error_text(outcome.exception), prose=True)
             p.halt(_halt_text(outcome.exception))
 
     def _record(self, record: Record, *, index: int | None = None) -> None:
@@ -445,11 +451,11 @@ class Scrollback:
             event.outcome,
             Failed,
         ):
-            p.error(f"{label}: {error_text(event.outcome.exception)}")
+            p.error(f"{label}: {error_text(event.outcome.exception)}", prose=True)
         elif isinstance(event, types.ModelResponseSuspended):
             if event.reset_at_by_login:
                 p.note(logins_spent_text(event), lead=f"{label}: ")
-            p.error(f"{label}: {suspended_text(event)}")
+            p.error(f"{label}: {suspended_text(event)}", prose=True)
         elif isinstance(event, types.LoginSwitched):
             p.note(login_text(event), lead=f"{label}: ")
         elif isinstance(event, AgentMessage):

@@ -37,6 +37,7 @@ from sagent.model.exceptions import (
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers import cli_login
 from sagent.providers.google import cli
+from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
 from sagent.session.types import (
     AgentMessage,
@@ -1258,8 +1259,8 @@ def test_a_stream_is_costed_at_the_card_of_its_utc_date(
     assert turn.response(capability=capability).spend.response == 2.0
 
 
-def test_the_provider_serves_what_agy_offers() -> None:
-    """``agy models`` listed 3.8 Flash alone on 2026-10-27, at three efforts."""
+def test_the_provider_serves_every_catalogued_model() -> None:
+    """What a login is offered is agy's to say, per request: no list is kept."""
     provider = GoogleCLI()
     assert (GoogleCLI.section, provider.name, provider.usage) == (
         "google-cli",
@@ -1267,12 +1268,22 @@ def test_the_provider_serves_what_agy_offers() -> None:
         (),
     )
     assert GoogleCLI(name="work").name == "work"
-    assert list(provider) == ["gemini-flash-3.8"]
-    for role in ("default", "best", "everyday", "utility"):
-        assert provider[role].capability.model_id == "gemini-flash-3.8"
-    assert provider["gemini-flash"].capability.thinking_effort == frozenset(
-        {"low", "medium", "high"},
+    assert list(provider) == list(Google.models())
+    roles = ("default", "best", "everyday", "utility")
+    assert {role: provider[role].capability.model_id for role in roles} == {
+        "default": "gemini-argon-4.0",
+        "best": "gemini-argon-4.0",
+        "everyday": "gemini-flash-3.8",
+        "utility": "gemini-flash-3.8",
+    }
+    neon = provider["neon"]
+    assert neon.capability.thinking_effort == frozenset(
+        {"low", "medium", "high", "xhigh"},
     )
+    assert neon._model_id() == "gemini-4-neon-high"
+    flash = provider["gemini-flash"]
+    assert flash.capability.thinking_effort == frozenset({"low", "medium", "high"})
+    assert flash.settings.thinking_effort == "high"
 
 
 def test_an_attachment_costs_only_the_line_naming_it() -> None:

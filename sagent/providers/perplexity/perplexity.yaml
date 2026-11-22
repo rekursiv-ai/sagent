@@ -38,6 +38,3 @@ models:
 providers:
   perplexity:
     sends: []
-    models:
-      glm-5.3:
-      glm-flash-5.3:

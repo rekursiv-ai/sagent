@@ -34,5 +34,3 @@ models:
 providers:
   mistral:
     sends: [thinking_effort]
-    models:
-      mistral-small-4.0:

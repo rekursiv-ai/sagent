@@ -177,8 +177,8 @@ class RecordingPrinter(ConsolePrinter):
         )
 
     @override
-    def error(self, text: str) -> None:
-        super().error(text)
+    def error(self, text: str, *, prose: bool = False) -> None:
+        super().error(text, prose=prose)
         self.entries.append(PrintedEntry(kind="error", text=text))
 
     @override

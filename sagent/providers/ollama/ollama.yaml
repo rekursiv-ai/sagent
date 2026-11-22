@@ -19,5 +19,3 @@ models:
 providers:
   ollama:
     sends: []
-    models:
-      llama-small-3.2:

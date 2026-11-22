@@ -100,8 +100,3 @@ providers:
     thinking_output_default: text
     service_tier: [auto]
     manage_context_server_side: [false]
-    models:
-      kimi-3.0:
-      kimi-2.6:
-      kimi-code-2.7:
-      kimi-code-highspeed-2.7:

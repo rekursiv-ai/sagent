@@ -29,5 +29,3 @@ models:
 providers:
   vertex:
     sends: [thinking_effort, thinking_budget, thinking_output]
-    models:
-      gemini-flash-3.8:

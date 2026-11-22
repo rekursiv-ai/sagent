@@ -75,6 +75,10 @@ class Setting:
     """Take what an ancestor chose: the closest value this one offers, rather than
     a refusal; ``None`` takes it as ``apply`` does."""
 
+    prose: bool = True
+    """Whether what ``apply`` returns is words, which wrap between words; a table,
+    whose spaces are its columns, wraps at the edge."""
+
 
 @runtime_checkable
 class HasSettings(Protocol):

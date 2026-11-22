@@ -17,21 +17,30 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Literal
 
+import dataclasses
 import html
+import math
 import re
 import time
 
+from sagent.model.capability import (
+    ModelCapability,
+    ThinkingBudget,
+    ThinkingEffort,
+    literal_members,
+)
 from sagent.model.cost import ServiceTier, TokenPrice
 
 
 if TYPE_CHECKING:
-    from sagent.model.capability import ModelCapability
     from sagent.providers.table import ModelTable
 
 
 __all__ = [
     "Fetch",
     "Finding",
+    "NewPrice",
+    "NewRow",
     "Status",
     "check_anthropic",
     "check_google",
@@ -43,6 +52,46 @@ __all__ = [
 type Fetch = Callable[[str], str]
 type Status = Literal["ok", "mismatch", "unstated", "waived"]
 type _Facts = dict[str, tuple[object, object | None]]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NewPrice:
+    """One rate card of a model the catalog lacks, per million tokens."""
+
+    service_tier: str
+    effective_date: str = ""
+    """The day it starts, ``YYYY-MM-DD``; ``""`` for from the start."""
+
+    effective_prompt_tokens: int = 0
+    """The prompt length it starts at; ``0`` for every prompt."""
+
+    request: float
+    response: float
+    cache_write: float
+    cache_write_1h: float
+    cache_read: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NewRow:
+    """A model the catalog lacks, as its vendor's pages state it."""
+
+    model_id: str
+    wire_model_id: str
+    knowledge_cutoff: str
+    limits: Mapping[str, int]
+    """Only the limits the pages state."""
+
+    thinking_effort: tuple[ThinkingEffort, ...]
+    thinking_effort_default: ThinkingEffort
+    thinking_budget: tuple[ThinkingBudget, ...] | None = None
+    """``None`` where the pages state no budget modes."""
+
+    thinking_budget_default: ThinkingBudget | None = None
+    thinking_off_max_effort: ThinkingEffort | None = None
+    """The highest effort thinking may be off at; ``None`` for any."""
+
+    prices: tuple[NewPrice, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -59,6 +108,11 @@ class Finding:
     url: str
     waiver: str = ""
     """Why the catalog departs from the source on purpose; empty for none."""
+
+    # ``dataclasses.field``: the bare name is the ``field`` above, in this body.
+    row: NewRow | None = dataclasses.field(default=None, compare=False, hash=False)
+    """For a model the catalog lacks, the row its vendor's pages state; ``None``
+    when they state too little to write one."""
 
     @property
     def status(self) -> Status:
@@ -102,17 +156,20 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
         _match(r"(\d+)\s+MB \(base64-encoded\) on the Claude API", vision),
     )
     edges = _claude_image_edges(vision)
-    findings: list[Finding] = []
     names: set[str] = set()
-    for row in table.rows:
-        url = f"{docs}/models/{row.wire_model_id.removeprefix('claude-')}/overview.md"
-        page = fetch(url)
+
+    def model_page(wire: str) -> tuple[str, str]:
+        url = f"{docs}/models/{wire.removeprefix('claude-')}/overview.md"
+        return url, fetch(url)
+
+    def facts(row: ModelCapability) -> tuple[str, _Facts]:
+        url, page = model_page(row.wire_model_id)
         cells = _cells(page)
         # A page without a title names no model, whatever stands in for it.
         name = _match(r"^title: (.+)$", page) or ""  # pragma: no mutate
         names.add(name)
         thinking = budgets.get(name)
-        facts: _Facts = {
+        stated: _Facts = {
             "knowledge_cutoff": (
                 row.knowledge_cutoff,
                 _month(cells.get("Reliable knowledge cutoff")),
@@ -154,9 +211,9 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
                 _claude_default_effort(cells.get("Default effort")),
             ),
         }
-        facts |= _claude_prices(row, cells=cells, today=today)
-        facts |= _claude_fast_prices(row, fast=fast.get(name), today=today)
-        facts |= {
+        stated |= _claude_prices(row, cells=cells, today=today)
+        stated |= _claude_fast_prices(row, fast=fast.get(name), today=today)
+        stated |= {
             "max_request_bytes": (
                 row.limits.max_request_bytes,
                 None if request_mb is None else request_mb * mib,
@@ -171,14 +228,36 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
                 _claude_image_edge(name, edges=edges),
             ),
         }
-        findings += _findings("anthropic", row, url=url, facts=facts)
+        return url, stated
+
+    findings: list[Finding] = []
+    for row in table.rows:
+        url, stated = facts(row)
+        findings += _findings("anthropic", row, url=url, facts=stated)
     # The thinking guide's table names every model the API serves; a page that
     # names no model leaves each one it lists maybe that one.
+    missing = set(budgets) - names
+    known = "" not in names
+    ids = {name: _claude_ids(name) for name in missing}
     return findings + _uncatalogued(
         "anthropic",
-        set(budgets) - names,
+        missing,
         url=guide,
-        known="" not in names,
+        known=known,
+        rows={
+            name: None
+            if pair is None
+            else _new_row(
+                pair[0],
+                model_id=pair[1],
+                facts=facts,
+                long_tokens=_claude_band(_cells(model_page(pair[0])[1])) or 0,
+                # Fast mode states input and output only; every catalogued row's
+                # cache rates scale with them (Opus 5.0, Fable 5.2: 2x).
+                scaled=("priority",),
+            )
+            for name, pair in ids.items()
+        },
     )
 
 
@@ -198,14 +277,14 @@ def check_openai(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
     pricing = f"{docs}/pricing.md"
     prices = _openai_prices(fetch(pricing))
     extended = _openai_extended(fetch(f"{docs}/guides/prompt-caching.md"))
-    findings: list[Finding] = []
     served: set[str] = set()
-    for row in table.rows:
+
+    def facts(row: ModelCapability) -> tuple[str, _Facts]:
         url = f"{docs}/models/{row.wire_model_id}.md"
         page = fetch(url)
         # An alias's page is its target's; the price table names only the target.
         model = _match(r"^Model ID: `([^`]+)`", page) or row.wire_model_id
-        served |= {row.wire_model_id, model}
+        served.update({row.wire_model_id, model})
         levels, default = _openai_efforts(page)
         cap = _count(_match(r"^- Maximum input tokens: ([\d,]+)", page))
         window = _count(_match(r"^- ([\d,]+) context window", page))
@@ -214,7 +293,7 @@ def check_openai(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
         # and 921,913 refused though the page says 922,000, so the catalog keeps
         # 1,000 back there; no smaller window was measured short.
         margin = 1_000 if window == 1_050_000 else 0
-        facts: _Facts = {
+        stated: _Facts = {
             "knowledge_cutoff": (
                 row.knowledge_cutoff,
                 None if cutoff is None else _day(cutoff),
@@ -235,8 +314,13 @@ def check_openai(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
                 _openai_cache_ttl(model, extended=extended),
             ),
         }
-        facts |= _openai_row_prices(row, cards=prices.get(model, {}), today=today)
-        findings += _findings("openai", row, url=url, facts=facts)
+        stated |= _openai_row_prices(row, cards=prices.get(model, {}), today=today)
+        return url, stated
+
+    findings: list[Finding] = []
+    for row in table.rows:
+        url, stated = facts(row)
+        findings += _findings("openai", row, url=url, facts=stated)
     # Text models only: the price tables also list audio, image, and realtime
     # models, and each model again under its dated snapshots.
     text = {
@@ -249,7 +333,24 @@ def check_openai(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
             m,
         )
     }
-    return findings + _uncatalogued("openai", text - served, url=pricing)
+    missing = text - served
+    return findings + _uncatalogued(
+        "openai",
+        missing,
+        url=pricing,
+        rows={
+            wire: _new_row(
+                wire,
+                model_id=_openai_model_id(wire),
+                facts=facts,
+                # OpenAI writes a cache for 30 minutes or 12 hours; sagent asks
+                # for no 12-hour write, so it never pays one.
+                unbilled=("cache_write_1h",),
+                long_tokens=272_000,
+            )
+            for wire in missing
+        },
+    )
 
 
 def check_google(table: ModelTable, *, fetch: Fetch, today: date) -> list[Finding]:
@@ -268,15 +369,15 @@ def check_google(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
     guide = f"{docs}/thinking.md"
     thinking = _gemini_thinking(fetch(guide))
     prices = _gemini_prices(fetch(f"{docs}/pricing.md"))
-    findings: list[Finding] = []
-    for row in table.rows:
+
+    def facts(row: ModelCapability) -> tuple[str, _Facts]:
         url = f"{docs}/models/{row.wire_model_id}.md"
         page = fetch(url)
         # Gemini 4 states one window shared by input and output; earlier models
         # state an input limit, their context then being ``0`` (the input bounds both).
         shared = _count(_match(r"input and output token limit\)\*\* ([\d,]+)", page))
         apart = _count(_match(r"\*\*Input token limit\*\* ([\d,]+)", page))
-        facts: _Facts = {
+        stated: _Facts = {
             "knowledge_cutoff": (row.knowledge_cutoff, _gemini_cutoff(page, fetch)),
             "max_request_tokens": (row.limits.max_request_tokens, shared or apart),
             "max_context_tokens": (
@@ -290,21 +391,42 @@ def check_google(table: ModelTable, *, fetch: Fetch, today: date) -> list[Findin
                 ),
             ),
         }
-        facts |= _gemini_thinking_facts(
+        stated |= _gemini_thinking_facts(
             row,
             row_thinking=thinking.get(row.wire_model_id),
         )
-        facts |= _gemini_row_prices(
+        stated |= _gemini_row_prices(
             row,
             cards=prices.get(row.wire_model_id),
             today=today,
         )
-        findings += _findings("google", row, url=url, facts=facts)
+        return url, stated
+
+    findings: list[Finding] = []
+    for row in table.rows:
+        url, stated = facts(row)
+        findings += _findings("google", row, url=url, facts=stated)
     # The thinking guide's table names every model that reasons; an image
     # model in it answers no chat.
     listed = {m for m in thinking if not m.endswith("-image")}
     served = {row.wire_model_id for row in table.rows}
-    return findings + _uncatalogued("google", listed - served, url=guide)
+    return findings + _uncatalogued(
+        "google",
+        listed - served,
+        url=guide,
+        rows={
+            wire: _new_row(
+                wire,
+                model_id=_gemini_model_id(wire),
+                facts=facts,
+                # Gemini caches implicitly: no write is billed.
+                unbilled=("cache_write", "cache_write_1h"),
+                long_tokens=200_000,
+                inherit=True,
+            )
+            for wire in listed - served
+        },
+    )
 
 
 def waivers() -> Mapping[tuple[str, str, str], str]:
@@ -374,6 +496,7 @@ def _uncatalogued(
     *,
     url: str,
     known: bool = True,
+    rows: Mapping[str, NewRow | None] | None = None,
 ) -> list[Finding]:
     """Return one finding per model the vendor lists at ``url`` and the catalog lacks."""
     return [
@@ -385,9 +508,144 @@ def _uncatalogued(
             source="listed" if known else None,
             url=url,
             waiver=_waiver(provider, model, "catalogued"),
+            row=None if rows is None else rows.get(model),
         )
         for model in sorted(models)
     ]
+
+
+# The facts a check reads for a row, read for a row that has only an id: what the
+# vendor's pages state is the row. A meter a vendor does not bill is ``unbilled``.
+def _new_row(
+    wire: str,
+    *,
+    model_id: str | None,
+    facts: Callable[[ModelCapability], tuple[str, _Facts]],
+    unbilled: tuple[str, ...] = (),
+    long_tokens: int,
+    inherit: bool = False,
+    scaled: tuple[str, ...] = (),
+) -> NewRow | None:
+    """Return the row the vendor's pages state for ``wire``; ``None`` if too little."""
+    if model_id is None:
+        return None
+    blank = ModelCapability(model_id=model_id, wire_model_id=wire, effort_as_level=True)
+    stated = {name: source for name, (_, source) in facts(blank)[1].items()}
+    efforts: tuple[ThinkingEffort, ...] = literal_members(ThinkingEffort)
+    modes: tuple[ThinkingBudget, ...] = literal_members(ThinkingBudget)
+    cutoff = stated.get("knowledge_cutoff")
+    offered = stated.get("thinking_effort")
+    default: ThinkingEffort | None = _member(
+        stated.get("thinking_effort_default"),
+        efforts,
+    )
+    limits = {
+        name: count
+        for name in ("max_request_tokens", "max_context_tokens", "max_response_tokens")
+        if isinstance(count := stated.get(name), int) and count
+    }
+    # A window wider than the input cap is the context the two share.
+    window = stated.get("context_tokens")
+    if isinstance(window, int) and window != limits.get("max_request_tokens"):
+        limits["max_context_tokens"] = window
+    prices = _new_prices(
+        stated,
+        unbilled=unbilled,
+        long_tokens=long_tokens,
+        inherit=inherit,
+        scaled=scaled,
+    )
+    # A default that is no level (Gemini 2.5's ``Off`` or ``dynamic``) is a budget
+    # model's, which levels misdescribe.
+    if (
+        not isinstance(cutoff, str)
+        or not isinstance(offered, frozenset)
+        or default is None
+        or "max_request_tokens" not in limits
+        or "max_response_tokens" not in limits
+        or not prices
+    ):
+        return None
+    budgets = stated.get("thinking_budget")
+    return NewRow(
+        model_id=model_id,
+        wire_model_id=wire,
+        knowledge_cutoff=cutoff,
+        limits=limits,
+        thinking_effort=tuple(e for e in efforts if e in offered),
+        thinking_effort_default=default,
+        thinking_budget=tuple(b for b in modes if b in budgets)
+        if isinstance(budgets, frozenset)
+        else None,
+        thinking_budget_default=_member(stated.get("thinking_budget_default"), modes),
+        # ``any`` is no member: thinking may be off at every effort.
+        thinking_off_max_effort=_member(stated.get("thinking_off_max_effort"), efforts),
+        prices=prices,
+    )
+
+
+def _member[T](value: object, members: tuple[T, ...]) -> T | None:
+    """Return the member ``value`` is, typed as one; ``None`` for no member."""
+    return next((member for member in members if member == value), None)
+
+
+# ``price.auto.request``, ``price.auto.long.request``, ``price.auto@2026-12-01.request``,
+# ``price.priority@2027-03-01.long.request``: one card per tier, start, and band.
+# With ``inherit``, a band's or a later date's unstated meter is its tier's base rate:
+# the vendor states only what changes. A ``scaled`` tier's unstated meter is the
+# standard card's, scaled as its stated input is.
+def _new_prices(
+    stated: Mapping[str, object],
+    *,
+    unbilled: tuple[str, ...],
+    long_tokens: int,
+    inherit: bool,
+    scaled: tuple[str, ...],
+) -> tuple[NewPrice, ...]:
+    """Return the price list the stated rates make; ``()`` without a whole base card."""
+    meters = ("request", "response", "cache_write", "cache_write_1h", "cache_read")
+    cards: dict[tuple[str, str, bool], dict[str, float]] = {}
+    for name, rate in stated.items():
+        if not name.startswith("price.") or not isinstance(rate, float):
+            continue
+        tier_part, *qualifiers, meter = name.split(".")[1:]
+        tier, _, day = tier_part.partition("@")
+        cards.setdefault((tier, day, "long" in qualifiers), {})[meter] = rate
+    prices: list[NewPrice] = []
+    for (tier, day, long), rates in sorted(
+        cards.items(),
+        key=lambda card: (card[0][0] != "auto", card[0]),
+    ):
+        base = cards.get((tier, "", False), {}) if inherit else {}
+        if tier in scaled and "request" in rates:
+            # Every meter of the tier is the base card's times one factor.
+            standard = cards.get(("auto", day, long), {})
+            factor = rates["request"] / standard.get("request", math.inf)
+            base = {m: round(rate * factor, 6) for m, rate in standard.items()}
+        whole = {
+            m: rate
+            for m in meters
+            if (rate := rates.get(m, base.get(m, 0.0 if m in unbilled else None)))
+            is not None
+        }
+        if whole.keys() != set(meters):
+            # A card missing a meter is left out: a tier unpriced is unoffered.
+            if (tier, day, long) == ("auto", "", False):
+                return ()
+            continue
+        prices.append(
+            NewPrice(
+                service_tier=tier,
+                effective_date=day,
+                effective_prompt_tokens=long_tokens if long else 0,
+                **whole,
+            ),
+        )
+    # Only an undated, unbanded ``auto`` card prices every small prompt every day.
+    based = ("auto", "", 0) in {
+        (p.service_tier, p.effective_date, p.effective_prompt_tokens) for p in prices
+    }
+    return tuple(prices) if based else ()
 
 
 def _findings(
@@ -411,11 +669,12 @@ def _findings(
 
 
 def _text(value: object) -> str:
-    """Return ``value`` as one comparable string: sets sorted, floats shortest."""
+    """Return ``value`` as one comparable string: sets sorted, floats exact."""
     if isinstance(value, frozenset):
         return ",".join(sorted(str(v) for v in value))
     if isinstance(value, float):
-        return f"{value:g}"
+        # The shortest text that reads back as the same float; ``2.0`` reads ``2``.
+        return repr(value).removesuffix(".0")
     return str(value)
 
 
@@ -675,7 +934,7 @@ def _claude_prices(
         at=today,
     )
     facts = _price_facts("price.auto", price, small)
-    over = _count(_match(r"over ([\d,]+) tokens", stated["request"]))
+    over = _claude_band(cells)
     if over is not None:
         large = {m: _first_rate(text, index=1) for m, text in stated.items()}
         price = _price(
@@ -686,6 +945,25 @@ def _claude_prices(
         )
         facts |= _price_facts("price.auto.long", price, large)
     return facts
+
+
+# ``None`` unversioned.
+#
+# ``claude-opus-5-6`` and ``opus-5.6``; ``Claude Opus 5`` is ``claude-opus-5`` and
+# ``opus-5.0``.
+def _claude_ids(name: str) -> tuple[str, str] | None:
+    """Return the API id and catalog name of ``Claude Opus 5.6``."""
+    found = re.fullmatch(r"Claude (\w+) (\d+)(?:\.(\d+))?", name)
+    if found is None:
+        return None
+    family, major, minor = found[1].lower(), found[2], found[3]
+    wire = f"claude-{family}-{major}" + ("" if minor is None else f"-{minor}")
+    return wire, f"{family}-{major}.{minor or 0}"
+
+
+def _claude_band(cells: Mapping[str, str]) -> int | None:
+    """Return the prompt length a model page's long-prompt rates start past."""
+    return _count(_match(r"over ([\d,]+) tokens", cells.get("Input", "")))
 
 
 def _first_rate(text: str, *, index: int) -> float | None:
@@ -858,6 +1136,26 @@ def _openai_efforts(page: str) -> tuple[frozenset[str] | None, str | None]:
     )
 
 
+# ``gpt-6.2-astra`` is ``astra-6.2``, ``gpt-5.4-mini`` ``gpt-mini-5.4``, ``gpt-4o``
+# ``gpt-omni-4.0``, ``o3-pro`` ``o-pro-3.0``, ``gpt-5.6`` itself.
+def _openai_model_id(wire: str) -> str | None:
+    """Return the catalog's name for an OpenAI id; ``None`` for no known naming."""
+    found = re.fullmatch(r"gpt-(\d+)(?:\.(\d+))?(o)?(?:-([a-z]+))?", wire)
+    if found is not None:
+        version = f"{found[1]}.{found[2] or 0}"
+        omni = "omni" if found[3] is not None else None
+        kinds = [str(k) for k in (omni, found[4]) if k is not None]
+        if not kinds:
+            return f"gpt-{version}"
+        if kinds[-1] in ("mini", "nano", "pro", "omni"):
+            return f"gpt-{'-'.join(kinds)}-{version}"
+        return f"{kinds[-1]}-{version}"
+    found = re.fullmatch(r"o(\d+)(?:-([a-z]+))?", wire)
+    if found is not None:
+        return f"o-{found[2]}-{found[1]}.0" if found[2] else f"o-{found[1]}.0"
+    return None
+
+
 def _openai_row_prices(
     row: ModelCapability,
     *,
@@ -929,6 +1227,14 @@ def _card_cutoff(raw: str) -> str | None:
         flags=re.IGNORECASE,
     )
     return None if found is None else str(found[1])
+
+
+def _gemini_model_id(wire: str) -> str | None:
+    """Return the catalog's name for a Gemini id: ``gemini-5-krypton`` is ``gemini-krypton-5.0``."""
+    found = re.fullmatch(r"gemini-(\d+)(?:\.(\d+))?-([a-z][a-z-]*?)(?:-preview)?", wire)
+    if found is None:
+        return None
+    return f"gemini-{found[3]}-{found[1]}.{found[2] or 0}"
 
 
 def _gemini_thinking(page: str) -> dict[str, tuple[str, frozenset[str]]]:
@@ -1059,7 +1365,10 @@ def _gemini_row_prices(
             if any(t == tag for _, t in rates)
         }
         if stated:
-            label = "price.auto" if tag == "base" else f"price.auto.{tag}"
+            label = {"base": "price.auto", "long": "price.auto.long"}.get(
+                tag,
+                f"price.auto@{tag}",
+            )
             price = _price(row, "auto", tokens=tokens, at=at)
             facts |= _price_facts(label, price, stated)
     return facts

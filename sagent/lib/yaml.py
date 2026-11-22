@@ -57,7 +57,7 @@ def parse(
         for event in yaml.parse(text, Loader=loader_class):
             if isinstance(event, yaml.AliasEvent):
                 # The C parser's mark is its own class, no ``yaml.Mark``.
-                assert isinstance(event.start_mark, _Position)
+                assert isinstance(event.start_mark, Position)
                 line = event.start_mark.line + 1
                 raise StrictYAMLError(
                     f"{where}line {line}: YAML aliases are not allowed.",
@@ -69,6 +69,38 @@ def parse(
         return None if node is None else loader.construct_document(node)
     finally:
         loader.dispose()
+
+
+@runtime_checkable
+class Position(Protocol):
+    """Where a node, token, or event starts or ends, as both parsers mark it."""
+
+    line: int
+    column: int
+    index: int
+
+
+def position(item: yaml.Node | yaml.Token, *, end: bool = False) -> Position:
+    """Return where a composed node or a scanned token starts, or ends.
+
+    Args:
+      item: A node ``yaml.compose`` built, or a token ``yaml.scan`` yielded.
+      end: Return where it ends, not where it starts.
+
+    Returns:
+      position: Its line, column, and index, each counted from 0.
+
+    Raises:
+      ValueError: ``item`` has no mark, as a node the representer built has none.
+
+    """
+    mark = item.end_mark if end else item.start_mark
+    if mark is None:
+        side = "end" if end else "start"
+        raise ValueError(
+            f"{type(item).__name__} has no {side} mark: only a parsed one has.",
+        )
+    return mark
 
 
 def split_frontmatter(text: str, *, source: str = "") -> tuple[object, str] | None:
@@ -123,7 +155,7 @@ def _validate(
     if isinstance(node, yaml.MappingNode):
         keys: set[object] = set()
         for key, value in node.value:
-            line = key.start_mark.line + 1
+            line = position(key).line + 1
             merge = key.tag == "tag:yaml.org,2002:merge"
             if string_keys and not merge and key.tag != "tag:yaml.org,2002:str":
                 raise StrictYAMLError(
@@ -148,11 +180,3 @@ def _validate(
             string_keys=string_keys,
             seen=seen,
         )
-
-
-@runtime_checkable
-class _Position(Protocol):
-    """Where an event starts, as both the Python and the C parser mark it."""
-
-    line: int
-    column: int

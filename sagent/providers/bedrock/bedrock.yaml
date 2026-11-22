@@ -7,4 +7,3 @@ models: []
 providers:
   bedrock:
     sends: [thinking_effort]
-    models: {}

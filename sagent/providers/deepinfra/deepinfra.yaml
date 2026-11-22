@@ -34,5 +34,3 @@ providers:
     retries_internally: true
     service_tier: [auto]
     manage_context_server_side: [false]
-    models:
-      nemotron-super-3.0:

@@ -28,7 +28,13 @@ from sagent.providers import (
     anthropic,
     table as provider_table,
 )
-from sagent.providers.table import HasModels, ModelTable, ModelTags, models
+from sagent.providers.table import (
+    HasModels,
+    ModelTable,
+    ModelTags,
+    models,
+    tag_words,
+)
 
 
 if TYPE_CHECKING:
@@ -201,6 +207,24 @@ def test_an_unversioned_id_is_an_exact_name_only() -> None:
     assert table["local-model"].model_id == "local-model"
     assert table["local-model-b"].model_id == "local-model-b"
     assert "local" not in table
+    # ``neon-preview`` spells the family but no version: ``neon`` is Neon 4.0.
+    named = ModelTable(rows=(_row("neon-preview"), _row("neon-4.0")))
+    assert named["neon"].model_id == "neon-4.0"
+
+
+def test_tag_words_are_each_word_a_model_line_reads_as_its_kind() -> None:
+    """Every word parses back to its kind; the old spellings are left out."""
+    words = tag_words()
+    assert set(words) == {"size", "effort", "tier"}
+    assert "fast" in words["tier"]
+    assert "large" not in words["size"]
+    assert "high" not in words["effort"]
+    for word in words["size"]:
+        assert ModelTags.parse(f"opus+{word}").context == word
+    for word in words["effort"]:
+        assert ModelTags.parse(f"opus+{word}").effort is not None
+    for word in words["tier"]:
+        assert ModelTags.parse(f"opus+{word}").service_tier is not None
 
 
 def test_best_and_everyday_fall_back_to_the_default() -> None:
@@ -554,11 +578,7 @@ def _write(
         "limits": {"max_request_tokens": 1000},
         "thinking": _THINKING,
     }
-    served = {
-        "sends": list(model_setting_names()),
-        "models": {str(model["model_id"]): None for model in models},
-        **vendor,
-    }
+    served = {"sends": list(model_setting_names()), **vendor}
     document = {
         "reference": reference,
         "models": list(models),
@@ -666,13 +686,13 @@ providers:
     retries_internally: true
     keeps_user_turns_apart: true
     thinking: {effort: [none, low]}
+    omits:
+      unserved-1.0: its plan does not offer it
     models:
       example-1.0: {account_auth: true}
 """)
     table = _load(path)
-    assert list(table) == [
-        "example-1.0",
-    ]  # A model the section does not list is not served.
+    assert list(table) == ["example-1.0"]
     row = table["default"]
     assert row.wire_model_id == "vendor-example"
     assert row.approx_chars_per_token == 3.5
@@ -1237,8 +1257,16 @@ def test_a_document_the_strict_loader_refuses_names_file_and_line(
         ("models: []", "no section 'vendor'"),
         ("models: []\nproviders: {vendor: {}}", "does not say what it sends"),
         (
-            "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: }}}",
-            r"lists unknown models: \['ghost-1.0'\]",
+            "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: {}}}}",
+            r"overrides unknown models: \['ghost-1.0'\]",
+        ),
+        (
+            "models: []\nproviders: {vendor: {sends: [], omits: {ghost-1.0: why}}}",
+            r"omits unknown models: \['ghost-1.0'\]",
+        ),
+        (
+            "models: []\nproviders: {vendor: {sends: [], omits: {ghost-1.0: ''}}}",
+            r"omits 'ghost-1.0' without saying why",
         ),
     ],
 )
@@ -1263,27 +1291,57 @@ def test_a_section_naming_an_unknown_thinking_axis_is_rejected(tmp_path: Path) -
         _load(path)
 
 
-def test_a_section_serves_the_models_another_names_by_anchor(tmp_path: Path) -> None:
-    """One list, so a model added to one section's is served by both."""
+def test_every_section_serves_every_model_but_those_it_omits(tmp_path: Path) -> None:
+    """One list: a model added to the document reaches every section unasked."""
     path = tmp_path / "x.yaml"
+    row = (
+        "prices: [{request: 0, response: 0, cache_write: 0, cache_write_1h: 0,"
+        " cache_read: 0}]"
+    )
     path.write_text(
         "reference: {thinking: {effort: [none], budget: [none], output: [none]}}\n"
-        "models:\n"
-        "- {model_id: a-1.0, prices: [{request: 0, response: 0, cache_write: 0,"
-        " cache_write_1h: 0, cache_read: 0}]}\n"
+        f"models:\n- {{model_id: a-1.0, {row}}}\n- {{model_id: b-1.0, {row}}}\n"
         "providers:\n"
-        "  sub: {sends: [], models: &served {a-1.0: }}\n"
-        "  cli: {sends: [], models: *served}\n",
+        "  api: {sends: []}\n"
+        "  sub: {sends: [], omits: {a-1.0: the plan lacks it}}\n",
     )
-    sub = ModelTable.from_yaml(path, section="sub")
-    cli = ModelTable.from_yaml(path, section="cli")
-    assert list(sub) == list(cli) == ["a-1.0"]
+    assert list(ModelTable.from_yaml(path, section="api")) == ["a-1.0", "b-1.0"]
+    assert list(ModelTable.from_yaml(path, section="sub")) == ["b-1.0"]
 
 
-def test_a_section_listing_no_models_serves_none(tmp_path: Path) -> None:
+def test_a_section_listing_its_models_says_how_catalogs_name_them_now(
+    tmp_path: Path,
+) -> None:
+    """A user's catalog from before omits lists bare names; say what replaced them."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("deployment-1.0"),
+        _model("other-1.0"),
+        vendor={"models": {"deployment-1.0": None, "other-1.0": {"tokenizer": "t"}}},
+    )
+    message = (
+        "Section 'vendor' lists models by bare name: ['deployment-1.0']. A section"
+        " now serves every model in the document but those its omits name; delete"
+        " the bare names, and put any model it leaves out under omits, with why."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_document_with_no_models_serves_none(tmp_path: Path) -> None:
     path = tmp_path / "x.yaml"
     path.write_text("models: []\nproviders: {vendor: {sends: []}}")
     assert len(_load(path)) == 0
+
+
+def test_a_model_omitted_and_overridden_at_once_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"omits": {"example-1.0": "why"}, "models": {"example-1.0": {}}},
+    )
+    with pytest.raises(ValueError, match=r"both omits and overrides \['example-1.0'\]"):
+        _load(path)
 
 
 def test_a_catalog_without_thinking_offers_none(tmp_path: Path) -> None:
@@ -1291,7 +1349,7 @@ def test_a_catalog_without_thinking_offers_none(tmp_path: Path) -> None:
     path.write_text(
         "models:\n- {model_id: a-1.0, limits: {}, prices: [{request: 0,"
         " response: 0, cache_write: 0, cache_write_1h: 0, cache_read: 0}]}\n"
-        "providers: {vendor: {sends: [], models: {a-1.0: }}}\n",
+        "providers: {vendor: {sends: []}}\n",
     )
     row = _load(path)["a"]
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
@@ -1378,6 +1436,43 @@ def test_two_spellings_of_one_version_are_out_of_order() -> None:
 def test_a_family_with_a_major_reaches_a_hyphenated_family() -> None:
     table = ModelTable(rows=(_row("flash-lite-3.5"), _row("flash-3.8")))
     assert table["flash-lite-3"].model_id == "flash-lite-3.5"
+
+
+def test_a_family_is_named_by_its_last_words_too() -> None:
+    """``neon`` names ``gemini-neon``: the vendor's prefix is no part of the name."""
+    table = ModelTable(
+        rows=(
+            _row("gemini-neon-4.0"),
+            _row("gemini-flash-lite-3.5"),
+            _row("gemini-flash-3.8"),
+        ),
+    )
+    assert table["neon"].model_id == "gemini-neon-4.0"
+    assert table["neon-4"].model_id == "gemini-neon-4.0"
+    assert table["flash"].model_id == "gemini-flash-3.8"
+    assert table["lite"].model_id == "gemini-flash-lite-3.5"
+    assert table["flash-lite"].model_id == "gemini-flash-lite-3.5"
+    assert "eon" not in table
+    assert "gemini" not in table
+
+
+@pytest.mark.parametrize("name", ["pro", "pro-5", "pro-3"])
+def test_a_word_two_families_end_in_names_neither(name: str) -> None:
+    """``pro`` ends ``gpt-pro`` and ``o-pro``: row order must not pick between them."""
+    table = ModelTable(rows=(_row("gpt-pro-5.5"), _row("o-pro-3.0")))
+    assert name not in table
+    with pytest.raises(
+        UnknownModelError,
+        match=r"names more than one family: gpt-pro, o-pro",
+    ):
+        table.resolve(name)
+    assert table["gpt-pro"].model_id == "gpt-pro-5.5"
+    assert table["o-pro-3"].model_id == "o-pro-3.0"
+
+
+def test_a_family_named_whole_outranks_one_named_by_its_last_word() -> None:
+    table = ModelTable(rows=(_row("gpt-pro-5.5"), _row("pro-1.0")))
+    assert table["pro"].model_id == "pro-1.0"
 
 
 def test_a_section_s_roles_replace_the_document_s_it_names(tmp_path: Path) -> None:
@@ -1725,10 +1820,9 @@ def test_user_catalog_replaces_models_prices_and_settings(
             "providers": {
                 section: {
                     "sends": ["thinking_effort"],
-                    "models": {model_id: None},
                     "roles": {"default": model_id},
                 },
-                "unused": {"sends": [], "models": {}},
+                "unused": {"sends": []},
             },
         },
     )

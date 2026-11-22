@@ -647,23 +647,32 @@ def _setting(*, usage: str = "", applied: str = "", fails: bool = False) -> Sett
     return Setting(name=("x",), help_short="what x is", usage=usage, apply=apply)
 
 
-@pytest.mark.parametrize(
-    ("usage", "row"),
-    [
-        ("", f"  {'/x':<32s}what x is"),
-        ("u" * 28, f"  {'/x ' + 'u' * 28:<32s}what x is"),
-        ("u" * 29, f"  /x {'u' * 29}\n  {'':<32s}what x is"),
-    ],
-)
-def test_a_help_row_wraps_a_name_too_long_for_its_column(usage: str, row: str) -> None:
-    assert slash._listed(_setting(usage=usage), lambda n: f"/{'.'.join(n)}") == row
+def test_a_help_list_shows_names_and_what_they_do_never_usage() -> None:
+    """Usage belongs to ``/help NAME``; in the list it pushes the words off the row."""
+    settings = [
+        replace(_setting(usage="[-h] [--tools T,T,...] NAME"), name=("host", "add")),
+        replace(_setting(), name=("x",), help_short="what x does"),
+    ]
+    assert slash.help_text(settings, "").splitlines() == [
+        "sagent commands",
+        "  /host.add  what x is",
+        "  /x         what x does",
+    ]
 
 
-def test_a_long_name_with_no_usage_ends_where_its_name_does() -> None:
-    long = "/" + "n" * 40
-    assert slash._listed(_setting(), lambda _: long) == (
-        f"  {long}\n  {'':<32s}what x is"
-    )
+def test_a_name_too_long_for_the_column_puts_its_words_below() -> None:
+    """A name as wide as the column would run into its words."""
+    long = "n" * 39
+    settings = [
+        replace(_setting(), name=(long,)),
+        replace(_setting(), name=("x",)),
+    ]
+    assert slash.help_text(settings, "").splitlines() == [
+        "sagent commands",
+        f"  /{long}",
+        f"  {'':<40s}what x is",
+        f"  {'/x':<40s}what x is",
+    ]
 
 
 @pytest.mark.asyncio
@@ -724,8 +733,8 @@ def test_help_on_a_dotted_group_lists_its_settings() -> None:
     ]
     assert slash.help_text(settings, "tool.Echo").splitlines() == [
         "tool.Echo commands",
-        f"  {'/tool.Echo.second':<32s}what x is",
-        f"  {'/tool.Echo.first':<32s}what x is",
+        "  /tool.Echo.second  what x is",
+        "  /tool.Echo.first   what x is",
     ]
 
 
@@ -797,7 +806,7 @@ def help_commands(
 
 
 @pytest.mark.asyncio
-async def test_help_lists_every_setting_with_its_usage(
+async def test_help_lists_every_setting_with_what_it_does(
     help_commands: tuple[Commands, list[CommandOutput]],
 ) -> None:
     commands, said = help_commands
@@ -806,8 +815,9 @@ async def test_help_lists_every_setting_with_its_usage(
     assert (output.tone, output.command) == ("note", "/help")
     rows = output.text.split("\n")
     assert rows[0] == "sagent commands"
-    assert f"  {'/compact [hints]':<32s}compact history" in rows
-    assert f"  {'/model.thinking.effort VALUE':<32s}how hard the model reasons" in rows
+    named = {row.split(None, 1)[0]: row.split(None, 1)[1] for row in rows[1:]}
+    assert named["/compact"] == "compact history"
+    assert named["/model.thinking.effort"] == "how hard the model reasons"
     listed = [row.split()[0] for row in rows if row.startswith("  /")]
     assert listed == [
         *(f"/{'.'.join(action.name)}" for action in Commands.actions()),
@@ -866,11 +876,7 @@ async def test_help_on_a_group_lists_its_settings(
         CommandOutput(
             tone="note",
             command="/help",
-            text=(
-                "mcp commands\n"
-                f"  {'/mcp.list':<32s}list servers\n"
-                f"  {'/mcp.add NAME':<32s}add a server"
-            ),
+            text=("mcp commands\n  /mcp.list  list servers\n  /mcp.add   add a server"),
         ),
     ]
 
@@ -1190,6 +1196,23 @@ async def test_tasks_lists_running_calls_and_persistent_children(
 
 
 @pytest.mark.asyncio
+async def test_help_is_words_and_tasks_a_table(
+    action_commands: tuple[Commands, Mock, list[CommandOutput]],
+) -> None:
+    """Help wraps between words; the task table keeps its columns."""
+    commands, runtime, said = action_commands
+    runtime.jobs = dict[str, types.Job]()
+    await commands("/help")
+    await commands("/tasks")
+    await commands("/kill")
+    assert [(o.command, o.prose) for o in said] == [
+        ("/help", True),
+        ("/tasks", False),
+        ("/kill", True),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tasks_with_nothing_running_says_so(
     action_commands: tuple[Commands, Mock, list[CommandOutput]],
 ) -> None:
@@ -1201,6 +1224,7 @@ async def test_tasks_with_nothing_running_says_so(
             tone="note",
             command="/tasks",
             text="0 running tool call(s), 0 persistent agent(s)",
+            prose=False,
         ),
     ]
     assert runtime.mock_calls == []
@@ -1949,15 +1973,18 @@ async def test_a_bare_model_names_what_each_name_resolved_to() -> None:
     await desk.commands("/provider")
     await desk.commands("/context")
     await desk.commands("/account")
-    assert desk.printer.printed == [
-        (
-            "note",
-            "[/model] wide/wide-1.0+fullcontext+nothink",  # codespell:ignore nothink
-        ),
-        ("note", "[/model.provider] wide   (scripted, deep, signing, wide)"),
-        ("note", "[/model.context] 1m (default)   (default, fullcontext)"),
-        ("note", "[/model.provider.account] default   (default)"),
-    ]
+    assert (
+        desk.printer.printed
+        == [
+            (
+                "note",
+                "[/model] wide/wide-1.0+fullcontext+nothink   (wide-1.0)",  # codespell:ignore nothink
+            ),
+            ("note", "[/model.provider] wide   (scripted, deep, signing, wide)"),
+            ("note", "[/model.context] 1m (default)   (default, fullcontext)"),
+            ("note", "[/model.provider.account] default   (default)"),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -2074,6 +2101,7 @@ async def test_thinking_sets_the_catalog_s_axes_and_the_model_shows_them() -> No
                 "note",
                 (
                     "[/model] deep/deep+fullcontext+nothink budget=auto output=text"  # codespell:ignore nothink
+                    "   (deep)"
                 ),
             ),
         ]

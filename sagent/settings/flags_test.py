@@ -109,6 +109,34 @@ def test_an_actions_help_is_returned_not_printed_or_exited(
     assert capsys.readouterr() == ("", "")
 
 
+def test_an_actions_help_and_usage_hold_no_color_codes_on_a_color_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TUI prints them as text, where an escape code shows as ``^[[32m``."""
+    monkeypatch.setenv("PYTHON_COLORS", "1")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    setting = _parser().setting(_ran, name=("add",), help_short="add")
+    assert "\x1b" not in setting.usage
+    assert "\x1b" not in setting.help_long
+    assert setting.usage.startswith("[-h] [-e ENV]")
+
+
+def test_an_actions_help_is_the_same_whatever_terminal_built_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setting's help is sent and kept as is; the reader's screen wraps it."""
+    helps: list[str] = []
+    for columns in ("40", "400"):
+        monkeypatch.setenv("COLUMNS", columns)
+        parser = _parser()
+        parser.add_argument("--long", help=" ".join(["word"] * 20))
+        helps.append(parser.setting(_ran, name=("add",), help_short="add").help_long)
+    assert helps[0] == helps[1]
+    assert max(map(len, helps[0].splitlines())) <= 80
+    usage = parser.setting(_ran, name=("add",), help_short="add").usage
+    assert usage == "[-h] [-e ENV] [--long LONG] name target [args ...]"
+
+
 def test_printing_an_actions_help_raises_rather_than_prints(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -122,6 +150,8 @@ def test_printing_an_actions_help_raises_rather_than_prints(
     [
         ("", "the following arguments are required: name, target"),
         ("srv x --nope", "unrecognized arguments: --nope"),
+        # No abbreviation: ``--en`` is no ``--env``.
+        ("srv x --en A=1", "unrecognized arguments: --en;"),
         ("srv 'unclosed", "No closing quotation"),
     ],
 )
@@ -196,6 +226,11 @@ async def test_an_action_setting_exports_its_parser_and_runs_only_without_help()
         ["pkg"],
         ["A=1"],
     )
+
+
+async def _ran(parsed: argparse.Namespace) -> str:
+    del parsed
+    return ""
 
 
 if __name__ == "__main__":
