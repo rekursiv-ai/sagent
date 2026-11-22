@@ -87,7 +87,6 @@ from sagent.runtime.tape import (
     TapeRecord,
     TapeRef,
     calls,
-    coalesce_roles,
     full_tape_mask,
     sent_records,
     unpaired_call_ids,
@@ -151,7 +150,6 @@ from sagent.session.types import (
     ToolCall,
     ToolMessage,
     UserMessage,
-    as_sent,
     now_timestamp,
 )
 from sagent.tools.background_task import (
@@ -2381,6 +2379,7 @@ class Runtime:
     def request(
         self,
         *,
+        context: Sequence[ModelContextEvent] | None = None,
         after: Sequence[SessionRecord] = (),
         max_response_tokens: int | None = None,
     ) -> Request:
@@ -2390,6 +2389,8 @@ class Runtime:
         summary that appends to it reads the cache that call wrote.
 
         Args:
+          context: What to send in place of the context, such as a prefix of
+            it a summary reads; ``None`` sends the context.
           after: Records to add after the context.
           max_response_tokens: Explicit cap; ``None`` asks ``reply_room``, while
             ``0`` bypasses it for sizing without recursion.
@@ -2402,13 +2403,9 @@ class Runtime:
             Request(
                 system=self.system,
                 records=[
-                    # Told first, so a later message as user text merges with the
-                    # user's turn beside it.
                     *sent_records(
-                        coalesce_roles(
-                            as_sent(self.tape.context().messages),
-                            keep_senders_apart=self.model.capability.keeps_user_turns_apart,
-                        ),
+                        self.tape.context().messages if context is None else context,
+                        keep_senders_apart=self.model.capability.keeps_user_turns_apart,
                     ),
                     *after,
                 ],

@@ -325,20 +325,31 @@ def parts_model_turns(entry: SystemMessage | SessionContext) -> bool:
 
 # Every request a model is sent goes through here: the turn's own call and each
 # call a compaction makes, so a call's later messages never reach a provider as a
-# second result of it.
-def sent_records(entries: Sequence[ModelContextEvent]) -> list[SessionRecord]:
+# second result of it, and a request for part of a context starts as the request
+# for all of it does, which recorded sizes and the prompt cache both need. Told
+# first, so a later message as user text merges with the user's turn beside it.
+def sent_records(
+    entries: Sequence[ModelContextEvent],
+    *,
+    keep_senders_apart: bool = False,
+) -> list[SessionRecord]:
     """Return ``entries`` as a request's records, each later message user text.
 
     Args:
       entries: A context, or part of one.
+      keep_senders_apart: As :func:`coalesce_roles` takes it.
 
     Returns:
-      records: Each model turn's records in its place, in order.
+      records: Adjacent turns of one side merged, each model turn's records in
+        its place, in order.
 
     """
     return [
         record
-        for entry in as_sent(entries)
+        for entry in coalesce_roles(
+            as_sent(entries),
+            keep_senders_apart=keep_senders_apart,
+        )
         for record in (entry.records if isinstance(entry, Response) else (entry,))
     ]
 

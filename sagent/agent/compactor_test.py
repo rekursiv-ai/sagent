@@ -3578,6 +3578,76 @@ async def test_adjacent_original_users_preserve_the_live_request_prefix(
 
 
 @pytest.mark.asyncio
+async def test_a_calls_later_message_beside_the_users_keeps_the_live_request_prefix(
+    tmp_path: Path,
+) -> None:
+    """Recorded sizes and the prompt cache match only a request built as the live one."""
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    history = (
+        _user("go"),
+        _turn("", call("Read", "c1")),
+        ToolMessage(call_id="c1", state="pending", shown="[detached]"),
+        _turn("waiting"),
+        ToolMessage(
+            call_id="c1",
+            state="done",
+            stdout=("late",),
+            result=UncategorizedToolResult(),
+        ),
+        _user("and?"),
+        _turn("read it"),
+    )
+    _hold(agent, history)
+    original = agent.runtime.request()
+
+    _ = await _live(agent, SummaryCompactor(agent))
+
+    assert provider.requests[0].records[:-1] == original.records
+
+
+@pytest.mark.asyncio
+async def test_a_prefix_is_found_in_logarithmically_many_builds_none_asking_reply_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long window is sized a few times per summary call, not once per boundary."""
+    provider, agent = _agent(
+        tmp_path,
+        ValueError("stop"),
+        capability=_capability(window=4_000),
+    )
+    caps: list[int | None] = []
+    build = agent.runtime.request
+
+    def counted(
+        *,
+        context: Sequence[ModelContextEvent] | None = None,
+        after: Sequence[SessionRecord] = (),
+        max_response_tokens: int | None = None,
+    ) -> Request:
+        caps.append(max_response_tokens)
+        return build(
+            context=context,
+            after=after,
+            max_response_tokens=max_response_tokens,
+        )
+
+    monkeypatch.setattr(agent.runtime, "request", counted)
+    history = tuple(
+        entry
+        for i in range(16)
+        for entry in (_user(f"U{i}:" + "u" * 1_597), _turn(f"A{i}:" + "a" * 1_597))
+    )
+
+    with pytest.raises(ValueError, match="stop"):
+        _ = await _compact(SummaryCompactor(agent), agent, history)
+
+    assert 0 < len(_sent(provider.requests[0])) < len(history)
+    assert len(caps) <= math.ceil(math.log2(len(history) + 1)) + 1
+    assert set(caps) == {0}
+
+
+@pytest.mark.asyncio
 async def test_verification_preserves_the_retained_head_summary_boundary(
     tmp_path: Path,
 ) -> None:

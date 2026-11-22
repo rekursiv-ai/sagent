@@ -1407,6 +1407,16 @@ def test_a_request_is_sent_each_turn_s_records_and_a_call_s_later_messages_as_te
     assert "ok" in "".join(r.content or "" for r in sent if isinstance(r, UserMessage))
 
 
+def test_a_request_joins_two_senders_turns_unless_its_api_keeps_them_apart() -> None:
+    peer, user = _peer("kid", "the build is green"), _user("so?")
+
+    joined = sent_records([peer, user])
+    apart = sent_records([peer, user], keep_senders_apart=True)
+
+    assert [type(r) for r in joined] == [UserMessage]
+    assert apart == [peer, user]
+
+
 def test_repair_drops_a_result_here_of_an_id_answered_elsewhere_and_called_here() -> (
     None
 ):
