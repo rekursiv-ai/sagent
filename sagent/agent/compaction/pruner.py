@@ -59,7 +59,7 @@ from sagent.runtime.context import prunable
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Callable, Collection, Iterator
 
     from treekle import PlainTree
 
@@ -98,12 +98,23 @@ class Pruner:
 
     Args:
       agent: Whose session it prunes.
+      clock: Seconds by a clock that never steps back; times the cache's age.
+      policy: Which results may go, over the model's settings, server-side or not;
+        ``None`` reads them.
 
     """
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        policy: PruningPolicy | None = None,
+    ) -> None:
         self._agent = agent
-        # When the model last answered, by the monotonic clock; the cache's age.
+        self._clock = clock
+        self._given = policy
+        # When the model last answered, by ``clock``; the cache's age.
         self._answered_at: float | None = None
         agent.runtime.observers.append(self._observe)
         agent.runtime.result_note = self.footer
@@ -127,9 +138,7 @@ class Pruner:
         runtime = self._agent.runtime
         context = runtime.tape.context().messages
         stub = runtime.stubs.pruned
-        chosen = set(
-            eligible(context, client_policy(self._agent.model.settings), stub=stub),
-        )
+        chosen = set(eligible(context, self._policy(), stub=stub))
         # A prune names calls, and stubs every output of each; a call run apart has
         # several, so it is named only when the policy lets each of them go.
         kept = {
@@ -215,7 +224,7 @@ class Pruner:
         gone = superseded(context)
         riders = [
             i
-            for i in eligible(context, client_policy(model.settings), stub=pruned)
+            for i in eligible(context, self._policy(), stub=pruned)
             if i > queued[0] and i in gone
         ]
         chosen = sorted({*queued, *riders})
@@ -239,7 +248,7 @@ class Pruner:
             event.outcome,
             Succeeded,
         ):
-            self._answered_at = time.monotonic()
+            self._answered_at = self._clock()
 
     # Full is the compactor's word, the one that compacts: a count of the pruner's
     # own could call a context full that it never compacts, or put one off that it
@@ -345,7 +354,7 @@ class Pruner:
         """Return the indices of the results a drop now would take; none when none saves."""
         context = self._agent.runtime.tape.context().messages
         model = self._agent.model
-        policy = client_policy(model.settings)
+        policy = self._policy()
         if policy is None:
             return []
         tokens = sizes(model, context)
@@ -386,8 +395,14 @@ class Pruner:
         return (
             bool(lifetime)
             and self._answered_at is not None
-            and time.monotonic() - self._answered_at > lifetime
+            and self._clock() - self._answered_at > lifetime
         )
+
+    def _policy(self) -> PruningPolicy | None:
+        """Return the policy given, else the one the model's settings prune by."""
+        if self._given is not None:
+            return self._given
+        return client_policy(self._agent.model.settings)
 
 
 def client_policy(settings: ModelSettings) -> PruningPolicy | None:

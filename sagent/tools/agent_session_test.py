@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 from unittest.mock import Mock
@@ -159,6 +160,14 @@ def test_the_summary_names_the_action_and_edits_run_alone(
     tool = AgentSession(team=Mock(spec=Team))
     assert tool.summary(arguments) == summary
     assert tool.serialize_key(ToolContext(cwd=tmp_path), arguments) == key
+
+
+def test_the_description_defaults_to_the_asset_and_may_be_replaced() -> None:
+    asset = files("sagent.tools") / "assets" / "session.md"
+    team = Mock(spec=Team)
+
+    assert AgentSession(team=team).description == asset.read_text(encoding="utf-8")
+    assert AgentSession(team=team, description="Prune.").description == "Prune."
 
 
 @pytest.mark.asyncio

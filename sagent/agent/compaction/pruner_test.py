@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import asyncio
@@ -70,7 +71,7 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
     from pathlib import Path
 
     from sagent.agent.types import Factory, Shrinker
@@ -108,6 +109,7 @@ def _agent(
     window: int = 200_000,
     compactor: Factory[Shrinker] = NoShrinker,
     tools: Sequence[Tool] = (),
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[Agent, Pruner, ScriptedProvider]:
     prices = PriceCatalog(
         prices={} if price is None else {PriceCondition(): price},
@@ -132,7 +134,7 @@ def _agent(
         model=provider["priced"],
         tools=tools,
         compactor=compactor,
-        pruner=Pruner,
+        pruner=partial(Pruner, clock=clock),
         tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
     )
@@ -741,14 +743,10 @@ def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
     assert _noted(agent) == {"late"}
 
 
-def test_an_expired_cache_makes_any_drop_pay(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    agent, pruner, _ = _agent(tmp_path)
-    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
+def test_an_expired_cache_makes_any_drop_pay(tmp_path: Path) -> None:
     now = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    agent, pruner, _ = _agent(tmp_path, clock=lambda: now[0])
+    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
     agent.runtime.publish(
         types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
     )
@@ -771,13 +769,11 @@ def test_an_expired_cache_makes_any_drop_pay(
 )
 def test_a_call_that_brought_no_reply_warms_no_cache(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     outcome: Outcome[Response],
 ) -> None:
-    agent, pruner, _ = _agent(tmp_path)
-    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
     now = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    agent, pruner, _ = _agent(tmp_path, clock=lambda: now[0])
+    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
     agent.runtime.publish(
         types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
     )
@@ -1155,21 +1151,34 @@ def test_a_result_at_the_trigger_is_noted_unexpired(tmp_path: Path) -> None:
     assert _noted(agent) == {"c0"}
 
 
-def test_a_model_with_no_cache_has_none_to_go_cold(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    agent, pruner, _ = _agent(tmp_path)
+def test_a_model_with_no_cache_has_none_to_go_cold(tmp_path: Path) -> None:
+    now = [1000.0]
+    agent, pruner, _ = _agent(tmp_path, clock=lambda: now[0])
     agent.model.settings = replace(agent.model.settings, cache_ttl_sec=0.0)
     agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
-    now = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: now[0])
     agent.runtime.publish(
         types.ModelResponseCompleted(outcome=Succeeded(value=reply("ok"))),
     )
     now[0] += 1.0
 
     assert not pruner.should_run()
+
+
+@pytest.mark.parametrize("server", [False, True], ids=["client", "server"])
+def test_a_given_policy_overrides_the_models(tmp_path: Path, *, server: bool) -> None:
+    agent, _, _ = _agent(tmp_path)
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=None,
+        manage_context_server_side=server,
+    )
+    agent.session.append(*_turns("x" * 40_000, requests=20))
+    given = Pruner(agent, policy=PruningPolicy(keep_recent=0, expiry=0.0))
+
+    assert not Pruner(agent).should_run()
+    assert given.should_run()
+    _ = given.prune()
+    assert _noted(agent) == {"c0"}
 
 
 @dataclass(slots=True, kw_only=True)

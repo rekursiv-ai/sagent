@@ -126,13 +126,18 @@ class AgentSession:
         ] = None
 
     name = "AgentSession"
-    description = (files(__package__) / "assets" / "session.md").read_text(
-        encoding="utf-8",
-    )
     schema = json_schema(Arguments)
 
     team: Team = field(repr=False)
     """Where the caller is found."""
+
+    description: str = field(
+        default=(files(__package__) / "assets" / "session.md").read_text(
+            encoding="utf-8",
+        ),
+        repr=False,
+    )
+    """What the model reads of the tool."""
 
     display: ToolDisplay = field(default=ToolDisplay())
 
