@@ -14,7 +14,6 @@ import pytest
 
 from sagent.agent.types import Agent, Session
 from sagent.model.capability import ModelCapability, ModelSettings
-from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.model.types import Response
 from sagent.runtime import types
@@ -316,8 +315,6 @@ def test_a_detached_result_redraws_under_its_call_and_counts_once() -> None:
 def _turn(*records: AssistantMessage | Thinking | ToolCall) -> Response:
     return Response(
         records=records,
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="tool_use"
         if any(isinstance(r, ToolCall) for r in records)
         else "end_turn",

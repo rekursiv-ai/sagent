@@ -1008,7 +1008,7 @@ def test_a_drop_too_small_to_avert_compaction_is_left_to_it(tmp_path: Path) -> N
 
 
 def test_the_compactor_s_own_trigger_is_the_limit(tmp_path: Path) -> None:
-    records = _turns("x" * 9200, "y" * 800)
+    records = _turns("x" * 9600, "y" * 800)
     # 4,000 tokens: SummaryCompactor fires below the summary call's prompt and
     # room, under the 3,000 the window less the reply leaves.
     compacting, compacting_pruner, _ = _agent(

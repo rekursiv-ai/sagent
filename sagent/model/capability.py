@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "Compaction",
     "ModelCapability",
     "ModelLimits",
     "ModelSettingName",
@@ -59,6 +60,12 @@ type ThinkingOutput = Literal[
     "redacted",
 ]
 
+type Compaction = Literal[
+    "bespoke",
+    "provider",
+]
+"""Who summarizes a full context: sagent's own prompt, or the vendor's API."""
+
 type ModelSettingName = Literal[
     "thinking_effort",
     "thinking_budget",
@@ -66,6 +73,7 @@ type ModelSettingName = Literal[
     "service_tier",
     "cache_ttl_sec",
     "manage_context_server_side",
+    "compaction",
 ]
 """A ``ModelSettings`` field a model offers a choice of."""
 
@@ -152,6 +160,7 @@ class ModelSettings:
     service_tier: ServiceTier = "auto"
     cache_ttl_sec: float = 0.0
     manage_context_server_side: bool = False
+    compaction: Compaction = "bespoke"
     context_size: ContextSize = field(default_factory=ContextSize)
     pruning: PruningPolicy | None = field(default_factory=PruningPolicy)
 
@@ -178,6 +187,8 @@ class ModelSettings:
                 return self.cache_ttl_sec
             case "manage_context_server_side":
                 return self.manage_context_server_side
+            case "compaction":
+                return self.compaction
 
     def with_value(self, name: ModelSettingName, value: object) -> ModelSettings:
         """Return these settings with ``value`` chosen on ``name``; unchecked.
@@ -209,6 +220,8 @@ class ModelSettings:
                 return replace(self, cache_ttl_sec=float(value))
             case "manage_context_server_side" if isinstance(value, bool):
                 return replace(self, manage_context_server_side=value)
+            case "compaction" if value in literal_members(Compaction):
+                return replace(self, compaction=cast(Compaction, value))
             case _:
                 raise ValueError(f"{name}={value!r} is no choice")
 
@@ -227,6 +240,7 @@ class ModelCapability:
     service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
     manage_context_server_side: frozenset[bool] = frozenset({False, True})
     cache_ttl_sec: frozenset[float] = frozenset({0.0})
+    compaction: frozenset[Compaction] = frozenset({"bespoke"})
     default: ModelSettings = field(default_factory=ModelSettings)
 
     model_id: str = ""
@@ -301,6 +315,8 @@ class ModelCapability:
                 return tuple(sorted(self.cache_ttl_sec))
             case "manage_context_server_side":
                 return tuple(sorted(self.manage_context_server_side))
+            case "compaction":
+                return _ladder(self.compaction, literal_members(Compaction))
 
     def parse_value(self, name: ModelSettingName, text: str) -> object:
         """Return the value this model offers on ``name`` that ``text`` types.
@@ -404,6 +420,7 @@ class ModelCapability:
                 self.manage_context_server_side,
                 d.manage_context_server_side,
             ),
+            compaction=_kept(settings.compaction, self.compaction, d.compaction),
             context_size=self.prices[size.context_name if named else size.tokens],
             pruning=settings.pruning,
         )

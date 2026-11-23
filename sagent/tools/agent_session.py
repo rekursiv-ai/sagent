@@ -43,6 +43,7 @@ from sagent.session.types import (
     AssistantMessage,
     Cancelled,
     ContextClear,
+    ContextCompaction,
     Failed,
     SessionContext,
     SessionResult,
@@ -393,6 +394,8 @@ def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str
         return "note"
     if isinstance(entry, SessionContext):
         return "settings"
+    if isinstance(entry, ContextCompaction):
+        return f"summary by {entry.provider}"
     return (
         "user message" if entry.sender is None else f"user message from {entry.sender}"
     )

@@ -5,8 +5,7 @@ one numbered line each: every message the user sent, verbatim; every reply
 sent back; and one line per tool call. Tool results and earlier summaries are
 left out. Audit it, so the work can continue from your audit alone.
 
-Write an <analysis> section first, as scratch, then a <summary> section with
-these parts, in this order:
+Write a <summary> section with these parts, in this order:
 
 1. Human messages: every message the user sent, verbatim, each with its line
    number. Never paraphrase or merge them.

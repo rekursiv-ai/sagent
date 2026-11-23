@@ -2748,7 +2748,7 @@ async def test_no_setting_flag_leaves_the_model_s_own_and_hides_reasoning() -> N
             ("--thinking", "budget=fixed"),
             "[--model.thinking] budget: 'fixed' is not one of: none, auto",
         ),
-        (("--compact", "x"), "--compact names no setting; see /help"),
+        (("--compactness", "x"), "--compactness names no setting; see /help"),
     ],
 )
 async def test_a_refused_setting_flag_says_why(

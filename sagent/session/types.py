@@ -380,6 +380,10 @@ class Thinking:
     reasoning_id: str | None = None
     """OpenAI's id for its reasoning (``""`` if unstated); ``None`` if not OpenAI's."""
 
+    prefix_digest: str = ""
+    """What signed reasoning was made after, as ``model.token_accounting.stamped`` digests it; ``""``
+    when unknown, as for every block a journal held before digests were kept."""
+
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
 
     def __post_init__(self) -> None:
@@ -900,16 +904,33 @@ class ContextState:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContextCompaction:
-    """A compaction happened; the ``ContextClear`` after it holds the result."""
+    """A compaction happened; the ``ContextClear`` after it holds the result.
+
+    One a vendor's API wrote also stands in the window, in place of what it
+    summarized: its ``provider`` is sent ``block`` back as it came, any other
+    ``summary`` as user text.
+    """
 
     context_id: int | None = None
     timestamp: datetime | None = None
     summary: str | None = None
+    """The summary's text; ``None`` when the vendor sealed it."""
+
+    provider: str = ""
+    """The provider whose API wrote it, as the catalog names it; ``""`` for ours."""
+
+    block: Mapping[str, PlainTree] = field(default_factory=_no_json)
+    """The summary as the vendor's API returned it, to send back unchanged."""
+
+    replaces: str = ""
+    """The digest of the records it replaces (``model.token_accounting.digest``): the
+    vendor takes reasoning made after them as made after this."""
+
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
     """Provider bookkeeping, and the instructions the compaction was given."""
 
     def __post_init__(self) -> None:
-        _freeze(self, "extra")
+        _freeze(self, "extra", "block")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

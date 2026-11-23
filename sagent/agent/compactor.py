@@ -42,8 +42,10 @@ from treekle import PlainTree, from_plain, json_dumps, mutable
 from sagent.agent.scrunch import safe_boundaries
 from sagent.model.capability import ThinkingEffort, literal_members
 from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.model.token_accounting import bound, digest
 from sagent.model.types import Request, Response
 from sagent.runtime import types
+from sagent.runtime.context import resolve_context
 from sagent.runtime.tape import (
     ContextSplice,
     calls,
@@ -51,12 +53,14 @@ from sagent.runtime.tape import (
     full_tape_mask,
     sent_records,
     unpaired_call_ids,
+    unreadable,
 )
 from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
     Attachment,
     Cancelled,
+    ContextCompaction,
     Failed,
     SessionContext,
     Succeeded,
@@ -211,7 +215,37 @@ class SummaryCompactor:
           should: Whether to compact before the next model call.
 
         """
-        return self._held() >= self.trigger_tokens() or self._wire_bytes_due()
+        return (
+            self._held() >= self.trigger_tokens()
+            or self._wire_bytes_due()
+            or any(
+                unreadable(e, provider=self._agent.model.provider.name)
+                for e in self._agent.runtime.tape.context().messages
+            )
+        )
+
+    # The splice that wrote one is left out, so what it replaced shows again.
+    def _restored(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+    ) -> list[ModelContextEvent]:
+        """Return ``context`` with each sealed summary the model cannot read undone."""
+        provider = self._agent.model.provider.name
+        while sealed := [e for e in context if unreadable(e, provider=provider)]:
+            records: list[TapeRecord] = [
+                r
+                for r in tape
+                if not (
+                    isinstance(r, ContextSplice)
+                    and any(s in r.replacement for s in sealed)
+                )
+            ]
+            if len(records) == len(tape):
+                break
+            tape = records
+            context = resolve_context(tape).messages
+        return list(context)
 
     def _wire_bytes_due(self, *, byte_share: float = 0.8) -> bool:
         """Return whether the next request holds ``byte_share`` of the vendor's ceiling."""
@@ -361,8 +395,29 @@ class SummaryCompactor:
         """
         summarizer = self._model if self._model is not None else model
         instructions = custom_instructions or ""
+        context = self._restored(tape, context)
+        # What no splice can undo, as after a resume, the journal still holds whole.
+        sealed_left = any(
+            unreadable(e, provider=self._agent.model.provider.name) for e in context
+        )
         with _at_effort(summarizer, self._effort):
-            if self.style == "session-audit":
+            written = None
+            # The vendor's summary takes no instructions of ours.
+            if (
+                not sealed_left
+                and self.style == "summary"
+                and self._direction == "from"
+                and summarizer.settings.compaction == "provider"
+                and not instructions.strip()
+            ):
+                written = await self._provider_summary(
+                    summarizer,
+                    list(context),
+                    keep=self._tail_len(context),
+                )
+            if written is not None:
+                replacement, strategy, reason, kept = written
+            elif sealed_left or self.style == "session-audit":
                 replacement, strategy, reason, kept = await self._audit(
                     summarizer,
                     list(context),
@@ -387,6 +442,51 @@ class SummaryCompactor:
             entries_kept_verbatim=kept,
             paired_externally=unpaired_call_ids(replacement),
         )
+
+    # The request is the live one, its system prompt and tools too, so the vendor
+    # accepts the thinking in the kept tail as made after its summary.
+    async def _provider_summary(
+        self,
+        model: Model,
+        history: list[ModelContextEvent],
+        *,
+        keep: int,
+    ) -> tuple[tuple[ModelContextEvent, ...], str, str, int] | None:
+        """Return the new window from the vendor's own summary; ``None`` if it gave none."""
+        to_summarize, to_keep = _kept_tail(history, keep)
+        # Sent, adjacent user-side messages are one turn, and the thinking after it
+        # digests it whole; a cut between them would leave that thinking stale.
+        while (
+            to_summarize
+            and to_keep
+            and isinstance(to_summarize[-1], UserMessage | AgentMessage)
+            and isinstance(to_keep[0], UserMessage | AgentMessage)
+        ):
+            to_keep.insert(0, to_summarize.pop())
+        if not to_summarize:
+            return None
+        request = replace(
+            self._agent.runtime.request(context=to_summarize, max_response_tokens=0),
+            summarize=True,
+            purpose="compaction",
+        )
+        try:
+            response = await self._stream(model, request)
+        except (ContextOverflowError, RetryableError) as exc:
+            logger.warning("the provider's summary failed; writing our own: %s", exc)
+            return None
+        if not response.summary:
+            logger.warning("the provider returned no summary; writing our own")
+            return None
+        said = response.summary.get("content")
+        summary = ContextCompaction(
+            summary=said if isinstance(said, str) and said else None,
+            provider=model.provider.name,
+            block=response.summary,
+            replaces=digest(bound(request).records),
+        )
+        replacement = self._enrich(coalesce_roles([summary, *to_keep]), history=history)
+        return replacement, "provider_summary", "", len(to_keep)
 
     def _tail_len(self, history: Sequence[ModelContextEvent]) -> int:
         """Return the entries kept: ``keep_recent``, or the user's unanswered turn."""
@@ -599,6 +699,7 @@ class SummaryCompactor:
         head = sent_records(
             fixed,
             keep_senders_apart=self._agent.runtime.model.capability.keeps_user_turns_apart,
+            provider=model.provider.name,
         )
         pass_size = self._size(model, remaining)
         reason = ""
@@ -856,6 +957,7 @@ class SummaryCompactor:
             records=sent_records(
                 records,
                 keep_senders_apart=model.capability.keeps_user_turns_apart,
+                provider=model.provider.name,
             ),
             max_response_tokens=_room(
                 model,
@@ -989,6 +1091,8 @@ def text(entry: ModelContextEvent) -> str:
             else r.content or ""
             for r in entry.records
         )
+    if isinstance(entry, ContextCompaction):
+        return entry.summary or ""
     return entry.content or ""
 
 
@@ -1187,12 +1291,16 @@ def _append_to_first_user(
 ) -> None:
     """Append ``text`` to the first user message, or start the entries with one."""
     extra: dict[str, PlainTree] = {"skills": list(skills)} if skills else {}
-    for i, entry in enumerate(entries):
+    # A vendor's summary is sent as its block alone, and first.
+    lead = 0
+    while lead < len(entries) and isinstance(entries[lead], ContextCompaction):
+        lead += 1
+    for i, entry in enumerate(entries[lead:], start=lead):
         if isinstance(entry, (UserMessage, AgentMessage)):
             joined = f"{entry.content}\n\n{text}" if entry.content is not None else text
             entries[i] = replace(entry, content=joined, extra={**entry.extra, **extra})
             return
-    entries.insert(0, UserMessage(content=text, extra=extra))
+    entries.insert(lead, UserMessage(content=text, extra=extra))
 
 
 # Each line is what someone said or did: the user verbatim, the agent's replies, and a

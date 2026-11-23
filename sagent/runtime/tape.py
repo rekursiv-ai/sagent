@@ -29,6 +29,7 @@ from sagent.runtime.types import (
 from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
+    ContextCompaction,
     SessionContext,
     SystemMessage,
     Thinking,
@@ -65,6 +66,7 @@ __all__ = [
     "sent_records",
     "splice_safe_repair",
     "unpaired_call_ids",
+    "unreadable",
 ]
 
 
@@ -332,26 +334,57 @@ def sent_records(
     entries: Sequence[ModelContextEvent],
     *,
     keep_senders_apart: bool = False,
+    provider: str,
 ) -> list[SessionRecord]:
     """Return ``entries`` as a request's records, each later message user text.
 
     Args:
       entries: A context, or part of one.
       keep_senders_apart: As :func:`coalesce_roles` takes it.
+      provider: Who the request goes to; a summary another provider's API
+        wrote is its text, and one it sealed is left out.
 
     Returns:
       records: Adjacent turns of one side merged, each model turn's records in
         its place, in order.
 
     """
+    readable = [
+        UserMessage(content=entry.summary)
+        if isinstance(entry, ContextCompaction) and entry.provider != provider
+        else entry
+        for entry in entries
+        if not unreadable(entry, provider=provider)
+    ]
     return [
         record
         for entry in coalesce_roles(
-            as_sent(entries),
+            as_sent(readable),
             keep_senders_apart=keep_senders_apart,
         )
         for record in (entry.records if isinstance(entry, Response) else (entry,))
     ]
+
+
+def unreadable(entry: ModelContextEvent, *, provider: str) -> bool:
+    """Return whether ``entry`` is a summary another provider's API sealed.
+
+    A request leaves it out, and what it replaced is gone from the window
+    until a compaction writes it again.
+
+    Args:
+      entry: An entry of a context.
+      provider: The provider asked, which reads nothing sealed by another.
+
+    Returns:
+      unreadable: Whether ``provider`` can read none of it.
+
+    """
+    return (
+        isinstance(entry, ContextCompaction)
+        and entry.summary is None
+        and entry.provider != provider
+    )
 
 
 def coalesce_roles(

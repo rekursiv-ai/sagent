@@ -47,6 +47,7 @@ from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
     ContextClear,
+    ContextCompaction,
     SessionContext,
     SystemMessage,
     Thinking,
@@ -123,7 +124,16 @@ def encode(
     if settings.thinking_output == "redacted":
         betas.append("redact-thinking-2026-02-12")
     edits = _context_edits(settings=settings, cache_expired=cache_expired)
-    if edits:
+    # A summary the API wrote is read back only under its beta, as it is asked for.
+    if request.summarize or any(
+        isinstance(r, ContextCompaction) and "signature" in r.block
+        for r in request.records
+    ):
+        betas.append("compact-2026-09-04")
+    if request.summarize:
+        # The API refuses ``compaction`` beside ``context_management``.
+        body["compaction"] = {"type": "summarize"}
+    elif edits:
         body["context_management"] = {"edits": edits}
         betas.append("context-management-2025-06-27")
     if settings.thinking_effort != "none":
@@ -275,6 +285,7 @@ class StreamReader:
         self._blocks: dict[int, _Block] = {}
         self._usage: dict[str, object] = {}
         self._stop_reason = ""
+        self._summary: dict[str, object] = {}
 
     @property
     def stop_reason(self) -> str:
@@ -299,6 +310,10 @@ class StreamReader:
             self._usage = _object(_object(event.get("message")).get("usage"))
         elif kind == "content_block_start":
             start = _object(event.get("content_block"))
+            # A summary arrives whole, in its start event.
+            if start.get("type") == "compaction":
+                self._summary = start
+                return None
             self._blocks[from_plain(event.get("index"), int, default=0)] = _Block(
                 kind=start.get("type"),
                 call_id=str(start.get("id") or ""),
@@ -354,6 +369,7 @@ class StreamReader:
             ]
             * tokens,
             stop_reason=self._stop_reason,
+            summary=immutable(self._summary),
         )
 
     def _tokens(self) -> TokenCount:
@@ -521,6 +537,10 @@ def _blocks(
 ) -> list[tuple[str, dict[str, object]]]:
     """Return the role and blocks ``record`` becomes; none for bookkeeping records."""
     match record:
+        # Anthropic's own summary goes back as it came, in place of what it replaced.
+        case ContextCompaction(block=block) if "signature" in block:
+            written: dict[str, object] = {**mutable(block)}
+            return [("assistant", written)]
         # Whoever is named is named: another agent, or a person not the session's user.
         case UserMessage() | AgentMessage():
             return [

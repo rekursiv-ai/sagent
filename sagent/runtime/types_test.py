@@ -11,7 +11,6 @@ import re
 
 import pytest
 
-from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.runtime.tape import ContextSplice, TapeRef
@@ -86,8 +85,6 @@ def test_what_a_compaction_did_takes_every_field_from_the_override() -> None:
         (
             Response(
                 records=(),
-                tokens=TokenCount(),
-                spend=TokenCost(),
                 stop_reason="",
             ),
             "assistant",
@@ -107,8 +104,6 @@ def test_wire_role(entry: ModelContextEvent, role: str | None) -> None:
 def _turn(text: str) -> Response:
     return Response(
         records=(AssistantMessage(content=text),),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
 

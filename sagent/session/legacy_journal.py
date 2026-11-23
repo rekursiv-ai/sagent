@@ -39,7 +39,6 @@ from treekle import PlainTree, ReadError, from_plain, json_loads
 
 from sagent.lib.files.owner_only import write_private
 from sagent.lib.userdirs import data_dir
-from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.types import Response
 from sagent.runtime.context import (
     alive_splices,
@@ -645,8 +644,6 @@ class _Entries:
         ]
         return Response(
             records=(*thinking, *said, *calls),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="",
         )
 

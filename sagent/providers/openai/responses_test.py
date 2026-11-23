@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import io
 
 from PIL import Image
-from treekle import mutable
+from treekle import from_plain, mutable
 
 import pytest
 
@@ -27,6 +27,7 @@ from sagent.session.types import (
     AssistantMessage,
     Attachment,
     ContextClear,
+    ContextCompaction,
     Thinking,
     TokenUsage,
     ToolCall,
@@ -319,6 +320,36 @@ def _completed(**response: object) -> dict[str, object]:
 
 def _done(index: int, item: Mapping[str, object]) -> dict[str, object]:
     return {"type": "response.output_item.done", "output_index": index, "item": item}
+
+
+def test_a_summarize_request_ends_on_the_compaction_trigger() -> None:
+    body = _encode(Request(records=(UserMessage(content="q"),), summarize=True))
+    items = from_plain(body["input"], list[dict[str, object]])
+    assert items[-1] == {"type": "compaction_trigger"}
+
+
+def test_the_compaction_item_is_the_summary() -> None:
+    reader = _reader()
+    item = {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAA"}
+    reader.feed(_done(0, item))
+    reader.feed(_completed())
+    response = reader.response()
+    assert (response.records, response.summary) == ((), item)
+    plain = _reader()
+    plain.feed(_completed())
+    assert plain.response().summary == {}
+
+
+def test_an_openai_summary_returns_as_its_compaction_item() -> None:
+    summary = ContextCompaction(
+        provider="openai",
+        block={"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAA"},
+    )
+    items = from_plain(
+        _encode(Request(records=(summary,)))["input"],
+        list[dict[str, object]],
+    )
+    assert items == [{"type": "compaction", "encrypted_content": "gAAA"}]
 
 
 def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:

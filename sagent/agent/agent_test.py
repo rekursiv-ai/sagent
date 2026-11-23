@@ -44,7 +44,7 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import runtime, types
 from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
-from sagent.runtime.tape import MaskRange
+from sagent.runtime.tape import MaskRange, sent_records
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
@@ -1251,12 +1251,43 @@ def _resumed_request(tmp_path: Path, *records: SessionRecord) -> list[SessionRec
     return list(provider.requests[0].records)
 
 
+def _resumed_context(tmp_path: Path, *records: SessionRecord) -> list[SessionRecord]:
+    """Return the records of the context a session of ``records`` resumes to."""
+    journal = RecordingJournal()
+    journal.append(ContextClear(system_prompt="S"), *records)
+    _, agent = _agent(tmp_path, journal=journal)
+
+    async def resumed() -> list[SessionRecord]:
+        async with agent:
+            return sent_records(
+                agent.runtime.tape.context().messages,
+                provider=agent.model.provider.name,
+            )
+
+    return asyncio.run(resumed())
+
+
 def _done(call_id: str) -> ToolMessage:
     return ToolMessage(call_id=call_id, state="done", stdout=(call_id,))
 
 
-def test_a_reply_written_a_line_per_block_resumes_as_one_turn(tmp_path: Path) -> None:
+def test_resumed_thinking_that_cannot_say_what_it_followed_is_not_sent(
+    tmp_path: Path,
+) -> None:
+    """A journal from before digests: the vendor may refuse the block, so it stays home."""
     sent = _resumed_request(
+        tmp_path,
+        UserMessage(content="think"),
+        _SIGNED,
+        AssistantMessage(content="done"),
+    )
+
+    assert _SIGNED not in sent
+    assert AssistantMessage(content="done") in sent
+
+
+def test_a_reply_written_a_line_per_block_resumes_as_one_turn(tmp_path: Path) -> None:
+    sent = _resumed_context(
         tmp_path,
         UserMessage(content="read a and b"),
         _SIGNED,
@@ -1285,7 +1316,7 @@ def test_a_reply_written_a_line_per_block_resumes_as_one_turn(tmp_path: Path) ->
 def test_a_result_logged_while_its_reply_still_calls_follows_the_reply(
     tmp_path: Path,
 ) -> None:
-    sent = _resumed_request(
+    sent = _resumed_context(
         tmp_path,
         UserMessage(content="read a, b and c"),
         _SIGNED,
@@ -1434,7 +1465,7 @@ def test_a_reply_after_a_cli_s_own_error_line_resumes_with_its_thinking(
 ) -> None:
     """Claude logs an API error as a reply of its own, and the retry under its model."""
     error = AssistantMessage(content="API Error: an image could not be processed")
-    sent = _resumed_request(
+    sent = _resumed_context(
         tmp_path,
         UserMessage(content="think"),
         error,
@@ -1738,8 +1769,6 @@ def test_appended_records_are_turns_and_what_no_turn_holds_is_dropped(
     # A stored turn says nothing of how it ended or what it cost.
     assert entries[2] == Response(
         records=turn,
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="",
     )
 
@@ -3264,14 +3293,10 @@ def test_a_reply_in_an_appending_pass_still_journals_what_it_cost(
 async def test_a_turn_says_what_its_messages_said_together(tmp_path: Path) -> None:
     both = Response(
         records=(AssistantMessage(content="one "), AssistantMessage(content="two")),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="",
     )
     wordless = Response(
         records=(AssistantMessage(content=None),),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="",
     )
     _, agent = _agent(tmp_path, both, wordless)

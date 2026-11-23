@@ -15,11 +15,14 @@ Typical usage example:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 import uuid
+
+from treekle import PlainTree
 
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.session.types import (
@@ -67,6 +70,10 @@ class Request:
 
     purpose: Literal["main", "compaction"] = "main"
     """Why the call is made: the agent's own turn, or a summary of its context."""
+
+    summarize: bool = False
+    """Ask the vendor's API to summarize ``records`` in place of a reply
+    (``ModelSettings.compaction == "provider"``); the reply's ``summary`` holds it."""
 
     compaction: Literal["", "auto", "manual"] = ""
     """What started the compaction this call makes, or, on the first main call
@@ -140,10 +147,16 @@ class Response:
     """The finished reply."""
 
     records: tuple[AssistantMessage | Thinking | ToolCall, ...]
-    tokens: TokenCount
-    spend: TokenCost
+    tokens: TokenCount = field(default_factory=TokenCount)
+    spend: TokenCost = field(default_factory=TokenCost)
     stop_reason: str
     """Why the model stopped: ``end_turn``, ``tool_use``, ``max_tokens``, or ``refusal``; another vendor reason as spelled."""
 
     measurement: RequestMeasurement | None = field(default=None, compare=False)
     """The exact request's measured prompt, captured by the caller before streaming."""
+
+    summary: Mapping[str, PlainTree] = field(
+        default_factory=lambda: MappingProxyType[str, PlainTree]({}),
+    )
+    """The vendor's summary, as its API returned it, when the request asked to
+    ``summarize``; empty otherwise."""

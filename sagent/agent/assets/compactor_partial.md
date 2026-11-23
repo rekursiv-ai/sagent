@@ -1,20 +1,5 @@
 Generate a comprehensive recap of this conversation. This recap will appear at the beginning of a follow-on session; subsequent messages that extend this work will come after it (those messages are not visible to you here). Be thorough enough that a reader seeing only your recap followed by the newer messages can grasp everything that occurred and pick up where things left off.
 
-Before writing the finished recap, place your working analysis inside <analysis> tags. Use this space to structure your reasoning and confirm full coverage. During this analysis:
-
-1. Walk through every message in time order. For each segment, carefully extract:
-   - What the user requested and their underlying goals
-   - How you went about fulfilling those requests
-   - Important decisions, technical ideas, and code structures
-   - Concrete specifics such as:
-     - file paths
-     - complete code excerpts
-     - function and method signatures
-     - modifications to files
-   - Mistakes or failures encountered and their resolutions
-   - Give extra weight to direct user feedback, particularly corrections or redirections.
-2. Verify technical correctness and completeness, ensuring every required element receives adequate coverage.
-
 Structure the recap with these nine sections:
 
 1. Primary Request and Intent: Record the user's stated requests and underlying goals in full detail.
@@ -30,10 +15,6 @@ Structure the recap with these nine sections:
 Below is a template showing the expected output format:
 
 <example>
-<analysis>
-[Working notes verifying all required elements are addressed]
-</analysis>
-
 <summary>
 1. Primary Request and Intent:
    [Thorough description]

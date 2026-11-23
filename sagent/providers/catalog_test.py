@@ -206,7 +206,14 @@ async def test_every_setting_a_row_offers_changes_what_is_sent(
             for base in (capability.default, committed):
                 for value in values:
                     model.settings = capability.with_choices(base, {field: value})
-                    sent[value].add(await _sent(model, request))
+                    # The compaction setting is sent on a compaction's request,
+                    # which asks the API to summarize when it is ``provider``.
+                    asked = replace(
+                        request,
+                        summarize=field == "compaction"
+                        and model.settings.compaction == "provider",
+                    )
+                    sent[value].add(await _sent(model, asked))
             same = [v for v in values if sum(sent[v] == s for s in sent.values()) > 1]
             if same:
                 unsent.append(f"{section}/{model_name} {field}: {same}")
@@ -1331,7 +1338,7 @@ def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent(
         "\n  anthropic:\n"
         "    sends:\n"
         "      [thinking_effort, thinking_budget, thinking_output, service_tier,\n"
-        "       cache_ttl_sec, manage_context_server_side]\n"
+        "       cache_ttl_sec, manage_context_server_side, compaction]\n"
     )
     assert text.count(sent) == 1
     path = tmp_path / "unsent.yaml"

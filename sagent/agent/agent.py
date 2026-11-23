@@ -50,6 +50,7 @@ from sagent.session.types import (
     AssistantMessage,
     Cancelled,
     ContextClear,
+    ContextCompaction,
     Failed,
     ModelIdle,
     RequestMeasurement,
@@ -1319,7 +1320,12 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
             continue
         if not isinstance(
             record,
-            UserMessage | AgentMessage | SystemMessage | SessionContext | ToolMessage,
+            UserMessage
+            | AgentMessage
+            | SystemMessage
+            | SessionContext
+            | ToolMessage
+            | ContextCompaction,
         ):
             continue
         priced = False  # pragma: no mutate[truthiness]

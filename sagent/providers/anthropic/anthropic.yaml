@@ -349,9 +349,13 @@ providers:
   anthropic:
     sends:
       [thinking_effort, thinking_budget, thinking_output, service_tier,
-       cache_ttl_sec, manage_context_server_side]
+       cache_ttl_sec, manage_context_server_side, compaction]
     cache_ttl_sec: [300.0, 3600.0]
     retries_internally: true
+    # The API writes a summary (``compact-2026-09-04``) whose kept thinking stays
+    # valid; ours leaves it stale. Measured 2026-11-22 on fable and opus.
+    compaction: [bespoke, provider]
+    compaction_default: provider
   # Claude Code on the subscription, as sagent's anthropic-cli runs it and as
   # Trackinizer prices a person's sessions (``session_usage.py``).
   anthropic-cli: &anthropic_cli

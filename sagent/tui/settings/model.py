@@ -13,6 +13,7 @@
     model.service_tier             ModelSettings.service_tier
     model.cache_ttl_sec            ModelSettings.cache_ttl_sec
     model.manage_context_server_side
+    model.compaction               ModelSettings.compaction
 
 A switch keeps what the old model chose wherever the new one offers it; each
 choice offers what the model's catalog row does, in the row's own words. A
@@ -148,6 +149,10 @@ class AgentModel:
             self._axis(
                 "manage_context_server_side",
                 "whether the server rolls the history",
+            ),
+            self._axis(
+                "compaction",
+                "who summarizes a full context: sagent, or the provider",
             ),
         ]
 

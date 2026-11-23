@@ -529,7 +529,7 @@ def test_the_name_is_the_model_and_its_size() -> None:
             "opus speed=1",
             (
                 "speed is no choice; give budget, output, cache_ttl_sec,"
-                " manage_context_server_side"
+                " manage_context_server_side, compaction"
             ),
         ),
     ],
@@ -954,6 +954,39 @@ def test_a_default_cache_lifetime_is_what_a_bare_id_starts_at(
         vendor={"cache_ttl_sec": [300.0, 3600.0], **given},
     )
     assert _load(path)["example"].default.cache_ttl_sec == ttl
+
+
+@pytest.mark.parametrize(
+    ("offered", "default", "starts"),
+    [
+        (None, None, "bespoke"),
+        (["bespoke", "provider"], None, "bespoke"),
+        (["bespoke", "provider"], "provider", "provider"),
+        (["provider"], None, "provider"),
+    ],
+    ids=["unstated", "both-unset", "both-provider", "provider-only"],
+)
+def test_a_section_says_how_it_compacts_and_how_a_bare_id_starts(
+    tmp_path: Path,
+    offered: list[str] | None,
+    default: str | None,
+    starts: str,
+) -> None:
+    given: dict[str, object] = {} if offered is None else {"compaction": offered}
+    if default is not None:
+        given["compaction_default"] = default
+    path = _write(tmp_path / "x.yaml", _model(), vendor=given)
+    row = _load(path)["example"]
+    assert row.compaction == frozenset(offered or ["bespoke"])
+    assert row.default.compaction == starts
+
+
+def test_a_compaction_choice_reads_back_from_a_model_line() -> None:
+    row = replace(_row(), compaction=frozenset({"bespoke", "provider"}))
+    chosen = replace(row.default, compaction="provider")
+    tags = ModelTags.from_settings(row, chosen)
+    assert dict(tags.choices) == {"compaction": "provider"}
+    assert ModelTags.parse(str(tags)).choices == tags.choices
 
 
 @pytest.mark.parametrize(
@@ -1575,6 +1608,7 @@ def test_a_setting_offering_nothing_selectable_is_named(
         "service_tier",
         "cache_ttl_sec",
         "manage_context_server_side",
+        "compaction",
     ],
 )
 def test_each_setting_unsent_offers_only_its_default(
@@ -1592,7 +1626,11 @@ def test_each_setting_unsent_offers_only_its_default(
         "manage_context_server_side": [False, True],
     }
     sends = [name for name in model_setting_names() if name != unsent]
-    path = _write(tmp_path / "x.yaml", _model() | every, vendor={"sends": sends})
+    path = _write(
+        tmp_path / "x.yaml",
+        _model() | every,
+        vendor={"sends": sends, "compaction": ["bespoke", "provider"]},
+    )
     row = _load(path)["example"]
 
     for name in model_setting_names():

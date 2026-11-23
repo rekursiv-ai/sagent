@@ -1170,7 +1170,11 @@ models:
 # it takes 272k in, except the models measured to take their 1.05M window.
 providers:
   openai:
-    sends: [thinking_effort, thinking_output, service_tier]
+    sends: [thinking_effort, thinking_output, service_tier, compaction]
+    # A ``compaction_trigger`` item returns one sealed ``compaction`` item; measured
+    # 2026-11-22 on api.openai.com and the ChatGPT endpoint.
+    compaction: [bespoke, provider]
+    compaction_default: provider
     # What a cache lasts unasked; none is sent. GPT-5.6 and later keep at least 30
     # minutes; earlier models with extended retention keep about as long.
     cache_ttl_sec: [1800.0]
@@ -1195,7 +1199,9 @@ providers:
       gpt-omni-4.0: *in_memory
       gpt-omni-mini-4.0: *in_memory
   openai-sub:
-    sends: [thinking_effort, thinking_output, service_tier]
+    sends: [thinking_effort, thinking_output, service_tier, compaction]
+    compaction: [bespoke, provider]
+    compaction_default: provider
     # Measured from journals: no misses up to 30 minutes, 1 in 11 at 30 to 60.
     cache_ttl_sec: [3600.0]
     retries_internally: true
