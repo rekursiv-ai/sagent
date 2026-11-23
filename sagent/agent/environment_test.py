@@ -168,8 +168,8 @@ def test_windows_is_told_to_keep_unix_conventions(
 
 
 def test_the_knowledge_cutoff_is_the_last_line_when_known(tmp_path: Path) -> None:
-    assert environment(tmp_path, knowledge_cutoff="2026-06").splitlines()[-1] == (
-        "Knowledge cutoff: 2026-06."
+    assert environment(tmp_path, knowledge_cutoff="2026-06-01").splitlines()[-1] == (
+        "Knowledge cutoff: 2026-06-01."
     )
     assert "Knowledge cutoff" not in environment(tmp_path)
 

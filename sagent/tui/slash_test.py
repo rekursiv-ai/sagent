@@ -20,7 +20,8 @@ import pytest
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
 from sagent.host.settings import HostSettings
-from sagent.lib.userdirs import config_dir
+from sagent.host.strings import ServeDirs
+from sagent.lib.userdirs import config_dir, state_dir
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -849,6 +850,12 @@ async def test_help_on_one_setting_says_all_it_knows(
         command="/help",
         text="no setting 'nothing-at-all'",
     )
+    assert await commands("/help compact") is False
+    assert said[-1] == CommandOutput(
+        tone="note",
+        command="/help",
+        text="/compact [hints]\ncompact history",
+    )
 
 
 def test_what_an_owner_with_no_agent_shows_is_said_as_a_note(tmp_path: Path) -> None:
@@ -864,6 +871,10 @@ def test_what_an_owner_with_no_agent_shows_is_said_as_a_note(tmp_path: Path) -> 
         CommandOutput(text="Open https://sign.in", tone="note"),
         CommandOutput(text="Serving", tone="note"),
     ]
+    assert host.dirs == ServeDirs(
+        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+    )
 
 
 @pytest.mark.asyncio
@@ -2151,6 +2162,7 @@ async def test_peer_participation_is_chosen_inherited_and_validated() -> None:
     assert team is not None
     await desk.commands("/peer-messaging off")
     assert not team.peer_messaging("Agent")
+    assert team.choices == {"Agent": {"peer-messaging": "off"}}
     child = await desk.commands.child_commands(team, "child")
     await child("/peer-messaging")
     assert desk.printer.printed[-1] == (
@@ -2159,12 +2171,36 @@ async def test_peer_participation_is_chosen_inherited_and_validated() -> None:
     )
     await child("/peer-messaging on")
     assert team.peer_messaging("child")
+    assert desk.printer.printed[-1] == ("note", "[/peer-messaging] on")
+    await child("/help peer-messaging")
+    assert desk.printer.printed[-1] == (
+        "note",
+        (
+            "[/help] /peer-messaging on|off|default"
+            "\nparticipate in cross-session discovery and messaging"
+            "\nnow: on   (on, off, default)"
+        ),
+    )
     await child("/peer-messaging default")
     assert not team.peer_messaging("child")
     await child("/peer-messaging invalid")
     assert desk.printer.printed[-1][0] == "error"
     await desk.commands("/peer-messaging default")
     assert team.peer_messaging("child")
+
+
+@pytest.mark.asyncio
+async def test_peer_messaging_given_at_the_shell_records_its_own_choice() -> None:
+    """The shell applies a ``cli`` setting directly, with no prompt to record it."""
+    desk, _ = _teamed()
+    team = desk.team
+    assert team is not None
+    (peer,) = (s for s in desk.commands.settings() if s.name == ("peer-messaging",))
+    assert peer.cli
+    assert await peer.apply("off") == "off"
+    assert team.choices == {"Agent": {"peer-messaging": "off"}}
+    assert await peer.apply("default") == "on"
+    assert team.choices == {"Agent": {}}
 
 
 @pytest.mark.asyncio

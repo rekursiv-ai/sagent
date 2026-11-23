@@ -147,8 +147,5 @@ providers:
     retries_internally: true
     # The reply streams the reasoning unasked, and none of it is dropped.
     thinking_output_default: text
-    service_tier: [auto]
+    service_tier: [auto, priority]
     manage_context_server_side: [false]
-    models:
-      minimax-3.0:
-        service_tier: [auto, priority]

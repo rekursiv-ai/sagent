@@ -1075,7 +1075,10 @@ async def _agent_action(argv: Sequence[str]) -> int:
     if not any(tuple(words[: len(name)]) == name for name in named):
         return _unknown(argv)
     screen = _Screen()
-    allow = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    allow = argparse.ArgumentParser(
+        add_help=False,
+        allow_abbrev=False,  # pragma: no mutate[truthiness] -- argparse reads its truth.
+    )
     _allow_providers_argument(allow)
     allowed, argv = allow.parse_known_args(argv)
     Logins(AnthropicCLI.default_login_path(), own_directory=True).move_in()
@@ -1097,7 +1100,9 @@ async def _agent_action(argv: Sequence[str]) -> int:
             return rest
 
         found = await _dispatch(settings, argv, configure=apply_flags)
-    return _unknown(argv) if found is None else found
+    # Never None: ``settings`` holds each action ``named`` lists, checked above.
+    assert isinstance(found, int)
+    return found
 
 
 def _unknown(argv: Sequence[str]) -> int:
@@ -1163,20 +1168,22 @@ def _command_words(argv: Sequence[str]) -> list[str]:
 
 
 # Its own first: a setting's letters may spell an action's option, as ``--out``
-# spells ``model.thinking.output``. One naming nothing is left for the action to refuse.
+# spells ``model.thinking.output``. One naming nothing, or naming an action, is left
+# for the action to refuse. Matched as ``_configure`` matches it: ``--add`` spells
+# ``screen.theme.default.added`` by its letters, yet there names ``mcp.add``.
 def _action_options(
     action: Setting,
     tail: Sequence[str],
     settings: Sequence[Setting],
 ) -> frozenset[str]:
     """Return the ``--NAME`` words of ``tail`` that are ``action``'s, not a setting's."""
-    values = [s for s in settings if s.cli and s.value is not None]
+    cli = [s for s in settings if s.cli]
     before = tail[: tail.index("--")] if "--" in tail else tail
     unnamed = {
         option
         for word in before
         if (option := word.partition("=")[0]).startswith("--")
-        and match(values, option[2:]) is None
+        and ((named := match(cli, option[2:])) is None or named.value is None)
     }
     return action.flags | unnamed
 
@@ -1537,7 +1544,7 @@ async def _headless(agent: AgentProtocol, flags: Flags) -> int:
                     p := from_plain(
                         json_loads(line, dict[str, object]).get("prompt"),
                         str,
-                        default="",
+                        default="",  # pragma: no mutate[truthiness] -- A falsy prompt is dropped.
                     )
                 )
             ]

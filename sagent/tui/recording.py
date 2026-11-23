@@ -82,12 +82,7 @@ class RecordingPrinter(ConsolePrinter):
     def __init__(self, *, show_thinking: bool = False, width: int = 80) -> None:
         self._out = io.StringIO()
         super().__init__(
-            Console(
-                file=Screen(self._out),
-                width=width,
-                color_system=None,
-                highlight=False,
-            ),
+            Console(file=Screen(self._out), width=width, color_system=None),
             show_thinking=show_thinking,
         )
         self.entries: list[PrintedEntry] = []

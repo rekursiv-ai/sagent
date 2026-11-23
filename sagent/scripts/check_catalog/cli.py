@@ -2,8 +2,8 @@
 
 Reads every model's own page, the vendor's price page, and its thinking and
 effort guides, then prints each fact the catalog states that the vendor does not.
-A section a login gates is checked only when named, against what its login is
-served now. A page that cannot be fetched leaves its facts unstated and is
+A section a login gates is checked only when named, against what its login
+lists now. A page that cannot be fetched leaves its facts unstated and is
 named. Exits 1 when any fact disagrees without a recorded reason or any page is
 unreachable, so it can run on a schedule; it needs the network and is never a
 pre-commit hook.
@@ -61,14 +61,15 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        # The docstring is absent only under ``python -OO``, which no test runs.
-        description=(__doc__ or "").strip(),  # pragma: no mutate
+        description=(__doc__ or "").strip(),  # pragma: no mutate -- Only -OO drops it.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args())
     # Vendors date prices in their own zone; UTC is within a day of every one.
-    now = datetime.now(UTC)  # pragma: no mutate
+    # pragma: no mutate start -- Local time, too, is within a day of every zone.
+    now = datetime.now(UTC)
+    # pragma: no mutate end
     unreachable: dict[str, str] = {}
     unreadable: dict[str, str] = {}
     findings = check(
@@ -163,8 +164,8 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         "--write",
         action="store_true",
         help="Write the vendor's facts into the shipped catalog: each value a model's"
-        " own row states, each model it lists and the catalog lacks, and each"
-        " section's omits; the rest are printed for a person.",
+        " own row states, and each model it lists and the catalog lacks; the rest"
+        " are printed for a person.",
     )
 
 

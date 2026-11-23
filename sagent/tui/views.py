@@ -193,7 +193,7 @@ class Views:
         ]
         for view in gone:
             del self._views[view.label]
-            self._screens.pop(view.label, None)
+            del self._screens[view.label]
             self._close(view)
         self._joined &= set(lineage)
         self._adopt()
@@ -280,7 +280,7 @@ class Views:
         """Take every view off its runtime; wait for its commands and the stops."""
         if self.team is not None and self.team.to_user == self._to_user:
             self.team.to_user = None
-        self.release(show=False)
+        self.release(show=False)  # pragma: no mutate[truthiness] -- Only truth is read.
         self._hide(self.current)
         for view in self._views.values():
             self._close(view)
@@ -319,7 +319,6 @@ class Views:
         scrollback = Scrollback(
             self.printer,
             tools=agent.tools,
-            stubs=runtime.stubs,
             home=runtime.tool_context.origin,
         )
         status = Status(runtime, spend=agent.spend_usd)

@@ -250,7 +250,7 @@ def hang(
         # fold at the edge; the cap and the background still hold.
         line = Text.assemble(first, line)
         first = rest = Text()
-        prose = False
+        prose = False  # pragma: no mutate[truthiness] -- Only its truth is read.
     text, stops = _expanded(line)
 
     def room(lead: Text) -> int:
@@ -273,7 +273,11 @@ def hang(
         out = Text.assemble(first if i == 0 else rest, row)
         if background is not None:
             out.append(" " * max(0, width - out.cell_len), style=background)
-        console.print(out, no_wrap=True, overflow="ignore", crop=False)
+        console.print(
+            out,
+            overflow="ignore",
+            crop=False,  # pragma: no mutate[truthiness] -- Rich reads its truth.
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -541,7 +545,7 @@ def _expanded(line: Text) -> tuple[Text, frozenset[int]]:
     """Return ``line`` with each tab as spaces to the next stop, and those spaces."""
     text = line.blank_copy()
     stops: set[int] = set()
-    for part in line.split("\t", include_separator=True, allow_blank=True):
+    for part in line.split("\t", include_separator=True):
         tab = part.plain.endswith("\t")
         if tab:
             part.right_crop(1)
@@ -561,10 +565,12 @@ def _words(text: Text, *, first: int, rest: int) -> list[Text]:
     rows: list[Text] = []
     at, room = 0, first
     while at < len(plain):
-        end = at + len(chop_cells(plain[at : at + room], room)[0])
-        if end < len(plain) and plain[end] != " " and plain[end - 1] != " ":
+        # A character wider than the room chops to an empty first piece; skipping it
+        # puts the character on this row, where an empty row would never advance.
+        end = at + len(next(filter(None, chop_cells(plain[at : at + room], room))))
+        if end < len(plain) and plain[end] != " ":
             space = plain.rfind(" ", at, end)
-            if space > at and cell_len(plain[space + 1 :].split(" ", 1)[0]) <= rest:
+            if space > at and cell_len(plain[space + 1 :].partition(" ")[0]) <= rest:
                 end = space
         row = text[at:end]
         row.rstrip()
@@ -581,9 +587,9 @@ def _fold(text: Text, stops: frozenset[int], *, first: int, rest: int) -> list[T
     head = _cut(text, first)[0]
     rows = [head]
     at = len(head.plain)
-    for row in _cut(text[at:], rest) if at < len(text.plain) else []:
+    for row in _cut(text[at:], rest):
         skip = 0
-        while skip < len(row.plain) and at + skip in stops:
+        while at + skip in stops:
             skip += 1
         if row.plain[skip:].strip():
             rows.append(row[skip:])

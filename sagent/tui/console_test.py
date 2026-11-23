@@ -1384,11 +1384,42 @@ def test_prose_rows_continue_under_the_column_they_started_in(kind: str) -> None
     assert all(r.startswith(" " * column) and r[column] != " " for r in rows[1:]), rows
 
 
+@pytest.mark.parametrize(
+    ("name", "hangs"),
+    [
+        # The column after "  " + name + "  " is 15, half of 30: it still hangs.
+        ("n" * 11, True),
+        ("n" * 12, False),
+    ],
+)
+def test_prose_rows_hang_under_a_column_only_within_half_the_width(
+    name: str,
+    *,
+    hangs: bool,
+) -> None:
+    screen = _Pane(width=30)
+    screen.printer.note(f"  {name}  " + "word " * 10, prose=True)
+    second = screen.rows()[1]
+    column = len(f"  {name}  ") if hangs else 0
+    assert second.startswith(" " * column)
+    assert second[column] != " "
+
+
+def test_a_sentence_s_double_space_is_no_column() -> None:
+    """Only an indented row is a listing's: a sentence's rows wrap flush."""
+    screen = _Pane(width=30)
+    screen.printer.note("End.  " + "word " * 10, prose=True)
+    rows = screen.rows()
+    assert len(rows) > 1
+    assert all(row[0] != " " for row in rows), rows
+
+
 @pytest.mark.parametrize("kind", list(_VERBATIM))
 def test_a_tool_s_or_the_harness_s_text_keeps_its_spacing(kind: str) -> None:
     """Breaking between words dropped the spaces at each break, losing columns."""
     emit, first, rest = _VERBATIM[kind]
-    text = "col_a      col_b      col_c      col_d      col_e      col_f"
+    # Indented, so prose would hang its rows under ``col_b``.
+    text = "  col_a      col_b      col_c      col_d      col_e      col_f"
     screen = _Pane(width=40)
     emit(screen.printer, text)
     rows = screen.raw()
@@ -1472,7 +1503,7 @@ def test_a_wrapped_command_keeps_its_strings_colored_past_the_cut() -> None:
         assert all(codes == string for codes, text in _runs(row) if "y" in text), row
 
 
-@pytest.mark.parametrize("kind", [*_KINDS, "markdown", "halt"])
+@pytest.mark.parametrize("kind", [*_KINDS, "markdown", "halt", "bash-input"])
 def test_terminal_scrollback_uses_no_fixed_rgb_or_background(kind: str) -> None:
     screen = _Pane(color=True)
     screen.printer.theme.select("terminal")
@@ -1480,6 +1511,9 @@ def test_terminal_scrollback_uses_no_fixed_rgb_or_background(kind: str) -> None:
         screen.printer.markdown("```python\nx = 1\n```")
     elif kind == "halt":
         screen.printer.halt("stopped")
+    elif kind == "bash-input":
+        display = ToolDisplay(command_language="bash")
+        screen.printer.call(Header(key="1", label="Bash\nx = 1", display=display))
     else:
         _KINDS[kind][0](screen.printer, "x = 1")
     codes = [

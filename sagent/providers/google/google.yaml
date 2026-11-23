@@ -63,7 +63,7 @@ models:
 - model_id: gemini-neon-4.0
   wire_model_id: gemini-4-neon
   profile: levels_xhigh
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   limits: &gemini_4
     max_request_tokens: 1_048_576
     max_context_tokens: 1_048_576
@@ -81,7 +81,7 @@ models:
 - model_id: gemini-hydrogen-4.0
   wire_model_id: gemini-4-hydrogen
   profile: levels_xhigh
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   limits: *gemini_4
   prices:
   - service_tier: auto
@@ -96,7 +96,7 @@ models:
   wire_model_id: gemini-4-carbon
   profile: no_minimal
   thinking_effort_default: medium
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   limits: *gemini_4
   prices:
   - service_tier: auto
@@ -118,7 +118,7 @@ models:
   wire_model_id: gemini-4-argon
   profile: no_minimal
   thinking_effort_default: medium
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   limits: *gemini_4
   prices:
   - service_tier: auto
@@ -138,7 +138,7 @@ models:
 - model_id: gemini-pro-3.1
   wire_model_id: gemini-3.1-pro-preview
   profile: no_minimal
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   prices:
   - service_tier: auto
     request: 2.0
@@ -157,7 +157,7 @@ models:
 - model_id: gemini-pro-2.5
   wire_model_id: gemini-2.5-pro
   profile: token_budgets
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   # 2.5 Pro thinks whatever is asked; a budget of 0 is Flash's alone, and budget
   # ``none`` would only send no config and leave it thinking.
   thinking:
@@ -198,7 +198,7 @@ models:
   wire_model_id: gemini-3.8-flash
   profile: no_minimal
   thinking_effort_default: medium
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   prices:
   - service_tier: auto
     request: 0.75
@@ -217,7 +217,7 @@ models:
 - model_id: gemini-flash-3.6
   wire_model_id: gemini-3.6-flash
   thinking_effort_default: medium
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   prices:
   - service_tier: auto
     request: 0.75
@@ -235,7 +235,7 @@ models:
 
 - model_id: gemini-flash-3.0
   wire_model_id: gemini-3-flash-preview
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   prices:
   - service_tier: auto
     request: 0.5
@@ -247,7 +247,7 @@ models:
 - model_id: gemini-flash-2.5
   wire_model_id: gemini-2.5-flash
   profile: token_budgets
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   prices:
   - service_tier: auto
     request: 0.3
@@ -259,7 +259,7 @@ models:
 - model_id: gemini-flash-lite-3.5
   wire_model_id: gemini-3.5-flash-lite
   thinking_effort_default: min
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   prices:
   - service_tier: auto
     request: 0.3
@@ -271,7 +271,7 @@ models:
 - model_id: gemini-flash-lite-3.1
   wire_model_id: gemini-3.1-flash-lite
   thinking_effort_default: min
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   prices:
   - service_tier: auto
     request: 0.25
@@ -286,7 +286,7 @@ models:
   # "Model does not think" unless given a budget.
   thinking_effort_default: none
   thinking_budget_default: none
-  knowledge_cutoff: '2025-01'
+  knowledge_cutoff: '2025-01-01'
   prices:
   - service_tier: auto
     request: 0.1
@@ -299,9 +299,6 @@ providers:
   google:
     sends: [thinking_effort, thinking_budget, thinking_output]
     retries_internally: true
-  # ``agy``, as ``agy --model`` takes ids (1.5.14, 2026-11-22): each suffixed by its
-  # effort (``gemini-4-neon-high``), as sagent sends it. A model the login is not
-  # offered is refused as "not recognized as a known model", naming those it is.
   google-cli:
     sends: [thinking_effort]
     roles:

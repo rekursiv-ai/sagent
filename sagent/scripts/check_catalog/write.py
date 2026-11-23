@@ -16,9 +16,6 @@ family's newest-first order, or first in ``models`` for a new family. It names
 the profile whose levels it has, and the anchored window it shares when the
 anchor comes before it, rather than restating either.
 
-A section's ``omits`` follow what its login is served: an omitted model now
-served loses its entry, and a served one no longer listed gains one.
-
 Typical usage example:
 
   left = write(files(google) / "google.yaml", mismatches)  # What it could not.
@@ -28,8 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-import sys
 
 from treekle import from_plain
 
@@ -57,8 +52,8 @@ def write(path: Path, findings: Sequence[Finding]) -> list[Finding]:
 
     Args:
       path: The vendor's catalog document.
-      findings: Facts whose source differs from the catalog: values, models it
-        lacks (``catalogued``), and what a section serves (``served``).
+      findings: Facts whose source differs from the catalog: values, and models
+        it lacks (``catalogued``).
 
     Returns:
       left: The findings it could not write, in order.
@@ -82,16 +77,6 @@ def _edited(text: str, finding: Finding) -> str | None:
     lines = text.splitlines(keepends=True)
     root = yaml.compose(text)
     assert isinstance(root, yaml.MappingNode)
-    if finding.field == "served":
-        served = _served(
-            lines,
-            root,
-            section=finding.provider,
-            model_id=finding.model_id,
-            serve=finding.source == "yes",
-            why=f"not listed by {finding.url}",
-        )
-        return None if served is None else "".join(served)
     if finding.field == "catalogued":
         return (
             None if finding.row is None else "".join(_added(lines, root, finding.row))
@@ -444,53 +429,6 @@ def _window(layer: Mapping[str, object]) -> dict[str, object]:
     return from_plain(layer.get("limits", {}), dict[str, object])
 
 
-def _served(
-    lines: list[str],
-    root: yaml.MappingNode,
-    *,
-    section: str,
-    model_id: str,
-    serve: bool,
-    why: str,
-) -> list[str] | None:
-    """Return ``lines`` with ``section`` serving ``model_id``, or omitting it for ``why``."""
-    found = _get(_get(root, "providers"), section)
-    if not isinstance(found, yaml.MappingNode) or not found.value:
-        return None
-    omits = _get(found, "omits")
-    entries = omits.value if isinstance(omits, yaml.MappingNode) else []
-    if serve:
-        removed = [(k, v) for k, v in entries if _spells(k, model_id)]
-        # Every line of an omit goes: a reason may run over several.
-        gone = {
-            line
-            for k, v in removed
-            for line in range(position(k).line, position(v, end=True).line + 1)
-        }
-        opened = _key(found, "omits")
-        if removed and len(removed) == len(entries) and opened is not None:
-            gone.add(position(opened).line)
-        return [line for i, line in enumerate(lines) if i not in gone]
-    key_column = position(found.value[0][0]).column
-    if entries:
-        last = position(entries[-1][1], end=True).line
-        column = position(entries[0][0]).column
-        return [*lines[: last + 1], _entry(model_id, why, column), *lines[last + 1 :]]
-    models = _key(found, "models")
-    at = (
-        position(models).line
-        if models is not None
-        else max(position(leaf, end=True).line for leaf in _leaves(found)) + 1
-    )
-    opened = f"{' ' * key_column}omits:\n"
-    return [*lines[:at], opened, _entry(model_id, why, key_column + 2), *lines[at:]]
-
-
-def _entry(model_id: str, why: str, column: int) -> str:
-    """Return one ``omits`` line at ``column``."""
-    return f"{' ' * column}{model_id}: {_spelled(why)}\n"
-
-
 def _starts_at(
     layer: Mapping[str, object],
     key: str,
@@ -521,10 +459,9 @@ def _scalar(value: object) -> str:
     return str(value).lower() if isinstance(value, bool) else f"{value:_}"
 
 
-def _spelled(value: float | str) -> str:
-    """Return ``value`` as YAML's own representer spells it: ``1.0e-05``, a quoted ``a: b``."""
-    # Unbounded width: a long reason is one line, never folded onto the next.
-    return yaml.safe_dump(value, width=sys.maxsize).split("\n")[0]
+def _spelled(value: float) -> str:
+    """Return ``value`` as YAML's own representer spells it: ``1.0e-05``."""
+    return yaml.safe_dump(value).split()[0]
 
 
 def _value(field: str, source: str) -> str:

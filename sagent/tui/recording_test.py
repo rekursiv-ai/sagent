@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.recording import PrintedEntry, RecordingPrinter
 from sagent.tui.types import Header, Printer
+
+
+if TYPE_CHECKING:
+    import pytest
 
 
 _SHOWN = ToolDisplay(output=DisplaySpec(lines=None))
@@ -55,6 +61,20 @@ def test_what_it_drew_is_kept_at_its_width() -> None:
     printer = RecordingPrinter(width=12)
     printer.note("a" * 20)
     assert printer.text == "a" * 12 + "\n" + "a" * 8 + "\n"
+    printer = RecordingPrinter()
+    printer.note("a" * 81)
+    assert printer.text == "a" * 80 + "\n" + "a\n"
+
+
+def test_what_it_drew_is_plain_where_the_environment_forces_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TTY_COMPATIBLE", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    printer = RecordingPrinter()
+    printer.error("e")
+    assert printer.text == "  ✗ e\n"
 
 
 def test_reasoning_is_hidden_unless_asked_for_as_the_console_printer_s_is() -> None:

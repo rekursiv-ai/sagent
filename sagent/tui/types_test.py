@@ -268,10 +268,10 @@ def test_a_more_line_after_a_row_fits_the_rest_lead() -> None:
 
 def test_a_row_wider_than_the_console_is_neither_wrapped_nor_cut() -> None:
     console = Console(file=io.StringIO(), width=8, color_system=None)
-    hang(console, Text("a" * 18), first=Text("> "), rest=Text("  "), width=20)
+    hang(console, Text("aa bb cc dd ee"), first=Text("> "), rest=Text("  "), width=20)
     file = console.file
     assert isinstance(file, io.StringIO)
-    assert file.getvalue().splitlines() == ["> " + "a" * 18]
+    assert file.getvalue().splitlines() == ["> aa bb cc dd ee"]
 
 
 def test_a_more_line_alone_fits_the_first_lead() -> None:
@@ -331,6 +331,10 @@ def test_a_leading_space_is_no_break_even_where_rows_widen() -> None:
 
 def test_prose_whose_lead_takes_the_row_folds_at_the_edge() -> None:
     assert _hung("ab cd", width=2, prose=True) == _hung("ab cd", width=2)
+
+
+def test_hung_prose_wider_than_its_room_still_takes_a_character_per_row() -> None:
+    assert _hung("中a", width=3, prose=True) == ["> 中", "  a"]
 
 
 if __name__ == "__main__":

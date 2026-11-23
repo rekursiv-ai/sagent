@@ -632,7 +632,13 @@ def test_an_action_s_options_are_its_own_and_those_no_setting_names() -> None:
         )
 
     login = replace(setting("login", valued=False), flags=frozenset({"--headless"}))
-    settings = [login, setting("output", valued=True), setting("zap", valued=False)]
+    settings = [
+        login,
+        setting("output", valued=True),
+        setting("zap", valued=False),
+        setting("theme.added", valued=True),
+        setting("mcp.add", valued=False),
+    ]
     tail = ["--out=x", "--zap", "--zz", "-q", "--", "--after"]
     assert main._action_options(login, tail, settings) == {
         "--headless",
@@ -640,6 +646,12 @@ def test_an_action_s_options_are_its_own_and_those_no_setting_names() -> None:
         "--zz",
     }
     assert main._action_options(login, ["--zz"], settings) == {"--headless", "--zz"}
+    # ``--add`` spells ``theme.added`` by its letters, but names ``mcp.add``: taken
+    # as a setting, it would run that action before this one.
+    assert main._action_options(login, ["--add", "x"], settings) == {
+        "--headless",
+        "--add",
+    }
 
 
 def test_a_session_flag_is_never_abbreviated(
@@ -2272,6 +2284,20 @@ async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
     del script, offline_daemon
 
 
+def test_a_command_moves_each_claude_login_into_its_own_directory(
+    script: _Script,
+) -> None:
+    """``sagent login`` signs in where ``claude`` renews, as a session does."""
+    beside = AnthropicCLI.default_login_path().with_name(".credentials-work.json")
+    beside.parent.mkdir(parents=True)
+    beside.write_text("{}")
+    assert asyncio.run(main._agent_action(["login", "--provider", "signing"])) == 0
+    assert not beside.exists()
+    named = Logins(AnthropicCLI.default_login_path(), own_directory=True).path("work")
+    assert named.read_text() == "{}"
+    del script
+
+
 @pytest.mark.asyncio
 async def test_an_agent_opened_without_the_daemon_starts_and_links_none(
     script: _Script,
@@ -2682,6 +2708,7 @@ async def test_what_the_model_s_name_says_wins_over_a_flag_given_after_it() -> N
         ("--model", "slim/slim-1.0", "--effort", "low"),
         ("--effort", "low", "--model", "slim/slim-1.0"),
         ("--provider", "slim", "--effort", "low"),
+        ("--effort", "low", "--provider", "slim"),
         ("--provider", "slim", "--model", "slim-1.0", "--effort", "low"),
         ("--model", "slim-1.0", "--effort", "low", "--provider", "slim"),
     ],
@@ -3892,16 +3919,20 @@ async def test_run_reports_a_failing_command_and_goes_on(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+
     class _Broken(Commands):
         @override
         async def __call__(self, line: str) -> bool:
             if line == "/boom":
                 # Leaves run's observers gone too: its cleanup must not trip.
                 self.agent.runtime.observers.clear()
-                raise RuntimeError("kaboom")
+                raise RuntimeError(f"kaboom {words}")
             return await super().__call__(line)
 
     monkeypatch.setattr(main, "Commands", _Broken)
+    # Narrow, so the sentence wraps: between words, never inside one.
+    monkeypatch.setenv("COLUMNS", "30")
     screen = io.StringIO()
     async with Agent(model=ScriptedProvider()["scripted"]) as agent:
         with (
@@ -3918,7 +3949,9 @@ async def test_run_reports_a_failing_command_and_goes_on(
                 ),
                 timeout=5,
             )
-    assert "✗ RuntimeError: kaboom" in screen.getvalue()
+    shown = screen.getvalue()
+    assert "✗ RuntimeError: kaboom" in shown
+    assert set(words.split()) <= set(shown.split())
 
 
 @pytest.mark.asyncio
@@ -4130,6 +4163,8 @@ def test_help_opens_with_the_module_s_summary(
     assert "python -m sagent mcp login linear --headless" in out
     assert "``sagent mcp add ARGS``, each with ``--help``" in " ".join(out.split())
     assert "Every setting ``/help`` lists is a flag too" in out
+    # Set only by the terminal that starts a host, never typed.
+    assert "--hosted-session" not in out
 
 
 @pytest.mark.parametrize("tool", _DEFAULT_TOOLS)
@@ -5159,13 +5194,35 @@ async def test_a_host_that_does_not_start_says_where_to_look(
     ready: bool | None,
     why: str,
 ) -> None:
-    monkeypatch.setattr(main, "launch", partial(_launched, [], ready=ready))
-    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    launched: list[tuple[Path, tuple[int, int]]] = []
+    measured: list[int] = []
+
+    def launch(
+        address: Path,
+        command: Sequence[str],
+        *,
+        log: Path,
+        winsize: tuple[int, int],
+        timeout_sec: float,
+    ) -> bool | None:
+        del address, command, timeout_sec
+        launched.append((log, winsize))
+        return ready
+
+    def terminal_size(fd: int) -> tuple[int, int]:
+        measured.append(fd)
+        return (33, 99)
+
+    monkeypatch.setattr(main, "launch", launch)
+    monkeypatch.setattr(main, "terminal_size", terminal_size)
+    # The host's terminal takes the size of the one stdin is.
+    monkeypatch.setattr(sys, "stdin", _Terminal(9))
     journal = tmp_path / "000000000002" / "session.jsonl"
 
     assert await _resume(journal, command=["unused"]) == 1
     log = main._host_address(journal).with_suffix(".log")
     assert capsys.readouterr().err == f"Error: the session's host {why}; see {log}\n"
+    assert (launched, measured) == ([(log, (33, 99))], [9])
 
 
 # Without ``/proc/locks``, as on macOS, the kernel names no holder, so ``main`` is told
@@ -5371,7 +5428,11 @@ def test_a_holder_the_kernel_does_not_name_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "status", "attached"),
-    [("a", 7, [(False, True)]), ("r", 7, [(True, False)]), ("q", 0, [])],
+    [
+        (" Attach\n", 7, [(False, True)]),
+        ("read-only", 7, [(True, False)]),
+        ("q", 0, []),
+    ],
     ids=["take-over", "read-only", "quit"],
 )
 async def test_a_session_another_terminal_drives_asks_how_to_join(
@@ -5495,20 +5556,28 @@ def test_a_host_another_terminal_started_meanwhile_is_joined(
     """Two terminals launch at once; the one whose host lost joins the winner's."""
     asked: list[str] = []
     joined: list[tuple[bool, bool]] = []
-    monkeypatch.setattr(main, "accepts", partial(_in_turn, iter([False, True])))
+    probed: list[Path] = []
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        main,
+        "accepts",
+        partial(_in_turn, answers=answers, probed=probed),
+    )
     monkeypatch.setattr(main, "launch", partial(_launched, [], ready=False))
     monkeypatch.setattr(main, "terminal_size", _rows_cols)
     monkeypatch.setattr(main, "viewers", partial(_viewers, 1))
     monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
     monkeypatch.setattr(main, "attach", partial(_joined, joined))
 
-    assert main._resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 7
+    journal = tmp_path / "abc123" / "session.jsonl"
+    assert main._resume(journal, command=[]) == 7
     assert len(asked) == 1
     assert joined == [(False, True)]
+    assert probed == [main._host_address(journal)] * 2
 
 
-def _in_turn(answers: Iterator[bool], address: Path) -> bool:
-    del address
+def _in_turn(address: Path, *, answers: Iterator[bool], probed: list[Path]) -> bool:
+    probed.append(address)
     return next(answers)
 
 

@@ -1209,29 +1209,6 @@ providers:
       max_request_bytes: 536_870_912
       max_image_edge_px: 65_535
       truncates_at_context: true
-    # Measured 2026-11-22: a request to each with a ChatGPT login was refused, 400
-    # "The '<id>' model is not supported when using Codex with a ChatGPT account".
-    omits:
-      gpt-5.6: Codex refuses gpt-5.6 for a ChatGPT login (2026-11-22)
-      gpt-5.5: Codex refuses gpt-5.5 for a ChatGPT login (2026-11-22)
-      gpt-pro-5.5: Codex refuses gpt-5.5-pro for a ChatGPT login (2026-11-22)
-      gpt-5.4: Codex refuses gpt-5.4 for a ChatGPT login (2026-11-22)
-      gpt-pro-5.4: Codex refuses gpt-5.4-pro for a ChatGPT login (2026-11-22)
-      gpt-mini-5.4: Codex refuses gpt-5.4-mini for a ChatGPT login (2026-11-22)
-      gpt-nano-5.4: Codex refuses gpt-5.4-nano for a ChatGPT login (2026-11-22)
-      gpt-5.2: Codex refuses gpt-5.2 for a ChatGPT login (2026-11-22)
-      gpt-pro-5.2: Codex refuses gpt-5.2-pro for a ChatGPT login (2026-11-22)
-      gpt-5.1: Codex refuses gpt-5.1 for a ChatGPT login (2026-11-22)
-      gpt-5.0: Codex refuses gpt-5 for a ChatGPT login (2026-11-22)
-      gpt-pro-5.0: Codex refuses gpt-5-pro for a ChatGPT login (2026-11-22)
-      gpt-mini-5.0: Codex refuses gpt-5-mini for a ChatGPT login (2026-11-22)
-      gpt-nano-5.0: Codex refuses gpt-5-nano for a ChatGPT login (2026-11-22)
-      o-3.0: Codex refuses o3 for a ChatGPT login (2026-11-22)
-      o-pro-3.0: Codex refuses o3-pro for a ChatGPT login (2026-11-22)
-      gpt-4.1: Codex refuses gpt-4.1 for a ChatGPT login (2026-11-22)
-      gpt-mini-4.1: Codex refuses gpt-4.1-mini for a ChatGPT login (2026-11-22)
-      gpt-omni-4.0: Codex refuses gpt-4o for a ChatGPT login (2026-11-22)
-      gpt-omni-mini-4.0: Codex refuses gpt-4o-mini for a ChatGPT login (2026-11-22)
     models:
       # Bsearched 2026-11-18: the most input tokens served, by the server's
       # count; one more was refused (ContextOverflowError), as was 1,000,000.

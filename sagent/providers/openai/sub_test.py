@@ -20,6 +20,7 @@ from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.model.types import Request, Response
 from sagent.providers.login import Logins
 from sagent.providers.openai import responses, token_count, wire
+from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.lease import LeasedToken
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources
@@ -90,20 +91,9 @@ def test_the_subscription_serves_its_sections_clamped_models() -> None:
     assert sorted(luna.capability.service_tier) == ["auto", "priority"]
 
 
-def test_the_subscription_serves_what_codex_answers_a_chatgpt_login() -> None:
-    """Measured 2026-11-22: each other catalogued id was refused as not supported."""
-    assert list(OpenAISub()) == [
-        "astra-6.2",
-        "sol-6.2",
-        "astra-6.0",
-        "sol-6.1",
-        "terra-6.1",
-        "sol-6.0",
-        "luna-6.0",
-        "sol-5.6",
-        "luna-5.6",
-        "terra-5.6",
-    ]
+def test_the_subscription_serves_every_catalogued_model() -> None:
+    """What a login is served is Codex's to say, per request: no list is kept."""
+    assert list(OpenAISub()) == list(OpenAI.models())
 
 
 @pytest.mark.parametrize(
