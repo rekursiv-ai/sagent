@@ -35,6 +35,18 @@ from treekle import (
     mutable,
 )
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+    labeled_text,
+)
 from sagent.model import image
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
@@ -47,18 +59,6 @@ from sagent.model.exceptions import (
     RequestTooLargeError,
 )
 from sagent.model.types import Response, TextChunk
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UserMessage,
-    labeled_text,
-)
 
 
 if TYPE_CHECKING:
@@ -66,13 +66,13 @@ if TYPE_CHECKING:
 
     from treekle import MutablePlainTree, PlainTree
 
+    from sagent.journal.types import Attachment, SessionRecord
     from sagent.model.capability import (
         ModelCapability,
         ModelLimits,
         ModelSettings,
     )
     from sagent.model.types import Request
-    from sagent.session.types import Attachment, SessionRecord
 
 
 __all__ = [
@@ -274,9 +274,10 @@ class StreamReader:
 
         """
         if self._blocked is not None:
-            stop_reason = "refusal"
+            stop_reason, stop_details = "refusal", self._blocked
         elif self._finish is not None:
             stop_reason = _stop_reason(self._finish, called=bool(self._calls))
+            stop_details = self._finish if stop_reason == "refusal" else ""
         else:
             raise DisconnectedError("Gemini's stream ended before its reply finished.")
         signed: dict[str, PlainTree] = (
@@ -302,6 +303,7 @@ class StreamReader:
             ]
             * tokens,
             stop_reason=stop_reason,
+            stop_details=stop_details,
         )
 
     def _part(self, part: Mapping[str, object]) -> TextChunk | None:

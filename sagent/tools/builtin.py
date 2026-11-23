@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 from sagent.agent.agents_md import TIERS
 from sagent.host.wire import ToolSpec
-from sagent.session.projects import (
+from sagent.journal.projects import (
     merge_legacy_memories,
     project_dir,
     repo_root,

@@ -59,7 +59,7 @@ from treekle import PlainTree, json_loads, mutable
 from wesearch.fetch.gate import Admission, GatePolicy
 
 from sagent.agent.team import MessageKind
-from sagent.session.types import (
+from sagent.journal.types import (
     KnownToolResult,
     ToolMessage,
     current_plain,

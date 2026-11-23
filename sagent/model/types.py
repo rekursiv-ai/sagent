@@ -24,14 +24,14 @@ import uuid
 
 from treekle import PlainTree
 
-from sagent.model.cost import TokenCost, TokenCount
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     RequestMeasurement,
     SessionRecord,
     Thinking,
     ToolCall,
 )
+from sagent.model.cost import TokenCost, TokenCount
 from sagent.tools.types import Tool
 
 

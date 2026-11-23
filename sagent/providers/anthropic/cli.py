@@ -32,16 +32,7 @@ import tempfile
 
 from treekle import from_plain, json_dumps, json_loads, mutable
 
-from sagent.model import image
-from sagent.model.exceptions import ContextOverflowError, DisconnectedError
-from sagent.providers import anthropic
-from sagent.providers.anthropic import wire
-from sagent.providers.cli_login import cli_sign_in
-from sagent.providers.login import Logins
-from sagent.providers.resources import SharedResources
-from sagent.providers.retry import account_key, retried
-from sagent.providers.table import HasModels
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     Attachment,
@@ -54,6 +45,15 @@ from sagent.session.types import (
     UserMessage,
     labeled_text,
 )
+from sagent.model import image
+from sagent.model.exceptions import ContextOverflowError, DisconnectedError
+from sagent.providers import anthropic
+from sagent.providers.anthropic import wire
+from sagent.providers.cli_login import cli_sign_in
+from sagent.providers.login import Logins
+from sagent.providers.resources import SharedResources
+from sagent.providers.retry import account_key, retried
+from sagent.providers.table import HasModels
 from sagent.types import AsyncResource
 
 
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
     from types import ModuleType
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import (
         ModelCapability,
         ModelLimits,
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
         ToolMount,
         UsageWindow,
     )
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import Tool
 
 

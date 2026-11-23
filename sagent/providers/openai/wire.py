@@ -29,6 +29,14 @@ import uuid
 
 from treekle import ReadError, from_plain, json_loads
 
+from sagent.journal.types import (
+    AgentMessage,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    UserMessage,
+    labeled_text,
+)
 from sagent.model import image
 from sagent.model.exceptions import (
     AuthError,
@@ -40,22 +48,14 @@ from sagent.model.exceptions import (
     RequestTooLargeError,
 )
 from sagent.providers.types import UsageWindow
-from sagent.session.types import (
-    AgentMessage,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    UserMessage,
-    labeled_text,
-)
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 
+    from sagent.journal.types import Attachment, SessionRecord
     from sagent.model.capability import ModelLimits, ThinkingEffort
     from sagent.model.types import Request
-    from sagent.session.types import Attachment, SessionRecord
 
 
 __all__ = [

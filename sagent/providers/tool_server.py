@@ -27,7 +27,7 @@ import uuid
 
 from treekle import PlainTree, immutable
 
-from sagent.session.types import ToolCall
+from sagent.journal.types import ToolCall
 from sagent.types import AsyncResource
 
 
@@ -44,8 +44,8 @@ if TYPE_CHECKING:
     import mcp.types as mcp_types
     import uvicorn
 
+    from sagent.journal.types import ToolMessage
     from sagent.providers.types import ToolMount
-    from sagent.session.types import ToolMessage
     from sagent.tools.types import Tool
 else:
     from wrapt import lazy_import

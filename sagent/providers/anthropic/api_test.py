@@ -12,6 +12,7 @@ from treekle import ReadError, from_plain, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, Attachment, UserMessage
 from sagent.model.exceptions import (
     AuthError,
     ContextOverflowError,
@@ -28,7 +29,6 @@ from sagent.providers.catalog import listings
 from sagent.providers.resources import SharedResources
 from sagent.providers.testing import paused_backoff
 from sagent.providers.types import HasLogin, UsageWindow
-from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
 
 if TYPE_CHECKING:

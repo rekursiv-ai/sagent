@@ -92,7 +92,7 @@ Pass a journal when later runs should resume the conversation:
 ```python
 from pathlib import Path
 
-from sagent.session.jsonl import JsonlJournal
+from sagent.journal.jsonl import JsonlJournal
 
 path = Path("/tmp/sagent-demo/session/session.jsonl")
 async with ModelCatalog() as catalog, JsonlJournal(path) as journal:

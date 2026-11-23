@@ -64,10 +64,10 @@ from sagent.host.wire import (
     encoded,
     received,
 )
+from sagent.journal.types import ToolMessage
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.runtime.exceptions import describe
 from sagent.runtime.types import Stubs
-from sagent.session.types import ToolMessage
 from sagent.tools.builtin import builders
 from sagent.tools.remote import RemoteSession, saved, tls_link
 from sagent.tools.types import ToolContext, settled

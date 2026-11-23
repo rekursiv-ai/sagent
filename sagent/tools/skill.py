@@ -35,8 +35,8 @@ from treekle import ReadError, from_plain
 import yaml
 
 from sagent.agent.agents_md import TIERS, Tier, frontmatter
+from sagent.journal.types import SkillResult
 from sagent.lib.userdirs import data_dir
-from sagent.session.types import SkillResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

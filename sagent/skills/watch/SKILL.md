@@ -24,7 +24,8 @@ Each `[watch]` message holds what is new since the last:
 - `  r<n> <tool summary>` -- a tool call, by the tool's own summary.
 - `r<n> [compact]`, `r<n> [summary]`, `r<n> [clear]`, `r<n> [settings: ...]`,
   `r<n> [reminder] ...`, `r<n> [nudge] ...` -- something changed what it
-  knows or how it runs; a nudge tells it whom it owes a reply.
+  knows or how it runs; a nudge tells it whom it owes a reply. A clear also
+  stops any turn under way.
 - `[failed] ...` -- it stopped on an error.
 - `[halted by user]` -- the user stopped it, and is about to speak: wait for
   them.

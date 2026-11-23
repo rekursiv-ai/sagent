@@ -4,10 +4,10 @@ from dataclasses import replace
 
 import pytest
 
+from sagent.journal.types import AssistantMessage, Thinking, UserMessage
 from sagent.model.types import Request
 from sagent.providers.openai.compat import OpenAIModel
 from sagent.providers.openrouter.api import OpenRouter
-from sagent.session.types import AssistantMessage, Thinking, UserMessage
 
 
 @pytest.mark.asyncio

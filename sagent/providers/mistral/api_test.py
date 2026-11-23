@@ -4,9 +4,9 @@ from dataclasses import replace
 
 import pytest
 
+from sagent.journal.types import AssistantMessage, Thinking
 from sagent.model.types import Request, TextChunk
 from sagent.providers.mistral.api import Mistral
-from sagent.session.types import AssistantMessage, Thinking
 
 
 @pytest.mark.asyncio

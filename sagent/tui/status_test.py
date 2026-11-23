@@ -10,6 +10,14 @@ import asyncio
 
 import pytest
 
+from sagent.journal.types import (
+    Cancelled,
+    Failed,
+    Outcome,
+    Succeeded,
+    ToolCall,
+    UserMessage,
+)
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.exceptions import RateLimitedError
@@ -19,14 +27,6 @@ from sagent.runtime import (
     types,
 )
 from sagent.runtime.runtime import Await, Runtime
-from sagent.session.types import (
-    Cancelled,
-    Failed,
-    Outcome,
-    Succeeded,
-    ToolCall,
-    UserMessage,
-)
 from sagent.tui import status
 from sagent.tui.status import Status, count, elapsed
 

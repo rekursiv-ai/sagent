@@ -11,6 +11,7 @@ from treekle import ReadError, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, Attachment, UserMessage
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
     AuthError,
@@ -27,7 +28,6 @@ from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.providers.testing import paused_backoff
-from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
 
 if TYPE_CHECKING:

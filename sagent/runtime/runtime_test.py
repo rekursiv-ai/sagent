@@ -38,6 +38,30 @@ from treekle import PlainTree
 
 import pytest
 
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    BackgroundTaskResult,
+    BashResult,
+    Cancelled,
+    ContextCompaction,
+    Failed,
+    ModelIdle,
+    SessionContext,
+    SessionRecord,
+    Succeeded,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+    as_sent,
+    labeled_text,
+    late_messages,
+)
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
@@ -123,30 +147,6 @@ from sagent.runtime.types import (
     ToolWakeSchedules,
     UserMessageCompleted,
     WakeSchedule,
-)
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    BackgroundTaskResult,
-    BashResult,
-    Cancelled,
-    ContextCompaction,
-    Failed,
-    ModelIdle,
-    SessionContext,
-    SessionRecord,
-    Succeeded,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-    as_sent,
-    labeled_text,
-    late_messages,
 )
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
@@ -988,6 +988,47 @@ def test_a_result_note_ends_each_result_sent_and_none_kept() -> None:
 
     assert [r.text() for r in sent] == ["out\n[3 tok]", "tiny"]
     assert list(rt.tape.context().messages[2:]) == list(entries[2:])
+    # What sizes a block reads what the request sends.
+    assert rt.sent(rt.tape.context().messages) == rt.request().records
+
+
+def test_a_drop_takes_what_it_stubs_off_the_queue() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    for entry in (
+        _user("go"),
+        reply(calls=[call("echo", "c1"), call("echo", "c2")]),
+        ToolMessage(call_id="c1", state="done", stdout=("x" * 400,)),
+        ToolMessage(call_id="c2", state="done", stdout=("y" * 400,)),
+    ):
+        rt.tape.append_history(entry)
+    rt.queued.update({"c1": "spent", "c2": "spent too"})
+
+    rt.drop([2])
+
+    assert rt.queued == {"c2": "spent too"}
+
+
+@pytest.mark.asyncio
+async def test_with_no_pruner_the_queue_drops_before_the_next_call() -> None:
+    """Gone outputs leave the queue; the rest drop, though nothing prices them."""
+    h = Harness(reply("ok"))
+    for entry in (
+        _user("go"),
+        reply(calls=[call("echo", "c1")]),
+        ToolMessage(call_id="c1", state="done", stdout=("x" * 400,)),
+        reply("read it"),
+    ):
+        h.runtime.tape.append_history(entry)
+    h.runtime.queued.update({"c1": "spent", "gone": "compacted away"})
+
+    async with h:
+        h.push(_user("next"))
+        await h.seen(AgentIdle)
+
+    (request,) = h.provider.requests
+    (sent,) = [r for r in request.records if isinstance(r, ToolMessage)]
+    assert sent.text() == h.runtime.stubs.pruned
+    assert h.runtime.queued == {}
 
 
 @pytest.mark.asyncio
@@ -4512,7 +4553,14 @@ async def test_the_gate_compacts_at_most_twice_before_calling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_compaction_is_not_tried_again_until_the_user_writes() -> None:
+@pytest.mark.parametrize(
+    "message",
+    [_user("again"), AgentMessage(sender="parent", content="again")],
+    ids=["user", "agent"],
+)
+async def test_a_failed_compaction_is_not_tried_again_until_a_message_comes(
+    message: UserMessage | AgentMessage,
+) -> None:
     """A reply leaves the context it could not compact; each one retried it before."""
     summarizer = Summarizer(error=RefusedError("refused"))
     async with Harness(
@@ -4526,10 +4574,39 @@ async def test_a_failed_compaction_is_not_tried_again_until_the_user_writes() ->
         h.push(_user("go"))
         await h.seen(_answered)
         assert len(summarizer.instructions) == 1
-        h.push(_user("again"))
+        h.push(message)
         await h.seen(_answered, 2)
     assert len(summarizer.instructions) == 2
     assert len(h.requests()) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_transient_compaction_failure_is_tried_again_at_once() -> None:
+    """Waiting may cure a rate limit or a dropped stream; nothing blocks the next."""
+    summarizer = Summarizer(error=OverloadedError("busy"))
+    async with Harness(reply("one"), compactor=summarizer) as h:
+        h.runtime.compact_due = lambda: True
+        h.push(_user("go"))
+        await h.seen(_answered)
+    assert len(summarizer.instructions) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_retry_lets_a_failed_compaction_be_tried_again() -> None:
+    """A retry follows a sign-in or a switch of model, either of which may cure it."""
+    summarizer = Summarizer(error=RefusedError("refused"))
+    async with Harness(
+        ContextOverflowError("too long"),
+        reply("ok"),
+        compactor=summarizer,
+    ) as h:
+        h.runtime.compact_due = lambda: True
+        h.push(_user("go"))
+        await h.seen(_turn_failed)
+        assert len(summarizer.instructions) == 1
+        h.push(ModelRetry())
+        await h.seen(_answered)
+    assert len(summarizer.instructions) == 2
 
 
 @pytest.mark.asyncio

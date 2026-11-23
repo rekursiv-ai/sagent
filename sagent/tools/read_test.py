@@ -16,7 +16,7 @@ from PIL import Image
 import pypdfium2 as pdfium
 import pytest
 
-from sagent.session.types import LineSpan, ReadResult, ToolMessage
+from sagent.journal.types import LineSpan, ReadResult, ToolMessage
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.read import Read, _count
 from sagent.tools.types import ToolContext, parse, settled

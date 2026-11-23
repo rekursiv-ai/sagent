@@ -30,12 +30,12 @@ from treekle import PlainTree, json_loads
 import mcp.types as mcp_types
 import pytest
 
+from sagent.journal.projects import project_dir
+from sagent.journal.types import Attachment, McpResult
 from sagent.lib.testing.import_graph import Counted, import_graph
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.providers.testing import refuse_browsers
 from sagent.providers.tool_server import McpToolServer
-from sagent.session.projects import project_dir
-from sagent.session.types import Attachment, McpResult
 from sagent.tools import mcp, mcp_auth
 from sagent.tools.display import ToolDisplay
 from sagent.tools.function import tool

@@ -18,9 +18,9 @@ import math
 
 from treekle import json_dumps, mutable
 
+from sagent.journal.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 from sagent.model import image
 from sagent.providers.openai import wire
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 
 
 if TYPE_CHECKING:
@@ -28,9 +28,9 @@ if TYPE_CHECKING:
 
     import tiktoken
 
+    from sagent.journal.types import Attachment
     from sagent.model.capability import ModelCapability
     from sagent.model.types import Request
-    from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
 

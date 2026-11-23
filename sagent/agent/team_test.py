@@ -8,7 +8,7 @@ from collections import deque
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 from unittest import mock
 from unittest.mock import Mock
 
@@ -23,6 +23,20 @@ import pytest
 from sagent.agent.agent import Agent
 from sagent.agent.team import ChildSpec, MessageKind, Team
 from sagent.agent.types import Session
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    Cancelled,
+    Failed,
+    ModelIdle,
+    Succeeded,
+    SystemMessage,
+    ToolCall,
+    UncategorizedRecord,
+    UserMessage,
+)
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import (
     AuthError,
@@ -43,20 +57,6 @@ from sagent.providers.login import Logins, Spent
 from sagent.providers.testing import first_live, window
 from sagent.runtime import types
 from sagent.runtime.runtime import Runtime
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    AssistantMessage,
-    Cancelled,
-    Failed,
-    ModelIdle,
-    Succeeded,
-    SystemMessage,
-    ToolCall,
-    UncategorizedRecord,
-    UserMessage,
-)
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.types import ToolContext
 
@@ -707,48 +707,56 @@ def test_a_reply_owed_an_unwatched_user_is_dropped(tmp_path: Path) -> None:
     assert team.owes("a") == {}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("event", "said"),
-    [
+# How the runtime tells each way a turn stops short: a halt and a clear each end
+# the turn cancelled, then say which of them it was.
+_STOPS: Final = (
+    (
+        (ModelIdle(outcome=Failed(exception=ValueError("down"))),),
+        "failed] ValueError: down",
+    ),
+    (
         (
-            ModelIdle(outcome=Failed(exception=ValueError("down"))),
-            "[a failed] ValueError: down",
+            ModelIdle(outcome=Cancelled()),
+            types.ModelHaltCompleted(outcome=Succeeded(value=None)),
         ),
-        (ModelIdle(outcome=Cancelled()), "[a halted]"),
-    ],
+        "halted]",
+    ),
+    (
+        (
+            ModelIdle(outcome=Cancelled()),
+            types.SessionClearCompleted(outcome=Succeeded(value=None)),
+        ),
+        "cleared]",
+    ),
 )
-async def test_a_debtor_that_fails_or_halts_answers_for_itself(
+_STOP_IDS: Final = ("failed", "halted", "cleared")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("events", "said"), _STOPS, ids=_STOP_IDS)
+async def test_a_debtor_that_stops_short_answers_for_itself(
     tmp_path: Path,
-    event: types.RuntimeEvent,
+    events: tuple[types.RuntimeEvent, ...],
     said: str,
 ) -> None:
     team = _family(tmp_path)
     team.send("Agent", "a", "x")
 
     team["a"].runtime.publish(types.ModelResponseStarted())
-    team["a"].runtime.publish(event)
+    for event in events:
+        team["a"].runtime.publish(event)
 
     (told,) = team["Agent"].runtime.inbox.drain_nowait()
     assert isinstance(told, AgentMessage)
-    assert told.content == said
+    assert told.content == f"[a {said}"
     assert team.owes("a") == {}
 
 
-@pytest.mark.parametrize(
-    ("event", "said"),
-    [
-        (
-            ModelIdle(outcome=Failed(exception=ValueError("down"))),
-            "[Agent failed] ValueError: down",
-        ),
-        (ModelIdle(outcome=Cancelled()), "[Agent halted]"),
-    ],
-)
+@pytest.mark.parametrize(("events", "said"), _STOPS, ids=_STOP_IDS)
 @pytest.mark.parametrize("watching", [True, False])
 def test_a_watched_debtor_that_stops_leaves_its_watcher_to_the_feed(
     tmp_path: Path,
-    event: types.RuntimeEvent,
+    events: tuple[types.RuntimeEvent, ...],
     said: str,
     watching: bool,
 ) -> None:
@@ -761,12 +769,33 @@ def test_a_watched_debtor_that_stops_leaves_its_watcher_to_the_feed(
     team.send("watcher", "Agent", "check x")
 
     team["Agent"].runtime.publish(types.ModelResponseStarted())
-    team["Agent"].runtime.publish(event)
+    for event in events:
+        team["Agent"].runtime.publish(event)
     _complete_responses_and_idle(team["Agent"], reply("back"))
 
     assert team.owes("Agent") == {}
     assert _nudged(team["Agent"]) == 0
-    assert _told(team["watcher"]) == ([] if watching else [("Agent", said)])
+    assert _told(team["watcher"]) == ([] if watching else [("Agent", f"[Agent {said}")])
+
+
+def test_a_watched_debtor_with_no_agentsend_tells_its_watcher_why(
+    tmp_path: Path,
+) -> None:
+    """The feed shows only that it idled; the team's answer says why no reply came."""
+    team = _team()
+    mute = _agent(tmp_path, team)
+    mute.allowed = frozenset()
+    _ = team.join(mute)
+    _ = team.join(_agent(tmp_path, team), label="watcher")
+    team.watch("watcher", "Agent")
+    team.send("watcher", "Agent", "check x")
+
+    _idle(mute, "would answer")
+
+    assert _told(team["watcher"]) == [
+        ("Agent", "[Agent failed] it has no AgentSend to reply with"),
+    ]
+    assert team.owes("Agent") == {}
 
 
 # Only the runtime knows whether a turn stopped: a compaction cancels a call, a
@@ -779,10 +808,21 @@ def test_a_watched_debtor_that_stops_leaves_its_watcher_to_the_feed(
             outcome=Failed(exception=ValueError("down")),
         ),
         types.ModelHalt(),
+        types.ModelHaltCompleted(outcome=Succeeded(value=None)),
         types.SessionClearCompleted(outcome=Succeeded(value=None)),
         ModelIdle(outcome=Succeeded(value=None)),
+        # Cancelled says it stopped short, not what stopped it: what follows does.
+        ModelIdle(outcome=Cancelled()),
     ],
-    ids=["a-call-cancelled", "a-call-failed", "a-halt-asked", "a-clear", "finished"],
+    ids=[
+        "a-call-cancelled",
+        "a-call-failed",
+        "a-halt-asked",
+        "a-halt-of-nothing",
+        "a-clear",
+        "finished",
+        "cancelled-unexplained",
+    ],
 )
 def test_nothing_but_a_turn_that_stopped_short_ends_a_run_for_its_agent(
     tmp_path: Path,
@@ -1128,19 +1168,10 @@ def test_no_debtor_is_answered_for_whether_it_owes_its_parent_or_another(
     assert _told(team["b"]) == []
 
 
-@pytest.mark.parametrize(
-    ("event", "said"),
-    [
-        (
-            ModelIdle(outcome=Failed(exception=ValueError("down"))),
-            "[a failed] ValueError: down",
-        ),
-        (ModelIdle(outcome=Cancelled()), "[a halted]"),
-    ],
-)
-def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
+@pytest.mark.parametrize(("events", "said"), _STOPS, ids=_STOP_IDS)
+def test_a_child_that_stops_short_owing_no_one_tells_its_parent(
     tmp_path: Path,
-    event: types.RuntimeEvent,
+    events: tuple[types.RuntimeEvent, ...],
     said: str,
 ) -> None:
     """It waits for the user then, so it never idles; the parent hears it stopped."""
@@ -1152,25 +1183,19 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
             outcome=Succeeded(value=reply(calls=[_send("Agent")])),
         ),
     )
-    a.publish(event)
+    for event in events:
+        a.publish(event)
+    # A later halt of an agent at rest stopped nothing: it is not told again.
+    a.publish(types.ModelHaltCompleted(outcome=Cancelled()))
     _complete_responses_and_idle(team["a"], reply("back"))
 
-    assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle] back")]
+    assert _told(team["Agent"]) == [("a", f"[a {said}"), ("a", "[a is idle] back")]
 
 
-@pytest.mark.parametrize(
-    ("event", "said"),
-    [
-        (
-            ModelIdle(outcome=Failed(exception=ValueError("down"))),
-            "[a failed] ValueError: down",
-        ),
-        (ModelIdle(outcome=Cancelled()), "[a halted]"),
-    ],
-)
-def test_what_a_child_said_before_it_failed_is_not_told_again(
+@pytest.mark.parametrize(("events", "said"), _STOPS, ids=_STOP_IDS)
+def test_what_a_child_said_before_it_stopped_is_not_told_again(
     tmp_path: Path,
-    event: types.RuntimeEvent,
+    events: tuple[types.RuntimeEvent, ...],
     said: str,
 ) -> None:
     team = _family(tmp_path)
@@ -1179,10 +1204,11 @@ def test_what_a_child_said_before_it_failed_is_not_told_again(
     a.publish(
         types.ModelResponseCompleted(outcome=Succeeded(value=reply("half done"))),
     )
-    a.publish(event)
+    for event in events:
+        a.publish(event)
     _complete_responses_and_idle(team["a"], reply(calls=[call("Read")]))
 
-    assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle]")]
+    assert _told(team["Agent"]) == [("a", f"[a {said}"), ("a", "[a is idle]")]
 
 
 def test_an_idle_child_tells_its_parent_all_its_reply_said(tmp_path: Path) -> None:

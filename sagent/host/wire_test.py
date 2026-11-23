@@ -62,7 +62,7 @@ from sagent.host.wire import (
     ping,
     received,
 )
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AgentSpawnResult,
     Attachment,

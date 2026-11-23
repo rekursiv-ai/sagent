@@ -18,11 +18,11 @@ import re
 
 from treekle import json_dumps, json_loads
 
+from sagent.journal.types import AssistantMessage, ToolCall, ToolMessage
 from sagent.model.exceptions import DisconnectedError
 from sagent.providers import replicate
 from sagent.providers.openai import wire
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
-from sagent.session.types import AssistantMessage, ToolCall, ToolMessage
 
 
 if TYPE_CHECKING:

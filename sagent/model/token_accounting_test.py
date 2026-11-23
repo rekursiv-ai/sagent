@@ -15,20 +15,9 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.agents_md import AgentsMdConfig
-from sagent.model.capability import ModelCapability
-from sagent.model.cost import TokenCount
-from sagent.model.scripted import ScriptedProvider, reply
-from sagent.model.token_accounting import (
-    TokenAccounting,
-    _prefix,
-    bound,
-    digest,
-    stamped,
-)
-from sagent.model.types import Request, Response
-from sagent.session.jsonl import JsonlJournal, read_record, record_line
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.journal.jsonl import JsonlJournal, read_record, record_line
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AssistantMessage,
     Attachment,
     ContextCompaction,
@@ -43,6 +32,17 @@ from sagent.session.types import (
     UserMessage,
     stored_plain,
 )
+from sagent.model.capability import ModelCapability
+from sagent.model.cost import TokenCount
+from sagent.model.scripted import ScriptedProvider, reply
+from sagent.model.token_accounting import (
+    TokenAccounting,
+    _prefix,
+    bound,
+    digest,
+    stamped,
+)
+from sagent.model.types import Request, Response
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
 from sagent.tools.types import (

@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 
+from sagent.journal.types import GlobResult
 from sagent.lib.files.glob import GlobError, glob, in_path_order, streamed_paths
-from sagent.session.types import GlobResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,

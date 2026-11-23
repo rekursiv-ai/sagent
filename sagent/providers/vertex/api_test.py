@@ -10,13 +10,13 @@ from treekle import json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import ToolCall, UserMessage
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.model.types import Request, Response
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.providers.vertex.api import Vertex
-from sagent.session.types import ToolCall, UserMessage
 
 
 if TYPE_CHECKING:

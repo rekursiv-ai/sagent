@@ -14,6 +14,16 @@ from PIL import Image
 
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    TokenUsage,
+    UserMessage,
+)
 from sagent.model.capability import ModelLimits
 from sagent.model.exceptions import (
     AuthError,
@@ -27,16 +37,6 @@ from sagent.model.exceptions import (
 from sagent.model.types import Request
 from sagent.providers.openai import wire
 from sagent.providers.types import UsageWindow
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    TokenUsage,
-    UserMessage,
-)
 
 
 if TYPE_CHECKING:

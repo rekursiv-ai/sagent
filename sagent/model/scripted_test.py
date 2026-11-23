@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from sagent.journal.types import (
+    AssistantMessage,
+    Attachment,
+    UserMessage,
+)
 from sagent.model import scripted
 from sagent.model.capability import (
     ModelCapability,
@@ -19,11 +24,6 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
-from sagent.session.types import (
-    AssistantMessage,
-    Attachment,
-    UserMessage,
-)
 
 
 def test_a_reply_may_be_computed_from_the_request() -> None:

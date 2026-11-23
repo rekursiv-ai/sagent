@@ -1,7 +1,7 @@
 """A journal stored as one JSON line per record, locked to one process at a time.
 
-Each line is a record as :func:`~sagent.session.types.stored_plain` writes
-it, read back through :func:`~sagent.session.types.stored_record`.
+Each line is a record as :func:`~sagent.journal.types.stored_plain` writes
+it, read back through :func:`~sagent.journal.types.stored_record`.
 
 Typical usage example:
 
@@ -27,9 +27,7 @@ import re
 
 from treekle import json_loads
 
-from sagent.lib.files.owner_only import open_private
-from sagent.lib.posix.pids import lock_holder
-from sagent.session.types import (
+from sagent.journal.types import (
     FORMER_RESULT_KINDS,
     ContextClear,
     IncompleteRecord,
@@ -39,6 +37,8 @@ from sagent.session.types import (
     stored_plain,
     stored_record,
 )
+from sagent.lib.files.owner_only import open_private
+from sagent.lib.posix.pids import lock_holder
 from sagent.types import AsyncResource
 
 

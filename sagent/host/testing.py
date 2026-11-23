@@ -26,9 +26,9 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import Team
 from sagent.host.session import serve
 from sagent.host.wire import MAX_LINE_BYTES
+from sagent.journal.types import UncategorizedToolResult
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Tool,

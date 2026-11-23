@@ -10,6 +10,19 @@ import logging
 
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    ContextCompaction,
+    Failed,
+    SessionContext,
+    Succeeded,
+    SystemMessage,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+    as_sent,
+)
 from sagent.model.scripted import call, reply
 from sagent.model.types import Response
 from sagent.runtime import context
@@ -18,6 +31,7 @@ from sagent.runtime.context import (
     Tape,
     alive_splices,
     masked_refs_by_alive,
+    prunable,
     resolve_context,
     validate_context,
     widen_barrier_mask,
@@ -36,19 +50,6 @@ from sagent.runtime.types import (
     SessionCompacted,
     SessionCompactStarted,
     Stubs,
-)
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    ContextCompaction,
-    Failed,
-    SessionContext,
-    Succeeded,
-    SystemMessage,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-    as_sent,
 )
 
 
@@ -1267,6 +1268,44 @@ def test_a_tape_reads_as_the_sequence_of_its_records() -> None:
     assert tape[0] == ReferrableTapeEvent(ref=first, event=_user("a"))
     assert list(tape[1:]) == [tape[1]]
     assert list(tape) == [tape[0], tape[1]]
+
+
+@pytest.mark.parametrize(
+    ("entry", "can"),
+    [
+        (UserMessage(content="x" * 400), False),
+        (SystemMessage(content="x" * 400, subtype="reminder"), False),
+        (
+            ToolMessage(
+                call_id="c1",
+                state="pending",
+                stdout=("[talk c1 still running after 15s]\n" + "x" * 400,),
+            ),
+            True,
+        ),
+        (ToolMessage(call_id="c1", state="pending"), False),
+        (ToolMessage(call_id="c", state="cancelled", shown=Stubs().cancelled), False),
+        (ToolMessage(call_id="c", state="done", stdout=("tiny",)), False),
+        (ToolMessage(call_id="c", state="done", stdout=("sixsix",)), False),
+        (ToolMessage(call_id="c", state="done", stdout=("x" * 400,)), True),
+    ],
+    ids=[
+        "user",
+        "reminder",
+        "wake",
+        "empty-wake",
+        "killed",
+        "small",
+        "as-long-as-the-stub",
+        "result",
+    ],
+)
+def test_only_a_tool_s_output_that_a_drop_shrinks_is_prunable(
+    entry: ModelContextEvent,
+    *,
+    can: bool,
+) -> None:
+    assert prunable(entry, stub="[gone]") is can
 
 
 if __name__ == "__main__":

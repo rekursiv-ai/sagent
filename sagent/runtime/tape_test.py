@@ -17,6 +17,20 @@ from hypothesis import (
 
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextCompaction,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+    as_sent,
+)
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.scripted import call, reply
 from sagent.model.types import Response
@@ -40,20 +54,6 @@ from sagent.runtime.tape import (
     sent_records,
     splice_safe_repair,
     unpaired_call_ids,
-)
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    ContextCompaction,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-    as_sent,
 )
 
 
@@ -1034,13 +1034,14 @@ def test_model_turn_merge_sums_usage_and_keeps_the_last_stop() -> None:
         "b",
         tokens=TokenCount(request=10),
         spend=TokenCost(response=0.25),
-        stop_reason="max_tokens",
+        stop_reason="refusal",
+        stop_details="cyber: Blocked.",
     )
     (merged,) = coalesce_roles((first, second))
     assert isinstance(merged, Response)
     assert merged.tokens == TokenCount(request=11, response=2)
     assert merged.spend == TokenCost(request=0.5, response=0.25)
-    assert merged.stop_reason == "max_tokens"
+    assert (merged.stop_reason, merged.stop_details) == ("refusal", "cyber: Blocked.")
     assert _texts([merged]) == ["ab"]
 
 

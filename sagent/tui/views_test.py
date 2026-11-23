@@ -18,14 +18,14 @@ import pytest_asyncio
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
-from sagent.model.scripted import ScriptedProvider, reply
-from sagent.providers.catalog import ModelCatalog
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AssistantMessage,
     UserMessage,
 )
+from sagent.model.scripted import ScriptedProvider, reply
+from sagent.providers.catalog import ModelCatalog
+from sagent.runtime import types
 from sagent.tui import views as views_module
 from sagent.tui.console import Title
 from sagent.tui.prompt import Navigation

@@ -22,6 +22,19 @@ from treekle import PlainTree, json_dumps, json_loads
 import pytest
 import pytest_asyncio
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model.cost import (
     PriceCatalog,
     PriceCondition,
@@ -38,19 +51,6 @@ from sagent.providers import cli_login
 from sagent.providers.google import cli
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
@@ -59,9 +59,9 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import ThinkingEffort
     from sagent.providers.types import ToolMount
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 

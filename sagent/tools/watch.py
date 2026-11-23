@@ -24,9 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sagent.agent.team import Team
-from sagent.runtime import types
-from sagent.runtime.exceptions import describe, local_time
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     AssistantMessage,
@@ -41,12 +39,14 @@ from sagent.session.types import (
     ToolCall,
     UserMessage,
 )
+from sagent.runtime import types
+from sagent.runtime.exceptions import describe, local_time
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
     from sagent.tools.types import Tool
 
 
@@ -128,6 +128,9 @@ class Feed:
     halter: str | None = None
     """Who asked for the halt being heard; ``None`` for the user, or no halt."""
 
+    cut_short: bool = False
+    """Whether the turn ended cancelled, its cause, a halt or a clear, still untold."""
+
     # Observers run in order, the team's first: one that wakes the agent as it
     # idles has queued the wake by now.
     def __call__(self, event: types.RuntimeEvent) -> None:
@@ -138,15 +141,23 @@ class Feed:
         if isinstance(ended, Succeeded):
             self.worked = True
             return
-        # The turn a halt stops ends between the two.
-        if isinstance(event, (types.ModelHalt, types.ModelHaltCompleted)):
-            self.halter = event.sender if isinstance(event, types.ModelHalt) else None
+        if isinstance(event, types.ModelHalt):
+            self.halter = event.sender
             return
         stopped = event.outcome if isinstance(event, ModelIdle) else None
-        if isinstance(stopped, Failed):
+        # A turn ends cancelled before the runtime says what cancelled it: a halt's
+        # end, or a clear's, which its ``[clear]`` record tells.
+        if isinstance(stopped, Cancelled):
+            self.cut_short = True
+            return
+        if isinstance(event, types.ModelHaltCompleted):
+            halter, self.halter = self.halter, None
+            if not self.cut_short:
+                return
+            self.cut_short = False  # pragma: no mutate[truthiness]
+            self.pending.append(f"[halted by {halter or 'user'}]")
+        elif isinstance(stopped, Failed):
             self.pending.append(f"[failed] {describe(stopped.exception)}")
-        elif isinstance(stopped, Cancelled):
-            self.pending.append(f"[halted by {self.halter or 'user'}]")
         elif isinstance(event, types.ModelResponseSuspended):
             if not event.opens_a_quota_wait:
                 return
@@ -165,12 +176,11 @@ class Feed:
                 self.pending.append(
                     f"[idle: {self.watched} does nothing until messaged]",
                 )
+        elif isinstance(event, types.SessionClearCompleted):
+            self.cut_short = False  # pragma: no mutate[truthiness]
         elif not (
-            isinstance(event, types.SessionClearCompleted)
-            or (
-                isinstance(event, types.SessionCompactCompleted)
-                and isinstance(event.outcome, Succeeded)
-            )
+            isinstance(event, types.SessionCompactCompleted)
+            and isinstance(event.outcome, Succeeded)
         ):
             return
         self.send()

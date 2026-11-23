@@ -22,8 +22,8 @@ from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, normalize_id, s2_wire_id
 
+from sagent.journal.types import PaperFetchResult
 from sagent.lib.userdirs import cache_dir
-from sagent.session.types import PaperFetchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
 from sagent.tools.types import (

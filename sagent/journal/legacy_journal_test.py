@@ -15,19 +15,15 @@ from treekle import json_dumps
 
 import pytest
 
-from sagent.lib.userdirs import data_dir
-from sagent.model.cost import TokenCost, TokenCount
-from sagent.model.types import Response
-from sagent.runtime.tape import ContextSplice
-from sagent.session import legacy_journal, projects
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.legacy_journal import (
+from sagent.journal import legacy_journal, projects
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.legacy_journal import (
     convert,
     find_old,
     is_legacy,
     upgrade,
 )
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AgentSpawnResult,
     AssistantMessage,
@@ -45,6 +41,10 @@ from sagent.session.types import (
     WebFetchResult,
     WriteResult,
 )
+from sagent.lib.userdirs import data_dir
+from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.types import Response
+from sagent.runtime.tape import ContextSplice
 
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 _PNG = base64.b64encode(b"\x89PNG").decode()

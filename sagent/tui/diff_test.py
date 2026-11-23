@@ -12,8 +12,8 @@ from rich.style import Style
 
 import pytest
 
+from sagent.journal.types import Splice
 from sagent.lib.userdirs import config_dir
-from sagent.session.types import Splice
 from sagent.tui.diff import (
     DiffStyle,
     highlight_source,

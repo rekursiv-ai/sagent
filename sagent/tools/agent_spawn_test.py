@@ -22,9 +22,26 @@ import pytest
 
 from sagent.agent.agent import Agent, NoShrinker, RuntimeSession, spent
 from sagent.agent.agents_md import AgentsMdConfig
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.pruner import Pruner
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
 from sagent.agent.team import ChildSpec, MessageKind, Team
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AgentSpawnResult,
+    AssistantMessage,
+    Cancelled,
+    ContextClear,
+    Failed,
+    Outcome,
+    Succeeded,
+    SystemMessage,
+    ToolMessage,
+    UncategorizedRecord,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
 from sagent.model.exceptions import OverloadedError, RateLimitedError
@@ -41,23 +58,6 @@ from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
 from sagent.runtime.types import RuntimeEvent, ToolWakeSchedules
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    AgentSpawnResult,
-    AssistantMessage,
-    Cancelled,
-    ContextClear,
-    Failed,
-    Outcome,
-    Succeeded,
-    SystemMessage,
-    ToolMessage,
-    UncategorizedRecord,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.tools import agent_spawn
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn

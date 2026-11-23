@@ -22,15 +22,15 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.agents_md import AgentsMdConfig
-from sagent.agent.compactor import SummaryCompactor
-from sagent.model.scripted import ScriptedProvider, call, reply
-from sagent.session.types import (
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.journal.types import (
     AssistantMessage,
     ToolCall,
     ToolMessage,
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.tools.bash import Bash
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read

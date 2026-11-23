@@ -21,23 +21,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.agents_md import AgentsMdConfig
-from sagent.model.capability import ModelLimits, ModelSettings, PruningPolicy
-from sagent.model.cost import TokenCount
-from sagent.model.exceptions import (
-    AuthError,
-    BillingError,
-    ContextOverflowError,
-    OverloadedError,
-    RateLimitedError,
-    RefusedError,
-    RequestTooLargeError,
-)
-from sagent.model.scripted import ScriptedProvider, call, reply
-from sagent.model.types import Request, TextChunk
-from sagent.providers.anthropic import wire
-from sagent.providers.anthropic.api import Anthropic
-from sagent.providers.types import UsageWindow
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     Attachment,
@@ -55,6 +39,22 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelLimits, ModelSettings, PruningPolicy
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import (
+    AuthError,
+    BillingError,
+    ContextOverflowError,
+    OverloadedError,
+    RateLimitedError,
+    RefusedError,
+    RequestTooLargeError,
+)
+from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.model.types import Request, TextChunk
+from sagent.providers.anthropic import wire
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.types import UsageWindow
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolContext,
@@ -67,9 +67,9 @@ from sagent.tools.types import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import ModelCapability, ThinkingBudget
     from sagent.model.cost import ServiceTier
-    from sagent.session.types import SessionRecord
 
 
 def _model(

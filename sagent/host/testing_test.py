@@ -13,7 +13,7 @@ import pytest
 from sagent.host import testing
 from sagent.host.testing import Gate, LocalHost
 from sagent.host.wire import MAX_LINE_BYTES
-from sagent.session.types import UncategorizedToolResult
+from sagent.journal.types import UncategorizedToolResult
 from sagent.tools.types import ToolContext, settled
 
 

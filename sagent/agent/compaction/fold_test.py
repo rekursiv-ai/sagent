@@ -17,18 +17,19 @@ import re
 
 import pytest
 
-from sagent.agent import fold as agent_fold
-from sagent.agent.fold import FoldError, fold
+from sagent.agent.compaction import fold as agent_fold
+from sagent.agent.compaction.fold import FoldError, fold
+from sagent.journal.types import AssistantMessage, UserMessage
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCost
 from sagent.model.exceptions import (
     ContextOverflowError,
+    DisconnectedError,
     OverloadedError,
     RateLimitedError,
 )
 from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.model.types import TextChunk
-from sagent.session.types import AssistantMessage, UserMessage
 
 
 if TYPE_CHECKING:
@@ -533,19 +534,11 @@ async def test_a_filled_call_at_its_budget_uses_the_requested_word_share(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finished", [False, True], ids=["unfinished", "multipart"])
-async def test_an_attempt_uses_only_finished_assistant_text(
+async def test_an_attempt_charges_a_finished_reply_and_drops_an_unfinished_one(
     monkeypatch: pytest.MonkeyPatch,
     finished: bool,
 ) -> None:
-    response = replace(
-        reply("", spend=TokenCost(response=0.01)),
-        records=(
-            AssistantMessage(content=" alpha"),
-            call("Read"),
-            AssistantMessage(content=None),
-            AssistantMessage(content="beta "),
-        ),
-    )
+    response = reply("alpha", spend=TokenCost(response=0.01))
 
     async def stream(request: Request) -> AsyncIterator[TextChunk | Response]:
         del request
@@ -567,13 +560,37 @@ async def test_an_attempt_uses_only_finished_assistant_text(
         prompt="{{content}}",
     )
 
-    assert await agent_fold._attempt("content", call=invocation) == (
-        "alphabeta" if finished else ""
-    )
     if finished:
+        assert await agent_fold._attempt("content", call=invocation) is response
         spent.assert_called_once_with(0.01)
     else:
+        with pytest.raises(DisconnectedError):
+            _ = await agent_fold._attempt("content", call=invocation)
         spent.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "size", "text"),
+    [("end_turn", 100, "alphabeta"), ("max_tokens", 100, None), ("end_turn", 2, None)],
+    ids=["finished", "cut-off", "no-shorter"],
+)
+def test_a_summary_is_the_finished_assistant_text_when_it_is_shorter(
+    stop_reason: str,
+    size: int,
+    text: str | None,
+) -> None:
+    response = replace(
+        reply("", stop_reason=stop_reason),
+        records=(
+            AssistantMessage(content=" alpha"),
+            call("Read"),
+            AssistantMessage(content=None),
+            AssistantMessage(content="beta "),
+        ),
+    )
+
+    model = ScriptedProvider()["scripted"]
+    assert agent_fold._shorter(response, model=model, size=size) == text
 
 
 @pytest.mark.asyncio

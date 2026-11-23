@@ -23,10 +23,10 @@ if TYPE_CHECKING:
 
     import httpx2
 
+    from sagent.journal.types import Attachment, ToolCall, ToolMessage
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.login import Logins
-    from sagent.session.types import Attachment, ToolCall, ToolMessage
     from sagent.tools.types import Tool
 
 

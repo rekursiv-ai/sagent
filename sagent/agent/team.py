@@ -17,12 +17,12 @@ A message one agent sends another is a request, which the receiver owes a
 reply, unless the sender owed the receiver one: then it is that reply. An agent
 that goes idle owing replies is nudged, at every idle, until it replies by
 AgentSend; one with no AgentSend answers with that error. One that fails, is
-halted, or is stopped answers for itself; a watcher it owes, told by its feed,
-is settled without that answer.
+halted, cleared, or stopped answers for itself; a watcher it owes, whose feed
+tells it the failure, halt, or clear, is settled without that answer.
 
 A child that stops tells its parent ``[<label> is idle] <last text>``, unless
 its last tool call was an AgentSend to that parent, or its reply to the parent
-says it already; one that fails or is halted says so instead. The last text is
+says it already; one that fails, is halted, or is cleared says so instead. The last text is
 what it said since it last stopped. Only an idle after work counts: nothing
 wakes as a session resumes, until the user's first message nudges each other
 agent still owing.
@@ -67,13 +67,7 @@ import time
 from treekle import from_plain
 
 from sagent.agent.agent import Agent
-from sagent.model.exceptions import AuthError, RateLimitedError
-from sagent.providers.catalog import successor
-from sagent.providers.login import Spent
-from sagent.providers.types import HasLogins, Provider
-from sagent.runtime import types
-from sagent.runtime.exceptions import describe, local_time
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     AssistantMessage,
@@ -86,6 +80,12 @@ from sagent.session.types import (
     UncategorizedRecord,
     UserMessage,
 )
+from sagent.model.exceptions import AuthError, RateLimitedError
+from sagent.providers.catalog import successor
+from sagent.providers.login import Spent
+from sagent.providers.types import HasLogins, Provider
+from sagent.runtime import types
+from sagent.runtime.exceptions import describe, local_time
 from sagent.types import AsyncResource
 
 
@@ -868,6 +868,8 @@ class _Dun:
     # Whether the model answered since the last idle: an idle without is no stop.
     _worked: bool = field(default=False, repr=False)
     _last_call: ToolCall | None = field(default=None, repr=False)
+    # Whether the turn ended cancelled, its cause, a halt or a clear, still untold.
+    _cut_short: bool = field(default=False, repr=False)
 
     def __call__(self, event: types.RuntimeEvent) -> None:
         """Nudge, answer for the agent, or tell its parent, as ``event`` calls for."""
@@ -894,9 +896,21 @@ class _Dun:
         owed = self.team.owes(self.label)
         stopped = event.outcome if isinstance(event, ModelIdle) else None
         if isinstance(stopped, Failed):
-            self._ended(f"[{self.label} failed] {describe(stopped.exception)}", owed)
+            self._ended(
+                f"[{self.label} failed] {describe(stopped.exception)}",
+                owed,
+                heard=self._fed(),
+            )
+        # A turn ends cancelled before the runtime says what cancelled it.
         elif isinstance(stopped, Cancelled):
-            self._ended(f"[{self.label} halted]", owed)
+            self._cut_short = True
+        elif self._cut_short and isinstance(
+            event,
+            (types.ModelHaltCompleted, types.SessionClearCompleted),
+        ):
+            self._cut_short = False  # pragma: no mutate[truthiness]
+            how = "halted" if isinstance(event, types.ModelHaltCompleted) else "cleared"
+            self._ended(f"[{self.label} {how}]", owed, heard=self._fed())
         # The run goes on after the wait: nothing it owes is answered for it. No
         # spawn's result tells of the wait, so a spawned child's parent is told too.
         elif (
@@ -925,9 +939,11 @@ class _Dun:
             agent.runtime.allowed is not None
             and "AgentSend" not in agent.runtime.allowed
         ):
+            # No feed says why no reply comes: a watcher hears this too.
             self._ended(
                 f"[{self.label} failed] it has no AgentSend to reply with",
                 owed,
+                heard=(),
             )
             return
         asked = "; ".join(f"{c} ({what!r})" for c, what in owed.items())
@@ -954,23 +970,28 @@ class _Dun:
         ):
             self._tell_parent(f"[{self.label} is idle] {said}".rstrip(), owed)
 
-    # The runtime then waits for the user, so no idle follows to end the run. A
-    # watcher's feed tells it why already.
-    def _ended(self, said: str, owed: dict[str, str]) -> None:
-        """Answer each creditor, and tell the parent, that the run ended so."""
+    # The runtime then waits for the user, so no idle follows to end the run.
+    def _ended(
+        self,
+        said: str,
+        owed: dict[str, str],
+        *,
+        heard: Collection[str],
+    ) -> None:
+        """Answer each creditor not in ``heard``, and tell the parent, that the run ended so."""
         self._said = ""
         self._last_call = None
+        if owed:
+            self.team.answer(self.label, said, heard=heard)
+        self._tell_parent(said, owed)
+
+    def _fed(self) -> tuple[str, ...]:
+        """Return the watcher whose feed tells it how this agent stopped; none if unwatched."""
         team = self.team
         watcher = team.above(self.label) if team.parent(self.label) is None else None
-        if owed:
-            team.answer(
-                self.label,
-                said,
-                heard=(watcher,)
-                if watcher is not None and team.watching.get(watcher, False)
-                else (),
-            )
-        self._tell_parent(said, owed)
+        if watcher is None or not team.watching.get(watcher, False):
+            return ()
+        return (watcher,)
 
     def _tell_parent(
         self,

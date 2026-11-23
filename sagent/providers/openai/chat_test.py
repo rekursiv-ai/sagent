@@ -13,15 +13,7 @@ from treekle import from_plain, mutable
 
 import pytest
 
-from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
-from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
-from sagent.model.exceptions import DisconnectedError, RateLimitedError
-from sagent.model.types import Request, TextChunk
-from sagent.providers.dashscope.api import DashScope
-from sagent.providers.minimax.api import MiniMax
-from sagent.providers.moonshot.api import Moonshot
-from sagent.providers.openai import chat, wire
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     Attachment,
     SystemMessage,
@@ -32,6 +24,14 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import DisconnectedError, RateLimitedError
+from sagent.model.types import Request, TextChunk
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
+from sagent.providers.openai import chat, wire
 from sagent.tools.read import Read
 
 
@@ -399,26 +399,29 @@ def test_the_tokens_split_the_cached_prompt_from_the_uncached_and_are_priced() -
 
 
 @pytest.mark.parametrize(
-    ("finish", "refusal", "stop_reason"),
+    ("finish", "refusal", "stop_reason", "details"),
     [
-        ("stop", "", "end_turn"),
-        ("length", "", "max_tokens"),
-        ("function_call", "", "tool_use"),
-        ("content_filter", "", "refusal"),
-        ("stop", "I can't.", "refusal"),
-        ("eos", "", "eos"),
+        ("stop", "", "end_turn", ""),
+        ("length", "", "max_tokens", ""),
+        ("function_call", "", "tool_use", ""),
+        ("content_filter", "", "refusal", "content_filter"),
+        ("stop", "I can't.", "refusal", "I can't."),
+        ("eos", "", "eos", ""),
     ],
 )
 def test_the_stop_reason_is_in_the_shared_vocabulary(
     finish: str,
     refusal: str,
     stop_reason: str,
+    details: str,
 ) -> None:
     reader = _reader()
     if refusal:
         assert reader.feed(_chunk(refusal=refusal)) == (TextChunk(text=refusal),)
     reader.feed(_chunk(finish))
-    assert reader.response().stop_reason == stop_reason
+    response = reader.response()
+    assert response.stop_reason == stop_reason
+    assert response.stop_details == details
 
 
 def test_of_two_finish_reasons_the_last_stands() -> None:

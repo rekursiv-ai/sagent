@@ -22,7 +22,7 @@ import platform
 import shutil
 import subprocess
 
-from sagent.session.types import PlayAudioResult
+from sagent.journal.types import PlayAudioResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

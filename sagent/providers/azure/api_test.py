@@ -8,12 +8,12 @@ from treekle import json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.azure.api import Azure
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.table import ModelTable
-from sagent.session.types import AssistantMessage
 
 
 @pytest.mark.asyncio

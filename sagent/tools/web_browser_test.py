@@ -21,7 +21,7 @@ from wesearch.fetch import FetchSession
 
 import pytest
 
-from sagent.session.types import WebBrowserResult
+from sagent.journal.types import WebBrowserResult
 from sagent.tools.types import ToolContext, settled
 from sagent.tools.web_browser import WebBrowser
 

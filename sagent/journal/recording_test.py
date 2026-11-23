@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import AssistantMessage, ContextClear, UserMessage
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import AssistantMessage, ContextClear, UserMessage
 
 
 def test_it_has_no_file() -> None:

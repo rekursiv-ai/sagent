@@ -27,26 +27,26 @@ from treekle import (
     mutable,
 )
 
-from sagent.model.cost import TokenCount
-from sagent.model.exceptions import DisconnectedError
-from sagent.model.types import Response, TextChunk
-from sagent.providers.openai import wire
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     ContextCompaction,
     Thinking,
     ToolCall,
     ToolMessage,
 )
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import DisconnectedError
+from sagent.model.types import Response, TextChunk
+from sagent.providers.openai import wire
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from sagent.journal.types import Attachment, SessionRecord
     from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
     from sagent.model.cost import ServiceTier, TokenCost
     from sagent.model.types import Request
-    from sagent.session.types import Attachment, SessionRecord
     from sagent.tools.types import Tool
 
 
@@ -133,7 +133,7 @@ class StreamReader:
         self._settings = settings
         self._records: dict[int, AssistantMessage | Thinking | ToolCall] = {}
         self._refusing: set[str] = set()
-        self._refused = False  # pragma: no mutate[truthiness]
+        self._refusals: list[str] = []
         self._final: dict[str, object] | None = None
         self._summary: dict[str, object] = {}
 
@@ -199,8 +199,10 @@ class StreamReader:
         records = tuple(record for _, record in sorted(self._records.items()))
         tokens = _tokens(_object(final.get("usage")))
         reason = str(_object(final.get("incomplete_details")).get("reason") or "")
-        if self._refused or reason == "content_filter":
+        stop_details = ""
+        if self._refusals or reason == "content_filter":
             stop_reason = "refusal"
+            stop_details = "".join(self._refusals) or reason
         elif final.get("status") == "incomplete":
             stop_reason = "max_tokens"
         elif any(isinstance(record, ToolCall) for record in records):
@@ -213,6 +215,7 @@ class StreamReader:
             spend=self._spend(tokens, reported=final.get("service_tier")),
             stop_reason=stop_reason,
             summary=immutable(self._summary),
+            stop_details=stop_details,
         )
 
     def _done(self, index: int, *, item: Mapping[str, object]) -> None:
@@ -220,8 +223,10 @@ class StreamReader:
         kind = item.get("type")
         if kind == "message":
             parts = _objects(item.get("content"))
-            self._refused = self._refused or any(
-                part.get("type") == "refusal" for part in parts
+            self._refusals.extend(
+                str(part.get("refusal") or "")
+                for part in parts
+                if part.get("type") == "refusal"
             )
             text = "".join(
                 str(part.get("text") or part.get("refusal") or "") for part in parts

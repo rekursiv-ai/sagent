@@ -38,15 +38,15 @@ from sagent.host.wire import (
     encoded,
     received,
 )
-from sagent.model.scripted import ScriptedProvider
-from sagent.providers.catalog import ModelCatalog
-from sagent.runtime.types import Stubs
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     SystemMessage,
     ToolMessage,
     UncategorizedToolResult,
 )
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.runtime.types import Stubs
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.bash import Bash
 from sagent.tools.read import Read

@@ -13,11 +13,7 @@ from treekle import PlainTree
 import pytest
 
 from sagent.agent.types import Agent, Session
-from sagent.model.capability import ModelCapability, ModelSettings
-from sagent.model.scripted import ScriptedProvider, call, reply
-from sagent.model.types import Response
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     ContextClear,
@@ -33,6 +29,10 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelCapability, ModelSettings
+from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.model.types import Response
+from sagent.runtime import types
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tui.recording import RecordingPrinter

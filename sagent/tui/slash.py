@@ -56,14 +56,14 @@ import re
 
 from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
+from sagent.journal.types import (
+    AgentIdle,
+    UserMessage,
+)
 from sagent.lib.userdirs import config_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
 from sagent.providers.types import HasLogin, HasLogins
 from sagent.runtime import types
-from sagent.session.types import (
-    AgentIdle,
-    UserMessage,
-)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
 from sagent.settings.harvest import harvest

@@ -26,15 +26,7 @@ from treekle import json_dumps
 import pytest
 import torch
 
-from sagent.model.capability import ModelSettings
-from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
-from sagent.model.exceptions import UnknownModelError
-from sagent.model.types import Request, Response, TextChunk
-from sagent.providers.catalog import successor
-from sagent.providers.resources import SharedResources
-from sagent.providers.selfhosted import server
-from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     Attachment,
     Thinking,
@@ -44,6 +36,14 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelSettings
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import UnknownModelError
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.catalog import successor
+from sagent.providers.resources import SharedResources
+from sagent.providers.selfhosted import server
+from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
 from sagent.tools.read import Read
 
 

@@ -26,7 +26,7 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.session.types import PaperAuthorResult
+from sagent.journal.types import PaperAuthorResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
 from sagent.tools.types import (

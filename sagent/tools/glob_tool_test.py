@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from sagent.session.types import GlobResult
+from sagent.journal.types import GlobResult
 from sagent.tools import glob_tool
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.glob_tool import Glob

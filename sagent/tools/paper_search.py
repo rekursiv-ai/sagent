@@ -23,7 +23,7 @@ from wesearch.types.errors import BotDetectionError
 
 import cachetools
 
-from sagent.session.types import PaperSearchResult
+from sagent.journal.types import PaperSearchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,

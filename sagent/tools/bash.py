@@ -34,8 +34,8 @@ import secrets
 import signal
 import time
 
+from sagent.journal.types import BashResult
 from sagent.lib.posix.child import Child, finish
-from sagent.session.types import BashResult
 from sagent.tools.command_analyzer import (
     ReadOnly,
     Rewrite,

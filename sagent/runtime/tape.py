@@ -20,13 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from sagent.model.types import Response
-from sagent.runtime.types import (
-    ModelContextEvent,
-    SessionCompactCompleted,
-    SessionCompactStarted,
-)
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     ContextCompaction,
@@ -40,12 +34,18 @@ from sagent.session.types import (
     labeled_text,
     pairings,
 )
+from sagent.model.types import Response
+from sagent.runtime.types import (
+    ModelContextEvent,
+    SessionCompactCompleted,
+    SessionCompactStarted,
+)
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 __all__ = [
@@ -733,4 +733,5 @@ def _merge_assistant(prior: Response, entry: Response) -> Response:
         tokens=prior.tokens + entry.tokens,
         spend=prior.spend + entry.spend,
         stop_reason=entry.stop_reason,
+        stop_details=entry.stop_details,
     )

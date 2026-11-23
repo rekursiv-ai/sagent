@@ -9,8 +9,8 @@ from treekle import PlainTree, json_dumps, json_loads
 
 import pytest
 
+from sagent.journal.projects import project_dir
 from sagent.lib.userdirs import data_dir
-from sagent.session.projects import project_dir
 from sagent.settings.exceptions import SettingError
 from sagent.settings.harvest import harvest
 from sagent.tools import mcp_settings

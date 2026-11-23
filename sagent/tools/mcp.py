@@ -78,11 +78,11 @@ import re
 
 from treekle import PlainTree, ReadError, from_plain, json_dumps, json_loads
 
+from sagent.journal.projects import project_dir
+from sagent.journal.types import Attachment, McpResult
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.userdirs import data_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, file_lock
-from sagent.session.projects import project_dir
-from sagent.session.types import Attachment, McpResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.mcp_auth import (
     McpTokenStorage,

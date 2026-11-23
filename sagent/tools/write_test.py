@@ -12,8 +12,8 @@ import stat
 
 import pytest
 
+from sagent.journal.types import ToolMessage, WriteResult
 from sagent.lib.userdirs import state_dir
-from sagent.session.types import ToolMessage, WriteResult
 from sagent.tools import write
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext, settled

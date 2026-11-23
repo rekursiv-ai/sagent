@@ -16,12 +16,8 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
-from sagent.model.exceptions import OverloadedError, RateLimitedError
-from sagent.model.scripted import ScriptedProvider, reply
-from sagent.providers.catalog import ModelCatalog
-from sagent.runtime import types
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     AssistantMessage,
@@ -39,6 +35,10 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.exceptions import OverloadedError, RateLimitedError
+from sagent.model.scripted import ScriptedProvider, reply
+from sagent.providers.catalog import ModelCatalog
+from sagent.runtime import types
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 from sagent.tools.watch import Feed, lines
@@ -47,7 +47,7 @@ from sagent.tools.watch import Feed, lines
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 
@@ -300,17 +300,20 @@ def test_a_halted_turn_is_told_at_once_with_who_halted_it(
     assert _told(watcher) == [f"[watch]\n{said}"]
 
 
-def test_a_halt_that_stopped_nothing_names_no_later_stop() -> None:
-    """A halt of an agent at rest ends; a clear's stop after is the user's."""
-    team, _, watcher = _watched()
+def test_a_turn_a_clear_stopped_is_told_as_the_clear_not_a_halt() -> None:
+    """A halt that stopped nothing names no later stop, such as a clear's."""
+    team, agent, watcher = _watched()
     feed = Feed(team=team, watched="Agent", watcher="watcher")
 
     feed(types.ModelHalt(sender="Agent_0"))
     feed(types.ModelHaltCompleted(outcome=Cancelled()))
     feed(types.ModelResponseStarted())
     feed(ModelIdle(outcome=Cancelled()))
+    assert _told(watcher) == []
+    agent.session.append(UserMessage(content="go"))
+    feed(types.SessionClearCompleted(outcome=Succeeded(value=None)))
 
-    assert _told(watcher) == ["[watch]\n[halted by user]"]
+    assert _told(watcher) == ["[watch]\n> user: go"]
 
 
 # Only the runtime knows whether a turn stopped: a compaction cancels a call, a

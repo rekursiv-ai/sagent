@@ -28,6 +28,14 @@ import bisect
 import logging
 import math
 
+from sagent.journal.types import (
+    AssistantMessage,
+    ContextCompaction,
+    SessionContext,
+    SystemMessage,
+    ToolMessage,
+    pairings,
+)
 from sagent.model.types import Response
 from sagent.runtime.tape import (
     ContextSplice,
@@ -50,14 +58,6 @@ from sagent.runtime.types import (
     SessionCompactCompleted,
     SessionCompactStarted,
 )
-from sagent.session.types import (
-    AssistantMessage,
-    ContextCompaction,
-    SessionContext,
-    SystemMessage,
-    ToolMessage,
-    pairings,
-)
 
 
 if TYPE_CHECKING:
@@ -70,6 +70,7 @@ __all__ = [
     "Tape",
     "alive_splices",
     "masked_refs_by_alive",
+    "prunable",
     "resolve_context",
     "stubbed",
     "validate_context",
@@ -647,6 +648,22 @@ def stubbed(
             raise TypeError(f"Entry {i} is no tool output.")
         out[i] = _pruned(output, stub=stub)
     return out
+
+
+def prunable(entry: ModelContextEvent, *, stub: str) -> bool:
+    """Return whether ``entry`` is a tool's output that a stub makes shorter.
+
+    Args:
+      entry: A context entry.
+      stub: What a dropped output reads.
+
+    Returns:
+      prunable: Whether dropping it saves anything.
+
+    """
+    if not isinstance(entry, ToolMessage):
+        return False
+    return len(_pruned(entry, stub=stub).text()) < len(entry.text())
 
 
 # A stub's first line says the call runs on or was killed, and a wake's which call

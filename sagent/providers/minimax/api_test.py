@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from sagent.journal.types import UserMessage
 from sagent.model.capability import model_setting_names
 from sagent.model.exceptions import AuthError
 from sagent.model.types import Request
 from sagent.providers.minimax.api import MiniMax
-from sagent.session.types import UserMessage
 
 
 _REQUEST = Request(records=(UserMessage(content="hi"),))

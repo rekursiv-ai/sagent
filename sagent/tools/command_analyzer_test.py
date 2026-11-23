@@ -11,7 +11,7 @@ from treekle import PlainTree
 import bashlex
 import pytest
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.journal.types import UncategorizedToolResult
 from sagent.tools import command_analyzer
 from sagent.tools.command_analyzer import (
     Invocation,

@@ -28,13 +28,7 @@ from prompt_toolkit.output import DummyOutput
 import pytest
 import pytest_asyncio
 
-from sagent.model.scripted import ScriptedProvider, reply
-from sagent.runtime import (
-    runtime as runtime_module,
-    types,
-)
-from sagent.runtime.runtime import Await, Runtime
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     Attachment,
@@ -45,6 +39,12 @@ from sagent.session.types import (
     ToolCall,
     UserMessage,
 )
+from sagent.model.scripted import ScriptedProvider, reply
+from sagent.runtime import (
+    runtime as runtime_module,
+    types,
+)
+from sagent.runtime.runtime import Await, Runtime
 from sagent.tui.prompt import (
     OPEN_TREE,
     Deferred,

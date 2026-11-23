@@ -15,8 +15,8 @@ import sys
 
 import pytest
 
+from sagent.journal.types import SkillResult, ToolMessage
 from sagent.lib.userdirs import base_dir_variables, data_dir
-from sagent.session.types import SkillResult, ToolMessage
 from sagent.tools import skill
 from sagent.tools.skill import Skill, SkillInfo
 from sagent.tools.types import ToolContext, json_schema, settled

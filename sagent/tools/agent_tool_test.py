@@ -11,14 +11,18 @@ import asyncio
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.compaction.compactor import SummaryCompactor
 from sagent.agent.team import Team
+from sagent.journal.types import (
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model.capability import ModelCapability
 from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.runtime.context import validate_context
-from sagent.session.types import ToolMessage, UserMessage
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_session import AgentSession
 from sagent.tools.agent_tool import target_agent
@@ -133,25 +137,42 @@ async def test_session_changes_refuse_unrelated_agents(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["clear", "compact"])
+@pytest.mark.parametrize("action", ["clear", "compact", "prune_queue"])
 async def test_session_mutation_queues_on_the_target_only(
     tmp_path: Path,
     action: str,
 ) -> None:
     team, _, session = _setup(tmp_path)
     target = team["grand"]
+    target.session.append(
+        ToolMessage(
+            call_id="old",
+            state="done",
+            # Longer than the stub a prune leaves, so pruning it saves something.
+            stdout=("old output " * 10,),
+            result=UncategorizedToolResult(),
+        ),
+    )
     arguments: dict[str, PlainTree] = {"agent": "grand", "action": action}
+    if action == "prune_queue":
+        arguments.update({"ids": [1], "reason": "obsolete"})
     call = session.call(team["root"].runtime.tool_context, arguments)
     # A descendant's change is waited for, and the target, not running here, never
-    # ends it.
+    # ends it; an idle one's queue drops at once.
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     (queued,) = target.runtime.inbox.drain_nowait()
     assert isinstance(
         queued,
-        {"clear": types.SessionClear, "compact": types.SessionCompact}[action],
+        {
+            "prune_queue": types.SessionPrune,
+            "clear": types.SessionClear,
+            "compact": types.SessionCompact,
+        }[action],
     )
     assert queued.sender == "root"
+    if isinstance(queued, types.SessionPrune):
+        assert queued.call_ids == ("old",)
     assert not call.result.done()
     assert team["root"].runtime.inbox.drain_nowait() == []
     _ = call.result.cancel()

@@ -15,6 +15,7 @@ from treekle import from_plain, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, UserMessage
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.model.types import Request, Response
@@ -25,7 +26,6 @@ from sagent.providers.openai.lease import LeasedToken
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources
 from sagent.providers.testing import paused_backoff
-from sagent.session.types import AssistantMessage, UserMessage
 
 
 if TYPE_CHECKING:

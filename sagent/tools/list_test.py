@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from sagent.session.types import ListResult
+from sagent.journal.types import ListResult
 from sagent.tools import list as list_tool
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.list import List, ls_row, sort_paths

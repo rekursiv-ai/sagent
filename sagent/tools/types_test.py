@@ -21,7 +21,7 @@ from wesearch.fetch.session import default_session
 
 import pytest
 
-from sagent.session.types import (
+from sagent.journal.types import (
     Attachment,
     Splice,
     ToolMessage,

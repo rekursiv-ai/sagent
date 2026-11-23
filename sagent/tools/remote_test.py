@@ -50,6 +50,12 @@ from sagent.host.wire import (
     encoded,
     received,
 )
+from sagent.journal.jsonl import JsonlJournal, read_record
+from sagent.journal.types import (
+    RemoteToolResult,
+    ToolMessage,
+    UncategorizedToolResult,
+)
 from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.sockets import socket_address
 from sagent.lib.userdirs import config_dir
@@ -59,12 +65,6 @@ from sagent.model.scripted import (
     reply,
 )
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.jsonl import JsonlJournal, read_record
-from sagent.session.types import (
-    RemoteToolResult,
-    ToolMessage,
-    UncategorizedToolResult,
-)
 from sagent.tools import remote
 from sagent.tools.read import Read
 from sagent.tools.remote import (
