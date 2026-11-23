@@ -20,7 +20,7 @@ from datetime import date, datetime
 from functools import cache
 from importlib.resources import files
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, ClassVar, Self, cast, override
+from typing import TYPE_CHECKING, ClassVar, Final, Self, cast, override
 
 import math
 import re
@@ -49,6 +49,8 @@ from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
     from pathlib import Path
+
+    from _typeshed import SupportsRichComparison
 
 
 __all__ = [
@@ -128,17 +130,18 @@ class ModelTable(Mapping[str, ModelCapability]):
 
         Layers, lowest first: the reference row, the model's profile, the
         model, the provider's section, and the section's entry for the model
-        under its ``models``. Each replaces whole fields, except that the
-        section's ``thinking`` replaces only the axes it names. A section
-        serves every model in the document: the document's list is the only list
-        of models, so a model added there reaches every provider, and one an
-        account is not served fails with the vendor's own error. The section's
-        ``roles`` replace the document's it names.
-        The section's ``sends`` names the settings the provider's requests
-        carry; each other one offers only the row's default, what the vendor
-        does unasked, since a choice nothing sends would change only the label.
-        The section's ``service_tier`` names the tiers its provider can send; each
-        row offers those of them it prices.
+        under its ``models``. Each replaces whole fields, except what a model
+        can offer and a provider can allow: the section's ``thinking`` axes,
+        ``service_tier``, ``manage_context_server_side``, and ``compaction`` name
+        what its provider allows, and each row offers what it has of them (its
+        priced tiers, for ``service_tier``). A section serves every model in the
+        document: the document's list is the only list of models, so a model
+        added there reaches every provider, and one an account is not served
+        fails with the vendor's own error. The section's ``roles`` replace the
+        document's it names. The section's ``sends`` names the settings the
+        provider's requests carry; each other one offers only the row's default,
+        what the vendor does unasked, since a choice nothing sends would change
+        only the label.
 
         Args:
           text: The vendor's YAML document.
@@ -600,6 +603,10 @@ def _shipped(package: str, *, section: str) -> ModelTable:
     return ModelTable.from_yaml(files(package) / f"{leaf}.yaml", section=section)
 
 
+# What a model can offer and a provider can allow; a section's other keys replace.
+_ALLOWED: Final = ("service_tier", "manage_context_server_side", "compaction")
+
+
 def _choices() -> tuple[ModelSettingName, ...]:
     """Return the fields a line spells after its tags, as ``CHOICE=VALUE``."""
     return (
@@ -770,18 +777,62 @@ def _model(
     axes = from_plain(section.get("thinking", {}), dict[str, object])
     if axes.keys() - {"effort", "budget", "output"}:
         raise ValueError(f"Unknown thinking axes: {sorted(axes)}.")
-    # A section's tiers are those its provider sends, not a claim each model prices.
-    sent = section.get("service_tier")
     values |= {
         key: value
         for key, value in section.items()
-        if key not in {"thinking", "service_tier"}
+        if key not in {"thinking", *_ALLOWED}
     }
-    values["thinking"] = (
-        from_plain(values.get("thinking", {}), dict[str, object]) | axes
-    )
     values |= entry
     row = from_plain(values, _ModelRow)
+    allowed = from_plain(
+        values
+        | {key: section[key] for key in _ALLOWED if key in section}
+        | {
+            "thinking": from_plain(values.get("thinking", {}), dict[str, object])
+            | axes,
+        },
+        _ModelRow,
+    )
+    row = replace(
+        row,
+        thinking=_Thinking(
+            effort=_narrowed(
+                "thinking effort",
+                row.thinking.effort,
+                allowed=allowed.thinking.effort,
+                model_id=row.model_id,
+                section=section_name,
+            ),
+            budget=_narrowed(
+                "thinking budget",
+                row.thinking.budget,
+                allowed=allowed.thinking.budget,
+                model_id=row.model_id,
+                section=section_name,
+            ),
+            output=_narrowed(
+                "thinking output",
+                row.thinking.output,
+                allowed=allowed.thinking.output,
+                model_id=row.model_id,
+                section=section_name,
+            ),
+        ),
+        manage_context_server_side=_narrowed(
+            "manage_context_server_side",
+            row.manage_context_server_side,
+            allowed=allowed.manage_context_server_side,
+            model_id=row.model_id,
+            section=section_name,
+        ),
+        compaction=_narrowed(
+            "compaction",
+            row.compaction,
+            allowed=allowed.compaction,
+            model_id=row.model_id,
+            section=section_name,
+        ),
+    )
     if _family_version(row.model_id) is None:
         raise ValueError(f"Model id {row.model_id!r} is not family-major.minor.")
     _check_limits(row)
@@ -800,14 +851,14 @@ def _model(
         raise ValueError(
             f"Model {row.model_id!r} offers service_tier {unpriced!r} with no price.",
         )
-    if sent is not None:
-        sendable = frozenset(from_plain(sent, list[ServiceTier]))
-        tiers &= sendable
-        if not tiers:
-            raise ValueError(
-                f"Model {row.model_id!r} is priced at none of the service tiers"
-                f" section {section_name!r} sends: {sorted(sendable)}.",
-            )
+    if allowed.service_tier is not None:
+        tiers = _narrowed(
+            "service_tier",
+            tiers,
+            allowed=allowed.service_tier,
+            model_id=row.model_id,
+            section=section_name,
+        )
     tier = _lowest("service_tier", tiers, literal_members(ServiceTier))
     size = (
         _size(row.context_size_default.lower())
@@ -892,6 +943,24 @@ def _model(
     # Each default is picked alone; a pairing of them can still be refused.
     capability.check(capability.default)
     return capability
+
+
+def _narrowed[T: SupportsRichComparison](
+    name: str,
+    offered: frozenset[T],
+    *,
+    allowed: frozenset[T],
+    model_id: str,
+    section: str,
+) -> frozenset[T]:
+    """Return what the model offers of what its section allows of setting ``name``."""
+    kept = offered & allowed
+    if offered and not kept:
+        raise ValueError(
+            f"Model {model_id!r} offers none of the {name} section {section!r}"
+            f" allows: {sorted(allowed)}.",
+        )
+    return kept
 
 
 def _unsent_fixed(

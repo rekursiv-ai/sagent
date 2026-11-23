@@ -30,6 +30,7 @@ reference:
     effort: [low, medium, high, xhigh, max]
     budget: [auto]
     output: [none, text, redacted]
+  compaction: [bespoke, provider]
 
 profiles:
   # ``disabled`` is taken at any effort, but Opus 5 and Haiku 5.5 take it only

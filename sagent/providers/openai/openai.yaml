@@ -28,6 +28,7 @@ reference:
     effort: [none]
     budget: [none]
     output: [none]
+  compaction: [bespoke, provider]
 
 profiles:
   reasoning_only:
