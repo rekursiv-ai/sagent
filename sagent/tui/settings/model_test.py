@@ -180,15 +180,20 @@ def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
 def test_the_model_s_help_names_every_tag_a_line_reads() -> None:
     """The words come from the table that reads them, so neither can drift."""
     owner, _, _ = _model()
-    rows = {
-        row.split()[0]: row
-        for row in _setting(owner, "model").help_long.splitlines()
-        if row.startswith("    ")
-    }
-    for kind, words in tag_words().items():
-        listed = rows[kind].removeprefix(f"    {kind}").replace(",", " ").split()
-        assert set(words) <= set(listed), (kind, words, listed)
-        for word in words:
+    words = {kind: ", ".join(listed) for kind, listed in tag_words().items()}
+    assert _setting(owner, "model").help_long == (
+        "  ACCOUNT@   the login to sign in as\n"
+        "  PROVIDER/  the provider; default: this one, else the first that serves it\n"
+        "  MODEL      a name, a family (neon), or a role (default, best, everyday,"
+        " utility)\n"
+        "  +TAG       any of, in any order:\n"
+        f"    size     {words['size']}, or a count (258k)\n"
+        f"    effort   {words['effort']}\n"
+        f"    tier     {words['tier']}\n"
+        "  What the line leaves out is kept from the model before."
+    )
+    for kind_words in tag_words().values():
+        for word in kind_words:
             tags = ModelTags.parse(f"opus+{word}")
             assert tags.model == "opus", word
     assert "default" in tag_words()["tier"]
@@ -200,6 +205,9 @@ async def test_a_failed_switch_keeps_the_account_chosen_before() -> None:
     assert await _apply(owner, "model.provider.account", "work") == "work"
     with pytest.raises(UnknownModelError):
         await _apply(owner, "model", "home@vendor/nope")
+    assert catalog.account == "work"
+    with pytest.raises(UnknownModelError):
+        await _apply(owner, "model", "vendor/nope")
     assert catalog.account == "work"
     with pytest.raises(ValueError, match="is not a name"):
         await _apply(owner, "model.provider.account", "../x")

@@ -619,6 +619,39 @@ def test_tokenizer_inherits_profile_and_model_override(tmp_path: Path) -> None:
     assert table["override"].tokenizer == "own"
 
 
+def test_a_section_s_tiers_are_offered_where_each_model_prices_them(
+    tmp_path: Path,
+) -> None:
+    """The section's tiers are what its provider sends; a model prices its own."""
+    priority = dict(_FREE) | {"service_tier": "priority"}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("both-1.0", prices=[dict(_FREE), priority]),
+        _model("auto-1.0"),
+        vendor={"service_tier": ["auto", "priority"]},
+    )
+    table = _load(path)
+    assert table["both-1.0"].service_tier == {"auto", "priority"}
+    assert table["auto-1.0"].service_tier == {"auto"}
+
+
+def test_a_section_s_tiers_a_model_prices_none_of_refuse_it(tmp_path: Path) -> None:
+    flex = dict(_FREE) | {"service_tier": "flex"}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=[flex]),
+        vendor={"service_tier": ["auto", "priority"]},
+    )
+    with pytest.raises(
+        ValueError,
+        match=_exactly(
+            "Model 'example-1.0' is priced at none of the service tiers section"
+            " 'vendor' sends: ['auto', 'priority'].",
+        ),
+    ):
+        _load(path)
+
+
 def test_a_setting_the_provider_does_not_send_offers_only_its_default(
     tmp_path: Path,
 ) -> None:
@@ -658,7 +691,7 @@ reference:
   thinking: {effort: [none], budget: [none], output: [none]}
 profiles:
   base:
-    knowledge_cutoff: '2025-05'
+    knowledge_cutoff: '2025-05-01'
     thinking: {effort: [none, high], budget: [none, auto], output: [none, text]}
 models:
   - model_id: example-1.0
@@ -686,17 +719,15 @@ providers:
     retries_internally: true
     keeps_user_turns_apart: true
     thinking: {effort: [none, low]}
-    omits:
-      unserved-1.0: its plan does not offer it
     models:
       example-1.0: {account_auth: true}
 """)
     table = _load(path)
-    assert list(table) == ["example-1.0"]
+    assert list(table) == ["example-1.0", "unserved-1.0"]
     row = table["default"]
     assert row.wire_model_id == "vendor-example"
     assert row.approx_chars_per_token == 3.5
-    assert row.knowledge_cutoff == "2025-05"
+    assert row.knowledge_cutoff == "2025-05-01"
     assert row.limits.max_request_tokens == 1000
     # The section's ``thinking`` replaces only the axes it names.
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
@@ -805,21 +836,19 @@ def test_a_limit_a_profile_adds_must_be_restated_by_the_model(tmp_path: Path) ->
         _load(path)
 
 
-@pytest.mark.parametrize("cutoff", ["2025-05", "2026-05-18"])
-def test_a_cutoff_is_iso_at_the_precision_the_vendor_publishes(
-    tmp_path: Path,
-    cutoff: str,
-) -> None:
-    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
-    assert _load(path)["example"].knowledge_cutoff == cutoff
+def test_a_cutoff_is_an_iso_date(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": "2026-05-18"})
+    assert _load(path)["example"].knowledge_cutoff == "2026-05-18"
 
 
-@pytest.mark.parametrize("cutoff", ["May 2025", "2025-13", "2026-02-30", "2025"])
+@pytest.mark.parametrize(
+    "cutoff",
+    ["May 2025", "2025-05", "2025-13-01", "2026-02-30", "2025"],
+)
 def test_a_cutoff_in_any_other_form_is_refused(tmp_path: Path, cutoff: str) -> None:
     path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
     message = (
-        f"Model 'example-1.0' has knowledge_cutoff {cutoff!r};"
-        " write it as YYYY-MM or YYYY-MM-DD."
+        f"Model 'example-1.0' has knowledge_cutoff {cutoff!r}; write it as YYYY-MM-DD."
     )
     with pytest.raises(ValueError, match=_exactly(message)):
         _load(path)
@@ -1260,14 +1289,6 @@ def test_a_document_the_strict_loader_refuses_names_file_and_line(
             "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: {}}}}",
             r"overrides unknown models: \['ghost-1.0'\]",
         ),
-        (
-            "models: []\nproviders: {vendor: {sends: [], omits: {ghost-1.0: why}}}",
-            r"omits unknown models: \['ghost-1.0'\]",
-        ),
-        (
-            "models: []\nproviders: {vendor: {sends: [], omits: {ghost-1.0: ''}}}",
-            r"omits 'ghost-1.0' without saying why",
-        ),
     ],
 )
 def test_an_ill_formed_document_is_rejected(
@@ -1291,7 +1312,7 @@ def test_a_section_naming_an_unknown_thinking_axis_is_rejected(tmp_path: Path) -
         _load(path)
 
 
-def test_every_section_serves_every_model_but_those_it_omits(tmp_path: Path) -> None:
+def test_every_section_serves_every_model(tmp_path: Path) -> None:
     """One list: a model added to the document reaches every section unasked."""
     path = tmp_path / "x.yaml"
     row = (
@@ -1303,16 +1324,16 @@ def test_every_section_serves_every_model_but_those_it_omits(tmp_path: Path) -> 
         f"models:\n- {{model_id: a-1.0, {row}}}\n- {{model_id: b-1.0, {row}}}\n"
         "providers:\n"
         "  api: {sends: []}\n"
-        "  sub: {sends: [], omits: {a-1.0: the plan lacks it}}\n",
+        "  sub: {sends: [], account_auth: true}\n",
     )
     assert list(ModelTable.from_yaml(path, section="api")) == ["a-1.0", "b-1.0"]
-    assert list(ModelTable.from_yaml(path, section="sub")) == ["b-1.0"]
+    assert list(ModelTable.from_yaml(path, section="sub")) == ["a-1.0", "b-1.0"]
 
 
 def test_a_section_listing_its_models_says_how_catalogs_name_them_now(
     tmp_path: Path,
 ) -> None:
-    """A user's catalog from before omits lists bare names; say what replaced them."""
+    """A user's catalog from before lists bare names; say what replaced them."""
     path = _write(
         tmp_path / "x.yaml",
         _model("deployment-1.0"),
@@ -1321,8 +1342,26 @@ def test_a_section_listing_its_models_says_how_catalogs_name_them_now(
     )
     message = (
         "Section 'vendor' lists models by bare name: ['deployment-1.0']. A section"
-        " now serves every model in the document but those its omits name; delete"
-        " the bare names, and put any model it leaves out under omits, with why."
+        " now serves every model in the document; delete the bare names. A model"
+        " an account is not served fails with the vendor's own error."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_section_that_omits_models_says_every_model_is_served_now(
+    tmp_path: Path,
+) -> None:
+    """A user's catalog from before keeps ``omits``; say what replaced it."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"omits": {"example-1.0": "the plan lacks it"}},
+    )
+    message = (
+        "Section 'vendor' omits models: ['example-1.0']. A section now serves every"
+        " model in the document; delete its omits. A model an account is not served"
+        " fails with the vendor's own error."
     )
     with pytest.raises(ValueError, match=_exactly(message)):
         _load(path)
@@ -1332,16 +1371,6 @@ def test_a_document_with_no_models_serves_none(tmp_path: Path) -> None:
     path = tmp_path / "x.yaml"
     path.write_text("models: []\nproviders: {vendor: {sends: []}}")
     assert len(_load(path)) == 0
-
-
-def test_a_model_omitted_and_overridden_at_once_is_rejected(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path / "x.yaml",
-        _model(),
-        vendor={"omits": {"example-1.0": "why"}, "models": {"example-1.0": {}}},
-    )
-    with pytest.raises(ValueError, match=r"both omits and overrides \['example-1.0'\]"):
-        _load(path)
 
 
 def test_a_catalog_without_thinking_offers_none(tmp_path: Path) -> None:
@@ -1468,6 +1497,28 @@ def test_a_word_two_families_end_in_names_neither(name: str) -> None:
         table.resolve(name)
     assert table["gpt-pro"].model_id == "gpt-pro-5.5"
     assert table["o-pro-3"].model_id == "o-pro-3.0"
+
+
+def test_a_line_with_an_effort_is_unknown_not_ambiguous() -> None:
+    """A line naming an effort is the caller's to apply, never read as a family.
+
+    A role is read as its target, here a tail two families share.
+    """
+    table = ModelTable(
+        rows=(_row("gpt-pro-5.5"), _row("o-pro-3.0")),
+        roles={"pro": "gpt-pro-5.5"},
+    )
+    for line in ("pro+highthink", "o-pro+highthink"):
+        with pytest.raises(
+            UnknownModelError,
+            match=f"^{re.escape(f'Unknown model {line!r};')}",
+        ):
+            table.resolve(line)
+
+
+def test_a_document_read_from_text_names_no_source_in_its_errors() -> None:
+    with pytest.raises(ValueError, match=r"^line 2: the key 'a' is given twice\.$"):
+        ModelTable.from_text("a: 1\na: 2\n", section="x")
 
 
 def test_a_family_named_whole_outranks_one_named_by_its_last_word() -> None:

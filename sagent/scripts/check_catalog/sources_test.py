@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from importlib.resources import files
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import math
@@ -30,7 +31,7 @@ from sagent.scripts.check_catalog.sources import (
     _day,
     _gemini_model_id,
     _gemini_rates,
-    _month,
+    _month_start,
     _new_prices,
     _openai_model_id,
     _text,
@@ -66,21 +67,21 @@ def test_a_count_is_read_or_left_unstated_never_raised(
 
 
 @pytest.mark.parametrize(
-    ("text", "month"),
+    ("text", "start"),
     [
-        ("Jun 2026", "2026-06"),
-        ("March 2026", "2026-03"),
-        ("Sept 2026", "2026-09"),
+        ("Jun 2026", "2026-06-01"),
+        ("March 2026", "2026-03-01"),
+        ("Sept 2026", "2026-09-01"),
         ("Updated 2026", None),
         ("soon", None),
         (None, None),
     ],
 )
-def test_a_month_is_read_or_left_unstated_never_raised(
+def test_a_month_is_read_as_its_first_day_or_left_unstated_never_raised(
     text: str | None,
-    month: str | None,
+    start: str | None,
 ) -> None:
-    assert _month(text) == month
+    assert _month_start(text) == start
 
 
 @pytest.mark.parametrize(
@@ -114,14 +115,62 @@ def test_a_rate_is_compared_and_written_exactly_never_rounded(
     assert float(_text(value)) == value
 
 
-def test_a_card_list_with_no_base_card_makes_no_row() -> None:
+@pytest.mark.parametrize("inherit", [False, True])
+def test_a_card_list_with_no_base_card_makes_no_row(inherit: bool) -> None:
     """A long-prompt card alone leaves short prompts unpriced: the table refuses it."""
-    meters = ("request", "response", "cache_write", "cache_write_1h", "cache_read")
-    stated = {f"price.auto.long.{m}": 1.0 for m in meters}
+    stated = _card("auto.long")
     assert (
-        _new_prices(stated, unbilled=(), long_tokens=200_000, inherit=False, scaled=())
+        _new_prices(
+            stated,
+            unbilled=(),
+            long_tokens=200_000,
+            inherit=inherit,
+            scaled=(),
+        )
         == ()
     )
+
+
+def test_a_tier_priced_in_part_is_left_out_and_the_tiers_after_it_kept() -> None:
+    """A scaled tier with no standard card to scale from is unpriced, never raised on."""
+    stated = {
+        **_card("auto"),
+        "price.priority@2027-01-01.request": 2.0,
+        **_card("ultrafast"),
+    }
+    prices = _new_prices(
+        stated,
+        unbilled=(),
+        long_tokens=200_000,
+        inherit=False,
+        scaled=("priority",),
+    )
+    assert [p.service_tier for p in prices] == ["auto", "ultrafast"]
+
+
+def test_a_scaled_tier_s_unstated_rates_are_scaled_to_six_places() -> None:
+    stated = {**_card("auto"), "price.auto.request": 3.0, "price.priority.request": 1.0}
+    prices = _new_prices(
+        stated,
+        unbilled=(),
+        long_tokens=200_000,
+        inherit=False,
+        scaled=("priority",),
+    )
+    assert prices[1] == NewPrice(
+        service_tier="priority",
+        request=1.0,
+        response=0.333333,
+        cache_write=0.333333,
+        cache_write_1h=0.333333,
+        cache_read=0.333333,
+    )
+
+
+def _card(label: str) -> dict[str, float]:
+    """Return every meter of the card ``label`` names, each at ``1.0``."""
+    meters = ("request", "response", "cache_write", "cache_write_1h", "cache_read")
+    return {f"price.{label}.{m}": 1.0 for m in meters}
 
 
 def test_a_finding_is_ok_mismatch_waived_or_unstated() -> None:
@@ -294,7 +343,7 @@ def test_a_claude_page_that_agrees_yields_every_fact_ok() -> None:
     assert {f.status for f in findings} == {"ok"}
     assert _facts(findings) == _same(
         {
-            "knowledge_cutoff": "2026-06",
+            "knowledge_cutoff": "2026-06-01",
             "max_request_tokens": "1000000",
             "max_response_tokens": "128000",
             "thinking_budget": "auto,none",
@@ -339,6 +388,19 @@ def test_a_claude_image_edge_is_its_resolution_tier(
     assert _status(_anthropic(row, page), "max_image_edge_px")[:2] == ("1568", edge)
 
 
+def test_a_claude_byte_cap_is_an_exact_integer_however_large() -> None:
+    vision = _CLAUDE_VISION.replace("10\u00a0MB", "20000000000\u00a0MB")
+    findings = _anthropic(_haiku(), _claude_page(), vision=vision)
+    # Unequal to the catalog's cap, and waived as every model's reading of it is.
+    assert _status(findings, "max_image_bytes")[1:] == ("15728640000000000", "waived")
+
+
+def test_a_claude_page_without_a_long_band_compares_no_long_rates() -> None:
+    page = _claude_page().replace("over 100,000 tokens", "past the window")
+    findings = _anthropic(_haiku(), page)
+    assert not [f for f in findings if f.field.startswith("price.auto.long.")]
+
+
 def test_claude_byte_limits_are_unstated_where_the_guides_say_none() -> None:
     findings = _anthropic(_haiku(), _claude_page(), vision="", overview="")
     for fact in ("max_request_bytes", "max_image_bytes", "max_image_edge_px"):
@@ -353,7 +415,7 @@ def test_a_claude_page_that_disagrees_names_the_fact() -> None:
         if f.status == "mismatch"
     }
     assert bad == {
-        "knowledge_cutoff": ("2026-06", "2026-05"),
+        "knowledge_cutoff": ("2026-06-01", "2026-05-01"),
         "max_request_tokens": ("1000000", "200000"),
     }
 
@@ -732,7 +794,7 @@ def test_a_gemini_page_that_agrees_yields_every_fact_ok() -> None:
     # Audio and storage rates are not per-token text rates, so they are skipped.
     assert _facts(findings) == _same(
         {
-            "knowledge_cutoff": "2026-03",
+            "knowledge_cutoff": "2026-03-01",
             "max_request_tokens": "1048576",
             "max_context_tokens": "0",
             "max_response_tokens": "65536",
@@ -815,14 +877,14 @@ def test_a_cutoff_comes_from_the_card_or_the_card_it_defers_to() -> None:
         card: "<p>Knowledge <b>cutoff</b> date for Gemini 3.6 Flash is March 2026</p>",
     }
     assert _status(_google(_flash(), page, extra=direct), "knowledge_cutoff")[1] == (
-        "2026-03"
+        "2026-03-01"
     )
     deferred = {
         card: f"<h3>Known Limitations</h3>\n<p>See <a href={pdf} rel=x>card</a>.</p>",
         pdf: "The knowledge\ncutoff date for Gemini 3 Pro was January 2025.",
     }
     assert _status(_google(_flash(), page, extra=deferred), "knowledge_cutoff")[1] == (
-        "2025-01"
+        "2025-01-01"
     )
     silent = {card: "<h3>Known Limitations</h3><p>None stated.</p>"}
     assert _status(_google(_flash(), page, extra=silent), "knowledge_cutoff")[1] is None
@@ -893,7 +955,7 @@ def test_a_claude_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -
     assert absent.row == NewRow(
         model_id="opus-4.6",
         wire_model_id="claude-opus-4-6",
-        knowledge_cutoff="2026-06",
+        knowledge_cutoff="2026-06-01",
         limits={"max_request_tokens": 1_000_000, "max_response_tokens": 128_000},
         thinking_effort=("low", "medium", "high", "max"),
         thinking_effort_default="medium",
@@ -930,6 +992,23 @@ def test_a_claude_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -
     )
 
 
+def test_a_claude_model_the_catalog_lacks_keeps_its_thinking_off_cap() -> None:
+    docs = "https://platform.claude.com/docs/en"
+    row = _haiku(model_id="opus-4.6", wire="claude-opus-4-6")
+    page = _claude_page().replace("Claude Haiku 5.5", "Claude Opus 4.6")
+    findings = _anthropic(
+        row,
+        page,
+        extra={f"{docs}/models/haiku-5-5/overview.md": _claude_page()},
+    )
+    (absent,) = [f for f in findings if f.field == "catalogued"]
+    assert absent.row is not None
+    assert (absent.model_id, absent.row.thinking_off_max_effort) == (
+        "Claude Haiku 5.5",
+        "high",
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "ids"),
     [
@@ -951,6 +1030,7 @@ def test_a_claude_name_gives_its_api_id_and_catalog_name(
         ("gpt-6.3-sol", "sol-6.3"),
         ("gpt-5.6", "gpt-5.6"),
         ("gpt-5.4-mini", "gpt-mini-5.4"),
+        ("gpt-5.4-nano", "gpt-nano-5.4"),
         ("gpt-5-pro", "gpt-pro-5.0"),
         ("gpt-4o", "gpt-omni-4.0"),
         ("gpt-4o-mini", "gpt-omni-mini-4.0"),
@@ -1032,7 +1112,7 @@ def _haiku(
     row = _capability(
         model_id=model_id,
         wire=wire,
-        cutoff="2026-06",
+        cutoff="2026-06-01",
         limits=ModelLimits(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
@@ -1074,6 +1154,7 @@ def _anthropic(
     pricing: str = "",
     vision: str = _CLAUDE_VISION,
     overview: str = _CLAUDE_OVERVIEW,
+    extra: Mapping[str, str] = MappingProxyType({}),
 ) -> list[Finding]:
     docs = "https://platform.claude.com/docs/en"
     pages = {
@@ -1083,6 +1164,7 @@ def _anthropic(
         f"{docs}/build-with-claude/vision.md": vision,
         f"{docs}/api/overview.md": overview,
         f"{docs}/models/{row.wire_model_id.removeprefix('claude-')}/overview.md": page,
+        **extra,
     }
     # As ``cli._fetch`` reads a page it cannot get: empty.
     return check_anthropic(
@@ -1253,7 +1335,7 @@ def test_a_gemini_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -
     assert absent["gemini-3.6-flash"] == NewRow(
         model_id="gemini-flash-3.6",
         wire_model_id="gemini-3.6-flash",
-        knowledge_cutoff="2026-03",
+        knowledge_cutoff="2026-03-01",
         limits={"max_request_tokens": 1_048_576, "max_response_tokens": 65_536},
         thinking_effort=("min", "low", "medium", "high"),
         thinking_effort_default="min",
@@ -1269,17 +1351,6 @@ def test_a_gemini_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -
 
 def test_an_openai_model_the_catalog_lacks_comes_with_the_row_its_pages_state() -> None:
     """A tier priced in part is left out: unpriced, it is unoffered, and flagged."""
-    docs = "https://developers.openai.com/api/docs"
-    findings = check_openai(
-        ModelTable(rows=(_sol(model_id="gpt-omni-4.0", wire="gpt-4o"),)),
-        fetch=lambda url: {
-            f"{docs}/pricing.md": _openai_prices(),
-            f"{docs}/guides/prompt-caching.md": _OPENAI_CACHING,
-            f"{docs}/models/gpt-6.1-sol.md": _openai_page(),
-        }.get(url, ""),
-        today=date(2026, 11, 18),
-    )
-    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
     base = NewPrice(
         service_tier="auto",
         request=2.0,
@@ -1288,7 +1359,7 @@ def test_an_openai_model_the_catalog_lacks_comes_with_the_row_its_pages_state() 
         cache_write_1h=0.0,
         cache_read=0.1,
     )
-    assert absent["gpt-6.1-sol"] == NewRow(
+    assert _openai_new_row(_openai_page(), prices=_openai_prices()) == NewRow(
         model_id="sol-6.1",
         wire_model_id="gpt-6.1-sol",
         knowledge_cutoff="2026-04-30",
@@ -1314,6 +1385,84 @@ def test_an_openai_model_the_catalog_lacks_comes_with_the_row_its_pages_state() 
             ),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "unstated",
+    [
+        " (default)",
+        "- 128,000 max output tokens\n",
+        "- Apr 30, 2026 knowledge cutoff\n",
+    ],
+)
+def test_an_openai_model_whose_page_states_too_little_makes_no_row(
+    unstated: str,
+) -> None:
+    """A row needs a cutoff, a default level, and both token limits."""
+    page = _openai_page().replace(unstated, "")
+    assert _openai_new_row(page, prices=_openai_prices()) is None
+
+
+def test_a_window_no_wider_than_the_input_cap_adds_no_context_limit() -> None:
+    page = (
+        _openai_page()
+        .replace("1,050,000 context window", "400,000 context window")
+        .replace("922,000", "400,000")
+    )
+    row = _openai_new_row(page, prices=_openai_prices())
+    assert row is not None
+    assert row.limits == {"max_request_tokens": 400_000, "max_response_tokens": 128_000}
+
+
+def test_an_openai_band_priced_in_part_is_left_out_not_filled_from_the_base() -> None:
+    prices = (
+        _openai_prices()
+        .replace(" Long context 30m write |", "")
+        .replace("| $0.20 | $5.00 |", "| $0.20 |")
+    )
+    row = _openai_new_row(_openai_page(), prices=prices)
+    assert row is not None
+    assert [(p.service_tier, p.effective_prompt_tokens) for p in row.prices] == [
+        ("auto", 0),
+    ]
+
+
+def _openai_new_row(page: str, *, prices: str) -> NewRow | None:
+    """Return the row the pages state for ``gpt-6.1-sol``, which the catalog lacks."""
+    docs = "https://developers.openai.com/api/docs"
+    findings = check_openai(
+        ModelTable(rows=(_sol(model_id="gpt-omni-4.0", wire="gpt-4o"),)),
+        fetch=lambda url: {
+            f"{docs}/pricing.md": prices,
+            f"{docs}/guides/prompt-caching.md": _OPENAI_CACHING,
+            f"{docs}/models/gpt-6.1-sol.md": page,
+        }.get(url, ""),
+        today=date(2026, 11, 18),
+    )
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    return absent["gpt-6.1-sol"]
+
+
+def test_a_gemini_model_the_catalog_lacks_keeps_its_shared_window() -> None:
+    row = _flash(model_id="gemini-flash-3.8", wire="gemini-3.8-flash")
+    docs = "https://aistudio.google.com/docs"
+    shared = _gemini_page().replace(
+        "**Input token limit** 1,048,576",
+        "**Context window (unified input and output token limit)** 1,048,576",
+    )
+    findings = _google(
+        row,
+        _gemini_page(),
+        extra={f"{docs}/models/gemini-3.6-flash.md": shared},
+    )
+    absent = {f.model_id: f.row for f in findings if f.field == "catalogued"}
+    new = absent["gemini-3.6-flash"]
+    assert new is not None
+    assert new.limits == {
+        "max_request_tokens": 1_048_576,
+        "max_context_tokens": 1_048_576,
+        "max_response_tokens": 65_536,
+    }
 
 
 def test_a_model_whose_id_follows_no_naming_is_left_for_a_person() -> None:
@@ -1391,6 +1540,12 @@ Text is priced the same as [`gemini-3.1-pro-preview`](/docs/x).
   * Context caching price
   * Free of charge
   * $0.075 $1.00 / 1,000,000 tokens per hour (storage price)
+
+  ---
+
+  * Grounding with Google Search
+  * Free of charge
+  * $35 / 1,000 grounded prompts
 {% /tab %}
 {% tab title="Flex" %}
   * Feature
@@ -1418,7 +1573,7 @@ def _flash(
     row = _capability(
         model_id=model_id,
         wire=wire,
-        cutoff="2026-03",
+        cutoff="2026-03-01",
         limits=ModelLimits(
             max_request_tokens=1_048_576,
             max_context_tokens=context,
@@ -1444,7 +1599,7 @@ def _google(
     row: ModelCapability,
     page: str,
     *,
-    extra: Mapping[str, str] | None = None,
+    extra: Mapping[str, str] = MappingProxyType({}),
     prices: str = _GEMINI_PRICES,
     thinking: str = _GEMINI_THINKING,
     today: date = date(2026, 11, 18),
@@ -1454,7 +1609,7 @@ def _google(
         f"{docs}/thinking.md": thinking,
         f"{docs}/pricing.md": prices,
         f"{docs}/models/{row.wire_model_id}.md": page,
-        **(extra or {}),
+        **extra,
     }
     # As ``cli._fetch`` reads a page it cannot get: empty.
     return check_google(

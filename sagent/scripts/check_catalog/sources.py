@@ -165,14 +165,13 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
     def facts(row: ModelCapability) -> tuple[str, _Facts]:
         url, page = model_page(row.wire_model_id)
         cells = _cells(page)
-        # A page without a title names no model, whatever stands in for it.
-        name = _match(r"^title: (.+)$", page) or ""  # pragma: no mutate
+        name = _match(r"^title: (.+)$", page) or ""
         names.add(name)
         thinking = budgets.get(name)
         stated: _Facts = {
             "knowledge_cutoff": (
                 row.knowledge_cutoff,
-                _month(cells.get("Reliable knowledge cutoff")),
+                _month_start(cells.get("Reliable knowledge cutoff")),
             ),
             "max_request_tokens": (
                 row.limits.max_request_tokens,
@@ -251,7 +250,7 @@ def check_anthropic(table: ModelTable, *, fetch: Fetch, today: date) -> list[Fin
                 pair[0],
                 model_id=pair[1],
                 facts=facts,
-                long_tokens=_claude_band(_cells(model_page(pair[0])[1])) or 0,
+                long_tokens=_claude_band(_cells(model_page(pair[0])[1])),
                 # Fast mode states input and output only; every catalogued row's
                 # cache rates scale with them (Opus 5.0, Fable 5.2: 2x).
                 scaled=("priority",),
@@ -436,13 +435,11 @@ def waivers() -> Mapping[tuple[str, str, str], str]:
       waivers: Each reason, by provider, model, and field.
 
     """
-    claude_code = (
-        "Claude Code's default, which anthropic.yaml starts at"  # pragma: no mutate
-    )
-    codex = "Codex's default, which openai.yaml starts at"  # pragma: no mutate
+    claude_code = "Claude Code's default, which anthropic.yaml starts at"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
+    codex = "Codex's default, which openai.yaml starts at"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
     image_cap = (
-        "10 MB read as 10**6, below the 2**20 reading: unmeasured, and an"  # pragma: no mutate
-        " image shrunk a little more costs less than one refused"  # pragma: no mutate
+        "10 MB read as 10**6, below the 2**20 reading: unmeasured, and an"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
+        " image shrunk a little more costs less than one refused"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
     )
     # Claude Code turns thinking on for the 4.x models, which think only when asked.
     budgets = {
@@ -464,13 +461,13 @@ def waivers() -> Mapping[tuple[str, str, str], str]:
             ("anthropic", "*", "max_image_bytes"): image_cap,
             # A model left out of a catalog, by the id its vendor lists it under.
             ("anthropic", "Claude Mythos Preview", "catalogued"): (
-                "a research preview served only to invited partners"  # pragma: no mutate
+                "a research preview served only to invited partners"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
             ),
             ("google", "gemini-3-pro-preview", "catalogued"): (
-                "shut down; its page says so"  # pragma: no mutate
+                "shut down; its page says so"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
             ),
             ("google", "gemini-robotics-er-2-preview", "catalogued"): (
-                "an embodied-reasoning model for robots, not a chat model"  # pragma: no mutate
+                "an embodied-reasoning model for robots, not a chat model"  # pragma: no mutate[diagnostic-text] -- Only a person reads a waiver.
             ),
             ("anthropic", "fable-5.2", "thinking_effort_default"): claude_code,
             ("anthropic", "sonnet-5.5", "thinking_effort_default"): claude_code,
@@ -529,7 +526,7 @@ def _new_row(
     """Return the row the vendor's pages state for ``wire``; ``None`` if too little."""
     if model_id is None:
         return None
-    blank = ModelCapability(model_id=model_id, wire_model_id=wire, effort_as_level=True)
+    blank = ModelCapability(wire_model_id=wire, effort_as_level=True)
     stated = {name: source for name, (_, source) in facts(blank)[1].items()}
     efforts: tuple[ThinkingEffort, ...] = literal_members(ThinkingEffort)
     modes: tuple[ThinkingBudget, ...] = literal_members(ThinkingBudget)
@@ -612,10 +609,7 @@ def _new_prices(
         tier, _, day = tier_part.partition("@")
         cards.setdefault((tier, day, "long" in qualifiers), {})[meter] = rate
     prices: list[NewPrice] = []
-    for (tier, day, long), rates in sorted(
-        cards.items(),
-        key=lambda card: (card[0][0] != "auto", card[0]),
-    ):
+    for (tier, day, long), rates in sorted(cards.items()):
         base = cards.get((tier, "", False), {}) if inherit else {}
         if tier in scaled and "request" in rates:
             # Every meter of the tier is the base card's times one factor.
@@ -630,8 +624,6 @@ def _new_prices(
         }
         if whole.keys() != set(meters):
             # A card missing a meter is left out: a tier unpriced is unoffered.
-            if (tier, day, long) == ("auto", "", False):
-                return ()
             continue
         prices.append(
             NewPrice(
@@ -678,9 +670,9 @@ def _text(value: object) -> str:
     return str(value)
 
 
-def _match(pattern: str, text: str) -> str | None:
+def _match(pattern: str, text: str | None) -> str | None:
     """Return the first group of the first line ``pattern`` matches, or ``None``."""
-    found = re.search(pattern, text, flags=re.MULTILINE)
+    found = None if text is None else re.search(pattern, text, flags=re.MULTILINE)
     return None if found is None else str(found[1]).strip()
 
 
@@ -702,13 +694,10 @@ def _count(text: str | None) -> int | None:
     return round(float(found[1].replace(",", "")) * scale)
 
 
-def _month(text: str | None) -> str | None:
-    """Return ``Jun 2026`` or ``March 2026`` as ``2026-06``; ``None`` for no month."""
+def _month_start(text: str | None) -> str | None:
+    """Return ``Jun 2026`` or ``March 2026`` as ``2026-06-01``; ``None`` for no month."""
     found = None if text is None else re.search(r"([A-Z][a-z]+) (\d{4})", text)
-    if found is None:
-        return None
-    day = _day(f"{found[1]} 1, {found[2]}")
-    return None if day is None else day[: len("2026-06")]
+    return None if found is None else _day(f"{found[1]} 1, {found[2]}")
 
 
 def _day(text: str) -> str | None:
@@ -847,8 +836,9 @@ def _claude_image_edge(
     if version is None:
         return None
     later, other = edges
-    # A missing minor read as 0 or 1 falls the same side of 4.7: (4, 0) and (4, 1).
-    minor = int(version[2] or 0)  # pragma: no mutate
+    # pragma: no mutate start -- A missing minor read as 0 or 1 falls below 4.7 alike.
+    minor = int(version[2] or 0)
+    # pragma: no mutate end
     return later if (int(version[1]), minor) >= (4, 7) else other
 
 
@@ -874,7 +864,7 @@ def _claude_efforts(page: str) -> _ClaudeEfforts:
 
 def _claude_names(text: str | None) -> frozenset[str]:
     """Return the names in ``... Available on A, B, and C.``."""
-    listed = None if text is None else _match(r"Available on (.*?)\.?$", text)
+    listed = _match(r"Available on (.*?)\.?$", text)
     if listed is None:
         return frozenset()
     return frozenset(
@@ -904,8 +894,6 @@ def _claude_effort_levels(
 
 def _claude_default_effort(cell: str | None) -> str | None:
     """Return a backquoted level bare, and ``Not supported`` as ``none``."""
-    if cell is None:
-        return None
     return "none" if cell == "Not supported" else _match(r"`(\w+)`", cell)
 
 
@@ -923,24 +911,23 @@ def _claude_prices(
         "cache_write_1h": "1h cache write",
         "cache_read": "Cache read",
     }
-    # A missing cell holds no rate, whatever stands in for it.
-    blank = ""  # pragma: no mutate
+    blank = ""  # pragma: no mutate -- A missing cell holds no rate, whatever stands in for it.
     stated = {meter: cells.get(cell, blank) for meter, cell in meters.items()}
     small = {m: _first_rate(text, index=0) for m, text in stated.items()}
     price = _price(
         row,
         "auto",
-        tokens=1,  # pragma: no mutate -- any prompt under the band prices alike.
+        tokens=1,  # pragma: no mutate -- Any prompt under the band is priced alike.
         at=today,
     )
     facts = _price_facts("price.auto", price, small)
     over = _claude_band(cells)
-    if over is not None:
+    if over:
         large = {m: _first_rate(text, index=1) for m, text in stated.items()}
         price = _price(
             row,
             "auto",
-            tokens=over + 1,  # pragma: no mutate -- any prompt past the band alike.
+            tokens=over + 1,  # pragma: no mutate -- Any prompt past it prices alike.
             at=today,
         )
         facts |= _price_facts("price.auto.long", price, large)
@@ -961,9 +948,9 @@ def _claude_ids(name: str) -> tuple[str, str] | None:
     return wire, f"{family}-{major}.{minor or 0}"
 
 
-def _claude_band(cells: Mapping[str, str]) -> int | None:
-    """Return the prompt length a model page's long-prompt rates start past."""
-    return _count(_match(r"over ([\d,]+) tokens", cells.get("Input", "")))
+def _claude_band(cells: Mapping[str, str]) -> int:
+    """Return the prompt length a page's long-prompt rates start past; ``0`` for none."""
+    return _count(_match(r"over ([\d,]+) tokens", cells.get("Input"))) or 0
 
 
 def _first_rate(text: str, *, index: int) -> float | None:
@@ -996,7 +983,7 @@ def _claude_fast_prices(
     price = _price(
         row,
         "priority",
-        tokens=1,  # pragma: no mutate -- fast mode prices every prompt alike.
+        tokens=1,  # pragma: no mutate -- Fast mode prices every prompt alike.
         at=today,
     )
     if fast is None:
@@ -1056,13 +1043,11 @@ def _openai_table_rows(section: str) -> Iterator[tuple[str, dict[str, float]]]:
     }
     # Sagent sends no ``prompt_cache_options.ttl``, so it never pays the 12h write.
     unread = {"Model", "Short context 12h write", "Long context 12h write"}
-    # Every table opens with its header row, so no data row meets an empty header.
-    header: list[str] = []  # pragma: no mutate -- replaced before it is read.
+    header: list[str] = []  # pragma: no mutate -- The header row replaces it.
     for line in section.splitlines():
         if not line.startswith("|") or line.startswith("| ---"):
             continue
-        # Cells hold no ``X``, so stripping it too changes nothing.
-        inner = line.strip("|")  # pragma: no mutate
+        inner = line.strip("|")  # pragma: no mutate -- Cells hold no ``X``.
         cells = [cell.strip() for cell in inner.split("|")]
         if cells[0] == "Model":
             for name in cells:
@@ -1103,11 +1088,10 @@ def _openai_cache_ttl(
     if extended is None:
         return None
     version = re.match(r"gpt-(\d+)(?:\.(\d+))?", model)
-    # GPT-5.6 and later keep at least 30 minutes, listed or not. A missing minor
-    # read as 0 or 1 falls the same side of 5.6: (5, 0) and (5, 1).
+    # GPT-5.6 and later keep at least 30 minutes, listed or not.
     recent = version is not None and (
         int(version[1]),
-        int(version[2] or 0),  # pragma: no mutate
+        int(version[2] or 0),  # pragma: no mutate -- Minor 0 or 1 is below 5.6 alike.
     ) >= (5, 6)
     return frozenset({1800.0 if recent or model in extended else 300.0})
 
@@ -1129,11 +1113,10 @@ def _openai_efforts(page: str) -> tuple[frozenset[str] | None, str | None]:
     names = {"minimal": "min"}
     levels = _all(r"\b(none|minimal|low|medium|high|xhigh|max)\b", listed)
     default = _match(r"\b(\w+) \(default\)", listed)
-    return (
-        frozenset(names.get(level, level) for level in levels),
-        # ``names.get(None, None)`` is ``None`` too.
-        None if default is None else names.get(default, default),  # pragma: no mutate
-    )
+    offered = frozenset(names.get(level, level) for level in levels)
+    if default is None:
+        return offered, None
+    return offered, names.get(default, default)
 
 
 # ``gpt-6.2-astra`` is ``astra-6.2``, ``gpt-5.4-mini`` ``gpt-mini-5.4``, ``gpt-4o``
@@ -1171,7 +1154,7 @@ def _openai_row_prices(
         smallest = _price(
             row,
             tier,
-            tokens=1,  # pragma: no mutate -- any short prompt prices alike.
+            tokens=1,  # pragma: no mutate -- Any short prompt is priced alike.
             at=when,
         )
         facts |= _price_facts(label, smallest, short)
@@ -1184,7 +1167,7 @@ def _openai_row_prices(
             price = _price(
                 row,
                 tier,
-                tokens=272_001,  # pragma: no mutate -- any long prompt prices alike.
+                tokens=272_001,  # pragma: no mutate -- Any long prompt is priced alike.
                 at=when,
             )
             facts |= _price_facts(f"{label}.long", price, long)
@@ -1201,7 +1184,7 @@ def _gemini_cutoff(page: str, fetch: Fetch) -> str | None:
     """Return a model page's cutoff, or else the one its model card states."""
     stated = _match(r"Knowledge cutoff\s*\{% /section %\}\s*\*\s*(\w+ \d{4})", page)
     if stated is not None:
-        return _month(stated)
+        return _month_start(stated)
     card = _match(r"\[Model card\]\((https://deepmind\.google/[^)]+)\)", page)
     if card is None:
         return None
@@ -1215,14 +1198,14 @@ def _gemini_cutoff(page: str, fetch: Fetch) -> str | None:
     )
     if stated is None and limits is not None:
         stated = _card_cutoff(fetch(limits[1]))
-    return _month(stated)
+    return _month_start(stated)
 
 
 def _card_cutoff(raw: str) -> str | None:
     """Return the ``Month YYYY`` a model card's prose gives as its cutoff."""
     text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", raw)).split())
     found = re.search(
-        r"knowledge cutoff (?:date )?(?:for .{0,60}? )?(?:is|was) (\w+ \d{4})",  # pragma: no mutate[case-insensitive]
+        r"knowledge cutoff (?:date )?(?:for .{0,60}? )?(?:is|was) (\w+ \d{4})",  # pragma: no mutate[case-insensitive] -- Searched with ``re.IGNORECASE``.
         text,
         flags=re.IGNORECASE,
     )
@@ -1345,16 +1328,18 @@ def _gemini_row_prices(
         min(
             today,
             date.fromisoformat(starts[0])
-            - timedelta(days=1),  # pragma: no mutate -- any day before it alike.
+            - timedelta(days=1),  # pragma: no mutate -- Any earlier day prices alike.
         )
         if starts
         else today
     )
+    # pragma: no mutate start -- Any short, or any long, prompt prices alike.
     bands: list[tuple[str, date, int]] = [
-        ("base", base_day, 1),  # pragma: no mutate -- any short prompt alike.
-        ("long", base_day, 200_001),  # pragma: no mutate -- any long prompt alike.
+        ("base", base_day, 1),
+        ("long", base_day, 200_001),
     ]
-    bands += [(s, date.fromisoformat(s), 1) for s in starts]  # pragma: no mutate
+    bands += [(s, date.fromisoformat(s), 1) for s in starts]
+    # pragma: no mutate end
     facts: _Facts = {}
     for tag, at, tokens in bands:
         # Only the meters this band or date prices: Gemini states no long-prompt

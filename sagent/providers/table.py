@@ -129,13 +129,15 @@ class ModelTable(Mapping[str, ModelCapability]):
         model, the provider's section, and the section's entry for the model
         under its ``models``. Each replaces whole fields, except that the
         section's ``thinking`` replaces only the axes it names. A section
-        serves every model in the document but those its ``omits`` names, each
-        with the reason; the document's list is the only list of models, so a
-        model added there reaches every provider. The section's ``roles``
-        replace the document's it names.
+        serves every model in the document: the document's list is the only list
+        of models, so a model added there reaches every provider, and one an
+        account is not served fails with the vendor's own error. The section's
+        ``roles`` replace the document's it names.
         The section's ``sends`` names the settings the provider's requests
         carry; each other one offers only the row's default, what the vendor
         does unasked, since a choice nothing sends would change only the label.
+        The section's ``service_tier`` names the tiers its provider can send; each
+        row offers those of them it prices.
 
         Args:
           text: The vendor's YAML document.
@@ -164,32 +166,31 @@ class ModelTable(Mapping[str, ModelCapability]):
             raise ValueError(f"Section {section!r} does not say what it sends.")
         sends = frozenset(from_plain(layer.pop("sends"), list[ModelSettingName]))
         entries = from_plain(layer.pop("models", {}), dict[str, object])
-        # Before ``omits``, a section listed what it served as bare names.
+        # Catalogs once named the models a section served (bare names) or left
+        # out (``omits``); a user's old document says so instead of loading wrong.
+        served = (
+            "A section now serves every model in the document; delete {}. A model an"
+            " account is not served fails with the vendor's own error."
+        )
         if bare := sorted(k for k, v in entries.items() if v is None):
             raise ValueError(
-                f"Section {section!r} lists models by bare name: {bare}. A section"
-                " now serves every model in the document but those its omits name;"
-                " delete the bare names, and put any model it leaves out under"
-                " omits, with why.",
+                f"Section {section!r} lists models by bare name: {bare}. "
+                + served.format("the bare names"),
+            )
+        if "omits" in layer:
+            omitted = sorted(from_plain(layer["omits"], dict[str, object]))
+            raise ValueError(
+                f"Section {section!r} omits models: {omitted}. "
+                + served.format("its omits"),
             )
         overrides = from_plain(entries, dict[str, dict[str, object]])
-        omits = from_plain(layer.pop("omits", {}), dict[str, str])
         # A provider serving other models than the vendor's own names its own.
         roles = document.roles | from_plain(layer.pop("roles", {}), dict[str, str])
         named = [(from_plain(raw.get("model_id"), str), raw) for raw in document.models]
-        for model_id, why in omits.items():
-            if not why.strip():
-                raise ValueError(
-                    f"Section {section!r} omits {model_id!r} without saying why.",
-                )
-        known = {model_id for model_id, _ in named}
-        for key, given in (("overrides", overrides), ("omits", omits)):
-            if unknown := sorted(set(given) - known):
-                raise ValueError(
-                    f"Section {section!r} {key} unknown models: {unknown}.",
-                )
-        if both := sorted(set(omits) & set(overrides)):
-            raise ValueError(f"Section {section!r} both omits and overrides {both}.")
+        if unknown := sorted(set(overrides) - {model_id for model_id, _ in named}):
+            raise ValueError(
+                f"Section {section!r} overrides unknown models: {unknown}.",
+            )
         rows = tuple(
             _unsent_fixed(
                 _model(
@@ -202,7 +203,6 @@ class ModelTable(Mapping[str, ModelCapability]):
                 sends=sends,
             )
             for model_id, raw in named
-            if model_id not in omits
         )
         return cls(rows=rows, roles=roles)
 
@@ -612,8 +612,9 @@ def _choices() -> tuple[ModelSettingName, ...]:
 def _family_version(model_id: str) -> tuple[str, tuple[int, int]] | None:
     """Split ``opus-5.5`` into ``("opus", (5, 5))``; ``None`` for other names."""
     family, _, version = model_id.rpartition("-")
-    # A second dot fails either split: ``2.3`` or ``1.2`` is no decimal.
-    major, dot, minor = version.partition(".")  # pragma: no mutate
+    # pragma: no mutate start -- A second dot fails either split: ``2.3`` is no decimal.
+    major, dot, minor = version.partition(".")
+    # pragma: no mutate end
     if (
         not dot
         or not major.isdecimal()
@@ -763,7 +764,13 @@ def _model(
     axes = from_plain(section.get("thinking", {}), dict[str, object])
     if axes.keys() - {"effort", "budget", "output"}:
         raise ValueError(f"Unknown thinking axes: {sorted(axes)}.")
-    values |= {key: value for key, value in section.items() if key != "thinking"}
+    # A section's tiers are those its provider sends, not a claim each model prices.
+    sent = section.get("service_tier")
+    values |= {
+        key: value
+        for key, value in section.items()
+        if key not in {"thinking", "service_tier"}
+    }
     values["thinking"] = (
         from_plain(values.get("thinking", {}), dict[str, object]) | axes
     )
@@ -787,6 +794,14 @@ def _model(
         raise ValueError(
             f"Model {row.model_id!r} offers service_tier {unpriced!r} with no price.",
         )
+    if sent is not None:
+        sendable = frozenset(from_plain(sent, list[ServiceTier]))
+        tiers &= sendable
+        if not tiers:
+            raise ValueError(
+                f"Model {row.model_id!r} is priced at none of the service tiers"
+                f" section {section_name!r} sends: {sorted(sendable)}.",
+            )
     tier = _lowest("service_tier", tiers, literal_members(ServiceTier))
     size = (
         _size(row.context_size_default.lower())
@@ -910,8 +925,9 @@ def _effort_ladder(
 
 def _default_first[T](default: T | None, ladder: tuple[T, ...]) -> tuple[T, ...]:
     """Return ``ladder`` with ``default``, when one is given, tried first."""
-    # A ``None`` tried first changes nothing: no row offers ``None``.
-    return ladder if default is None else (default, *ladder)  # pragma: no mutate
+    # pragma: no mutate start -- A ``None`` tried first changes nothing: no row offers it.
+    return ladder if default is None else (default, *ladder)
+    # pragma: no mutate end
 
 
 def _lowest[T](name: str, offered: Collection[T], ladder: Sequence[T]) -> T:
@@ -964,23 +980,20 @@ def _check_limits(row: _ModelRow) -> None:
 
 
 def _check_cutoff(row: _ModelRow) -> None:
-    """Reject a knowledge cutoff that is not an ISO year-month or date."""
+    """Reject a knowledge cutoff that is not an ISO date."""
     cutoff = row.knowledge_cutoff
     if cutoff is None:
         return
-    if re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", cutoff):
-        # A year-month is checked as its first day: ``2025-13`` fails as ``2025-13-01``.
+    # ``fromisoformat`` also reads ``20250501`` and week dates: only one spelling.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
         try:
-            date.fromisoformat(
-                cutoff if len(cutoff) > len("2026-05") else f"{cutoff}-01",
-            )
+            date.fromisoformat(cutoff)
         except ValueError:
             pass
         else:
             return
     raise ValueError(
-        f"Model {row.model_id!r} has knowledge_cutoff {cutoff!r};"
-        " write it as YYYY-MM or YYYY-MM-DD.",
+        f"Model {row.model_id!r} has knowledge_cutoff {cutoff!r}; write it as YYYY-MM-DD.",
     )
 
 

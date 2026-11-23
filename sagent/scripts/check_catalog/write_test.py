@@ -20,7 +20,7 @@ models:
 # Implicit caching only.
 - model_id: gemini-neon-4.0
   wire_model_id: gemini-4-neon
-  knowledge_cutoff: '2026-03'
+  knowledge_cutoff: '2026-03-01'
   limits:
     max_request_tokens: 1_048_576
     max_context_tokens: 1_114_112
@@ -82,7 +82,7 @@ def test_each_fact_a_row_states_is_rewritten_in_place(tmp_path: Path) -> None:
             _finding("gemini-neon-4.0", "price.auto@2026-12-01.response", "18"),
             _finding("gemini-neon-4.0", "price.auto.long.request", "7"),
             _finding("gemini-neon-4.0", "price.ultrafast@2027-03-01.request", "24"),
-            _finding("gemini-neon-4.0", "knowledge_cutoff", "2026-04"),
+            _finding("gemini-neon-4.0", "knowledge_cutoff", "2026-04-01"),
             _finding("gemini-neon-4.0", "max_request_tokens", "1000000"),
             _finding("gemini-neon-4.0", "max_context_tokens", "1200000"),
             _finding("gemini-neon-4.0", "max_response_tokens", "131072"),
@@ -94,7 +94,7 @@ def test_each_fact_a_row_states_is_rewritten_in_place(tmp_path: Path) -> None:
         .replace("response: 20.0", "response: 18.0")
         .replace("request: 6.0", "request: 7.0")
         .replace("request: 18.0", "request: 24.0")
-        .replace("'2026-03'", "'2026-04'")
+        .replace("'2026-03-01'", "'2026-04-01'")
         .replace("max_request_tokens: 1_048_576", "max_request_tokens: 1_000_000")
         .replace("max_context_tokens: 1_114_112", "max_context_tokens: 1_200_000")
         .replace("max_response_tokens: 65_536", "max_response_tokens: 131_072")
@@ -118,7 +118,7 @@ def test_a_fact_the_row_does_not_state_itself_is_left_for_a_person(
         _finding("gemini-argon-4.0", "price.priority", "absent"),
         _finding("gemini-neon-4.0", "price.auto.weird.request", "7"),
         _finding("gemini-argon-4.0", "thinking_effort", "high,low"),
-        _finding("gemini-krypton-5.0", "knowledge_cutoff", "2026-09"),
+        _finding("gemini-krypton-5.0", "knowledge_cutoff", "2026-09-01"),
         _finding("gemini-5-krypton", "catalogued", "listed"),
     ]
     assert write(path, unwritable) == unwritable
@@ -131,7 +131,7 @@ def test_a_value_the_catalog_would_refuse_is_left_and_nothing_is_saved(
     """Every edit is loaded before it is kept: a bad one never reaches the file."""
     path = tmp_path / "google.yaml"
     path.write_text(_DOCUMENT)
-    refused = _finding("gemini-neon-4.0", "knowledge_cutoff", "2026-13")
+    refused = _finding("gemini-neon-4.0", "knowledge_cutoff", "2026-13-01")
     assert write(path, [refused]) == [refused]
     assert path.read_text() == _DOCUMENT
 
@@ -241,7 +241,7 @@ def test_a_new_model_is_written_reusing_the_document_s_profile_and_window(
     row = NewRow(
         model_id="gemini-krypton-5.0",
         wire_model_id="gemini-5-krypton",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits=_GEMINI_4,
         thinking_effort=("low", "medium", "high", "xhigh"),
         thinking_effort_default="high",
@@ -253,7 +253,7 @@ def test_a_new_model_is_written_reusing_the_document_s_profile_and_window(
 - model_id: gemini-krypton-5.0
   wire_model_id: gemini-5-krypton
   profile: levels_xhigh
-  knowledge_cutoff: '2026-09'
+  knowledge_cutoff: '2026-09-01'
   limits: *gemini_4
   prices:
   - service_tier: auto
@@ -285,7 +285,7 @@ def test_a_new_model_whose_window_no_anchor_holds_states_it(tmp_path: Path) -> N
     row = NewRow(
         model_id="gemini-krypton-5.0",
         wire_model_id="gemini-5-krypton",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits={"max_request_tokens": 2_097_152},
         thinking_effort=("low", "medium", "high", "xhigh"),
         thinking_effort_default="high",
@@ -308,7 +308,7 @@ def test_a_new_model_above_its_window_s_anchor_states_the_window(
     row = NewRow(
         model_id="gemini-neon-4.5",
         wire_model_id="gemini-4.5-neon",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits=_GEMINI_4,
         thinking_effort=("low", "medium", "high", "xhigh"),
         thinking_effort_default="high",
@@ -331,7 +331,7 @@ def test_a_new_model_of_a_known_family_goes_above_its_elders_stating_what_differ
     row = NewRow(
         model_id="gemini-neon-4.5",
         wire_model_id="gemini-4.5-neon",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits={"max_request_tokens": 2_097_152, "max_response_tokens": 131_072},
         thinking_effort=("low", "high"),
         thinking_effort_default="low",
@@ -346,7 +346,7 @@ def test_a_new_model_of_a_known_family_goes_above_its_elders_stating_what_differ
     budget: [auto]
     output: [none, text]
   thinking_effort_default: low
-  knowledge_cutoff: '2026-09'
+  knowledge_cutoff: '2026-09-01'
   limits:
     max_request_tokens: 2_097_152
     max_response_tokens: 131_072
@@ -373,7 +373,7 @@ def test_a_new_model_of_a_known_family_goes_above_its_elders_stating_what_differ
 _NEON_39 = NewRow(
     model_id="gemini-neon-3.9",
     wire_model_id="gemini-3.9-neon",
-    knowledge_cutoff="2026-01",
+    knowledge_cutoff="2026-01-01",
     limits={},
     thinking_effort=("min", "low", "medium", "high"),
     thinking_effort_default="high",
@@ -428,14 +428,14 @@ models:
   # Sol 6.0 is the newest.
 - model_id: sol-6.0
   wire_model_id: gpt-6-sol
-  knowledge_cutoff: '2026-01'
+  knowledge_cutoff: '2026-01-01'
   prices:
   - service_tier: auto
     request: 2.0
 
 - &sol_5_6
   model_id: sol-5.6
-  knowledge_cutoff: '2025-06'
+  knowledge_cutoff: '2025-06-01'
   prices:
   - service_tier: auto
     request: 4.0
@@ -463,7 +463,7 @@ def test_an_anchored_row_and_a_merged_row_are_rows_too(tmp_path: Path) -> None:
     sol_55 = NewRow(
         model_id="sol-5.5",
         wire_model_id="gpt-5.5-sol",
-        knowledge_cutoff="2025-01",
+        knowledge_cutoff="2025-01-01",
         limits={"max_request_tokens": 2_000},
         thinking_effort=("low", "high"),
         thinking_effort_default="low",
@@ -504,7 +504,7 @@ def test_the_newest_model_goes_above_the_comment_of_the_row_it_leads(
     sol_61 = NewRow(
         model_id="sol-6.1",
         wire_model_id="gpt-6.1-sol",
-        knowledge_cutoff="2026-03",
+        knowledge_cutoff="2026-03-01",
         limits={},
         thinking_effort=("low", "high"),
         thinking_effort_default="low",
@@ -523,28 +523,18 @@ def test_the_newest_model_goes_above_the_comment_of_the_row_it_leads(
     ]
 
 
-def test_a_limit_of_a_row_with_no_window_and_a_missing_section_are_left(
-    tmp_path: Path,
-) -> None:
-    """Sol 6.0 states no ``limits`` to rewrite; ``nowhere`` has no omits to edit."""
+def test_a_limit_of_a_row_with_no_window_is_left(tmp_path: Path) -> None:
+    """Sol 6.0 states no ``limits`` to rewrite."""
     path = tmp_path / "openai.yaml"
     path.write_text(_ANCHORED)
     unwritable = [
         replace(_finding("sol-6.0", "max_request_tokens", "2000"), provider="openai"),
-        Finding(
-            provider="nowhere",
-            model_id="sol-6.0",
-            field="served",
-            catalog="yes",
-            source="no",
-            url="https://u",
-        ),
     ]
     assert write(path, unwritable) == unwritable
     assert path.read_text() == _ANCHORED
 
 
-_SECTIONS = """\
+_ROWS = """\
 reference:
   thinking: {effort: [none], budget: [none], output: [none]}
 
@@ -554,164 +544,21 @@ models:
   prices: [{request: 1.0}]
 - model_id: argon-4.0
   prices: [{request: 1.0}]
-- model_id: hydrogen-4.0
-  prices: [{request: 1.0}]
-- model_id: carbon-4.0
-  prices: [{request: 1.0}]
 - {model_id: flash-3.8, prices: [{request: 1.0}]}
 
 providers:
   api:
     sends: []
-  plan: &plan
-    sends: []
-    omits:
-      neon-4.0: not listed
-      argon-4.0: not listed
-      carbon-4.0: not listed
-        any more
-    models:
-      flash-3.8:
-        approx_chars_per_token: 3.0
-  other:
-    sends: []
-    roles:
-      utility: "neon-\\
-        4.0"
 """
-
-
-def _served(
-    model_id: str,
-    *,
-    catalog: str,
-    source: str,
-    provider: str = "plan",
-    url: str = "fetchAvailableModels",
-) -> Finding:
-    return Finding(
-        provider=provider,
-        model_id=model_id,
-        field="served",
-        catalog=catalog,
-        source=source,
-        url=url,
-    )
-
-
-def _plan(path: Path) -> list[str]:
-    return list(ModelTable.from_yaml(path, section="plan"))
-
-
-def test_a_section_s_omits_follow_what_its_login_is_served(tmp_path: Path) -> None:
-    """Served now: its omit goes. No longer served: it is omitted, saying so."""
-    path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
-    assert (
-        write(
-            path,
-            [
-                _served("hydrogen-4.0", catalog="yes", source="no"),
-                _served("neon-4.0", catalog="no", source="yes"),
-            ],
-        )
-        == []
-    )
-    # Below the last of three omits, whose reason runs over two lines.
-    assert path.read_text() == _SECTIONS.replace(
-        "      neon-4.0: not listed\n",
-        "",
-    ).replace(
-        "        any more\n",
-        "        any more\n      hydrogen-4.0: not listed by fetchAvailableModels\n",
-    )
-    assert _plan(path) == ["neon-4.0", "flash-3.8"]
-
-
-def test_a_section_s_last_omit_takes_its_key_and_a_first_one_makes_it(
-    tmp_path: Path,
-) -> None:
-    """An omit goes with every line of its reason; the last takes ``omits:``.
-
-    One left, Carbon's, is the one a new omit lines up under.
-    """
-    path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
-    write(
-        path,
-        [
-            _served("neon-4.0", catalog="no", source="yes"),
-            _served("argon-4.0", catalog="no", source="yes"),
-            _served("hydrogen-4.0", catalog="yes", source="no"),
-        ],
-    )
-    assert path.read_text() == _SECTIONS.replace(
-        "      neon-4.0: not listed\n      argon-4.0: not listed\n",
-        "",
-    ).replace(
-        "        any more\n",
-        "        any more\n      hydrogen-4.0: not listed by fetchAvailableModels\n",
-    )
-    write(
-        path,
-        [
-            _served("carbon-4.0", catalog="no", source="yes"),
-            _served("hydrogen-4.0", catalog="no", source="yes"),
-        ],
-    )
-    assert "omits:" not in path.read_text()
-    assert "any more" not in path.read_text()
-    write(path, [_served("hydrogen-4.0", catalog="yes", source="no")])
-    assert path.read_text() == _SECTIONS.replace(
-        "      neon-4.0: not listed\n      argon-4.0: not listed\n"
-        "      carbon-4.0: not listed\n        any more\n",
-        "      hydrogen-4.0: not listed by fetchAvailableModels\n",
-    )
-    assert _plan(path) == ["neon-4.0", "argon-4.0", "carbon-4.0", "flash-3.8"]
-
-
-def test_a_section_without_omits_or_models_gets_them_below_its_last_line(
-    tmp_path: Path,
-) -> None:
-    """``api`` states one key; ``other`` ends in an id quoted over two lines.
-
-    A long reason stays on one line.
-    """
-    path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
-    url = "fetchAvailableModels" + ", asked again" * 8
-    assert (
-        write(
-            path,
-            [
-                _served(
-                    "hydrogen-4.0",
-                    catalog="yes",
-                    source="no",
-                    provider=section,
-                    url=url,
-                )
-                for section in ("api", "other")
-            ],
-        )
-        == []
-    )
-    omitted = f"    omits:\n      hydrogen-4.0: not listed by {url}\n"
-    assert path.read_text() == _SECTIONS.replace(
-        "  api:\n    sends: []\n",
-        f"  api:\n    sends: []\n{omitted}",
-    ).replace('        4.0"\n', f'        4.0"\n{omitted}')
-    for section in ("api", "other"):
-        assert "hydrogen-4.0" not in ModelTable.from_yaml(path, section=section)
 
 
 def test_a_card_without_a_tier_is_the_auto_one(tmp_path: Path) -> None:
     """Every row is read for the one named, Flash's one line among them."""
     path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
+    path.write_text(_ROWS)
     finding = replace(_finding("neon-4.0", "price.auto.request", "2"), provider="api")
     assert write(path, [finding]) == []
-    assert path.read_text() == _SECTIONS.replace(
+    assert path.read_text() == _ROWS.replace(
         "  prices: [{request: 1.0}]\n- model_id: argon",
         "  prices: [{request: 2.0}]\n- model_id: argon",
     )
@@ -722,11 +569,11 @@ def test_a_new_model_above_a_row_without_a_comment_goes_right_above_it(
 ) -> None:
     """Neon 4.0 has no comment: the one above ``models:`` is no row's."""
     path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
+    path.write_text(_ROWS)
     neon_45 = NewRow(
         model_id="neon-4.5",
         wire_model_id="neon-4.5",
-        knowledge_cutoff="2026-01",
+        knowledge_cutoff="2026-01-01",
         limits={},
         thinking_effort=("none",),
         thinking_effort_default="none",
@@ -742,17 +589,6 @@ def test_a_new_model_above_a_row_without_a_comment_goes_right_above_it(
     ]
 
 
-def test_a_model_the_section_also_overrides_is_left_for_a_person(
-    tmp_path: Path,
-) -> None:
-    """Omitted and overridden at once, the section would not load."""
-    path = tmp_path / "google.yaml"
-    path.write_text(_SECTIONS)
-    unserved = _served("flash-3.8", catalog="yes", source="no")
-    assert write(path, [unserved]) == [unserved]
-    assert path.read_text() == _SECTIONS
-
-
 def test_a_model_that_does_not_think_fits_a_reference_stating_no_thinking(
     tmp_path: Path,
 ) -> None:
@@ -762,7 +598,7 @@ def test_a_model_that_does_not_think_fits_a_reference_stating_no_thinking(
     row = NewRow(
         model_id="plain-1.0",
         wire_model_id="plain-1",
-        knowledge_cutoff="2026-01",
+        knowledge_cutoff="2026-01-01",
         limits={"max_request_tokens": 1_000},
         thinking_effort=("none",),
         thinking_effort_default="none",
@@ -783,7 +619,7 @@ def test_a_new_model_states_each_default_and_band_its_layer_does_not(
     row = NewRow(
         model_id="gemini-krypton-5.0",
         wire_model_id="gemini-5-krypton",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits={},
         thinking_effort=("min", "low", "medium", "high"),
         thinking_effort_default="high",
@@ -816,7 +652,7 @@ def test_a_model_no_layer_takes_writes_its_budget_modes_out(tmp_path: Path) -> N
     row = NewRow(
         model_id="gemini-krypton-5.0",
         wire_model_id="gemini-5-krypton",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits={},
         thinking_effort=("low", "medium", "high", "xhigh"),
         thinking_effort_default="high",
@@ -827,7 +663,7 @@ def test_a_model_no_layer_takes_writes_its_budget_modes_out(tmp_path: Path) -> N
     text = path.read_text()
     assert "  thinking:\n    effort: [low, medium, high, xhigh]\n" in text
     assert "    budget: [none, auto]\n    output: [none, text]\n" in text
-    assert "profile: levels_xhigh\n  knowledge_cutoff: '2026-09'" not in text
+    assert "profile: levels_xhigh\n  knowledge_cutoff: '2026-09-01'" not in text
 
 
 def test_a_default_the_reference_states_is_not_restated(tmp_path: Path) -> None:
@@ -847,7 +683,7 @@ def test_a_default_the_reference_states_is_not_restated(tmp_path: Path) -> None:
     row = NewRow(
         model_id="plain-1.0",
         wire_model_id="plain-1",
-        knowledge_cutoff="2026-01",
+        knowledge_cutoff="2026-01-01",
         limits={"max_request_tokens": 1_000},
         thinking_effort=("min", "low", "medium", "high"),
         thinking_effort_default="min",
@@ -886,7 +722,7 @@ def test_a_new_model_takes_the_first_profile_whose_window_holds_its_own(
     row = NewRow(
         model_id="gemini-krypton-5.0",
         wire_model_id="gemini-5-krypton",
-        knowledge_cutoff="2026-09",
+        knowledge_cutoff="2026-09-01",
         limits={"max_request_tokens": 2_097_152},
         thinking_effort=("low", "medium", "high", "xhigh"),
         thinking_effort_default="high",

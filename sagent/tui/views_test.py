@@ -333,6 +333,32 @@ async def test_watch_follows_until_cancelled(stack: AsyncExitStack) -> None:
 
 
 @pytest.mark.asyncio
+async def test_watch_ticks_each_fifth_of_a_second_by_default(
+    stack: AsyncExitStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = Views(
+        await _open(stack),
+        team=None,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+    waits: list[float] = []
+
+    async def cancelled(delay_sec: float) -> None:
+        waits.append(delay_sec)
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(asyncio, "sleep", cancelled)
+        with pytest.raises(asyncio.CancelledError):
+            await views.watch()
+
+    assert waits == [0.2]
+    await views.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("show", "printed"), [(True, True), (False, False)])
 async def test_what_happens_while_held_prints_on_release_if_shown(
     stack: AsyncExitStack,
@@ -395,7 +421,7 @@ async def test_a_stop_that_fails_prints_why(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team = await _team(stack)
-    printer = RecordingPrinter()
+    printer = RecordingPrinter(width=22)
     views = Views(team["Agent"], team=team, printer=printer, catalog=_catalog())
 
     async def fail(label: str) -> None:
@@ -405,7 +431,9 @@ async def test_a_stop_that_fails_prints_why(
     _ = views.stop("kid")
     await views.aclose()
 
-    assert "RuntimeError: cannot stop kid" in printer.text
+    # A sentence wraps between words, never inside one.
+    assert "RuntimeError:" in printer.text
+    assert "cannot stop kid" in printer.text
 
 
 @pytest.mark.asyncio
@@ -501,8 +529,8 @@ async def test_a_view_is_built_on_its_own_agent_s_parts(
     assert views.title in kid.runtime.observers
     assert view.status in kid.runtime.observers
     assert view.status.spend == kid.spend_usd
+    assert "$0.75" in views.toolbar()
     assert view.scrollback.tools is kid.tools
-    assert view.scrollback.stubs is kid.runtime.stubs
     assert view.scrollback.home == kid.runtime.tool_context.origin
     assert view.deferred.runtime is kid.runtime
     assert view.deferred.panes is view.panes

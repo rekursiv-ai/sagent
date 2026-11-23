@@ -31,7 +31,7 @@ from rich.style import Style
 from rich.text import Text
 
 from sagent.runtime import types
-from sagent.tools.display import Elided
+from sagent.tools.display import DisplaySpec, Elided
 from sagent.tui.diff import highlight_source, render_diff
 from sagent.tui.markdown import TightMarkdown
 from sagent.tui.theme import ThemeState, load_theme
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from prompt_toolkit.output.color_depth import ColorDepth
     from prompt_toolkit.output.defaults import create_output
 
-    from sagent.tools.display import DisplaySpec, ToolDisplay
+    from sagent.tools.display import ToolDisplay
     from sagent.tui.types import Header
 else:
     from wrapt import lazy_import
@@ -321,7 +321,7 @@ class ConsolePrinter:
             body.stylize_before(self.style.quiet)
             output_indent = Text(self.output_indent, style=self.style.quiet)
             self._rows(
-                display.command.keep(list(body.split("\n", allow_blank=True))),
+                display.command.keep(list(body.split())),
                 first=output_indent,
                 rest=output_indent,
                 spec=display.command,
@@ -464,6 +464,7 @@ class ConsolePrinter:
     ) -> None:
         """Print each line hung after ``rest``, the very first after ``first``."""
         width = width or self.console.width
+        spec = spec or DisplaySpec()
         for i, line in enumerate(lines):
             lead = first if i == 0 else rest
             if isinstance(line, Elided):
@@ -479,7 +480,7 @@ class ConsolePrinter:
             # Words wrap under the column their line started in: a help row's
             # under its words, not back under its name.
             column = _column(line.plain) if prose else 0
-            if rest.cell_len + column > width // 2:
+            if 2 * (rest.cell_len + column) > width:
                 column = 0
             hang(
                 self.console,
@@ -487,8 +488,8 @@ class ConsolePrinter:
                 first=lead,
                 rest=rest + " " * column,
                 width=width,
-                limit=spec.width if spec is not None else 0,
-                overflow=spec.overflow if spec is not None else "fold",
+                limit=spec.width,
+                overflow=spec.overflow,
                 prose=prose,
                 background=background,
             )
@@ -498,7 +499,7 @@ class ConsolePrinter:
         if not text:
             return []
         shown = Text(_shown(text).removesuffix("\n"), style=style)
-        return list(shown.split("\n", allow_blank=True))
+        return list(shown.split(allow_blank=True))
 
     # The call is labelled again unless the last row on screen is its, and its rows then
     # end where the rows written inside do.
@@ -767,7 +768,8 @@ def _column(plain: str) -> int:
 def _shown(text: str) -> str:
     """Return ``text`` with each control character but tab and newline in caret form."""
     return re.sub(
-        r"[\x00-\x08\x0b-\x1f\x7f]",
+        # The C0 controls but tab and newline, then DEL.
+        r"[\000-\010\013-\037\177]",
         lambda m: f"^{chr(ord(m.group()) ^ 0x40)}",
         text,
     )

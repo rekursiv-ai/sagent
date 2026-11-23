@@ -61,7 +61,8 @@ def test_write_sets_each_mismatch_it_can_and_fails_only_on_the_rest(
 
     def write(path: Path, findings: list[Finding]) -> list[Finding]:
         written.append((path, [f.field for f in findings]))
-        return findings[1:]
+        # Google's both written, OpenAI's one: "facts" and "fact".
+        return findings[1:] if path.name == "openai.yaml" else []
 
     _fake_checks(monkeypatch, sources=("b", "c", "a"))
     monkeypatch.setattr(cli, "write", write)
@@ -77,11 +78,10 @@ def test_write_sets_each_mismatch_it_can_and_fails_only_on_the_rest(
         (Path(str(files(openai) / "openai.yaml")), ["f", "f"]),
     ]
     assert capsys.readouterr().out.splitlines() == [
-        "mismatch google m-1.0 f: catalog=a source=c  https://u",
         "mismatch openai m-1.0 f: catalog=a source=c  https://u",
-        "wrote 1 fact to google.yaml",
+        "wrote 2 facts to google.yaml",
         "wrote 1 fact to openai.yaml",
-        "2 mismatch, 0 waived, 0 unstated, 2 ok, 0 unreachable",
+        "1 mismatch, 0 waived, 0 unstated, 2 ok, 0 unreachable",
     ]
 
 

@@ -595,12 +595,12 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
 @pytest.mark.parametrize(
     ("model_id", "cutoff"),
     [
-        ("fable-5.2", "2026-06"),
-        ("fable-5.1", "2026-06"),
-        ("opus-5.0", "2026-05"),
-        ("opus-4.6", "2025-05"),
-        ("sonnet-4.6", "2025-08"),
-        ("haiku-4.5", "2025-02"),
+        ("fable-5.2", "2026-06-01"),
+        ("fable-5.1", "2026-06-01"),
+        ("opus-5.0", "2026-05-01"),
+        ("opus-4.6", "2025-05-01"),
+        ("sonnet-4.6", "2025-08-01"),
+        ("haiku-4.5", "2025-02-01"),
     ],
 )
 def test_every_row_states_its_published_cutoff(model_id: str, cutoff: str) -> None:

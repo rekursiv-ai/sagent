@@ -21,7 +21,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
@@ -109,7 +109,6 @@ class Scrollback:
       printer: Where scrollback goes.
       tools: The agent's tools, whose summaries label calls and whose
         displays size results.
-      stubs: What the runtime names the calls it answers itself.
       flush_chars: Held text past which it renders unfinished, as an unclosed
         fence would otherwise hold it all round.
       home: Where sagent was started; a call's path below it shows relative
@@ -122,14 +121,12 @@ class Scrollback:
         printer: Printer,
         *,
         tools: Mapping[str, Tool],
-        stubs: types.Stubs | None = None,
         flush_chars: int = 64 * 1024,
         home: Path | None = None,
     ) -> None:
         self.printer = printer
         self.tools = tools
         self.home = home
-        self.stubs = stubs if stubs is not None else types.Stubs()
         self.flush_chars = flush_chars
         self.shown = 0
         """Messages, replies, and results drawn: what a replay's footer counts."""
@@ -279,6 +276,8 @@ class Scrollback:
                         p.error(said, prose=prose)
                     case "line":
                         p.line(said)
+                    case _:
+                        assert_never(tone)
             case (
                 UserMessage()
                 | AgentMessage()
@@ -514,10 +513,10 @@ class Scrollback:
             opened=opened,
         )
 
-    def _block(self, stream: Stream, text: str) -> None:
-        """Print a finished block of ``stream``."""
+    def _block(self, stream: Stream, text: str, *, closes: bool = False) -> None:
+        """Print a finished block of ``stream``; one that ``closes`` ends its reasoning."""
         if stream == "thinking":
-            self.printer.thinking(text, opens=False, closes=False)
+            self.printer.thinking(text, opens=False, closes=closes)
         # Never blank: a cut falls where a block starts, after another block.
         elif done := text.rstrip("\n"):
             self.printer.markdown(done)
@@ -537,10 +536,7 @@ class Scrollback:
         )
         if stream not in printed.opened:
             return
-        if stream == "thinking":
-            self.printer.thinking(held, opens=False, closes=True)
-        else:
-            self._block(stream, held)
+        self._block(stream, held, closes=True)
 
     def _flush(self) -> None:
         """Print whatever either stream holds."""
@@ -675,7 +671,9 @@ def error_text(error: BaseException) -> str:
 
     """
     if isinstance(error, RateLimitedError) and error.retry_after_sec > 0:
-        resets = datetime.fromtimestamp(time.time() + error.retry_after_sec, UTC)
+        resets = datetime.fromtimestamp(
+            time.time() + error.retry_after_sec,
+        ).astimezone()
         return f"{_why(error)}. Resets {_when(resets)}."
     return str(error) if isinstance(error, UserFacingError) else describe(error)
 
@@ -748,6 +746,8 @@ def _compacted(outcome: Outcome[types.SessionCompacted]) -> str:
             return f"[compaction failed: {error_text(exception)}]"
         case Succeeded(value=did):
             pass
+        case _:
+            assert_never(outcome)
     if not did.summary_fallback_reason:
         return (
             f"[compaction complete: ~{did.masked_tokens} →"

@@ -526,8 +526,13 @@ class _Stranger:
                 value=replace(reply(), records=(cast("ToolCall", _Stranger()),)),
             ),
         ),
+        CommandOutput(text="x", tone=cast("Literal['line']", _Stranger.__name__)),
+        types.SessionCompactCompleted(
+            outcome=cast("Cancelled", _Stranger()),
+            tape_len_before=1,
+        ),
     ],
-    ids=["event", "record"],
+    ids=["event", "record", "tone", "compaction"],
 )
 def test_what_the_renderer_does_not_know_fails_rather_than_draws(given: Shown) -> None:
     render, printer = _renderer()
@@ -737,23 +742,32 @@ def test_a_child_s_work_does_not_end_the_reply_being_streamed() -> None:
     assert printer.printed == [("error", "c: ValueError: x")]
 
 
-def test_a_spawn_s_result_says_what_its_child_used() -> None:
-    render, printer = _renderer()
-    render(_turn(call("AgentSpawn", "1", prompt="go")))
-    render(
-        ToolMessage(
-            call_id="1",
-            state="done",
-            stdout=("said",),
-            result=AgentSpawnResult(
+@pytest.mark.parametrize(
+    ("spawned", "note"),
+    [
+        (
+            AgentSpawnResult(
                 agent_id="c",
                 tokens=12_345,
                 spend=TokenCost(request=0.426),
                 duration_sec=65.0,
             ),
+            "[c done: 1m 5s, 12K tokens, $0.43]",
         ),
+        (AgentSpawnResult(agent_id="c"), "[c done: 0s, 0 tokens, $0.00]"),
+    ],
+    ids=["used", "unreported"],
+)
+def test_a_spawn_s_result_says_what_its_child_used(
+    spawned: AgentSpawnResult,
+    note: str,
+) -> None:
+    render, printer = _renderer()
+    render(_turn(call("AgentSpawn", "1", prompt="go")))
+    render(
+        ToolMessage(call_id="1", state="done", stdout=("said",), result=spawned),
     )
-    assert printer.printed[-1] == ("note", "[c done: 1m 5s, 12K tokens, $0.43]")
+    assert printer.printed[-1] == ("note", note)
 
 
 def test_a_spawn_another_harness_logged_says_nothing_of_a_child() -> None:
@@ -1836,6 +1850,34 @@ def test_a_result_right_after_its_detached_label_names_its_call_once() -> None:
         ("output", "[undetached; Echo#1]"),
         ("output", "late"),
     ]
+
+
+_SUSPENDED = types.ModelResponseSuspended(
+    exception=OverloadedError("busy"),
+    retry_at=datetime.fromtimestamp(_NOON, UTC),
+    failures_in_a_row=1,
+)
+_FAILED = ModelIdle(outcome=Failed(exception=ValueError("the model said no more")))
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        _FAILED,
+        _SUSPENDED,
+        _context_put_in_force((Path("a.md"),)),
+        CommandOutput(text="no model named sonnet-9 here", tone="error"),
+        types.ChildEvent(label="c", event=_FAILED),
+        types.ChildEvent(label="c", event=_SUSPENDED),
+    ],
+    ids=["failed", "suspended", "skipped", "command", "child-failed", "child-waits"],
+)
+def test_an_error_that_is_a_sentence_breaks_between_words(given: Shown) -> None:
+    printer = RecordingPrinter(width=24)
+    Scrollback(printer, tools=_tools()).show(given)
+    (said,) = [text for kind, text in printer.printed if kind == "error"]
+    words = ["✗", *said.split()]
+    assert printer.text.split()[: len(words)] == words
 
 
 if __name__ == "__main__":

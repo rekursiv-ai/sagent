@@ -371,7 +371,7 @@ class Commands:
             return []
 
         def value() -> str:
-            return "on" if team.watching.get(own, False) else "off"
+            return "on" if team.watching[own] else "off"
 
         async def apply(args: str) -> str:
             if args not in ("on", "off"):
