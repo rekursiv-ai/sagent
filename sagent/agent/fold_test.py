@@ -51,6 +51,7 @@ class _Summarize:
         force a second level.
       truncate_calls: Calls answered as cut off at the cap.
       empty_calls: Calls answered with no text.
+      refused_calls: Calls the vendor refused, with a short refusal as their text.
       overflow_over_chars: Requests longer than this raise ``ContextOverflowError``.
       echo: Answer with the request itself, so nothing ever shrinks.
 
@@ -59,6 +60,7 @@ class _Summarize:
     pad_share: float = 0.0
     truncate_calls: frozenset[int] = frozenset()
     empty_calls: frozenset[int] = frozenset()
+    refused_calls: frozenset[int] = frozenset()
     overflow_over_chars: int = 0
     echo: bool = False
     calls: int = field(default=0)
@@ -73,6 +75,8 @@ class _Summarize:
             return reply(body)
         if n in self.empty_calls:
             return reply(" \n\t")
+        if n in self.refused_calls:
+            return reply("I will not.", stop_reason="refusal")
         listing = "summary of: " + " ".join(_MARKER.findall(body))
         if n in self.truncate_calls:
             return reply(listing[: len(listing) // 2], stop_reason="max_tokens")
@@ -187,22 +191,32 @@ async def test_summaries_that_still_overflow_are_folded_again() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("truncate_calls", "empty_calls"),
-    [(frozenset({0}), frozenset[int]()), (frozenset[int](), frozenset({0}))],
-    ids=["cut-off", "empty"],
+    ("truncate_calls", "empty_calls", "refused_calls"),
+    [
+        (frozenset({0}), frozenset[int](), frozenset[int]()),
+        (frozenset[int](), frozenset({0}), frozenset[int]()),
+        (frozenset[int](), frozenset[int](), frozenset({0})),
+    ],
+    ids=["cut-off", "empty", "refused"],
 )
 async def test_a_failed_summary_is_asked_again(
     truncate_calls: frozenset[int],
     empty_calls: frozenset[int],
+    refused_calls: frozenset[int],
 ) -> None:
     provider, model = _model(
-        _Summarize(truncate_calls=truncate_calls, empty_calls=empty_calls),
+        _Summarize(
+            truncate_calls=truncate_calls,
+            empty_calls=empty_calls,
+            refused_calls=refused_calls,
+        ),
     )
     text, markers = _document()
 
     out = await _fold(model, text)
 
     assert set(_MARKER.findall(out)) == markers
+    assert "I will not." not in out
     assert _prompt(provider.requests[0]) == _prompt(provider.requests[1])
 
 

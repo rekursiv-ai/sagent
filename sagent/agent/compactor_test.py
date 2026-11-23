@@ -42,6 +42,7 @@ from sagent.model.exceptions import (
     ContextOverflowError,
     OverloadedError,
     RateLimitedError,
+    RefusedError,
 )
 from sagent.model.scripted import (
     Reply,
@@ -762,9 +763,8 @@ def test_a_custom_partial_prompt_is_used_when_a_tail_is_kept() -> None:
         reply("<summary>   </summary>"),
         reply("<analysis>still thinking", stop_reason="max_tokens"),
         reply(""),
-        reply("I will not.", stop_reason="refusal"),
     ],
-    ids=["no-tag", "empty-tag", "cut-off-before-it", "empty", "refused"],
+    ids=["no-tag", "empty-tag", "cut-off-before-it", "empty"],
 )
 async def test_a_reply_that_is_no_summary_preserves_history(
     tmp_path: Path,
@@ -774,12 +774,59 @@ async def test_a_reply_that_is_no_summary_preserves_history(
     _hold(agent, _HISTORY)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+    with pytest.raises(RuntimeError, match="no usable summary after 3 attempts"):
         _ = await _live(agent, SummaryCompactor(agent))
 
     assert len(provider.requests) == 3
     assert all(r.records == provider.requests[0].records for r in provider.requests)
     assert agent.runtime.tape.context().messages == before
+
+
+_REFUSED = reply(
+    "I will not.",
+    stop_reason="refusal",
+    stop_details="reasoning_extraction: Blocked.",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_summary_refused_every_attempt_says_it_was_refused_and_why(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, agent = _agent(tmp_path, _REFUSED, _REFUSED, _REFUSED)
+    _hold(agent, _HISTORY)
+    before = agent.runtime.tape.context().messages
+
+    with (
+        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
+        pytest.raises(
+            RefusedError,
+            match=r"refused the summary 3 times: reasoning_extraction: Blocked\.$",
+        ),
+    ):
+        _ = await _live(agent, SummaryCompactor(agent))
+
+    assert len(provider.requests) == 3
+    assert agent.runtime.tape.context().messages == before
+    assert (
+        caplog.messages.count(
+            "summary refused: reasoning_extraction: Blocked.",
+        )
+        == 3
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_summary_asked_again_may_be_answered(tmp_path: Path) -> None:
+    """Refusals come and go: the same request asked again was answered."""
+    provider, agent = _agent(tmp_path, _REFUSED, _SUMMARY)
+
+    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+
+    assert splice.strategy == "summary"
+    first, again = provider.requests
+    assert again.records == first.records
 
 
 def test_a_finished_summary_missing_its_closing_tag_is_kept() -> None:
@@ -1469,10 +1516,7 @@ async def test_a_summary_that_overflows_every_attempt_errors_with_bounded_calls(
     )
 
     expected = 3 if attempts is None else attempts
-    with pytest.raises(
-        ContextOverflowError,
-        match=f"summary failed after {expected} attempts",
-    ):
+    with pytest.raises(ContextOverflowError, match=r"^too long$"):
         _ = await _compact(compactor, agent, history)
 
     assert len(provider.requests) == expected
@@ -1518,10 +1562,7 @@ async def test_repeated_transient_failures_sleep_only_between_attempts(
         *[OverloadedError("busy", retry_after_sec=0.25)] * attempts,
     )
 
-    with pytest.raises(
-        ContextOverflowError,
-        match=f"summary failed after {attempts} attempts",
-    ):
+    with pytest.raises(OverloadedError, match=r"^busy$"):
         _ = await _compact(
             SummaryCompactor(agent, max_attempts=attempts),
             agent,
@@ -2762,30 +2803,48 @@ async def test_an_audit_too_long_for_one_request_summarizes_its_older_half(
 
 
 @pytest.mark.parametrize(
-    "replies",
+    ("replies", "error", "match"),
     [
-        (ContextOverflowError("too long"),),
-        (RateLimitedError("busy"),),
-        (reply("no summary here"),),
-        (reply("<summary>x</summary>", stop_reason="refusal"),),
-        (reply("<summary>x</summary>", calls=[call("Read", "c9")]),),
+        ((ContextOverflowError("too long"),), ContextOverflowError, "^too long$"),
+        ((RateLimitedError("busy"),), RateLimitedError, "^busy$"),
+        ((reply("no summary here"),), RuntimeError, "no usable summary"),
+        ((_REFUSED,) * 3, RefusedError, "refused the session audit 3 times"),
+        (
+            (reply("<summary>x</summary>", calls=[call("Read", "c9")]),),
+            RuntimeError,
+            "no usable summary",
+        ),
     ],
     ids=["overflows", "rate-limited", "no-summary", "refused", "tool-call"],
 )
 @pytest.mark.asyncio
-async def test_an_audit_that_cannot_be_had_preserves_history(
+async def test_an_audit_that_cannot_be_had_says_why_and_preserves_history(
     tmp_path: Path,
     replies: tuple[Reply, ...],
+    error: type[Exception],
+    match: str,
 ) -> None:
     provider, agent, compactor = _auditing(tmp_path, *replies)
     _hold(agent, _HISTORY)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(ContextOverflowError, match="the session audit failed"):
+    with pytest.raises(error, match=match):
         _ = await _live(agent, compactor)
 
     assert agent.runtime.tape.context().messages == before
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == len(replies)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_audit_asked_again_may_be_answered(tmp_path: Path) -> None:
+    provider, agent, compactor = _auditing(tmp_path, _REFUSED, _AUDIT)
+    _hold(agent, _HISTORY)
+
+    splice = await _live(agent, compactor)
+
+    assert splice.strategy == "session_audit"
+    first, again = provider.requests
+    assert again.records == first.records
 
 
 @pytest.mark.parametrize(
@@ -2793,30 +2852,37 @@ async def test_an_audit_that_cannot_be_had_preserves_history(
     [
         reply("no summary here"),
         reply("<summary>" + "z" * 80_000 + "</summary>"),
-        reply("<summary>x</summary>", stop_reason="refusal"),
         reply("<summary>x</summary>", calls=[call("Read", "c9")]),
     ],
-    ids=["no-summary", "no-shorter", "refused", "tool-call"],
+    ids=["no-summary", "no-shorter", "tool-call"],
 )
 @pytest.mark.asyncio
 async def test_an_audit_that_will_not_shrink_preserves_history(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
     digest: Reply,
 ) -> None:
     provider, agent, compactor = _auditing(tmp_path, digest, _AUDIT, window=14_000)
     _hold(agent, (_user("a" * 30_000), _turn("ok"), _user("b" * 30_000)))
 
     before = agent.runtime.tape.context().messages
-    with (
-        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
-        pytest.raises(ContextOverflowError, match="the session audit failed"),
-    ):
+    with pytest.raises(ContextOverflowError, match="could not be cut to fit"):
         _ = await _live(agent, compactor)
 
     assert len(provider.requests) == 1
     assert agent.runtime.tape.context().messages == before
-    assert "the session audit could not be cut to fit" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_an_audit_whose_digest_is_refused_says_it_was_refused(
+    tmp_path: Path,
+) -> None:
+    provider, agent, compactor = _auditing(tmp_path, *[_REFUSED] * 3, window=14_000)
+    _hold(agent, (_user("a" * 30_000), _turn("ok"), _user("b" * 30_000)))
+
+    with pytest.raises(RefusedError, match="refused the session audit 3 times"):
+        _ = await _live(agent, compactor)
+
+    assert len(provider.requests) == 3
 
 
 @pytest.mark.asyncio
@@ -3067,23 +3133,24 @@ async def test_a_kept_head_also_preserves_the_unanswered_tail(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "answer",
+    ("answer", "error"),
     [
-        reply("I will not.", stop_reason="refusal"),
-        reply("no tags"),
-        ContextOverflowError("too long"),
+        (_REFUSED, RefusedError),
+        (reply("no tags"), RuntimeError),
+        (ContextOverflowError("too long"), ContextOverflowError),
     ],
     ids=["refused", "no-summary", "every-round-dropped"],
 )
 async def test_a_failed_summary_preserves_the_history_and_kept_tail(
     tmp_path: Path,
     answer: Reply,
+    error: type[Exception],
 ) -> None:
     provider, agent = _agent(tmp_path, *[answer] * 3)
     _hold(agent, (*_HISTORY, _user("next")))
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(ContextOverflowError):
+    with pytest.raises(error):
         _ = await _live(agent, SummaryCompactor(agent, keep_recent=1))
 
     assert agent.runtime.tape.context().messages == before
@@ -3095,15 +3162,12 @@ async def test_a_failed_summary_preserves_the_history_and_kept_tail(
 async def test_a_failed_summary_preserves_the_history_and_kept_head(
     tmp_path: Path,
 ) -> None:
-    provider, agent = _agent(
-        tmp_path,
-        *[reply("I will not.", stop_reason="refusal")] * 3,
-    )
+    provider, agent = _agent(tmp_path, *[_REFUSED] * 3)
     history = (_user("head"), _turn("kept"), _user("more"), _turn("done"))
     _hold(agent, history)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+    with pytest.raises(RefusedError, match="refused the summary 3 times"):
         _ = await _live(
             agent,
             SummaryCompactor(agent, keep_recent=2, direction="up_to"),
@@ -3543,35 +3607,6 @@ async def test_an_audits_digest_reads_the_older_lines_as_a_summary_is_asked(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("failure", "logged"),
-    [
-        (ContextOverflowError("too long"), "too long"),
-        (RateLimitedError("busy"), "busy"),
-    ],
-    ids=["overflows", "rate-limited"],
-)
-async def test_an_audit_request_that_fails_says_why(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-    failure: Exception,
-    logged: str,
-) -> None:
-    _, agent, compactor = _auditing(tmp_path, failure)
-    _hold(agent, (*_HISTORY, _user("now this")))
-
-    before = agent.runtime.tape.context().messages
-    with (
-        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
-        pytest.raises(ContextOverflowError, match="the session audit failed"),
-    ):
-        _ = await _live(agent, compactor)
-
-    assert f"the session audit request failed: {logged}" in caplog.messages
-    assert agent.runtime.tape.context().messages == before
-
-
-@pytest.mark.asyncio
 async def test_a_finished_audit_missing_its_closing_tag_is_kept_whole(
     tmp_path: Path,
 ) -> None:
@@ -3883,7 +3918,7 @@ async def test_failure_after_a_successful_prefix_leaves_all_history_intact(
     _hold(agent, history)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+    with pytest.raises(RuntimeError, match="no usable summary after 3 attempts"):
         _ = await _live(agent, _unreserved(agent))
 
     assert len(provider.requests) == 4

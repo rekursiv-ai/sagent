@@ -633,7 +633,7 @@ class AgentSpawn:
             reply, state = await _answer(child, a.prompt)
         except asyncio.CancelledError:
             # The spawn is cancelled, not the child: it stops its turn and stays.
-            child.runtime.halt()
+            child.runtime.halt(sender=parent.runtime.tool_context.label)
             child.runtime.push(types.ToolHalt())
             raise
         finally:
@@ -769,6 +769,7 @@ def _agent_from_parent(
         system_prompt=system_prompt,
         journal=journal,
         compactor=parent.compactor_factory,
+        pruner=parent.pruner_factory,
         # All of the parent's but what one agent alone keeps: a field added later
         # is inherited unless it is reset here. The team sets ``label`` as the
         # agent joins, and the agent its ``spill_dir`` from its journal.

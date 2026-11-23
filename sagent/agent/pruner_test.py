@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import math
+import re
 import time
 
 import pytest
@@ -60,6 +61,7 @@ from sagent.session.types import (
     UserMessage,
     WriteResult,
 )
+from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 
 
@@ -71,6 +73,7 @@ if TYPE_CHECKING:
     from sagent.model.types import Response
     from sagent.runtime.types import ModelContextEvent
     from sagent.session.types import SessionRecord
+    from sagent.tools.types import Tool
 
 
 _STUB = "[pruned: old tool output removed to keep the context small]"
@@ -92,6 +95,7 @@ def _agent(
     price: TokenPrice | None = _CACHED,
     window: int = 200_000,
     compactor: Factory[Shrinker] = NoShrinker,
+    tools: Sequence[Tool] = (),
 ) -> tuple[Agent, Pruner, ScriptedProvider]:
     prices = PriceCatalog(
         prices={} if price is None else {PriceCondition(): price},
@@ -114,6 +118,7 @@ def _agent(
     )
     agent = Agent(
         model=provider["priced"],
+        tools=tools,
         compactor=compactor,
         pruner=Pruner,
         tool_context=ToolContext(cwd=tmp_path),
@@ -206,6 +211,24 @@ def _prunes(agent: Agent) -> list[ContextSplice]:
     ]
 
 
+def _notes(agent: Agent) -> list[str]:
+    return [
+        r.content or ""
+        for r in agent.runtime.tape.context().messages
+        if isinstance(r, SystemMessage) and r.subtype == "prune"
+    ]
+
+
+def _noted(agent: Agent) -> set[str]:
+    """Return the calls whose outputs the last prune note listed; none with no note."""
+    notes = _notes(agent)
+    if not notes:
+        return set()
+    found = cast(list[str], re.findall(r"^- #(\d+) ", notes[-1], re.MULTILINE))
+    listed = [int(n) for n in found]
+    return _ids(agent.runtime.tape.context().messages, listed)
+
+
 def test_a_drop_that_costs_more_than_it_saves_waits(tmp_path: Path) -> None:
     agent, pruner, _ = _agent(tmp_path)
     # One request has read 1000 tokens, with 1000 kept after it to rewrite:
@@ -226,8 +249,7 @@ def test_a_drop_pays_once_enough_requests_will_read_it(tmp_path: Path) -> None:
     assert pruner.should_run()
     assert pruner.prune()
 
-    assert _results(agent) == {"c0": _STUB}
-    assert len(_prunes(agent)) == 1
+    assert _noted(agent) == {"c0"}
 
 
 def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> None:
@@ -244,7 +266,7 @@ def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> 
     assert not pruner.should_run()
     agent.session.append(*_turns(requests=10))
     assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB}
+    assert _noted(agent) == {"c0"}
 
 
 def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> None:
@@ -279,7 +301,7 @@ def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> Non
     )
 
     assert pruner.prune()
-    assert _results(agent) == {"read": _STUB, "unread": "y" * 4000}
+    assert _noted(agent) == {"read"}
 
 
 _P = "/home/me/repo/agent/x.py"
@@ -619,7 +641,7 @@ def test_a_file_in_use_is_kept_though_its_rent_has_paid(
     agent.session.append(*_read_turn(_P, before=15, named=named, after=5))
 
     assert pruner.prune() is not kept
-    assert (_results(agent)["c0"] == _STUB) is not kept
+    assert (_noted(agent) == {"c0"}) is not kept
 
 
 def test_a_superseded_read_goes_while_the_newer_stays(tmp_path: Path) -> None:
@@ -639,7 +661,7 @@ def test_a_superseded_read_goes_while_the_newer_stays(tmp_path: Path) -> None:
     )
 
     assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB, "c1": "x" * 4000}
+    assert _noted(agent) == {"c0"}
 
 
 def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
@@ -669,7 +691,7 @@ def test_a_cut_its_reads_have_not_paid_for_waits(tmp_path: Path) -> None:
 
     assert pruner.prune()
 
-    assert _results(agent) == {"early": "e" * 40_000, "late": _STUB}
+    assert _noted(agent) == {"late"}
 
 
 def test_an_expired_cache_makes_any_drop_pay(
@@ -689,7 +711,10 @@ def test_an_expired_cache_makes_any_drop_pay(
     now[0] += 1.0
 
     assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB, "c1": _STUB}
+    assert _noted(agent) == {"c0", "c1"}
+    pruner.queued["c0"] = "spent"
+    assert pruner.prune()
+    assert _results(agent) == {"c0": _STUB, "c1": "y" * 4000}
 
 
 @pytest.mark.parametrize(
@@ -728,7 +753,7 @@ def test_without_a_cache_discount_every_drop_pays(tmp_path: Path) -> None:
     agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
 
     assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB}
+    assert _noted(agent) == {"c0"}
 
 
 def test_a_free_cache_write_still_rewrites_at_the_input_price(tmp_path: Path) -> None:
@@ -805,7 +830,7 @@ async def test_a_forced_prune_forgets_the_files_read_and_runs_once(
 
 
 @pytest.mark.asyncio
-async def test_the_runtime_prunes_before_a_model_call_that_it_pays_for(
+async def test_the_runtime_notes_before_a_model_call_what_a_drop_would_pay_for(
     tmp_path: Path,
 ) -> None:
     uncached = TokenPrice(
@@ -824,7 +849,12 @@ async def test_the_runtime_prunes_before_a_model_call_that_it_pays_for(
 
     (request,) = provider.requests
     sent = [r for r in request.records if isinstance(r, ToolMessage)]
-    assert [r.text() for r in sent] == [_STUB]
+    assert [r.text() for r in sent] == [
+        f"{'x' * 4000}\n[1,000 tok; $0.003 per request to keep]",
+    ]
+    assert [r.subtype for r in request.records if isinstance(r, SystemMessage)] == [
+        "prune",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -991,15 +1021,6 @@ def test_a_small_window_leaves_fewer_requests_to_pay_a_drop_back(
     assert not small_pruner.should_run()
 
 
-def test_a_drop_that_averts_compaction_is_taken_unpriced(tmp_path: Path) -> None:
-    agent, pruner, _ = _agent(tmp_path, price=None, window=4000)
-    # 3,100 tokens against a 3,000 trigger; the two results are most of it.
-    agent.session.append(*_turns("x" * 12_000, "y" * 400))
-
-    assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB, "c1": _STUB}
-
-
 def test_a_drop_too_small_to_avert_compaction_is_left_to_it(tmp_path: Path) -> None:
     agent, pruner, _ = _agent(tmp_path, price=None, window=4000)
     agent.session.append(*_turns("x" * 400, tail="t" * 14_000))
@@ -1085,7 +1106,7 @@ def test_a_drop_at_the_trigger_averts_compaction_unexpired(tmp_path: Path) -> No
     assert sum(sizes(agent.model, agent.runtime.tape.context().messages)) == 3000
 
     assert pruner.prune()
-    assert _results(agent) == {"c0": _STUB}
+    assert _noted(agent) == {"c0"}
 
 
 def test_a_model_with_no_cache_has_none_to_go_cold(
@@ -1370,6 +1391,252 @@ async def test_a_forced_prune_the_runtime_quit_before_is_cancelled(
 
     with pytest.raises(asyncio.CancelledError):
         await runtime.pruner.run()
+
+
+def test_a_drop_that_pays_is_noted_for_the_model_not_taken(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.session.append(*_turns("x" * 40_000, requests=20))
+
+    assert pruner.prune()
+
+    assert _prunes(agent) == []
+    assert _results(agent) == {"c0": "x" * 40_000}
+    # Keep: 0.3e-6 x (10,000 - 14.75); reread: 0.3e-6 x P + 3.75e-6 x 10,000.
+    assert _notes(agent) == [
+        (
+            "Prunable (keep: $ per request; reread: $ at current context):\n"
+            "- #2 Read: $0.003; $0.041\n"
+            "Pruning rewrites the cache once ($0.00014); pruned results must be reread"
+            " to attend to.\n"
+            "Prune only what you won't need, with AgentSession prune_queue, only now or"
+            " when the user asks. Cost never justifies partial reads or dropping rules"
+            " you follow."
+        ),
+    ]
+
+
+_UNCACHED = TokenPrice(
+    request=3.0,
+    response=15.0,
+    cache_write=0.0,
+    cache_write_1h=0.0,
+    cache_read=3.0,
+)
+
+
+def test_a_note_s_rent_is_what_a_result_holds_beyond_its_stub(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=_UNCACHED)
+    agent.session.append(*_turns("x" * 400, tail="t" * 4000))
+
+    assert pruner.prune()
+    # 3e-6 x (100 - 14.75); with the stub added it would read $0.00034.
+    assert _notes(agent)[0].splitlines()[1] == "- #2 Read: $0.00026; $0.0036"
+
+
+def test_a_note_names_news_whose_call_is_gone_as_such(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=_UNCACHED)
+    for entry in (
+        UserMessage(content="go"),
+        _wake("c9"),
+        reply("done"),
+    ):
+        _ = agent.runtime.tape.append_history(entry)
+
+    assert pruner.prune()
+    assert (
+        _notes(agent)[0]
+        .splitlines()[1]
+        .startswith(
+            "- #1 output of a call no longer shown: $",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("price", "footer"),
+    [
+        # 3e-6 x (1,000 - 14.75) a request.
+        (_UNCACHED, "\n[1,000 tok; $0.003 per request to keep]"),
+        (None, "\n[1,000 tok]"),
+    ],
+    ids=["priced", "unpriced"],
+)
+def test_each_result_sent_says_its_size_and_rent(
+    tmp_path: Path,
+    price: TokenPrice | None,
+    footer: str,
+) -> None:
+    agent, _, _ = _agent(tmp_path, price=price)
+    agent.session.append(*_turns("x" * 4000, "tiny"))
+
+    sent = [r for r in agent.runtime.request().records if isinstance(r, ToolMessage)]
+
+    assert [r.text() for r in sent] == [f"{'x' * 4000}{footer}", "tiny"]
+
+
+def test_a_note_names_each_result_by_its_tool_s_summary(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path, tools=[Read()])
+    agent.session.append(
+        UserMessage(content="go"),
+        *_read("c0", _P),
+        *_turns(requests=20),
+    )
+
+    assert pruner.prune()
+    assert f"- #2 Read {_P}: $" in _notes(agent)[0]
+
+
+def test_a_result_noted_and_left_is_not_noted_again_until_it_expires_again(
+    tmp_path: Path,
+) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0),
+    )
+    # Unused 21 requests; it expires after 14 unused.
+    agent.session.append(*_read_turn(_P, before=15, named="/repo/other.py", after=5))
+    assert pruner.prune()
+    assert _noted(agent) == {"c0"}
+
+    agent.session.append(*_turns(requests=10))
+    assert not pruner.prune()
+    agent.session.append(*_turns(requests=10))
+
+    assert pruner.prune()
+    assert len(_notes(agent)) == 2
+
+
+def test_a_queue_drops_in_one_splice_once_it_pays(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0, expiry=math.inf),
+    )
+    agent.session.append(*_turns("x" * 4000, "y" * 4000, tail="t" * 4000))
+
+    pruner.queued["c0"] = "spent"
+    assert not pruner.prune()
+    agent.session.append(*_turns(requests=1))
+    pruner.queued["c1"] = "spent too"
+    assert not pruner.prune()
+    assert _prunes(agent) == []
+    agent.session.append(*_turns(requests=12))
+
+    assert pruner.prune()
+    assert _results(agent) == {"c0": _STUB, "c1": _STUB}
+    assert len(_prunes(agent)) == 1
+    assert pruner.queued == {}
+
+
+def test_a_queue_that_does_not_pay_yet_reports_its_shortfall(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
+    pruner.queued["c0"] = "spent"
+
+    chosen, worth, due = pruner.pending()
+
+    assert chosen == [2]
+    assert worth is not None
+    assert worth.priced is not None
+    assert worth.priced[0] < 0
+    assert not due
+
+
+def test_nothing_queued_is_nothing_pending(tmp_path: Path) -> None:
+    _, pruner, _ = _agent(tmp_path)
+    assert pruner.pending() == ([], None, False)
+
+
+def test_superseded_results_after_the_queue_ride_along(tmp_path: Path) -> None:
+    uncached = TokenPrice(
+        request=3.0,
+        response=15.0,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=3.0,
+    )
+    agent, pruner, _ = _agent(tmp_path, price=uncached)
+    agent.session.append(
+        UserMessage(content="go"),
+        *_shell("early", "make"),
+        *_read("a", _P),
+        *_read("b", _P),
+        AssistantMessage(content="read"),
+    )
+    pruner.queued["early"] = "spent"
+
+    assert pruner.prune()
+
+    assert _results(agent) == {"early": _STUB, "a": _STUB, "b": "x" * 4000}
+
+
+def test_a_queued_output_compacted_away_leaves_the_queue(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.session.append(*_turns("x" * 4000))
+    pruner.queued["gone"] = "spent"
+
+    _ = pruner.prune()
+
+    assert pruner.queued == {}
+
+
+def test_an_unpriced_queue_drops_at_once(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=None)
+    agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
+    pruner.queued["c0"] = "spent"
+
+    assert pruner.prune()
+    assert _results(agent) == {"c0": _STUB}
+
+
+def test_a_full_context_notes_once_then_leaves_it_to_compaction(
+    tmp_path: Path,
+) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=None, window=4000)
+    # 3,100 tokens against a 3,000 trigger; the two results are most of it.
+    agent.session.append(*_turns("x" * 12_000, "y" * 400))
+
+    assert pruner.prune()
+    assert _notes(agent) == [
+        (
+            "Prunable (tokens):\n"
+            "- #2 Read: 3,000 tok\n"
+            "- #4 Read: 100 tok\n"
+            "The context is full: without pruning, it compacts next.\n"
+            "Pruned results must be reread to attend to.\n"
+            "Prune only what you won't need, with AgentSession prune_queue, only now or"
+            " when the user asks. Cost never justifies partial reads or dropping rules"
+            " you follow."
+        ),
+    ]
+    assert not pruner.prune()
+
+    pruner.queued.update({"c0": "spent", "c1": "spent"})
+    assert pruner.prune()
+    assert _results(agent) == {"c0": _STUB, "c1": _STUB}
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_waits_a_round_to_compact_after_a_note(
+    tmp_path: Path,
+) -> None:
+    agent, _, provider = _agent(
+        tmp_path,
+        price=None,
+        window=4000,
+        compactor=SummaryCompactor,
+    )
+    provider.replies.append(reply("noted"))
+    async with agent:
+        agent.session.append(*_turns("x" * 12_000, "y" * 400))
+
+        assert await agent.send("next") == "noted"
+
+    (request,) = provider.requests
+    assert any(
+        isinstance(r, SystemMessage) and r.subtype == "prune" for r in request.records
+    )
 
 
 if __name__ == "__main__":

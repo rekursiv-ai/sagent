@@ -156,7 +156,7 @@ Default sessions live under a project-scoped directory derived from the current 
 | --- | --- |
 | `--compact` / `--no-compact` | Enable or disable automatic conversation compaction. Default: enabled. |
 | `--compactor {summary,session-audit}` | Condense what the model sees, or audit the whole session from its journal. Default: `summary`. |
-| `--prune` / `--no-prune` | Drop old tool output once that costs less than keeping it cached. Default: enabled. |
+| `--prune` / `--no-prune` | Note old tool output the model may prune, and drop what it queues once that costs less than keeping it cached. Default: enabled. |
 | `--max-budget-usd USD` | Stop once cumulative model cost reaches this run budget. |
 | `--max-tool-call-rounds N` | Limit tool-call rounds for one prompt. Default: unlimited. |
 

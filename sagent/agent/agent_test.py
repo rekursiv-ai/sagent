@@ -817,12 +817,18 @@ async def test_a_call_past_the_round_cap_halts_the_turn(tmp_path: Path) -> None:
         tools=[_Tool(name="Nope")],
         max_rounds=1,
     )
+    agent.runtime.tool_context.label = "Agent"
+    seen = _Seen()
+    agent.runtime.observers.append(seen)
     async with agent:
         with pytest.raises(RoundLimitError) as raised:
             _ = await agent.send("go")
 
     assert (raised.value.rounds, raised.value.max_rounds) == (1, 1)
     assert len(provider.requests) == 2
+    assert [e.sender for e in seen.events if isinstance(e, types.ModelHalt)] == [
+        "Agent",
+    ]
 
 
 @pytest.mark.asyncio
@@ -943,7 +949,10 @@ async def test_a_charge_past_the_cap_halts_and_refuses_the_next_turn(
 ) -> None:
     """A child's spend, charged between turns, trips the cap its parent holds."""
     provider, agent = _agent(tmp_path, reply("unsent"), max_spend_usd=1.0)
+    agent.runtime.tool_context.label = "Agent"
+    seen = _Seen()
     async with agent:
+        agent.runtime.observers.append(seen)
         agent.charge(TokenCost(request=0.5), label="kid")
         assert agent.spend_usd == 0.5
         agent.charge(TokenCost(request=0.75), label="kid")
@@ -951,6 +960,9 @@ async def test_a_charge_past_the_cap_halts_and_refuses_the_next_turn(
             _ = await agent.send("go")
     assert raised.value.total_cost_usd == pytest.approx(1.25)
     assert provider.requests == []
+    assert [e.sender for e in seen.events if isinstance(e, types.ModelHalt)] == [
+        "Agent",
+    ]
 
 
 @pytest.mark.asyncio
@@ -3489,6 +3501,7 @@ def test_each_shrinker_is_built_for_its_agent(tmp_path: Path) -> None:
 
     assert built == [("compactor", agent), ("pruner", agent)]
     assert agent.compactor_factory is compactor
+    assert agent.pruner_factory is pruner
 
 
 def test_the_agents_md_config_given_is_the_one_kept(tmp_path: Path) -> None:

@@ -46,6 +46,7 @@ from sagent.model.exceptions import (
     DisconnectedError,
     OverloadedError,
     RateLimitedError,
+    RefusedError,
 )
 from sagent.model.scripted import (
     Reply,
@@ -971,6 +972,24 @@ def test_a_request_for_part_of_the_context_is_sent_as_the_live_one_starts() -> N
     assert rt.request(context=entries).records == live
 
 
+def test_a_result_note_ends_each_result_sent_and_none_kept() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    entries = (
+        _user("go"),
+        reply(calls=[call("echo", "c1"), call("echo", "c2")]),
+        ToolMessage(call_id="c1", state="done", stdout=("out",)),
+        ToolMessage(call_id="c2", state="done", stdout=("tiny",)),
+    )
+    for entry in entries:
+        rt.tape.append_history(entry)
+    rt.result_note = lambda result: "" if result.call_id == "c2" else "[3 tok]"
+
+    sent = [r for r in rt.request().records if isinstance(r, ToolMessage)]
+
+    assert [r.text() for r in sent] == ["out\n[3 tok]", "tiny"]
+    assert list(rt.tape.context().messages[2:]) == list(entries[2:])
+
+
 @pytest.mark.asyncio
 async def test_a_call_to_a_tool_offered_but_not_allowed_is_refused() -> None:
     allowed, gated = Gated(name="allowed"), Gated(name="gated")
@@ -1296,6 +1315,25 @@ async def test_a_call_no_tool_answered_is_an_error_result_and_a_stand_in_a_bare_
         "[Running in background: echo as job b1]",
     )
     assert stub in h.events
+
+
+def test_the_runtime_answers_with_the_stubs_it_was_given() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"], stubs=Stubs(cancelled="[gone]"))
+    for record in (
+        _user("go"),
+        reply(calls=[call("echo", "a")]),
+        ToolMessage(call_id="a", state="pending", shown="[running]"),
+    ):
+        _ = rt.tape.append_history(record)
+
+    rt.settle_detached()
+
+    (settled,) = [
+        e
+        for e in rt.tape.context().messages
+        if isinstance(e, ToolMessage) and e.state == "cancelled"
+    ]
+    assert settled.text() == "[gone]"
 
 
 def test_a_resume_cancels_each_pending_call_left_unanswered_past_an_answered_one() -> (
@@ -4470,6 +4508,38 @@ async def test_the_gate_compacts_at_most_twice_before_calling() -> None:
         h.push(_user("go"))
         await h.seen(_answered)
     assert len(summarizer.instructions) == 2
+    assert len(h.requests()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_compaction_is_not_tried_again_until_the_user_writes() -> None:
+    """A reply leaves the context it could not compact; each one retried it before."""
+    summarizer = Summarizer(error=RefusedError("refused"))
+    async with Harness(
+        reply(calls=[call("echo", "c1")]),
+        reply("one"),
+        reply("two"),
+        tools=[Gated()],
+        compactor=summarizer,
+    ) as h:
+        h.runtime.compact_due = lambda: True
+        h.push(_user("go"))
+        await h.seen(_answered)
+        assert len(summarizer.instructions) == 1
+        h.push(_user("again"))
+        await h.seen(_answered, 2)
+    assert len(summarizer.instructions) == 2
+    assert len(h.requests()) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_after_a_failed_compaction_stops_the_turn() -> None:
+    summarizer = Summarizer(error=RefusedError("refused"))
+    async with Harness(ContextOverflowError("too long"), compactor=summarizer) as h:
+        h.runtime.compact_due = lambda: True
+        h.push(_user("go"))
+        await h.seen(_turn_failed)
+    assert len(summarizer.instructions) == 1
     assert len(h.requests()) == 1
 
 

@@ -1,18 +1,25 @@
-"""The pruner: drops old tool results once their cached reads have paid for a rewrite.
+"""The pruner: asks the model which old tool results to drop, and drops them when it pays.
 
 Two rent-or-buy decisions, each stated in its function's docstring. :func:`expired`
 says which results are dead: unused long enough that keeping them has cost what
 fetching them again would. :func:`cut` says when dropping the dead pays for
 breaking the cache. :func:`superseded` and :func:`idle` feed the first,
 ``reads`` and :func:`requests_left` the second, and :func:`saving` prices
-a chosen drop. A drop that keeps the context under the compaction trigger is taken
-instead of compacting. :func:`eligible` says which outputs the policy lets go; the
+a chosen drop. :func:`eligible` says which outputs the policy lets go; the
 runtime's ``drop`` splices in the stub.
+
+The pruner drops nothing on its own judgment. When a cut pays, it notes the dead
+results for the model, each with what keeping and rereading it cost; the model
+queues those it no longer needs (``AgentSession prune_queue``). A result noted
+and not queued counts as used then. The queue, with the superseded results after
+its first, drops in one splice once that pays: at once when the cache is cold or
+the model unpriced, and past the compaction trigger only when it brings the
+context back under.
 
 Typical usage example:
 
-  async with Agent(model=opus, pruner=Pruner) as agent:   # Prunes when it pays.
-      await agent.session.pruner.run()                     # Or now, whatever it costs.
+  async with Agent(model=opus, pruner=Pruner) as agent:   # Notes; drops the queue.
+      await agent.session.pruner.run()                     # Or all now, whatever it costs.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from sagent.session.types import (
     LineSpan,
     ReadResult,
     Succeeded,
+    SystemMessage,
     ToolCall,
     ToolMessage,
     WriteResult,
@@ -82,11 +90,12 @@ __all__ = [
 
 
 class Pruner:
-    """Drops old tool results from its agent's session once keeping them has cost a rewrite.
+    """Notes which old tool results have cost a rewrite; drops those the model queues.
 
     Which results may go is ``agent.model.settings.pruning``; a model that prunes
-    on the server, with ``manage_context_server_side``, is left to do it there.
-    The runtime asks :meth:`prune` before each model call.
+    on the server, with ``manage_context_server_side``, is left to do it there,
+    though its queue still drops. The runtime asks :meth:`prune` before each
+    model call.
 
     Args:
       agent: Whose session it prunes.
@@ -95,9 +104,15 @@ class Pruner:
 
     def __init__(self, agent: Agent) -> None:
         self._agent = agent
+        self.queued: dict[str, str] = {}
+        """Calls whose outputs the model queued to drop, each with why."""
+
         # When the model last answered, by the monotonic clock; the cache's age.
         self._answered_at: float | None = None
+        # Each call a note listed, with how many replies the context held then.
+        self._listed: dict[str, int] = {}
         agent.runtime.observers.append(self._observe)
+        agent.runtime.result_note = self.footer
 
     def should_run(self) -> bool:
         """Return whether pruning now would cost less than keeping every result."""
@@ -150,10 +165,92 @@ class Pruner:
                 pass
 
     def prune(self) -> bool:
-        """Drop the results whose reads have paid for their drop, if any; return whether one did."""
-        chosen = self._plan()
+        """Drop the queue once that pays, else note for the model what would pay.
+
+        Returns:
+          acted: Whether it dropped or noted anything; the runtime then compacts
+            no sooner than the next round.
+
+        """
+        context = self._agent.runtime.tape.context().messages
+        here = {e.call_id for e in context if isinstance(e, ToolMessage)}
+        self.queued = {c: why for c, why in self.queued.items() if c in here}
+        chosen, _, due = self.pending()
+        if not due:
+            return self._note()
         self._agent.runtime.drop(chosen)
-        return bool(chosen)
+        gone = {e.call_id for i in chosen if isinstance(e := context[i], ToolMessage)}
+        self.queued = {c: why for c, why in self.queued.items() if c not in gone}
+        return True
+
+    # Priced at the smallest prompt, so a result's footer reads the same in every
+    # request and the prompt cache holds: a tiered price changes as the prompt grows.
+    def footer(self, result: ToolMessage) -> str:
+        """Return what ends ``result`` as the model is sent it: its size and rent.
+
+        Args:
+          result: A tool's output.
+
+        Returns:
+          footer: ``[<n> tok; $<h> per request to keep]``, its tokens unpriced;
+            empty for one a stub would not shrink.
+
+        """
+        model = self._agent.model
+        pruned = self._agent.runtime.stubs.pruned
+        if not prunable(result, stub=pruned):
+            return ""
+        per = model.capability.approx_chars_per_token
+        (tokens,) = sizes(model, [result])
+        priced = prices(model, prompt=0)
+        if priced is None:
+            return f"[{tokens:,.0f} tok]"
+        rent = priced[0] * (tokens - len(pruned) / per)
+        return f"[{tokens:,.0f} tok; ${rent:.2g} per request to keep]"
+
+    def pending(self) -> tuple[list[int], Saving | None, bool]:
+        """Return what the queue drops, what that is worth, and whether it is due now.
+
+        Returns:
+          chosen: The queued outputs' positions, and the superseded results the
+            policy lets go after the first of them.
+          worth: What dropping ``chosen`` saves; ``None`` with nothing queued.
+          due: Whether it drops before the next request.
+
+        """
+        agent = self._agent
+        model = agent.model
+        context = agent.runtime.tape.context().messages
+        pruned = agent.runtime.stubs.pruned
+        queued = [
+            i
+            for i, e in enumerate(context)
+            if isinstance(e, ToolMessage)
+            and e.call_id in self.queued
+            and prunable(e, stub=pruned)
+        ]
+        if not queued:
+            return [], None, False
+        gone = superseded(context)
+        riders = [
+            i
+            for i in eligible(context, client_policy(model.settings), stub=pruned)
+            if i > queued[0] and i in gone
+        ]
+        chosen = sorted({*queued, *riders})
+        tokens = sizes(model, context)
+        limit = limit_tokens(agent)
+        worth = saving(
+            tokens,
+            chosen,
+            stub=len(pruned) / model.capability.approx_chars_per_token,
+            prices=prices(model, prompt=int(sum(tokens))),
+            left=left_in(context, tokens, limit=limit),
+        )
+        if sum(tokens) >= limit:
+            return chosen, worth, sum(tokens) - worth.saved < limit
+        due = worth.priced is None or self._cold() or worth.priced[0] > 0
+        return chosen, worth, due
 
     def _observe(self, event: types.RuntimeEvent) -> None:
         """Note when the model answers: its prompt is cached from then."""
@@ -163,8 +260,112 @@ class Pruner:
         ):
             self._answered_at = time.monotonic()
 
+    # Past the trigger every candidate is noted once: the model answers before the
+    # runtime compacts, and a second note would put compaction off for good.
+    def _note(self) -> bool:
+        """Note for the model the results a cut would drop, not yet queued; return whether any."""
+        agent = self._agent
+        model = agent.model
+        context = agent.runtime.tape.context().messages
+        tokens = sizes(model, context)
+        full = sum(tokens) >= limit_tokens(agent)
+        chosen = [
+            i
+            for i in self._plan()
+            if isinstance(e := context[i], ToolMessage)
+            and e.call_id not in self.queued
+            and not (full and e.call_id in self._listed)
+        ]
+        if not chosen:
+            return False
+        replies = sum(isinstance(e, Response) for e in context)
+        for i in chosen:
+            if isinstance(e := context[i], ToolMessage):
+                self._listed[e.call_id] = replies
+        agent.session.append(
+            SystemMessage(
+                content=self._text(context, tokens, chosen, full=full),
+                subtype="prune",
+            ),
+        )
+        return True
+
+    def _text(
+        self,
+        context: Sequence[ModelContextEvent],
+        tokens: Sequence[float],
+        chosen: Sequence[int],
+        *,
+        full: bool,
+    ) -> str:
+        """Return the note listing ``chosen``: each one's costs, then how to prune."""
+        model = self._agent.model
+        stub = len(self._agent.runtime.stubs.pruned) / (
+            model.capability.approx_chars_per_token
+        )
+        priced = prices(model, prompt=int(sum(tokens)))
+        calls = {
+            r.call_id: r
+            for e in context
+            if isinstance(e, Response)
+            for r in e.records
+            if isinstance(r, ToolCall)
+        }
+        lines = [
+            "Prunable (tokens):"
+            if priced is None
+            else "Prunable (keep: $ per request; reread: $ at current context):",
+        ]
+        for i in chosen:
+            entry = context[i]
+            assert isinstance(entry, ToolMessage)
+            # A compaction may keep a long call's news and drop the call itself.
+            call = calls.get(entry.call_id)
+            tool = self._agent.tools.get(call.name) if call is not None else None
+            what = (
+                "output of a call no longer shown"
+                if call is None
+                else (call.name if tool is None else tool.summary(call.arguments))
+            )
+            if priced is None:
+                lines.append(f"- #{i} {what}: {tokens[i]:,.0f} tok")
+                continue
+            read, write = priced
+            lines.append(
+                f"- #{i} {what}: ${read * (tokens[i] - stub):.2g};"
+                f" ${read * sum(tokens) + write * tokens[i]:.2g}",
+            )
+        if full:
+            lines.append("The context is full: without pruning, it compacts next.")
+        if priced is None:
+            lines.append("Pruned results must be reread to attend to.")
+        else:
+            read, write = priced
+            # ``T`` as :func:`saving` states it: from the first chosen on, less ``D``.
+            rewritten = sum(tokens[chosen[0] :]) - sum(tokens[i] - stub for i in chosen)
+            rewrite = (write - read) * rewritten
+            lines.append(
+                f"Pruning rewrites the cache once (${rewrite:.2g});"
+                " pruned results must be reread to attend to.",
+            )
+        lines.append(
+            "Prune only what you won't need, with AgentSession prune_queue, only now"
+            " or when the user asks. Cost never justifies partial reads or dropping"
+            " rules you follow.",
+        )
+        return "\n".join(lines)
+
+    def _idle(self, context: Sequence[ModelContextEvent]) -> list[int]:
+        """Return :func:`idle`, a result a note listed counting as used when listed."""
+        used = idle(context)
+        replies = sum(isinstance(e, Response) for e in context)
+        for i, entry in enumerate(context):
+            if isinstance(entry, ToolMessage) and entry.call_id in self._listed:
+                used[i] = min(used[i], max(0, replies - self._listed[entry.call_id]))
+        return used
+
     def _plan(self) -> list[int]:
-        """Return the indices of the results to drop now; none when no drop saves."""
+        """Return the indices of the results a drop now would take; none when none saves."""
         context = self._agent.runtime.tape.context().messages
         model = self._agent.model
         policy = client_policy(model.settings)
@@ -183,7 +384,7 @@ class Pruner:
             else expired(
                 tokens,
                 candidates,
-                idle=idle(context),
+                idle=self._idle(context),
                 superseded=superseded(context),
                 stub=stub,
                 prices=priced,

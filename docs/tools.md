@@ -137,7 +137,7 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 | `AgentSpawn` | Run child agents. | `prompt`; optional `system`, `provider`, `model`, `account`, reasoning settings, `tools`, `max_tool_call_rounds`, `max_depth`, `label`, `watch`. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
-| `AgentSession` | List, read, search, prune, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
+| `AgentSession` | List, read, search, queue prunes, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
 | `Recall` | Name stored sessions like this one, as each is found, and wake the model. | Optional `limit`. Set `/tool.Recall.url` and `/tool.Recall.session`, or `TRACKINIZER_URL` and `TRAX_SESSION`; the key is `TRACKINIZER_TOKEN`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
@@ -236,7 +236,7 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 - `diagnostics`: set `true` to report model, settings, limits, and directory.
 - `catalog`, `catalog_provider`: `"providers"` or `"models"` for read-only discovery.
 
-`AgentSession` lists, reads, searches, prunes, compacts, or clears a context.
+`AgentSession` lists, reads, searches, queues prunes for, compacts, or clears a context.
 
 Both tools accept `agent`, a label or single-agent relation, defaulting to
 self: `AgentSelf(agent="helper", effort="high")` and
@@ -284,7 +284,7 @@ A backgrounded tool immediately returns a placeholder result. When the tool comp
 
 ## Pruning
 
-`Pruner` (`sagent.agent.pruner`) replaces old tool results with a stub once keeping them has cost more than fetching them again. `agent.model.settings.pruning`, a `PruningPolicy`, says which may go: the newest `keep_recent` results and tools in `keep_tools` (`Skill` by default) are never pruned. See [Compaction](compaction.md#pruning).
+`Pruner` (`sagent.agent.pruner`) notes old tool results for the model once keeping them has cost more than fetching them again, and replaces those the model queues with a stub once that pays. `agent.model.settings.pruning`, a `PruningPolicy`, says which may go: the newest `keep_recent` results and tools in `keep_tools` (`Skill` by default) are never pruned. See [Compaction](compaction.md#pruning).
 
 ## Result size
 

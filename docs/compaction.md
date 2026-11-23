@@ -75,10 +75,10 @@ Pass `Pruner` to drop old tool results instead of summarizing them:
 from sagent.agent.pruner import Pruner
 
 async with Agent(model=model, tools=tools, pruner=Pruner) as agent:
-    await agent.session.pruner.run()  # Or prune now, whatever it costs.
+    await agent.session.pruner.run()  # Or prune all now, whatever it costs.
 ```
 
-Before each model call, the pruner replaces a result with a stub once keeping it has cost more than fetching it again, and only when dropping the dead results pays for breaking the prompt cache. A drop that keeps the context under the compaction trigger is taken instead of compacting.
+The pruner drops nothing on its own judgment. Before each model call, once keeping a result has cost more than fetching it again and dropping the dead results pays for breaking the prompt cache, it adds a `prune` note listing them, each with what keeping and rereading it costs. The model queues those it no longer needs with `AgentSession(action="prune_queue")`; a listed result left unqueued counts as used. The queue, with the superseded results after its first, drops in one splice once that pays. Past the compaction trigger the note puts compaction off one round, and the queue drops only if that brings the context back under.
 
 `agent.model.settings.pruning`, a `PruningPolicy`, says which results may go:
 

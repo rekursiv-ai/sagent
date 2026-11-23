@@ -1,10 +1,12 @@
 """AgentSession: read and edit an agent's session.
 
 Everything the API does to a session, the model can do to its own: list and
-read what it sees, search the whole session, weigh and make a prune, compact,
-or clear. A change to the caller's own session reaches the runtime just after
-this call's result, so the call and its result are part of what it changes. A
-change to a descendant's is waited for: the call's result says how it went.
+read what it sees, search the whole session, weigh a prune and queue it,
+compact, or clear. A queued prune drops when the agent's pruner finds it pays,
+before one of its requests. A compaction or clear of the caller's own session
+reaches the runtime just after this call's result, so the call and its result
+are part of what it changes; one of a descendant's is waited for, and the
+call's result says how it went.
 
 The ``agent`` argument targets another agent with the caller's authority.
 ``records`` reads by record number, as ``search`` and a watcher's feed give
@@ -28,6 +30,8 @@ from treekle import json_dumps, mutable
 
 from sagent.agent.compactor import Style, SummaryCompactor, text
 from sagent.agent.pruner import (
+    Pruner,
+    Saving,
     left_in,
     limit_tokens,
     prices,
@@ -87,7 +91,9 @@ type Action = Literal[
     "read",
     "search",
     "estimate",
-    "prune",
+    "prune_queue",
+    "prune_unqueue",
+    "prune_list",
     "compact",
     "clear",
 ]
@@ -105,14 +111,14 @@ class AgentSession:
         agent: Annotated[str, "Agent label or relation; omit for yourself."] = ""
         ids: Annotated[
             tuple[int, ...],
-            "Entry ids, as list shows them: for read, estimate, and prune.",
+            "Entry ids, as list shows them: for read, estimate, and the queue.",
         ] = ()
         records: Annotated[
             tuple[int, ...],
             "Record numbers, as search and a watch feed give them: for read.",
         ] = ()
         text: Annotated[str, "What search finds, case ignored."] = ""
-        reason: Annotated[str, "Why prune drops these results."] = ""
+        reason: Annotated[str, "Why prune_queue drops these results."] = ""
         prompt: Annotated[str, "What a compaction must keep."] = ""
         style: Annotated[
             Style | None,
@@ -131,7 +137,7 @@ class AgentSession:
     display: ToolDisplay = field(default=ToolDisplay())
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
-        """Return ``AgentSession <action>`` and the ids, such as ``AgentSession prune 3 7``."""
+        """Return ``AgentSession <action>`` and the ids, as ``AgentSession prune_queue 3 7``."""
         ids = arguments.get("ids")
         named = [str(i) for i in ids] if isinstance(ids, list) else []
         return " ".join(
@@ -145,7 +151,8 @@ class AgentSession:
     ) -> str | None:
         """Return ``"*"`` for an edit, which must not interleave; ``None`` for a read."""
         del context
-        return "*" if arguments.get("action") in ("prune", "compact", "clear") else None
+        edits = ("prune_queue", "prune_unqueue", "compact", "clear")
+        return "*" if arguments.get("action") in edits else None
 
     def call(
         self,
@@ -213,8 +220,10 @@ class AgentSession:
         if a.action == "search":
             found = await asyncio.to_thread(_search, agent.session.history(), a.text)
             return _said(context, a.action, found)
-        if a.action in ("estimate", "prune"):
-            return await self._prune(agent, read, a, asker=context.label)
+        if a.action == "estimate":
+            return _estimate(agent, read, a)
+        if a.action in ("prune_queue", "prune_unqueue", "prune_list"):
+            return _queue(agent, read, a)
         # The asker's own is queued behind this call's result: taken ahead of it, a
         # clear or a compaction would detach the call. A descendant's has no such
         # knot: the call waits, and its own result says how it went.
@@ -258,97 +267,115 @@ class AgentSession:
                     )
         return ToolOutput(stdout=(reply,), result=SessionResult(action=a.action))
 
-    # A prune of the asker's own session runs once this call has ended, so the call
-    # cannot wait for it: the runtime tells its model if it is then not done. A
-    # descendant's has no such knot, and its model did not ask: the call waits, and
-    # its own result says how the prune went.
-    async def _prune(
-        self,
-        agent: Agent,
-        read: ResolvedContext,
-        a: AgentSession.Arguments,
-        *,
-        asker: str,
-    ) -> ToolOutput[SessionResult, str, str]:
-        """Weigh dropping the tool outputs ``a.ids``; for ``prune``, drop them for ``asker``."""
-        entries = read.messages
-        picked = _picked(entries, a.ids)
-        stub = agent.runtime.stubs.pruned
-        kept = [i for i in picked if not prunable(entries[i], stub=stub)]
-        if kept:
-            raise ValueError(f"#{kept[0]} is no tool output that can be pruned.")
-        # A prune names calls and stubs every output of each: what is weighed is
-        # what goes, a long call's other outputs too.
-        named = {
-            output.call_id
-            for i in picked
-            if isinstance(output := entries[i], ToolMessage)
-        }
-        picked = [
-            i
-            for i, entry in enumerate(entries)
-            if isinstance(entry, ToolMessage)
-            and entry.call_id in named
-            and prunable(entry, stub=stub)
-        ]
-        if a.action == "prune" and not a.reason.strip():
-            raise ValueError("Say why in 'reason'.")
-        model = agent.model
-        tokens = sizes(model, entries)
-        worth = saving(
-            tokens,
-            picked,
-            stub=len(stub) / model.capability.approx_chars_per_token,
-            prices=prices(model, prompt=int(sum(tokens))),
-            left=left_in(entries, tokens, limit=limit_tokens(agent)),
+
+def _estimate(
+    agent: Agent,
+    read: ResolvedContext,
+    a: AgentSession.Arguments,
+) -> ToolOutput[SessionResult, str, str]:
+    """Weigh dropping the tool outputs ``a.ids``, every output of each call they name."""
+    entries = read.messages
+    stub = agent.runtime.stubs.pruned
+    picked = _outputs(entries, a.ids, stub=stub)
+    model = agent.model
+    tokens = sizes(model, entries)
+    worth = saving(
+        tokens,
+        picked,
+        stub=len(stub) / model.capability.approx_chars_per_token,
+        prices=prices(model, prompt=int(sum(tokens))),
+        left=left_in(entries, tokens, limit=limit_tokens(agent)),
+    )
+    lines = [_dropping(picked, worth)]
+    if worth.priced is not None:
+        dollars, breakeven = worth.priced
+        lines.append(
+            f"It pays for itself after {breakeven:.1f} requests, and saves"
+            f" about ${dollars:.4f} over the requests left before compaction.",
         )
+    return ToolOutput(stdout=("\n".join(lines),), result=SessionResult(action=a.action))
+
+
+# Calls are queued by id, which no splice moves; what the queue drops, and when,
+# is the pruner's to say, before each of the agent's requests.
+def _queue(
+    agent: Agent,
+    read: ResolvedContext,
+    a: AgentSession.Arguments,
+) -> ToolOutput[SessionResult, str, str]:
+    """Queue or unqueue the calls of ``a.ids``, or list the queue; then say where it stands."""
+    pruner = agent.session.pruner
+    queues = isinstance(pruner, Pruner)
+    if not queues:
+        raise ValueError("This agent has no pruner.")
+    entries = read.messages
+    queued = pruner.queued
+    lines: list[str] = []
+    if a.action == "prune_list":
         lines = [
-            (
-                f"Dropping {', '.join(f'#{i}' for i in picked)} saves {worth.saved:,.0f}"
-                f" tokens on each later request and writes {worth.rewritten:,.0f}"
-                " tokens to the cache once."
-            ),
+            f"#{i} {_kind(e, entries)} ({sizes(agent.model, [e])[0]:,.0f} tokens):"
+            f" {queued[e.call_id]}"
+            for i, e in enumerate(entries)
+            if isinstance(e, ToolMessage) and e.call_id in queued
         ]
-        if worth.priced is not None:
-            dollars, breakeven = worth.priced
-            lines.append(
-                f"It pays for itself after {breakeven:.1f} requests, and saves"
-                f" about ${dollars:.4f} over the requests left before compaction.",
-            )
-        if a.action == "estimate":
-            return ToolOutput(
-                stdout=("\n".join(lines),),
-                result=SessionResult(action=a.action),
-            )
-        # Positions may move before the drop runs; call ids do not.
-        own = agent is self.team[asker]
-        request = types.SessionPrune(
-            sender=asker,
-            # A long call's stub and its news name one call: it is named once.
-            call_ids=tuple(
-                dict.fromkeys(
-                    output.call_id
-                    for i in picked
-                    if isinstance(output := entries[i], ToolMessage)
-                ),
-            ),
-            reason=a.reason.strip(),
-        )
-        if own:
-            agent.runtime.push_after(asyncio.current_task(), request)
-            reply = "Prune queued"
+    else:
+        picked = _outputs(entries, a.ids, stub=agent.runtime.stubs.pruned)
+        calls = {e.call_id for i in picked if isinstance(e := entries[i], ToolMessage)}
+        named = ", ".join(f"#{i}" for i in picked)
+        if a.action == "prune_unqueue":
+            for call in calls:
+                queued.pop(call, None)
+            lines = [f"Unqueued {named}."]
+        elif not a.reason.strip():
+            raise ValueError("Say why in 'reason'.")
         else:
-            match await agent.runtime.ask(request):
-                case Failed(exception=exc):
-                    raise ValueError(f"The prune was not done: {exc}") from exc
-                case Cancelled():
-                    raise ValueError("The prune was not done: the agent quit first.")
-                case Succeeded():
-                    reply = "Pruned"
-        return ToolOutput(
-            stdout=("\n".join([f"{reply}: {a.reason.strip()}", *lines]),),
-            result=SessionResult(action=a.action),
-        )
+            queued.update(dict.fromkeys(calls, a.reason.strip()))
+            lines = [f"Queued {named}: {a.reason.strip()}"]
+    chosen, worth, due = pruner.pending()
+    if worth is None:
+        lines.append("Nothing is queued.")
+    else:
+        lines.append(_dropping(chosen, worth))
+        if due:
+            lines.append("It drops before your next request.")
+        elif worth.priced is not None:
+            lines.append(
+                f"It is ${-worth.priced[0]:.4f} short of paying; it drops once it pays.",
+            )
+        else:
+            lines.append("It drops once it brings the context under compaction.")
+    return ToolOutput(stdout=("\n".join(lines),), result=SessionResult(action=a.action))
+
+
+# A prune stubs every output of a call: a long call's other outputs go too.
+def _outputs(
+    entries: Sequence[ModelContextEvent],
+    ids: Sequence[int],
+    *,
+    stub: str,
+) -> list[int]:
+    """Return every output of the calls ``ids`` name; refuse an unprunable id."""
+    picked = _picked(entries, ids)
+    kept = [i for i in picked if not prunable(entries[i], stub=stub)]
+    if kept:
+        raise ValueError(f"#{kept[0]} is no tool output that can be pruned.")
+    named = {e.call_id for i in picked if isinstance(e := entries[i], ToolMessage)}
+    return [
+        i
+        for i, entry in enumerate(entries)
+        if isinstance(entry, ToolMessage)
+        and entry.call_id in named
+        and prunable(entry, stub=stub)
+    ]
+
+
+def _dropping(picked: Sequence[int], worth: Saving) -> str:
+    """Return what dropping ``picked`` saves each request and writes once."""
+    return (
+        f"Dropping {', '.join(f'#{i}' for i in picked)} saves {worth.saved:,.0f}"
+        f" tokens on each later request and writes {worth.rewritten:,.0f}"
+        " tokens to the cache once."
+    )
 
 
 def _picked(entries: Sequence[ModelContextEvent], ids: Sequence[int]) -> list[int]:

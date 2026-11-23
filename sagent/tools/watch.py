@@ -7,7 +7,8 @@ AgentSession opens with ``agent=label``, ``action="read"``, and ``records=[n]``.
 Tool results and reasoning are left out; their record numbers follow their call's.
 
 It goes when the watched agent idles, and at once when it compacts, clears,
-fails, or is halted. An idle after work ends it ``[idle: <label> does nothing
+fails, or is halted; a halt names who asked, ``[halted by user]`` or
+``[halted by <label>]``. An idle after work ends it ``[idle: <label> does nothing
 until messaged]``; an idle the agent is woken from at once, as by a nudge,
 sends what is new without that line.
 
@@ -124,6 +125,9 @@ class Feed:
     worked: bool = False
     """Whether the model answered since the last idle the agent stayed in."""
 
+    halter: str | None = None
+    """Who asked for the halt being heard; ``None`` for the user, or no halt."""
+
     # Observers run in order, the team's first: one that wakes the agent as it
     # idles has queued the wake by now.
     def __call__(self, event: types.RuntimeEvent) -> None:
@@ -134,11 +138,15 @@ class Feed:
         if isinstance(ended, Succeeded):
             self.worked = True
             return
+        # The turn a halt stops ends between the two.
+        if isinstance(event, (types.ModelHalt, types.ModelHaltCompleted)):
+            self.halter = event.sender if isinstance(event, types.ModelHalt) else None
+            return
         stopped = event.outcome if isinstance(event, ModelIdle) else None
         if isinstance(stopped, Failed):
             self.pending.append(f"[failed] {describe(stopped.exception)}")
         elif isinstance(stopped, Cancelled):
-            self.pending.append("[halted]")
+            self.pending.append(f"[halted by {self.halter or 'user'}]")
         elif isinstance(event, types.ModelResponseSuspended):
             if not event.opens_a_quota_wait:
                 return

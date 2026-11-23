@@ -230,6 +230,7 @@ def reply(
     tokens: TokenCount | None = None,
     spend: TokenCost | None = None,
     stop_reason: str | None = None,
+    stop_details: str = "",
 ) -> Response:
     """Return a model turn that says ``text`` and makes ``calls``.
 
@@ -239,6 +240,7 @@ def reply(
       tokens: What it was billed; nothing by default.
       spend: What it cost; nothing by default.
       stop_reason: Why it stopped; ``tool_use`` with calls, else ``end_turn``.
+      stop_details: What the vendor said of the stop, such as a refusal's category.
 
     Returns:
       response: The turn.
@@ -257,6 +259,7 @@ def reply(
         else "tool_use"
         if calls
         else "end_turn",
+        stop_details=stop_details,
     )
 
 
