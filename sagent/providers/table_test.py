@@ -645,11 +645,101 @@ def test_a_section_s_tiers_a_model_prices_none_of_refuse_it(tmp_path: Path) -> N
     with pytest.raises(
         ValueError,
         match=_exactly(
-            "Model 'example-1.0' is priced at none of the service tiers section"
-            " 'vendor' sends: ['auto', 'priority'].",
+            "Model 'example-1.0' offers none of the service_tier section"
+            " 'vendor' allows: ['auto', 'priority'].",
         ),
     ):
         _load(path)
+
+
+@pytest.mark.parametrize(
+    ("offers", "allows", "name", "offered"),
+    [
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"output": ["none", "text"]}},
+            "thinking_output",
+            {"none"},
+        ),
+        (
+            {"manage_context_server_side": [False]},
+            {"manage_context_server_side": [False, True]},
+            "manage_context_server_side",
+            {False},
+        ),
+        (
+            {"compaction": ["bespoke"]},
+            {"compaction": ["bespoke", "provider"]},
+            "compaction",
+            {"bespoke"},
+        ),
+    ],
+    ids=["thinking", "manage_context_server_side", "compaction"],
+)
+def test_a_model_offers_what_it_has_of_what_its_section_allows(
+    tmp_path: Path,
+    offers: dict[str, object],
+    allows: dict[str, object],
+    name: ModelSettingName,
+    offered: set[object],
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | offers, vendor=allows)
+    assert set(_load(path)["example"].values(name)) == offered
+
+
+@pytest.mark.parametrize(
+    ("offers", "allows", "message"),
+    [
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"effort": ["low"]}},
+            "the thinking effort section 'vendor' allows: ['low']",
+        ),
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"budget": ["auto"]}},
+            "the thinking budget section 'vendor' allows: ['auto']",
+        ),
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"output": ["text"]}},
+            "the thinking output section 'vendor' allows: ['text']",
+        ),
+        (
+            {"manage_context_server_side": [False]},
+            {"manage_context_server_side": [True]},
+            "the manage_context_server_side section 'vendor' allows: [True]",
+        ),
+        (
+            {"compaction": ["bespoke"]},
+            {"compaction": ["provider"]},
+            "the compaction section 'vendor' allows: ['provider']",
+        ),
+    ],
+    ids=["effort", "budget", "output", "manage_context_server_side", "compaction"],
+)
+def test_a_section_allowing_none_of_what_a_model_offers_refuses_it(
+    tmp_path: Path,
+    offers: dict[str, object],
+    allows: dict[str, object],
+    message: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | offers, vendor=allows)
+    with pytest.raises(
+        ValueError,
+        match=_exactly(f"Model 'example-1.0' offers none of {message}."),
+    ):
+        _load(path)
+
+
+def test_a_section_s_cache_lifetime_replaces_the_model_s(tmp_path: Path) -> None:
+    """A cache lasts as long as its provider keeps it, which no model offers."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(cache_ttl_sec=[300.0]),
+        vendor={"cache_ttl_sec": [600.0]},
+    )
+    assert _load(path)["example"].cache_ttl_sec == {600.0}
 
 
 def test_a_setting_the_provider_does_not_send_offers_only_its_default(
@@ -729,7 +819,7 @@ providers:
     assert row.approx_chars_per_token == 3.5
     assert row.knowledge_cutoff == "2025-05-01"
     assert row.limits.max_request_tokens == 1000
-    # The section's ``thinking`` replaces only the axes it names.
+    # The section's ``thinking`` narrows only the axes it names.
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
         {"none", "low"},
         {"none", "auto"},
@@ -975,9 +1065,10 @@ def test_a_section_says_how_it_compacts_and_how_a_bare_id_starts(
     given: dict[str, object] = {} if offered is None else {"compaction": offered}
     if default is not None:
         given["compaction_default"] = default
-    path = _write(tmp_path / "x.yaml", _model(), vendor=given)
+    both = ["bespoke", "provider"]
+    path = _write(tmp_path / "x.yaml", _model(compaction=both), vendor=given)
     row = _load(path)["example"]
-    assert row.compaction == frozenset(offered or ["bespoke"])
+    assert row.compaction == frozenset(offered or both)
     assert row.default.compaction == starts
 
 
@@ -1586,6 +1677,7 @@ def test_a_role_may_name_an_unversioned_id_or_a_vendor_id(target: str) -> None:
     ("fields", "name"),
     [
         ({"manage_context_server_side": []}, "manage_context_server_side"),
+        ({"compaction": []}, "compaction"),
         ({"service_tier": []}, "service_tier"),
     ],
 )
@@ -1624,13 +1716,10 @@ def test_each_setting_unsent_offers_only_its_default(
         "prices": [dict(_FREE), _FREE | {"service_tier": "priority"}],
         "cache_ttl_sec": [300.0, 3600.0],
         "manage_context_server_side": [False, True],
+        "compaction": ["bespoke", "provider"],
     }
     sends = [name for name in model_setting_names() if name != unsent]
-    path = _write(
-        tmp_path / "x.yaml",
-        _model() | every,
-        vendor={"sends": sends, "compaction": ["bespoke", "provider"]},
-    )
+    path = _write(tmp_path / "x.yaml", _model() | every, vendor={"sends": sends})
     row = _load(path)["example"]
 
     for name in model_setting_names():

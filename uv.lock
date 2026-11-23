@@ -448,8 +448,8 @@ wheels = [
 
 [[package]]
 name = "codedoctor"
-version = "0.1.15.dev5+g50401e527"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#50401e5271340d77ab60f8babb1a4c5d7050587f" }
+version = "0.1.15.dev6+g0f7f4f196"
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#0f7f4f196acb07e0f13495c1378bc4ee8f0fc1e0" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rignore" },
