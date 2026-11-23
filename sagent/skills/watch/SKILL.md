@@ -25,7 +25,11 @@ Each `[watch]` message holds what is new since the last:
 - `r<n> [compact]`, `r<n> [summary]`, `r<n> [clear]`, `r<n> [settings: ...]`,
   `r<n> [reminder] ...`, `r<n> [nudge] ...` -- something changed what it
   knows or how it runs; a nudge tells it whom it owes a reply.
-- `[failed] ...`, `[halted]` -- it stopped, and why.
+- `[failed] ...` -- it stopped on an error.
+- `[halted by user]` -- the user stopped it, and is about to speak: wait for
+  them.
+- `[halted by <label>]` -- that agent stopped it; its own label means it
+  reached a spend or round cap.
 - `[idle: <label> does nothing until messaged]` -- it stopped, and waits.
 
 Tool results and its reasoning are left out. Each `r<n>` is a record number.

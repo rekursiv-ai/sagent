@@ -286,6 +286,7 @@ class StreamReader:
         self._usage: dict[str, object] = {}
         self._stop_reason = ""
         self._summary: dict[str, object] = {}
+        self._stop_details = ""
 
     @property
     def stop_reason(self) -> str:
@@ -335,8 +336,13 @@ class StreamReader:
                     ),
                 )
         elif kind == "message_delta":
-            self._stop_reason = str(
-                _object(event.get("delta")).get("stop_reason") or "",
+            delta = _object(event.get("delta"))
+            self._stop_reason = str(delta.get("stop_reason") or "")
+            details = _object(delta.get("stop_details"))
+            self._stop_details = ": ".join(
+                str(details[key])
+                for key in ("category", "explanation")
+                if details.get(key)
             )
             self._usage |= _object(event.get("usage"))
         elif kind == "error":
@@ -370,6 +376,7 @@ class StreamReader:
             * tokens,
             stop_reason=self._stop_reason,
             summary=immutable(self._summary),
+            stop_details=self._stop_details,
         )
 
     def _tokens(self) -> TokenCount:

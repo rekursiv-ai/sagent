@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, override
 from unittest.mock import Mock
 
 import asyncio
+import re
 import threading
 import tracemalloc
 
@@ -15,6 +16,7 @@ import pytest
 
 from sagent.agent.agent import Agent, NoShrinker
 from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
@@ -94,6 +96,7 @@ def _setup(
         tools=[tool] if routed else [],
         tool_context=ToolContext(cwd=tmp_path),
         compactor=compactor,
+        pruner=Pruner,
         journal=journal,
         system_prompt="",
     )
@@ -137,7 +140,9 @@ async def _ask(
     ("arguments", "summary", "key"),
     [
         ({"action": "list"}, "AgentSession list", None),
-        ({"action": "prune", "ids": [3, 7]}, "AgentSession prune 3 7", "*"),
+        ({"action": "prune_queue", "ids": [3, 7]}, "AgentSession prune_queue 3 7", "*"),
+        ({"action": "prune_unqueue", "ids": [3]}, "AgentSession prune_unqueue 3", "*"),
+        ({"action": "prune_list"}, "AgentSession prune_list", None),
         ({"action": "compact"}, "AgentSession compact", "*"),
         ({"action": "clear"}, "AgentSession clear", "*"),
         ({"action": "read", "ids": "x"}, "AgentSession read", None),
@@ -423,11 +428,21 @@ async def test_only_output_a_drop_would_shrink_can_be_pruned(
         ValueError,
         match=rf"^#{at} is no tool output that can be pruned\.$",
     ):
-        _ = await _ask(tool, tmp_path, {"action": "prune", "ids": [at], "reason": "x"})
+        _ = await _ask(
+            tool,
+            tmp_path,
+            {"action": "prune_queue", "ids": [at], "reason": "x"},
+        )
+
+
+def _queued(agent: Agent) -> dict[str, str]:
+    pruner = agent.session.pruner
+    assert isinstance(pruner, Pruner)
+    return pruner.queued
 
 
 @pytest.mark.asyncio
-async def test_a_long_call_s_stub_and_news_can_be_pruned(tmp_path: Path) -> None:
+async def test_a_long_call_s_stub_and_news_can_be_queued(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     news = ToolMessage(
         call_id="c2",
@@ -443,11 +458,14 @@ async def test_a_long_call_s_stub_and_news_can_be_pruned(tmp_path: Path) -> None
     )
     entries = agent.runtime.tape.context().messages
     picked = [i for i, e in enumerate(entries) if e in (news, entries[-4])]
-    text = await _ask(tool, tmp_path, {"action": "prune", "ids": picked, "reason": "x"})
-    assert text.startswith("Prune queued: x")
-    assert agent.runtime.inbox.drain_nowait() == [
-        types.SessionPrune(sender="Agent", call_ids=("c2",), reason="x"),
-    ]
+    text = await _ask(
+        tool,
+        tmp_path,
+        {"action": "prune_queue", "ids": picked, "reason": "x"},
+    )
+    assert text.startswith(f"Queued #{picked[0]}, #{picked[1]}: x")
+    assert _queued(agent) == {"c2": "x"}
+    assert agent.runtime.inbox.drain_nowait() == []
 
 
 @pytest.mark.asyncio
@@ -480,38 +498,97 @@ async def test_an_estimate_of_one_output_of_a_long_call_names_every_one_dropped(
 
 
 @pytest.mark.asyncio
-async def test_a_prune_says_why_and_drops_after_the_call(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_queue_says_why_and_how_far_it_is_from_paying(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     with pytest.raises(ValueError, match=r"^Say why in 'reason'\.$"):
-        _ = await _ask(tool, tmp_path, {"action": "prune", "ids": [2]})
+        _ = await _ask(tool, tmp_path, {"action": "prune_queue", "ids": [2]})
+    # Ten thousand tokens after it to write again: more than a drop saves.
+    agent.session.append(AssistantMessage(content="t" * 40_000))
 
-    after: list[object] = []
-    push_after = agent.runtime.push_after
-
-    def noted(task: asyncio.Future[object] | None, event: types.RuntimeEvent) -> None:
-        after.append(task)
-        push_after(task, event)
-
-    monkeypatch.setattr(agent.runtime, "push_after", noted)
-    streaming_result = tool.call(
-        ToolContext(cwd=tmp_path, label="Agent"),
-        {"action": "prune", "ids": [2], "reason": "the file is read"},
+    text = await _ask(
+        tool,
+        tmp_path,
+        {"action": "prune_queue", "ids": [2], "reason": "the file is read"},
     )
-    queued_prune = await settled(streaming_result)
-    text = queued_prune.text()
 
-    assert text.startswith("Prune queued: the file is read\nDropping #2 saves")
-    assert queued_prune.result == SessionResult(action="prune")
-    # The drop is queued behind the result of the call the tool itself runs in.
-    assert after == [streaming_result.result]
-    # The tool ran outside a runtime call, so the event waits behind no result.
-    # It names the call whose output the model listed.
-    assert agent.runtime.inbox.drain_nowait() == [
-        types.SessionPrune(sender="Agent", call_ids=("c0",), reason="the file is read"),
+    first, saved, short = text.splitlines()
+    assert first == "Queued #2: the file is read"
+    assert saved.startswith("Dropping #2 saves 985 tokens on each later request")
+    assert re.fullmatch(
+        r"It is \$[\d.]+ short of paying; it drops once it pays\.",
+        short,
+    )
+    assert _queued(agent) == {"c0": "the file is read"}
+    assert agent.runtime.inbox.drain_nowait() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price", [None, _CACHED], ids=["unpriced", "paying"])
+async def test_a_queue_that_pays_drops_before_the_next_request(
+    tmp_path: Path,
+    price: TokenPrice | None,
+) -> None:
+    _, tool = _setup(tmp_path, price=price)
+
+    text = await _ask(
+        tool,
+        tmp_path,
+        {"action": "prune_queue", "ids": [2], "reason": "spent"},
+    )
+
+    assert text.splitlines()[-1] == "It drops before your next request."
+
+
+@pytest.mark.asyncio
+async def test_a_queue_past_the_trigger_waits_until_it_brings_the_context_under(
+    tmp_path: Path,
+) -> None:
+    agent, tool = _setup(tmp_path, price=None)
+    # 200,000 tokens: past the trigger by more than the result saves.
+    agent.session.append(UserMessage(content="p" * 800_000))
+
+    text = await _ask(
+        tool,
+        tmp_path,
+        {"action": "prune_queue", "ids": [2], "reason": "spent"},
+    )
+
+    assert text.splitlines()[-1] == (
+        "It drops once it brings the context under compaction."
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_queue_lists_and_unqueues_by_entry(tmp_path: Path) -> None:
+    agent, tool = _setup(tmp_path)
+    assert await _ask(tool, tmp_path, {"action": "prune_list"}) == "Nothing is queued."
+    _ = await _ask(
+        tool,
+        tmp_path,
+        {"action": "prune_queue", "ids": [2], "reason": "the file is read"},
+    )
+
+    listed = await _ask(tool, tmp_path, {"action": "prune_list"})
+    unqueued = await _ask(tool, tmp_path, {"action": "prune_unqueue", "ids": [2]})
+
+    assert listed.splitlines()[:2] == [
+        "#2 result of Read (1,000 tokens): the file is read",
+        (
+            "Dropping #2 saves 985 tokens on each later request and writes 126 tokens"
+            " to the cache once."
+        ),
     ]
+    assert unqueued == "Unqueued #2.\nNothing is queued."
+    assert _queued(agent) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_agent_with_no_pruner_has_no_queue(tmp_path: Path) -> None:
+    _, tool = _setup(tmp_path)
+    _ = _kid(tool, tmp_path)
+
+    with pytest.raises(ValueError, match=r"^This agent has no pruner\.$"):
+        _ = await _ask(tool, tmp_path, {"agent": "kid", "action": "prune_list"})
 
 
 def _kid(
@@ -519,12 +596,14 @@ def _kid(
     tmp_path: Path,
     *,
     compactor: Factory[Shrinker] = NoShrinker,
+    pruner: Factory[Shrinker] = NoShrinker,
 ) -> Agent:
     """Return a child of ``Agent`` in ``tool``'s team, with one output to prune."""
     kid = Agent(
         model=ScriptedProvider()["scripted"],
         tool_context=ToolContext(cwd=tmp_path),
         compactor=compactor,
+        pruner=pruner,
     )
     _ = tool.team.join(kid, label="kid", parent="Agent")
     kid.session.append(
@@ -541,52 +620,23 @@ def _kid(
     return kid
 
 
-# The child's model did not ask: it is told nothing. Whoever asked is told by the
-# call's own result, which waits for the prune to end.
+# The child's model did not ask: it is told nothing.
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("outcome", "reply"),
-    [
-        (Succeeded(value=None), "Pruned: it is stale\nDropping #2 saves"),
-        (
-            Failed(exception=IndexError("list index out of range")),
-            "ValueError: The prune was not done: list index out of range",
-        ),
-        (
-            Cancelled(),
-            "ValueError: The prune was not done: the agent quit first.",
-        ),
-    ],
-    ids=["done", "failed", "the-child-quit"],
-)
-async def test_a_prune_of_a_child_s_session_waits_and_tells_who_asked_how_it_went(
+async def test_a_queue_for_a_child_s_session_lands_in_its_pruner(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: Outcome[None],
-    reply: str,
 ) -> None:
     agent, tool = _setup(tmp_path)
-    kid = _kid(tool, tmp_path)
-    asked: list[types.RuntimeEvent] = []
+    kid = _kid(tool, tmp_path, pruner=Pruner)
 
-    async def ask(request: types.SessionPrune) -> Outcome[None]:
-        asked.append(request)
-        return outcome
-
-    monkeypatch.setattr(kid.runtime, "ask", ask)
-    result = await settled(
-        tool.call(
-            ToolContext(cwd=tmp_path, label="Agent"),
-            {"agent": "kid", "action": "prune", "ids": [2], "reason": "it is stale"},
-        ),
+    text = await _ask(
+        tool,
+        tmp_path,
+        {"agent": "kid", "action": "prune_queue", "ids": [2], "reason": "stale"},
     )
 
-    assert result.is_error is not isinstance(outcome, Succeeded)
-    assert result.text().startswith(reply)
-    # It names who asked, and tells the child's model nothing.
-    assert asked == [
-        types.SessionPrune(sender="Agent", call_ids=("k0",), reason="it is stale"),
-    ]
+    assert text.startswith("Queued #2: stale\nDropping #2 saves")
+    assert _queued(kid) == {"k0": "stale"}
+    assert _queued(agent) == {}
     assert agent.runtime.inbox.drain_nowait() == []
     assert kid.runtime.inbox.drain_nowait() == []
 

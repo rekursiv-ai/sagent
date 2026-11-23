@@ -23,6 +23,7 @@ import pytest
 from sagent.agent.agent import Agent, NoShrinker, RuntimeSession, spent
 from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.pruner import Pruner
 from sagent.agent.team import ChildSpec, MessageKind, Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
@@ -224,6 +225,7 @@ def _setup(
     *replies: Reply,
     journal: Journal | None = None,
     compactor: Factory[Shrinker] = NoShrinker,
+    pruner: Factory[Shrinker] = NoShrinker,
     tools: Sequence[_Tool] = (),
     other: Sequence[Reply] = (),
     send: bool = False,
@@ -255,6 +257,7 @@ def _setup(
         system_prompt="the parent's prompt",
         journal=journal,
         compactor=compactor,
+        pruner=pruner,
         tool_context=ToolContext(cwd=tmp_path),
         agents_md=AgentsMdConfig(system_dir=tmp_path / "s", user_dir=tmp_path / "u"),
     )
@@ -856,11 +859,14 @@ async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> 
     async with setup.team:
         task = asyncio.ensure_future(_spawn(setup, tmp_path, {"prompt": "go"}))
         await wait.started.wait()
+        seen: list[RuntimeEvent] = []
+        setup.team["Agent_0"].runtime.observers.append(seen.append)
         _ = task.cancel()
 
         assert (await task).state == "cancelled"
         await asyncio.wait_for(wait.stopped.wait(), timeout=5)
         assert list(setup.team) == ["Agent", "Agent_0"]
+        assert [e.sender for e in seen if isinstance(e, types.ModelHalt)] == ["Agent"]
 
 
 @pytest.mark.asyncio
@@ -958,6 +964,22 @@ async def test_a_child_compacts_as_its_parent_does(tmp_path: Path) -> None:
         assert isinstance(theirs, SummaryCompactor)
         assert theirs is not mine
         assert theirs.trigger_tokens() == mine.trigger_tokens() < 1_000
+
+
+@pytest.mark.asyncio
+async def test_a_child_prunes_as_its_parent_does(tmp_path: Path) -> None:
+    """Its own pruner, so its queue and notes are its own."""
+    setup = _setup(tmp_path, reply("ready"), pruner=Pruner)
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        mine, theirs = (
+            setup.parent.session.pruner,
+            setup.team["Agent_0"].session.pruner,
+        )
+
+        assert isinstance(mine, Pruner)
+        assert isinstance(theirs, Pruner)
+        assert theirs is not mine
 
 
 @pytest.mark.asyncio

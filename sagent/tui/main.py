@@ -824,8 +824,8 @@ def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
             "--prune",
             action=argparse.BooleanOptionalAction,
             default=True,
-            help="Drop old tool output once that costs less than keeping it cached"
-            " (default: on).",
+            help="Note old tool output the model may prune, and drop what it queues"
+            " once that costs less than keeping it cached (default: on).",
         ),
         parser.add_argument(
             "--tools",

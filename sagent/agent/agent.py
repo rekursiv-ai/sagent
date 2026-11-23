@@ -231,8 +231,9 @@ class Agent(AsyncResource):
             pruner=pruner,
         )
         self.session: Session = self._session
-        # What a child it spawns compacts with, so the child compacts as it does.
+        # What a child it spawns compacts and prunes with, so the child does as it does.
         self.compactor_factory: Factory[Shrinker] = compactor
+        self.pruner_factory: Factory[Shrinker] = pruner
         self.runtime.context_updates = self._session.updates
         # A compactor the runtime can call compacts on ``SessionCompact``, and when due,
         # and sizes each reply to the room the window leaves.
@@ -347,7 +348,7 @@ class Agent(AsyncResource):
         self.runtime.publish(types.SessionSpendCharged(spend=spend, label=label))
         if (over := self._over_budget()) is not None:
             self._limit = over
-            self.runtime.halt()
+            self.runtime.halt(sender=self.runtime.tool_context.label)
 
     async def recall(self, catalog: ModelCatalog) -> None:
         """Take the model, its account, the model cache, and the prompt last stood.
@@ -598,7 +599,7 @@ class Agent(AsyncResource):
             self._rounds += 1
             self._gate_tools()
         if self._limit is not None:
-            self.runtime.halt()
+            self.runtime.halt(sender=self.runtime.tool_context.label)
 
     def _over_budget(self) -> BudgetExhaustedError | None:
         """Return the error a spend at or past ``max_spend_usd`` raises; ``None`` under it."""

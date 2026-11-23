@@ -9,7 +9,7 @@ verbatim, since a prompt's instructions sit at its head.
 
 Every level shrinks or the fold raises, so the tree is at most
 ``log(len / budget)`` levels deep. No chunk is ever dropped: a reply cut off,
-empty, or no shorter than the chunk, or a chunk the provider rejects as too
+refused, empty, or no shorter than the chunk, or a chunk the provider rejects as too
 long, is retried, then halved -- at its middle line, or mid-line for a single
 long line -- and only a one-character chunk that cannot be summarized fails.
 
@@ -241,7 +241,7 @@ async def _attempt(prompt: str, *, call: _Call) -> str:
         return ""
     if reply is not None:
         call.spent(reply.spend.total)
-    if reply is None or reply.stop_reason == "max_tokens":
+    if reply is None or reply.stop_reason in ("max_tokens", "refusal"):
         return ""
     return "".join(
         r.content or "" for r in reply.records if isinstance(r, AssistantMessage)

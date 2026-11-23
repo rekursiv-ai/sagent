@@ -152,6 +152,9 @@ class Response:
     stop_reason: str
     """Why the model stopped: ``end_turn``, ``tool_use``, ``max_tokens``, or ``refusal``; another vendor reason as spelled."""
 
+    stop_details: str = ""
+    """What the vendor said of the stop, such as a refusal's category and explanation."""
+
     measurement: RequestMeasurement | None = field(default=None, compare=False)
     """The exact request's measured prompt, captured by the caller before streaming."""
 

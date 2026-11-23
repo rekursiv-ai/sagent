@@ -17,7 +17,8 @@ A message one agent sends another is a request, which the receiver owes a
 reply, unless the sender owed the receiver one: then it is that reply. An agent
 that goes idle owing replies is nudged, at every idle, until it replies by
 AgentSend; one with no AgentSend answers with that error. One that fails, is
-halted, or is stopped answers for itself.
+halted, or is stopped answers for itself; a watcher it owes, told by its feed,
+is settled without that answer.
 
 A child that stops tells its parent ``[<label> is idle] <last text>``, unless
 its last tool call was an AgentSend to that parent, or its reply to the parent
@@ -89,7 +90,7 @@ from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator
 
     from treekle import PlainTree
 
@@ -610,13 +611,27 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         """Return whom ``label`` owes a reply, each with the first words asked."""
         return dict(self._owed.get(label, {}))
 
-    def answer(self, label: str, content: str) -> None:
-        """Send ``content`` to each one ``label`` owes, settling every debt."""
+    def answer(
+        self,
+        label: str,
+        content: str,
+        *,
+        heard: Collection[str] = (),
+    ) -> None:
+        """Send ``content`` to each one ``label`` owes, settling every debt.
+
+        Args:
+          label: The debtor.
+          content: The answer.
+          heard: Creditors told another way, settled without it.
+
+        """
         owed = self._owed.pop(label, {})
         if owed:
             self._book(label)
         for creditor in owed:
-            self._deliver(label, creditor, content, kind="reply")
+            if creditor not in heard:
+                self._deliver(label, creditor, content, kind="reply")
 
     def tell(self, sender: str, recipient: str, content: str) -> None:
         """Deliver ``content`` as news: no request, so no one owes a reply.
@@ -939,13 +954,22 @@ class _Dun:
         ):
             self._tell_parent(f"[{self.label} is idle] {said}".rstrip(), owed)
 
-    # The runtime then waits for the user, so no idle follows to end the run.
+    # The runtime then waits for the user, so no idle follows to end the run. A
+    # watcher's feed tells it why already.
     def _ended(self, said: str, owed: dict[str, str]) -> None:
         """Answer each creditor, and tell the parent, that the run ended so."""
         self._said = ""
         self._last_call = None
+        team = self.team
+        watcher = team.above(self.label) if team.parent(self.label) is None else None
         if owed:
-            self.team.answer(self.label, said)
+            team.answer(
+                self.label,
+                said,
+                heard=(watcher,)
+                if watcher is not None and team.watching.get(watcher, False)
+                else (),
+            )
         self._tell_parent(said, owed)
 
     def _tell_parent(

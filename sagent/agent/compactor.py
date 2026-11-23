@@ -41,7 +41,11 @@ from treekle import PlainTree, from_plain, json_dumps, mutable
 
 from sagent.agent.scrunch import safe_boundaries
 from sagent.model.capability import ThinkingEffort, literal_members
-from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.model.exceptions import (
+    ContextOverflowError,
+    RefusedError,
+    RetryableError,
+)
 from sagent.model.token_accounting import bound, digest
 from sagent.model.types import Request, Response
 from sagent.runtime import types
@@ -609,10 +613,9 @@ class SummaryCompactor:
         body = _asset("compactor_session_audit")
         if guidance := instructions.strip():
             body = _append_user_guidance(body, guidance)
-        response = await self._audited(model, lines, body)
-        summary = _summary(response) if response is not None else None
+        summary = _summary(await self._audited(model, lines, body))
         if summary is None:
-            raise ContextOverflowError("the session audit failed")
+            raise RuntimeError("The session audit returned no usable summary.")
         replacement, reason = await self._prefixes(
             model,
             [UserMessage(content=summary)],
@@ -637,45 +640,54 @@ class SummaryCompactor:
 
     # An audit too long for one request has its older half summarized first, as a
     # compaction would, until the rest fits; each round must shrink it, or it fails.
-    async def _audited(
-        self,
-        model: Model,
-        lines: list[str],
-        body: str,
-    ) -> Response | None:
-        """Ask for the audit of ``lines``; ``None`` when it cannot be had."""
+    async def _audited(self, model: Model, lines: list[str], body: str) -> Response:
+        """Return the reply to the audit request for ``lines``."""
         per = model.capability.approx_chars_per_token
         budget = self._room((len(_asset("compactor_system")) + len(body)) / per)
-        try:
-            while k := halve([len(line) / per for line in lines], budget=budget):
-                earlier = await self._digest(model, lines[:k])
-                shorter = (
-                    [f"[earlier lines, summarized] {earlier}", *lines[k:]]
-                    if earlier is not None
-                    else lines
-                )
-                if sum(map(len, shorter)) >= sum(map(len, lines)):
-                    logger.warning("the session audit could not be cut to fit")
-                    return None
-                lines = shorter
-            joined = "\n".join(lines)
-            return await self._ask(
-                model,
-                [UserMessage(content=f"{body}\n\n<session>\n{joined}\n</session>")],
+        while k := halve([len(line) / per for line in lines], budget=budget):
+            earlier = await self._digest(model, lines[:k])
+            shorter = (
+                [f"[earlier lines, summarized] {earlier}", *lines[k:]]
+                if earlier is not None
+                else lines
             )
-        except (ContextOverflowError, RetryableError) as exc:
-            logger.warning("the session audit request failed: %s", exc)
-            return None
+            if sum(map(len, shorter)) >= sum(map(len, lines)):
+                raise ContextOverflowError("The session audit could not be cut to fit.")
+            lines = shorter
+        joined = "\n".join(lines)
+        return await self._answered(
+            model,
+            [UserMessage(content=f"{body}\n\n<session>\n{joined}\n</session>")],
+        )
 
     async def _digest(self, model: Model, lines: list[str]) -> str | None:
         """Return a summary of ``lines``, as a compaction writes one; ``None`` if none."""
         joined = "\n".join(lines)
         prompt = _summary_prompt(_asset("compactor"))
-        response = await self._ask(
+        response = await self._answered(
             model,
             [UserMessage(content=f"{joined}\n\n{prompt}")],
         )
         return _summary(response)
+
+    # Refusals come and go: the same request asked again was answered (2026-11-22).
+    async def _answered(
+        self,
+        model: Model,
+        records: Sequence[ModelContextEvent],
+    ) -> Response:
+        """Ask as :meth:`_ask` does, again while refused, up to ``max_attempts`` times."""
+        reasons: list[str] = []
+        for _ in range(self._max_attempts):
+            response = await self._ask(model, records)
+            if response.stop_reason != "refusal":
+                return response
+            logger.warning("session audit refused: %s", response.stop_details)
+            reasons.append(response.stop_details)
+        raise RefusedError(
+            f"The model refused the session audit {self._max_attempts} times:"
+            f" {reasons[-1] or 'no reason given'}",
+        )
 
     async def _prefixes(
         self,
@@ -746,6 +758,8 @@ class SummaryCompactor:
             force = False
         return render(summaries, remaining), reason
 
+    # An overflow shortens the prefix, a transient failure waits, and a refusal or a
+    # reply with no summary asks again; each counts one attempt.
     async def _prefix_summary(
         self,
         model: Model,
@@ -764,6 +778,7 @@ class SummaryCompactor:
             instruction=instruction,
             retained=retained,
         )
+        failures: list[Exception] = []
         for attempt in range(self._max_attempts):
             # A measured size can undercut an estimate, so sizes need not grow with
             # the prefix: this finds a stop that fits whose next one does not.
@@ -779,10 +794,12 @@ class SummaryCompactor:
             )
             try:
                 response = await self._stream(model, request)
-            except ContextOverflowError:
+            except ContextOverflowError as exc:
+                failures.append(exc)
                 stops = stops[: fitting - 1]
                 continue
             except RetryableError as exc:
+                failures.append(exc)
                 logger.warning(
                     "summary call failed (%s); waiting %ss",
                     exc,
@@ -794,8 +811,21 @@ class SummaryCompactor:
             summary = _summary(response)
             if summary is not None:
                 return response, summary, taken
-        raise ContextOverflowError(
-            f"summary failed after {self._max_attempts} attempts",
+            failures.append(self._unusable(response))
+        raise failures[-1]
+
+    # Raised only if the last attempt fails as this one did.
+    def _unusable(self, response: Response) -> Exception:
+        """Return the error a reply with no usable summary stands for."""
+        if response.stop_reason == "refusal":
+            logger.warning("summary refused: %s", response.stop_details)
+            return RefusedError(
+                f"The model refused the summary {self._max_attempts} times:"
+                f" {response.stop_details or 'no reason given'}",
+            )
+        return RuntimeError(
+            f"The model returned no usable summary after {self._max_attempts}"
+            " attempts.",
         )
 
     def _prefix_fits(

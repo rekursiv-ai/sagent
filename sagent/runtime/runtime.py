@@ -492,6 +492,7 @@ class Runtime:
         self.compact_due: Callable[[], bool] | None = None
         self.reply_room: Callable[[], int] | None = None
         self.prune: Callable[[], bool] | None = None
+        self.result_note: Callable[[ToolMessage], str] | None = None
         self.before_tool_spawn: Callable[[Response], UserMessage | None] | None = None
         self.context_updates: (
             Callable[[], Sequence[SystemMessage | AgentMessage | SessionContextUpdate]]
@@ -503,7 +504,6 @@ class Runtime:
         ) = None
 
         # What each request names its conversation and this agent's place in it.
-        self.session_id = session_id
         self.conversation = ""
         self.agent = ""
         self.parent = ""
@@ -520,9 +520,10 @@ class Runtime:
         self.tape = Tape(session_id)
 
         # The inbox; its gate is the only wait for the user. ``_awaited`` is what
-        # it waited for before this drain, until a message or retry takes it.
+        # it waited for before this drain, until a message or retry takes it; each
+        # drain sets it before anything reads it.
         self.inbox: GatedDeque[RuntimeEvent] = GatedDeque()
-        self._awaited: Await | None = None
+        self._awaited: Await | None
         # Each request taken in and not yet ended, and where it stands: held for a
         # state, taken into the turn, or neither yet. Kept in the order each came to
         # where it stands.
@@ -550,6 +551,11 @@ class Runtime:
         self._last_request: float | None = None
         # Automatic compactions since the last reply; two in a row stop trying.
         self._auto_compactions = 0
+        # Whether the last compaction failed. A reply leaves the context it could not
+        # compact, so none is tried again on its own until the user writes, retries,
+        # or clears, or one asked for succeeds; each reply retried it before
+        # (2026-11-22).
+        self._compaction_failed = False  # pragma: no mutate[truthiness]
 
         self.compact_task: asyncio.Task[SessionCompactCompleted | None] | None = None
         self._compacting: SessionCompact | None = None
@@ -1201,9 +1207,11 @@ class Runtime:
         if item.due_after is not None:
             self._commit_due(self._opened(item))
             return
-        # The user writing during a suspension asks to try now.
+        # The user writing during a suspension asks to try now, as after a failed
+        # compaction.
         if isinstance(item, UserMessage):
             self.recheck_quota = True
+            self._compaction_failed = False
             self._end_suspension()
         if isinstance(item, SystemMessage):
             # A nudge to a busy agent is moot: it is told again at its next idle if
@@ -1228,6 +1236,7 @@ class Runtime:
         )
         self._awaited = None
         self.recheck_quota = True
+        self._compaction_failed = False
         self._end_suspension()
         self.publish(
             ModelRetryCompleted(
@@ -1322,9 +1331,10 @@ class Runtime:
             ModelIdle,
             AgentIdle,
         )
-        # A new conversation does not inherit the old one's failure, or its wait
-        # for a rate limit.
+        # A new conversation does not inherit the old one's failure, its wait for a
+        # rate limit, or its failed compaction.
         self._end_suspension()
+        self._compaction_failed = False
         self.tape.append_clear()
         # A tool that finished as the user cleared posted its result behind the
         # ``SessionClear``; delivering it would carry the wiped session's work into
@@ -1415,6 +1425,7 @@ class Runtime:
             isinstance(exc, ContextOverflowError)
             and self.compactor is not None
             and self._auto_compactions < 2
+            and not self._compaction_failed
         ):
             logger.warning("model context overflowed; compacting: %s", exc)
             self._auto_compactions += 1
@@ -1742,6 +1753,8 @@ class Runtime:
         else:
             self._compaction_trigger = ""
         if not isinstance(ending.outcome, Cancelled):
+            self._compaction_failed = isinstance(ending.outcome, Failed)
+        if not isinstance(ending.outcome, Cancelled):
             self.tape.append_history(ending)
         self._end(request, ending)
 
@@ -1839,17 +1852,19 @@ class Runtime:
                 self.publish(news)
 
     # Prune first: a drop that brings the context back under the compaction trigger
-    # spares the compaction. Compact when the compactor says the request would not
-    # fit; twice with no model call between means compacting does not help, so the
-    # call goes ahead and the provider's error says why.
+    # spares the compaction, and a note of what may be pruned puts it off a round,
+    # so the model can answer it. Compact when the compactor says the request would
+    # not fit; twice with no model call between means compacting does not help, so
+    # the call goes ahead and the provider's error says why.
     async def _start_round(self) -> None:
         """Prune, compact, or call the model, whichever the context is due."""
-        if self.prune is not None:
-            _ = self.prune()
+        pruned = self.prune is not None and self.prune()
         if (
-            self.compactor is not None
+            not pruned
+            and self.compactor is not None
             and self.compact_due is not None
             and self._auto_compactions < 2
+            and not self._compaction_failed
             and self.compact_due()
         ):
             self._auto_compactions += 1
@@ -2399,17 +2414,25 @@ class Runtime:
             ``0`` bypasses it for sizing without recursion.
 
         Returns:
-          request: The system prompt, the context and ``after``, and every tool.
+          request: The system prompt, the context and ``after``, and every tool;
+            each tool result ends with its ``result_note``, which is never kept.
 
         """
+        records = sent_records(
+            self.tape.context().messages if context is None else context,
+            keep_senders_apart=self.model.capability.keeps_user_turns_apart,
+            provider=self.model.provider.name,
+        )
+        note = self.result_note
         return self.tagged(
             Request(
                 system=self.system,
                 records=[
-                    *sent_records(
-                        self.tape.context().messages if context is None else context,
-                        keep_senders_apart=self.model.capability.keeps_user_turns_apart,
-                        provider=self.model.provider.name,
+                    *(
+                        r
+                        if note is None or not isinstance(r, ToolMessage)
+                        else _noted(r, note(r))
+                        for r in records
                     ),
                     *after,
                 ],
@@ -2858,6 +2881,16 @@ class _Watch:
 def _runs_until_stopped(call: _Call) -> bool:
     """Return whether the call's tool said it ends only when it is stopped."""
     return call.watch is not None and call.watch.runs_until_stopped
+
+
+# Through ``shown``, so the result's attachments are sent as before.
+def _noted(result: ToolMessage, note: str) -> ToolMessage:
+    """Return ``result`` reading ``note`` on a line after its text; as it is, for none."""
+    return (
+        dataclasses.replace(result, shown=f"{result.text()}\n{note}")
+        if note
+        else result
+    )
 
 
 def _cache_key(model: Model) -> tuple[str, str]:

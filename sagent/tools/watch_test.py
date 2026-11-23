@@ -268,27 +268,49 @@ def test_each_send_reads_only_the_records_not_yet_sent() -> None:
     assert _told(watcher) == ["[watch]\n> user: go", "[watch]\nAgent: done"]
 
 
+def test_a_turn_that_fails_is_told_at_once() -> None:
+    team, _, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+
+    feed(types.ModelResponseStarted())
+    feed(ModelIdle(outcome=Failed(exception=ValueError("down"))))
+
+    assert _told(watcher) == ["[watch]\n[failed] ValueError: down"]
+
+
 @pytest.mark.parametrize(
-    ("event", "said"),
+    ("halt", "said"),
     [
-        (
-            ModelIdle(outcome=Failed(exception=ValueError("down"))),
-            "[failed] ValueError: down",
-        ),
-        (ModelIdle(outcome=Cancelled()), "[halted]"),
+        (types.ModelHalt(), "[halted by user]"),
+        (types.ModelHalt(sender="Agent_0"), "[halted by Agent_0]"),
     ],
 )
-def test_a_turn_that_fails_or_is_halted_is_told_at_once(
-    event: types.RuntimeEvent,
+def test_a_halted_turn_is_told_at_once_with_who_halted_it(
+    halt: types.ModelHalt,
     said: str,
 ) -> None:
     team, _, watcher = _watched()
     feed = Feed(team=team, watched="Agent", watcher="watcher")
 
     feed(types.ModelResponseStarted())
-    feed(event)
+    feed(halt)
+    feed(ModelIdle(outcome=Cancelled()))
+    feed(types.ModelHaltCompleted(outcome=Succeeded(value=None)))
 
     assert _told(watcher) == [f"[watch]\n{said}"]
+
+
+def test_a_halt_that_stopped_nothing_names_no_later_stop() -> None:
+    """A halt of an agent at rest ends; a clear's stop after is the user's."""
+    team, _, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+
+    feed(types.ModelHalt(sender="Agent_0"))
+    feed(types.ModelHaltCompleted(outcome=Cancelled()))
+    feed(types.ModelResponseStarted())
+    feed(ModelIdle(outcome=Cancelled()))
+
+    assert _told(watcher) == ["[watch]\n[halted by user]"]
 
 
 # Only the runtime knows whether a turn stopped: a compaction cancels a call, a

@@ -1085,6 +1085,26 @@ def test_the_stop_reason_is_empty_until_the_model_says() -> None:
     assert reader.stop_reason == "max_tokens"
 
 
+def test_a_refusal_keeps_its_category_and_explanation() -> None:
+    details = {
+        "type": "refusal",
+        "category": "reasoning_extraction",
+        "explanation": "Blocked.",
+    }
+    _, refused = _read(
+        _start(),
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "refusal", "stop_details": details},
+            "usage": {},
+        },
+    )
+    _, bare = _read(_start(), _stop("refusal"))
+
+    assert refused.response().stop_details == "reasoning_extraction: Blocked."
+    assert bare.response().stop_details == ""
+
+
 def test_thinking_streams_as_reasoning_and_keeps_its_signature() -> None:
     chunks, reader = _read(
         _start(),

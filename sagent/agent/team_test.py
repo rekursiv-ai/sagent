@@ -735,6 +735,40 @@ async def test_a_debtor_that_fails_or_halts_answers_for_itself(
     assert team.owes("a") == {}
 
 
+@pytest.mark.parametrize(
+    ("event", "said"),
+    [
+        (
+            ModelIdle(outcome=Failed(exception=ValueError("down"))),
+            "[Agent failed] ValueError: down",
+        ),
+        (ModelIdle(outcome=Cancelled()), "[Agent halted]"),
+    ],
+)
+@pytest.mark.parametrize("watching", [True, False])
+def test_a_watched_debtor_that_stops_leaves_its_watcher_to_the_feed(
+    tmp_path: Path,
+    event: types.RuntimeEvent,
+    said: str,
+    watching: bool,
+) -> None:
+    """The feed tells a watcher why its agent stopped; the team settles in silence."""
+    team = _team()
+    _ = team.join(_agent(tmp_path, team))
+    _ = team.join(_agent(tmp_path, team), label="watcher")
+    team.watch("watcher", "Agent")
+    team.watching["watcher"] = watching
+    team.send("watcher", "Agent", "check x")
+
+    team["Agent"].runtime.publish(types.ModelResponseStarted())
+    team["Agent"].runtime.publish(event)
+    _complete_responses_and_idle(team["Agent"], reply("back"))
+
+    assert team.owes("Agent") == {}
+    assert _nudged(team["Agent"]) == 0
+    assert _told(team["watcher"]) == ([] if watching else [("Agent", said)])
+
+
 # Only the runtime knows whether a turn stopped: a compaction cancels a call, a
 # failure may be got past, and a halt or a clear of an agent at rest stops nothing.
 @pytest.mark.parametrize(
