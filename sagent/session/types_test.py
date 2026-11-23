@@ -256,6 +256,16 @@ def _every_record() -> list[SessionRecord]:
         ),
         ContextState(kind="k", content="c", extra={"full": [True]}),
         ContextCompaction(summary="sum", extra={"tokens": {"before": 9}}),
+        ContextCompaction(
+            summary="The user asked.",
+            provider="anthropic",
+            block={
+                "type": "compaction",
+                "content": "The user asked.",
+                "signature": "s",
+            },
+            replaces="abc",
+        ),
         ContextClear(
             cleared_session_id="old",
             system_prompt="sys",
@@ -372,7 +382,6 @@ def test_a_stored_time_reads_as_a_datetime_and_is_stored_as_it_was() -> None:
         SystemMessage,
         TokenUsage,
         ContextState,
-        ContextCompaction,
         ContextClear,
         AgentMessage,
     ],

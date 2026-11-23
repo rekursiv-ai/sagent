@@ -22,6 +22,7 @@ from sagent.model.types import Response
 from sagent.session.types import (
     AgentIdle,
     AgentMessage,
+    ContextCompaction,
     ModelIdle,
     Outcome,
     SessionContext,
@@ -624,7 +625,13 @@ class CompactionSplice(Protocol):
 
 
 type ModelContextEvent = (
-    UserMessage | AgentMessage | Response | ToolMessage | SystemMessage | SessionContext
+    UserMessage
+    | AgentMessage
+    | Response
+    | ToolMessage
+    | SystemMessage
+    | SessionContext
+    | ContextCompaction
 )
 
 

@@ -176,6 +176,30 @@ async def test_reasoning_and_tier_changes_are_applied_and_reported(
 
 
 @pytest.mark.asyncio
+async def test_a_compaction_mode_the_model_offers_is_applied_and_reported(
+    tmp_path: Path,
+) -> None:
+    capability = replace(
+        _capability("scripted"),
+        compaction=frozenset({"bespoke", "provider"}),
+    )
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, capability=capability)},
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["scripted"]["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(agent)
+
+    text = await _patch(AgentSelf(team=team), tmp_path, {"compaction": "provider"})
+
+    assert agent.model.settings.compaction == "provider"
+    assert text == "compaction: bespoke -> provider"
+
+
+@pytest.mark.asyncio
 async def test_an_effort_too_high_for_thinking_off_turns_thinking_on(
     tmp_path: Path,
 ) -> None:
@@ -282,8 +306,9 @@ async def test_a_detach_patch_that_does_not_fit_changes_nothing(
         {"effort": "high", "budget": "fixed"},
         {"effort": "high", "output": "redacted"},
         {"provider": "other", "effort": "max"},
+        {"effort": "high", "compaction": "provider"},
     ],
-    ids=["tier", "budget", "output", "effort-with-switch"],
+    ids=["tier", "budget", "output", "effort-with-switch", "compaction"],
 )
 async def test_a_patch_with_any_setting_not_offered_changes_nothing(
     tmp_path: Path,
@@ -495,6 +520,7 @@ async def test_diagnostics_report_what_the_agent_runs_on(tmp_path: Path) -> None
         "context: 1k",
         "thinking: budget=none output=none effort=none",
         "service_tier: auto; cache_ttl_sec: 0",
+        "compaction: bespoke",
         "limits: request=1000 response=100",
         f"cwd: {tmp_path}",
         "tools: ",

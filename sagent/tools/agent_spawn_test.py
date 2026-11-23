@@ -666,8 +666,6 @@ def test_a_call_is_written_as_the_first_line_of_its_tool_s_summary() -> None:
             call("Sum", "c1", x="7"),
             call("Gone", "c2"),
         ),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="tool_use",
     )
 

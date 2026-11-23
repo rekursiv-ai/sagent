@@ -42,6 +42,7 @@ from sagent.session.types import (
     AssistantMessage,
     Attachment,
     ContextClear,
+    ContextCompaction,
     ContextState,
     IncompleteRecord,
     SessionContext,
@@ -1107,6 +1108,51 @@ def test_thinking_streams_as_reasoning_and_keeps_its_signature() -> None:
         Thinking(content="unsigned"),
         Thinking(encrypted="sealed"),
     )
+
+
+def test_a_compaction_block_streams_whole_as_the_summary() -> None:
+    """As measured: the block starts whole, with no deltas, and stops the reply."""
+    block = {"type": "compaction", "content": "The user asked.", "signature": "s"}
+    chunks, reader = _read(
+        _start(),
+        _block(0, **block),
+        {"type": "content_block_stop", "index": 0},
+        _stop("compaction"),
+    )
+    response = reader.response()
+    assert (chunks, response.records, response.stop_reason) == ([], (), "compaction")
+    assert response.summary == block
+
+
+def test_a_summarize_request_asks_the_api_for_its_summary() -> None:
+    opus, settings = _model()
+    body, betas = wire.encode(
+        Request(records=(UserMessage(content="q"),), summarize=True),
+        capability=opus,
+        settings=settings,
+        system=[],
+    )
+    assert body["compaction"] == {"type": "summarize"}
+    assert "compact-2026-09-04" in betas
+    assert "context_management" not in body
+
+
+def test_a_provider_summary_returns_first_as_its_own_block() -> None:
+    block = {"type": "compaction", "content": "The user asked.", "signature": "s"}
+    summary = ContextCompaction(
+        summary="The user asked.",
+        provider="anthropic",
+        block=block,
+        replaces="x",
+    )
+    _, betas = _encode([summary, UserMessage(content="next")])
+    assert "compact-2026-09-04" in betas
+    messages = _messages([summary, Thinking(content="t", encrypted="sig")])
+    assert messages[0]["role"] == "assistant"
+    assert _blocks(messages[0])[:2] == [
+        block,
+        {"type": "thinking", "thinking": "t", "signature": "sig"},
+    ]
 
 
 def test_a_tool_call_gathers_its_argument_json() -> None:

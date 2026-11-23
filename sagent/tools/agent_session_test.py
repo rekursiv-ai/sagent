@@ -28,6 +28,7 @@ from sagent.session.types import (
     AssistantMessage,
     Cancelled,
     ContextClear,
+    ContextCompaction,
     Failed,
     Outcome,
     SessionContext,
@@ -195,6 +196,27 @@ async def test_list_cuts_a_head_only_past_80_and_names_unknown_and_several_calls
         "#4 result of ? (6 chars): orphan",
         "#5 user message from bob (2 chars): hi",
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_names_a_vendor_s_summary_and_shows_its_text(tmp_path: Path) -> None:
+    agent, tool = _setup(tmp_path)
+    agent.runtime.tape.append_clear()
+    agent.session.append(
+        ContextCompaction(
+            summary="The user asked.",
+            provider="anthropic",
+            block={
+                "type": "compaction",
+                "content": "The user asked.",
+                "signature": "s",
+            },
+        ),
+    )
+
+    lines = (await _ask(tool, tmp_path, {"action": "list"})).splitlines()
+
+    assert lines == ["#0 summary by anthropic (15 chars): The user asked."]
 
 
 @pytest.mark.asyncio

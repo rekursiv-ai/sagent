@@ -66,6 +66,7 @@ _WIDE = ModelCapability(
     service_tier=frozenset({"auto", "priority"}),
     cache_ttl_sec=frozenset({300.0, 3600.0}),
     manage_context_server_side=frozenset({False, True}),
+    compaction=frozenset({"bespoke", "provider"}),
     default=ModelSettings(
         thinking_effort="high",
         cache_ttl_sec=300.0,
@@ -129,6 +130,7 @@ def test_the_model_exports_each_choice_under_it_for_the_command_line() -> None:
         "model.service_tier",
         "model.cache_ttl_sec",
         "model.manage_context_server_side",
+        "model.compaction",
     ]
     assert all(s.cli and s.value is not None for s in settings)
 
@@ -173,6 +175,11 @@ def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
             "model.manage_context_server_side",
             "VALUE",
             "whether the server rolls the history",
+        ),
+        (
+            "model.compaction",
+            "VALUE",
+            "who summarizes a full context: sagent, or the provider",
         ),
     ]
 
@@ -264,6 +271,10 @@ def test_each_setting_shows_its_value_and_what_it_may_take() -> None:
         "model.manage_context_server_side": (
             "false (default)",
             ("default", "false", "true"),
+        ),
+        "model.compaction": (
+            "bespoke (default)",
+            ("default", "bespoke", "provider"),
         ),
     }
 
@@ -560,11 +571,13 @@ async def test_an_axis_takes_only_what_the_model_offers() -> None:
     assert await _apply(owner, "model.cache_ttl_sec", "3600") == "3600"
     assert await _apply(owner, "model.manage_context_server_side", "true") == "true"
     assert await _apply(owner, "model.service_tier", "priority") == "priority"
+    assert await _apply(owner, "model.compaction", "provider") == "provider"
     settings = agent.model.settings
-    assert (settings.cache_ttl_sec, settings.manage_context_server_side) == (
-        3600.0,
-        True,
-    )
+    assert (
+        settings.cache_ttl_sec,
+        settings.manage_context_server_side,
+        settings.compaction,
+    ) == (3600.0, True, "provider")
     message = "'xhigh' is not one of: none, low, high, max"
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         await _apply(owner, "model.thinking.effort", "xhigh")

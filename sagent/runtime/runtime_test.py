@@ -73,6 +73,7 @@ from sagent.runtime.tape import (
     ContextSplice,
     InvalidReplacementError,
     InvalidSpliceError,
+    MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
     TapeRecord,
@@ -130,6 +131,7 @@ from sagent.session.types import (
     BackgroundTaskResult,
     BashResult,
     Cancelled,
+    ContextCompaction,
     Failed,
     ModelIdle,
     SessionContext,
@@ -3081,6 +3083,94 @@ async def test_a_background_job_killed_before_it_starts_leaves_no_job() -> None:
     assert tool.started == []
     assert [r.state for r in _arrival(h, "b1")] == ["cancelled"]
     assert jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_sealed_thinking_goes_back_until_what_it_followed_is_rewritten() -> None:
+    sealed = Response(
+        records=(Thinking(content="t", encrypted="sig"), AssistantMessage(content="a")),
+        stop_reason="end_turn",
+    )
+    h = Harness(sealed, reply("b"), reply("c"))
+    async with h:
+        h.push(_user("first"))
+        await h.seen(_answered)
+        h.push(_user("second"))
+        await h.seen(_answered, 2)
+        first = next(
+            r.ref
+            for r in h.runtime.tape
+            if isinstance(r, ReferrableTapeEvent) and r.event == _user("first")
+        )
+        h.runtime.tape.append_splice(
+            mask=(
+                MaskRange(
+                    session_id=first.session_id,
+                    lo=first.ordinal,
+                    hi=first.ordinal,
+                ),
+            ),
+            replacement=(_user("Summary: the user said first."),),
+            discards_content=True,
+        )
+        h.push(_user("third"))
+        await h.seen(_answered, 3)
+
+    def thinking(index: int) -> list[str | None]:
+        return [
+            r.encrypted for r in h.requests()[index].records if isinstance(r, Thinking)
+        ]
+
+    assert (thinking(1), thinking(2)) == (["sig"], [])
+    [made] = [
+        r
+        for e in h.history()
+        if isinstance(e, Response)
+        for r in e.records
+        if isinstance(r, Thinking)
+    ]
+    assert made.prefix_digest
+
+
+@pytest.mark.asyncio
+async def test_a_summary_only_another_provider_reads_stops_the_turn_and_says_so() -> (
+    None
+):
+    """Sent without it, the model would answer as if nothing came before."""
+    h = Harness(reply("as if nothing came before"))
+    h.runtime.tape.append_history(
+        ContextCompaction(
+            provider="openai",
+            block={"type": "compaction", "encrypted_content": "gAAA"},
+        ),
+    )
+    async with h:
+        h.push(_user("which count is larger?"))
+        await h.seen(_failed)
+
+    assert h.requests() == []
+    [failed] = [e for e in h.events if _failed(e)]
+    assert isinstance(failed, ModelResponseCompleted)
+    assert isinstance(failed.outcome, Failed)
+    error = failed.outcome.exception
+    assert isinstance(error, UserFacingError)
+    assert "openai" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_this_model_s_own_sealed_summary_goes_out_with_the_turn() -> None:
+    h = Harness(reply("ok"))
+    own = ContextCompaction(
+        provider=h.runtime.model.provider.name,
+        block={"type": "compaction", "encrypted_content": "gAAA"},
+    )
+    h.runtime.tape.append_history(own)
+    async with h:
+        h.push(_user("go on"))
+        await h.seen(_answered)
+
+    [request] = h.requests()
+    assert own in request.records
 
 
 @pytest.mark.asyncio

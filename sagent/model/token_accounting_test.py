@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import sys
+
+from treekle import PlainTree
 
 import pytest
 
@@ -14,13 +18,20 @@ from sagent.agent.agents_md import AgentsMdConfig
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCount
 from sagent.model.scripted import ScriptedProvider, reply
-from sagent.model.token_accounting import TokenAccounting, _prefix
+from sagent.model.token_accounting import (
+    TokenAccounting,
+    _prefix,
+    bound,
+    digest,
+    stamped,
+)
 from sagent.model.types import Request, Response
 from sagent.session.jsonl import JsonlJournal, read_record, record_line
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
+    ContextCompaction,
     SessionContext,
     SessionRecord,
     SystemMessage,
@@ -32,8 +43,14 @@ from sagent.session.types import (
     UserMessage,
     stored_plain,
 )
+from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
@@ -579,6 +596,190 @@ def _hashed(monkeypatch: pytest.MonkeyPatch) -> list[object]:
 
     monkeypatch.setattr("sagent.model.token_accounting.stored_plain", counted)
     return hashed
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Echo:
+    """A tool these tests only offer."""
+
+    name: str = "Echo"
+    description: str = "Say the text back."
+    schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: MappingProxyType({"type": "object"}),
+    )
+    display: ToolDisplay = field(default_factory=ToolDisplay)
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        del context, arguments
+        return whole_output(self._run())
+
+    async def _run(self) -> ToolOutput[UncategorizedToolResult, object, object]:
+        return ToolOutput(result=UncategorizedToolResult())
+
+
+def _request(
+    records: Sequence[SessionRecord],
+    *,
+    system: tuple[str, ...] = ("Be terse.",),
+    tool: _Echo | None = None,
+) -> Request:
+    return Request(system=system, records=records, tools=(tool or _Echo(),))
+
+
+def _turn() -> tuple[Request, list[SessionRecord]]:
+    """Return the first request, and the context once its reply and result came."""
+    asked = _request([UserMessage(content="Read a.txt.")])
+    reply = stamped(
+        asked,
+        records=[
+            Thinking(content="I should read it.", encrypted="sig"),
+            ToolCall(call_id="1", name="Echo", arguments={"text": "a"}),
+        ],
+    )
+    result = ToolMessage(call_id="1", state="done", stdout=("a",))
+    context = [*asked.records, *reply, result]
+    return asked, context
+
+
+def _thinking(request: Request) -> list[Thinking]:
+    return [r for r in request.records if isinstance(r, Thinking)]
+
+
+def test_thinking_made_after_the_same_prefix_is_sent_back() -> None:
+    _, context = _turn()
+
+    sent = bound(_request([*context, UserMessage(content="Now b.txt.")]))
+
+    assert _thinking(sent) == [r for r in context if isinstance(r, Thinking)]
+
+
+def test_a_rewritten_message_before_it_strips_only_the_sealed_thinking() -> None:
+    _, context = _turn()
+    summary = UserMessage(content="Summary: the user asked about a file.")
+    readable = Thinking(content="No seal: any model may read it.")
+
+    sent = bound(_request([summary, readable, *context[1:]]))
+
+    assert _thinking(sent) == [readable]
+    assert [type(r) for r in sent.records] == [
+        UserMessage,
+        Thinking,
+        ToolCall,
+        ToolMessage,
+    ]
+
+
+def test_a_changed_system_prompt_or_tool_strips_it() -> None:
+    _, context = _turn()
+
+    for request in (
+        _request(context, system=("Be verbose.",)),
+        _request(context, tool=_Echo(name="Say")),
+        _request(context, tool=_Echo(description="Echo the text.")),
+        _request(context, tool=_Echo(schema={"type": "string"})),
+    ):
+        assert _thinking(bound(request)) == []
+
+
+def test_openai_reasoning_is_left_to_its_vendor() -> None:
+    """OpenAI is not known to bind reasoning to what came before; it is sent as before."""
+    reasoning = Thinking(encrypted="gAAA", reasoning_id="rs_1")
+
+    sent = bound(_request([UserMessage(content="Summary."), reasoning]))
+
+    assert _thinking(sent) == [reasoning]
+    assert stamped(_request([]), records=[reasoning]) == (reasoning,)
+
+
+def test_thinking_with_no_stamp_is_stripped() -> None:
+    """A journal written before stamps cannot say what its thinking followed."""
+    sent = bound(
+        _request(
+            [
+                UserMessage(content="q"),
+                Thinking(content="I should read it.", encrypted="sig"),
+            ],
+        ),
+    )
+
+    assert _thinking(sent) == []
+
+
+def test_a_stripped_turn_stays_stripped_and_what_follows_it_stays_valid() -> None:
+    _, context = _turn()
+    rewritten = [UserMessage(content="Summary."), *context[1:]]
+    asked = bound(_request(rewritten))
+    later = stamped(
+        asked,
+        records=[Thinking(content="I should read it.", encrypted="sig2")],
+    )
+
+    sent = bound(_request([*rewritten, *later]))
+
+    assert [t.encrypted for t in _thinking(sent)] == ["sig2"]
+
+
+def test_each_stamp_follows_the_records_of_its_own_reply_before_it() -> None:
+    asked = _request([UserMessage(content="q")])
+    first, said, second = stamped(
+        asked,
+        records=[
+            Thinking(content="I should read it.", encrypted="sig"),
+            AssistantMessage(content="Looking."),
+            Thinking(content="I should read it.", encrypted="b"),
+        ],
+    )
+    assert said == AssistantMessage(content="Looking.")
+    sent = bound(_request([*asked.records, first, said, second]))
+    assert _thinking(sent) == [first, second]
+
+
+def test_a_provider_summary_keeps_the_thinking_after_it() -> None:
+    """The vendor accepts the swap it wrote, so the kept turns stay valid."""
+    asked, context = _turn()
+    first_reply = context[1]
+    assert isinstance(first_reply, Thinking)
+    head = bound(_request(context[:1]))
+    summary = ContextCompaction(
+        provider="anthropic",
+        block={"type": "compaction", "content": "The user asked.", "signature": "s"},
+        replaces=digest(head.records),
+    )
+
+    sent = bound(_request([summary, *context[1:]]))
+
+    assert _thinking(sent) == [first_reply]
+    assert asked.records[0] not in sent.records
+
+
+def test_a_provider_summary_under_a_changed_system_prompt_strips_it() -> None:
+    _, context = _turn()
+    head = bound(_request(context[:1]))
+    summary = ContextCompaction(
+        provider="anthropic",
+        block={"type": "compaction", "content": "The user asked.", "signature": "s"},
+        replaces=digest(head.records),
+    )
+
+    sent = bound(_request([summary, *context[1:]], system=("Be verbose.",)))
+
+    assert _thinking(sent) == []
 
 
 if __name__ == "__main__":

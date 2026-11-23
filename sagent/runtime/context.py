@@ -52,6 +52,7 @@ from sagent.runtime.types import (
 )
 from sagent.session.types import (
     AssistantMessage,
+    ContextCompaction,
     SessionContext,
     SystemMessage,
     ToolMessage,
@@ -792,4 +793,6 @@ def _entry_text(entry: ModelContextEvent) -> str:
         return "".join(
             r.content or "" for r in entry.records if isinstance(r, AssistantMessage)
         )
+    if isinstance(entry, ContextCompaction):
+        return entry.summary or ""
     return entry.content or ""

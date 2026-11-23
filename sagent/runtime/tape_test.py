@@ -45,6 +45,7 @@ from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
     Attachment,
+    ContextCompaction,
     SessionContext,
     SystemMessage,
     Thinking,
@@ -1076,14 +1077,10 @@ def test_model_turn_merge_drops_signed_thinking_and_keeps_sealed() -> None:
     readable = Thinking(content="plain")
     first = Response(
         records=(signed, AssistantMessage(content="a")),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
     second = Response(
         records=(sealed, readable, AssistantMessage(content="b")),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
     (merged,) = coalesce_roles((first, second))
@@ -1400,18 +1397,41 @@ def test_a_request_is_sent_each_turn_s_records_and_a_call_s_later_messages_as_te
     )
     user = _user("u")
 
-    sent = sent_records([user, turn, stub, late])
+    sent = sent_records([user, turn, stub, late], provider="p")
 
     assert sent[: 1 + len(turn.records) + 1] == [user, *turn.records, stub]
     assert [type(r) for r in sent[1 + len(turn.records) + 1 :]] == [UserMessage]
     assert "ok" in "".join(r.content or "" for r in sent if isinstance(r, UserMessage))
 
 
+def test_a_vendor_s_summary_goes_whole_only_to_its_own_provider() -> None:
+    """Another reads its text; one the vendor sealed tells another nothing."""
+    readable = ContextCompaction(
+        summary="The user asked.",
+        provider="anthropic",
+        block={"type": "compaction", "content": "The user asked.", "signature": "s"},
+    )
+    sealed = ContextCompaction(
+        provider="openai",
+        block={"type": "compaction", "encrypted_content": "gAAA"},
+    )
+    entries = [readable, sealed, _user("next")]
+
+    assert sent_records(entries, provider="anthropic") == [readable, _user("next")]
+    assert sent_records(entries, provider="openai") == [
+        UserMessage(content="The user asked."),
+        sealed,
+        _user("next"),
+    ]
+    assert sent_records(entries, provider="openai")[0] != sealed
+    assert sent_records([sealed], provider="openai") == [sealed]
+
+
 def test_a_request_joins_two_senders_turns_unless_its_api_keeps_them_apart() -> None:
     peer, user = _peer("kid", "the build is green"), _user("so?")
 
-    joined = sent_records([peer, user])
-    apart = sent_records([peer, user], keep_senders_apart=True)
+    joined = sent_records([peer, user], provider="p")
+    apart = sent_records([peer, user], keep_senders_apart=True, provider="p")
 
     assert [type(r) for r in joined] == [UserMessage]
     assert apart == [peer, user]

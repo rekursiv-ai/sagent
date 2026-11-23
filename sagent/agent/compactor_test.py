@@ -23,6 +23,7 @@ import pytest
 from sagent.agent.agent import Agent, spent
 from sagent.agent.compactor import (
     SummaryCompactor,
+    _append_to_first_user,
     _asset,
     _jobs_note,
     _request_tokens,
@@ -30,7 +31,12 @@ from sagent.agent.compactor import (
     halve,
     summary_tokens,
 )
-from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.capability import (
+    Compaction,
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
 from sagent.model.exceptions import (
     ContextOverflowError,
@@ -44,10 +50,11 @@ from sagent.model.scripted import (
     call,
     reply,
 )
+from sagent.model.token_accounting import bound, digest, stamped
 from sagent.model.types import Request, Response, TextChunk
 from sagent.runtime import types
 from sagent.runtime.context import Tape
-from sagent.runtime.tape import TapeRef
+from sagent.runtime.tape import TapeRef, coalesce_roles, full_tape_mask
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
@@ -56,6 +63,7 @@ from sagent.session.types import (
     Attachment,
     Cancelled,
     ContextClear,
+    ContextCompaction,
     Failed,
     Outcome,
     SessionContext,
@@ -99,6 +107,7 @@ def _capability(
     response: int = 8_000,
     context: int = 0,
     efforts: frozenset[ThinkingEffort] = frozenset({"none"}),
+    compaction: Compaction = "bespoke",
 ) -> ModelCapability:
     prices = PriceCatalog(window=window)
     return ModelCapability(
@@ -110,7 +119,11 @@ def _capability(
         ),
         prices=prices,
         thinking_effort=efforts,
-        default=ModelSettings(context_size=prices["fullcontext"]),
+        compaction=frozenset({"bespoke", compaction}),
+        default=ModelSettings(
+            context_size=prices["fullcontext"],
+            compaction=compaction,
+        ),
     )
 
 
@@ -317,7 +330,11 @@ def _trigger(
 def test_a_compaction_is_due_once_the_body_reaches_the_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = Mock(spec=Agent, model=ScriptedProvider()["scripted"])
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider()["scripted"],
+        runtime=Mock(system=(), tape=Tape("s")),
+    )
     compactor = SummaryCompactor(agent)
     monkeypatch.setattr(compactor, "trigger_tokens", Mock(return_value=16.0))
     monkeypatch.setattr(compactor, "_held", Mock(side_effect=[15, 16]))
@@ -495,7 +512,7 @@ def test_a_window_of_unknown_size_is_never_due(
         model=ScriptedProvider(capability=_capability(window=0, response=0))[
             "scripted"
         ],
-        runtime=Mock(system=()),
+        runtime=Mock(system=(), tape=Tape("s")),
     )
     compactor = SummaryCompactor(agent)
     monkeypatch.setattr(compactor, "_held", Mock(return_value=1))
@@ -666,6 +683,9 @@ async def test_the_summary_replaces_the_history_without_its_analysis(
     assert _instruction(request).startswith("CRITICAL: Produce plain text exclusively.")
     assert _instruction(request).rstrip().endswith("causing task failure.")
     assert "<user_guidance>" not in _instruction(request)
+    # Asked for working notes on another model's turns, Claude refuses the summary
+    # as reasoning extraction (measured 2026-11-22: 6 of 6 with, 0 of 6 without).
+    assert "<analysis>" not in _instruction(request)
 
 
 @pytest.mark.asyncio
@@ -850,6 +870,338 @@ async def test_a_kept_tail_follows_the_summary_verbatim(tmp_path: Path) -> None:
     ) in _lead(splice)
     assert "Generate a comprehensive recap" in _instruction(provider.requests[0])
     assert _texts(_sent(provider.requests[0])) == _texts(_records(_HISTORY))
+
+
+@pytest.mark.asyncio
+async def test_provider_compaction_asks_the_api_and_keeps_the_tail_whole(
+    tmp_path: Path,
+) -> None:
+    sealed = Response(
+        records=(
+            Thinking(content="t", encrypted="sig"),
+            AssistantMessage(content="done"),
+        ),
+        stop_reason="end_turn",
+    )
+    provider, agent = _agent(
+        tmp_path,
+        Response(
+            records=(),
+            stop_reason="compaction",
+            summary={
+                "type": "compaction",
+                "content": "The user fixed a bug.",
+                "signature": "s",
+            },
+        ),
+        capability=_capability(compaction="provider"),
+    )
+    history = (*_HISTORY, _user("and the docs"), sealed)
+
+    splice = await _compact(SummaryCompactor(agent, keep_recent=2), agent, history)
+
+    (request,) = provider.requests
+    assert request.summarize
+    assert (request.system, request.tools) == (
+        agent.runtime.request().system,
+        agent.runtime.request().tools,
+    )
+    assert _texts(request.records) == _texts(_records(_HISTORY))
+    assert splice.strategy == "provider_summary"
+    summary, *kept = splice.replacement
+    assert summary == ContextCompaction(
+        summary="The user fixed a bug.",
+        provider=agent.model.provider.name,
+        block={
+            "type": "compaction",
+            "content": "The user fixed a bug.",
+            "signature": "s",
+        },
+        replaces=digest(request.records),
+    )
+    assert kept == [_user("and the docs"), sealed]
+
+
+@pytest.mark.parametrize(
+    ("capability", "summarized", "kept"),
+    [
+        (
+            _capability(compaction="provider"),
+            Response(
+                records=(),
+                stop_reason="compaction",
+                summary={
+                    "type": "compaction",
+                    "content": "The user fixed a bug.",
+                    "signature": "s",
+                },
+            ),
+            ["sig"],
+        ),
+        (_capability(), _SUMMARY, []),
+    ],
+    ids=["provider", "bespoke"],
+)
+@pytest.mark.asyncio
+async def test_kept_thinking_survives_a_provider_summary_and_no_bespoke_one(
+    tmp_path: Path,
+    capability: ModelCapability,
+    summarized: Response,
+    kept: list[str],
+) -> None:
+    _, agent = _agent(tmp_path, summarized, capability=capability)
+    before = (*_HISTORY, _user("and the docs"))
+    made = stamped(
+        agent.runtime.request(context=before),
+        records=[
+            Thinking(content="t", encrypted="sig"),
+            AssistantMessage(content="done"),
+        ],
+    )
+    sealed = replace(_turn(), records=made, stop_reason="end_turn")
+
+    splice = await _compact(
+        SummaryCompactor(agent, keep_recent=2),
+        agent,
+        (*before, sealed),
+    )
+
+    sent = bound(agent.runtime.request(context=splice.replacement))
+    assert [r.encrypted for r in sent.records if isinstance(r, Thinking)] == kept
+
+
+@pytest.mark.asyncio
+async def test_kept_thinking_survives_a_cut_between_two_user_messages(
+    tmp_path: Path,
+) -> None:
+    """Sent, the two are one turn; the tail keeps the whole turn the thinking followed."""
+    _, agent = _agent(
+        tmp_path,
+        Response(
+            records=(),
+            stop_reason="compaction",
+            summary={"type": "compaction", "content": "S.", "signature": "s"},
+        ),
+        capability=_capability(compaction="provider"),
+    )
+    before = (*_HISTORY, _user("and the docs"), _user("and the tests"))
+    made = stamped(
+        agent.runtime.request(context=before),
+        records=[
+            Thinking(content="t", encrypted="sig"),
+            AssistantMessage(content="ok"),
+        ],
+    )
+    sealed = replace(_turn(), records=made, stop_reason="end_turn")
+
+    splice = await _compact(
+        SummaryCompactor(agent, keep_recent=2),
+        agent,
+        (*before, sealed),
+    )
+
+    sent = bound(agent.runtime.request(context=splice.replacement))
+    assert [r.encrypted for r in sent.records if isinstance(r, Thinking)] == ["sig"]
+
+
+@pytest.mark.asyncio
+async def test_another_vendor_s_sealed_summary_is_rewritten_from_what_it_replaced(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    tape = agent.runtime.tape
+    for entry in _HISTORY:
+        tape.append_history(entry)
+    tape.append_splice(
+        mask=full_tape_mask(list(tape)),
+        replacement=(
+            ContextCompaction(
+                provider="openai",
+                block={"type": "compaction", "encrypted_content": "gAAA"},
+            ),
+        ),
+        strategy="provider_summary",
+        discards_content=True,
+    )
+    compactor = SummaryCompactor(agent)
+
+    assert compactor.should_run()
+    splice = await _compact(compactor, agent, tape.context().messages)
+
+    (request,) = provider.requests
+    assert _texts(_sent(request)) == _texts(_records(_HISTORY))
+    assert "Summary:\nthe gist" in _lead(splice)
+    tape.adopt_record(splice, discards_content=True)
+    assert not compactor.should_run()
+
+
+@pytest.mark.asyncio
+async def test_this_model_s_own_sealed_summary_is_summarized_as_it_is(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    tape = agent.runtime.tape
+    for entry in _HISTORY:
+        tape.append_history(entry)
+    own = ContextCompaction(
+        provider=agent.model.provider.name,
+        block={"type": "compaction", "encrypted_content": "gAAA"},
+    )
+    tape.append_splice(
+        mask=full_tape_mask(list(tape)),
+        replacement=(own, _user("next")),
+        strategy="provider_summary",
+        discards_content=True,
+    )
+
+    _ = await _compact(SummaryCompactor(agent), agent, tape.context().messages)
+
+    (request,) = provider.requests
+    assert own in request.records
+    assert "fix the bug" not in _texts(request.records)
+
+
+def test_a_summary_the_model_can_read_needs_no_rewrite(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    tape = agent.runtime.tape
+    tape.append_history(
+        ContextCompaction(
+            summary="The user fixed a bug.",
+            provider="anthropic",
+            block={
+                "type": "compaction",
+                "content": "The user fixed a bug.",
+                "signature": "s",
+            },
+        ),
+    )
+    tape.append_history(
+        ContextCompaction(
+            provider=agent.model.provider.name,
+            block={"type": "compaction", "encrypted_content": "gAAA"},
+        ),
+    )
+
+    assert not SummaryCompactor(agent).should_run()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_sealed_summary_is_rewritten_from_the_journal(
+    tmp_path: Path,
+) -> None:
+    """A resume holds no splice to undo, but the journal still holds every window."""
+    sealed = ContextCompaction(
+        provider="openai",
+        block={"type": "compaction", "encrypted_content": "gAAA"},
+    )
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        UserMessage(content="fix the bug"),
+        AssistantMessage(content="fixed it"),
+        ContextClear(system_prompt="S", history=(sealed, UserMessage(content="next"))),
+    )
+    provider = ScriptedProvider(replies=[_AUDIT], capability=_capability())
+    agent = Agent(
+        model=provider["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        system_prompt="S",
+        journal=journal,
+        compactor=SummaryCompactor,
+    )
+    compactor = agent.session.compactor
+    assert isinstance(compactor, SummaryCompactor)
+    # As a resume tapes the journal's last window: as history, under no splice.
+    agent.session.append(sealed, UserMessage(content="next"))
+
+    assert compactor.should_run()
+    splice = await _compact(compactor, agent, agent.runtime.tape.context().messages)
+
+    (request,) = provider.requests
+    assert "L1 USER: fix the bug" in _instruction(request)
+    assert "L2 AGENT: fixed it" in _instruction(request)
+    assert splice.strategy == "session_audit"
+    assert sealed not in splice.replacement
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [ContextOverflowError("too long"), RateLimitedError("slow", retry_after_sec=0)],
+)
+@pytest.mark.asyncio
+async def test_a_provider_summary_that_fails_falls_back_to_bespoke(
+    tmp_path: Path,
+    refusal: Exception,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        refusal,
+        _SUMMARY,
+        capability=_capability(compaction="provider"),
+    )
+
+    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+
+    assert [r.summarize for r in provider.requests] == [True, False]
+    assert splice.strategy == "summary"
+
+
+@pytest.mark.asyncio
+async def test_nothing_to_summarize_asks_the_provider_nothing(tmp_path: Path) -> None:
+    provider, agent = _agent(tmp_path, capability=_capability(compaction="provider"))
+
+    splice = await _compact(SummaryCompactor(agent), agent, [_user("only this")])
+
+    assert provider.requests == []
+    assert splice.strategy == "summary_fallback"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_returns_no_summary_falls_back_to_bespoke(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        Response(records=(), stop_reason="compaction"),
+        _SUMMARY,
+        capability=_capability(compaction="provider"),
+    )
+
+    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+
+    assert [r.summarize for r in provider.requests] == [True, False]
+    assert splice.strategy == "summary"
+    assert "Summary:\nthe gist" in _lead(splice)
+
+
+def test_a_note_after_compaction_follows_a_provider_summary() -> None:
+    """The vendor reads only its block, and wants it first."""
+    summary = ContextCompaction(
+        provider="anthropic",
+        block={
+            "type": "compaction",
+            "content": "The user fixed a bug.",
+            "signature": "s",
+        },
+    )
+    entries: list[ModelContextEvent] = [summary, reply("ok")]
+
+    _append_to_first_user(entries, "note")
+
+    assert entries == [summary, UserMessage(content="note"), reply("ok")]
+
+
+def test_a_provider_summary_is_never_merged_with_the_user_turn_after_it() -> None:
+    summary = ContextCompaction(
+        provider="anthropic",
+        block={
+            "type": "compaction",
+            "content": "The user fixed a bug.",
+            "signature": "s",
+        },
+    )
+
+    assert coalesce_roles([summary, _user("next")]) == (summary, _user("next"))
 
 
 @pytest.mark.asyncio
@@ -1687,8 +2039,6 @@ async def test_a_compaction_brings_back_no_file_the_model_read(tmp_path: Path) -
 def test_thinking_counts_toward_the_token_estimate() -> None:
     thought = Response(
         records=(Thinking(content="tttt"), AssistantMessage(content="ok")),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
 
@@ -2325,6 +2675,7 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
     (asked,) = provider.requests
     assert asked.tools == ()
     assert asked.system[0].startswith("Your role is to condense")
+    assert "<analysis>" not in _instruction(asked)
     lines = _instruction(asked).split("<session>\n")[1].removesuffix("\n</session>")
     assert lines.splitlines() == [
         "L1 USER: first ask",
@@ -2831,8 +3182,6 @@ def test_a_summary_said_in_parts_is_read_whole() -> None:
             AssistantMessage(content=None),
             AssistantMessage(content="gist</summary>"),
         ),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
 
@@ -2845,8 +3194,6 @@ def test_a_calls_arguments_and_sealed_thinking_count_as_the_model_reads_them() -
             Thinking(encrypted="sealed"),
             call("Read", "c1", file_path="pppp"),
         ),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="tool_use",
     )
 

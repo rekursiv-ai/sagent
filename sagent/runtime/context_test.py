@@ -40,6 +40,7 @@ from sagent.runtime.types import (
 from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
+    ContextCompaction,
     Failed,
     SessionContext,
     Succeeded,
@@ -843,6 +844,15 @@ def test_absorbing_a_splice_must_carry_its_text() -> None:
             ),
         )
     assert _texts(tape) == ["must survive", "b"]
+
+
+def test_absorbing_a_vendor_s_summary_must_carry_its_text() -> None:
+    tape = Tape("s")
+    summary = ContextCompaction(summary="the gist", provider="anthropic")
+    barrier = _barrier(tape, summary, _user("next"))
+    mask = (MaskRange(session_id="s", lo=0, hi=barrier.ordinal),)
+    with pytest.raises(InvalidSpliceError, match="first: 'the gist'"):
+        _ = tape.append_splice(mask=mask, replacement=(_user("next"),), strategy="c")
 
 
 def test_absorbing_a_splice_while_carrying_it_is_allowed() -> None:

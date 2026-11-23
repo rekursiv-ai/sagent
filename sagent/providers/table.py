@@ -30,6 +30,7 @@ from treekle import from_plain
 from sagent.lib.userdirs import config_dir
 from sagent.lib.yaml import parse
 from sagent.model.capability import (
+    Compaction,
     ModelCapability,
     ModelLimits,
     ModelSettingName,
@@ -606,6 +607,7 @@ def _choices() -> tuple[ModelSettingName, ...]:
         "thinking_output",
         "cache_ttl_sec",
         "manage_context_server_side",
+        "compaction",
     )
 
 
@@ -707,6 +709,10 @@ class _CapabilityProfile:
     """The cache lifetime a bare id starts at; ``None`` is the shortest offered."""
 
     manage_context_server_side: frozenset[bool] = frozenset({False, True})
+    compaction: frozenset[Compaction] = frozenset({"bespoke"})
+    compaction_default: Compaction | None = None
+    """How a bare id compacts; ``None`` is the first offered, ``bespoke`` before ``provider``."""
+
     retries_internally: bool = False
     account_auth: bool = False
     keeps_user_turns_apart: bool = False
@@ -829,6 +835,7 @@ def _model(
         service_tier=tiers,
         cache_ttl_sec=row.cache_ttl_sec,
         manage_context_server_side=row.manage_context_server_side,
+        compaction=row.compaction,
         retries_internally=row.retries_internally,
         account_auth=row.account_auth,
         keeps_user_turns_apart=row.keeps_user_turns_apart,
@@ -874,6 +881,11 @@ def _model(
                 row.manage_context_server_side,
                 (False, True),
             ),
+            compaction=_lowest(
+                "compaction",
+                row.compaction,
+                _default_first(row.compaction_default, literal_members(Compaction)),
+            ),
             context_size=prices[size],
         ),
     )
@@ -909,6 +921,9 @@ def _unsent_fixed(
         manage_context_server_side=capability.manage_context_server_side
         if "manage_context_server_side" in sends
         else frozenset({d.manage_context_server_side}),
+        compaction=capability.compaction
+        if "compaction" in sends
+        else frozenset({d.compaction}),
     )
 
 

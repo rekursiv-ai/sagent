@@ -71,12 +71,13 @@ from sagent.model.exceptions import (
     DisconnectedError,
     RetryableError,
 )
-from sagent.model.token_accounting import TokenAccounting
+from sagent.model.token_accounting import TokenAccounting, bound, stamped
 from sagent.model.types import Request, Response, TextChunk
 
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
 from sagent.runtime.context import Tape, stubbed, widen_barrier_mask
 from sagent.runtime.exceptions import (
+    UserFacingError,
     describe,
     log_exception_or_warning,
     log_task_exception,
@@ -90,6 +91,7 @@ from sagent.runtime.tape import (
     full_tape_mask,
     sent_records,
     unpaired_call_ids,
+    unreadable,
 )
 from sagent.runtime.types import (
     AgentMessageCompleted,
@@ -140,6 +142,7 @@ from sagent.session.types import (
     AssistantMessage,
     BackgroundTaskResult,
     Cancelled,
+    ContextCompaction,
     Failed,
     ModelIdle,
     Outcome,
@@ -2406,6 +2409,7 @@ class Runtime:
                     *sent_records(
                         self.tape.context().messages if context is None else context,
                         keep_senders_apart=self.model.capability.keeps_user_turns_apart,
+                        provider=self.model.provider.name,
                     ),
                     *after,
                 ],
@@ -2457,16 +2461,33 @@ class Runtime:
           request: A call this agent is about to send.
 
         Returns:
-          sent: ``request``, tagged.
+          sent: ``request``, tagged, without sealed reasoning whose prefix changed.
 
         """
-        sent = self.tagged(request)
+        sent = bound(self.tagged(request))
         self._steps += 1
         return sent
 
     async def _reply(self) -> Response:
         """Ask the model about the context; post its words as they arrive."""
         response = None
+        # Left out of the request, it would leave the model answering as if
+        # nothing came before; a compaction that failed to rewrite it says so.
+        provider = self._called_model.provider.name
+        sealed = {
+            e.provider
+            for e in self.tape.context().messages
+            if isinstance(e, ContextCompaction) and unreadable(e, provider=provider)
+        }
+        if sealed:
+            # pragma: no mutate[diagnostic-text] start
+            names = ", ".join(sorted(sealed))
+            raise UserFacingError(
+                f"The context holds a summary only {names} can read, and"
+                f" compacting it for {provider} failed. Switch back to {names},"
+                " or clear the context.",
+            )
+            # pragma: no mutate end
         request = self.sending(
             dataclasses.replace(self.request(), recheck_quota=self.recheck_quota),
         )
@@ -2500,6 +2521,7 @@ class Runtime:
             raise ValueError(f"The reply repeats a tool call id: {sorted(ids)}.")
         return dataclasses.replace(
             response,
+            records=stamped(request, records=response.records),
             measurement=self.token_accounting.observe(snapshot, tokens=response.tokens),
         )
 

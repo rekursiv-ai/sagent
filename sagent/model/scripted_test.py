@@ -221,8 +221,6 @@ async def test_stream_joins_every_message_of_the_reply() -> None:
             AssistantMessage(content=""),
             AssistantMessage(content="two"),
         ),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
     provider = ScriptedProvider(replies=[turn])

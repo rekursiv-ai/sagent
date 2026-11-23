@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, ca
 from treekle import PlainTree, from_plain
 
 from sagent.agent.team import Team
-from sagent.model.capability import ThinkingBudget, ThinkingEffort, ThinkingOutput
+from sagent.model.capability import (
+    Compaction,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
+)
 from sagent.model.cost import ServiceTier
 from sagent.providers.catalog import counterpart, successor
 from sagent.providers.table import ModelTags
@@ -89,6 +94,10 @@ class AgentSelf:
         service_tier: Annotated[
             ServiceTier | None,
             "Serving tier, such as priority.",
+        ] = None
+        compaction: Annotated[
+            Compaction | None,
+            "Who summarizes a full context: bespoke (sagent) or provider (the API).",
         ] = None
         detach: Annotated[
             Mapping[str, PlainTree] | None,
@@ -198,6 +207,7 @@ class AgentSelf:
             ("thinking_output", settings.thinking_output, planned.thinking_output),
             ("thinking_effort", settings.thinking_effort, planned.thinking_effort),
             ("service_tier", settings.service_tier, planned.service_tier),
+            ("compaction", settings.compaction, planned.compaction),
         )
         lines.extend(
             f"{axis}: {old} -> {new}" for axis, old, new in changes if old != new
@@ -255,12 +265,13 @@ def _planned(
     settings: ModelSettings,
     a: AgentSelf.Arguments,
 ) -> ModelSettings:
-    """Return ``settings`` with the reasoning and serving arguments; raise if not offered."""
+    """Return ``settings`` with the reasoning, serving, and compaction arguments; raise if not offered."""
     given: dict[ModelSettingName, object | None] = {
         "thinking_effort": a.effort,
         "thinking_budget": a.budget,
         "thinking_output": a.output,
         "service_tier": a.service_tier,
+        "compaction": a.compaction,
     }
     planned = capability.with_choices(
         settings,
@@ -362,6 +373,7 @@ def _diagnostics(agent: Agent, *, label: str) -> list[str]:
             f" effort={s.thinking_effort}"
         ),
         f"service_tier: {s.service_tier}; cache_ttl_sec: {s.cache_ttl_sec:g}",
+        f"compaction: {s.compaction}",
         f"limits: request={limits.max_request_tokens} response={limits.max_response_tokens}",
         f"cwd: {agent.runtime.tool_context.cwd}",
         "tools: "

@@ -25,7 +25,6 @@ import pytest_asyncio
 from sagent.model.cost import (
     PriceCatalog,
     PriceCondition,
-    TokenCost,
     TokenCount,
     TokenPrice,
 )
@@ -476,8 +475,6 @@ def test_another_system_prompt_cannot_reuse_the_conversation() -> None:
         _HELLO,
         response=Response(
             records=(AssistantMessage(content="one"),),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="end_turn",
         ),
         context_tokens=0,
@@ -546,8 +543,6 @@ def test_the_next_turn_says_each_new_message_its_own_way() -> None:
         _HELLO,
         response=Response(
             records=(AssistantMessage(content="one"),),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="end_turn",
         ),
         context_tokens=0,
@@ -567,8 +562,6 @@ def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
         _HELLO,
         response=Response(
             records=(AssistantMessage(content="one"),),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="end_turn",
         ),
         context_tokens=0,
@@ -663,8 +656,6 @@ def test_a_held_turn_accepts_only_its_exact_results_and_notes(
         _HELLO,
         response=Response(
             records=(ToolCall(call_id="c1", name="Echo"),),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="tool_use",
         ),
         context_tokens=0,
@@ -912,8 +903,6 @@ async def test_answer_forwards_only_results_in_record_order(late: bool) -> None:
         _HELLO,
         response=Response(
             records=(first, second),
-            tokens=TokenCount(),
-            spend=TokenCost(),
             stop_reason="tool_use",
         ),
         context_tokens=0,
@@ -1060,8 +1049,6 @@ def test_an_agy_counts_each_turn_it_finishes() -> None:
     )
     said = Response(
         records=(AssistantMessage(content="x"),),
-        tokens=TokenCount(),
-        spend=TokenCost(),
         stop_reason="end_turn",
     )
     calling = replace(said, records=(ToolCall(call_id="c", name="Echo"),))

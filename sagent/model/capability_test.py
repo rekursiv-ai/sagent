@@ -113,6 +113,10 @@ def test_check_passes_what_is_offered() -> None:
             "manage_context_server_side=True",
         ),
         (
+            replace(_row().default, compaction="provider"),
+            "compaction='provider' is not offered by m; allowed: 'bespoke'",
+        ),
+        (
             replace(_row().default, context_size=_size("fullcontext", 2_000_000, "2m")),
             "context_size=2m is not offered by m; allowed: 1 to 1m",
         ),
@@ -251,7 +255,11 @@ def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
 
 
 def test_fit_keeps_every_choice_offered_whole() -> None:
-    row = replace(_row(), manage_context_server_side=frozenset({False, True}))
+    row = replace(
+        _row(),
+        manage_context_server_side=frozenset({False, True}),
+        compaction=frozenset({"bespoke", "provider"}),
+    )
     chosen = ModelSettings(
         thinking_effort="high",
         thinking_budget="auto",
@@ -259,6 +267,7 @@ def test_fit_keeps_every_choice_offered_whole() -> None:
         service_tier="priority",
         cache_ttl_sec=3600.0,
         manage_context_server_side=True,
+        compaction="provider",
         context_size=row.prices["smallcontext"],
         pruning=PruningPolicy(keep_recent=2),
     )
@@ -276,6 +285,7 @@ def test_fit_takes_the_default_of_every_choice_not_offered() -> None:
         service_tier=frozenset({"flex"}),
         cache_ttl_sec=frozenset({60.0}),
         manage_context_server_side=frozenset({True}),
+        compaction=frozenset({"provider"}),
         default=ModelSettings(
             thinking_effort="medium",
             thinking_budget="fixed",
@@ -283,6 +293,7 @@ def test_fit_takes_the_default_of_every_choice_not_offered() -> None:
             service_tier="flex",
             cache_ttl_sec=60.0,
             manage_context_server_side=True,
+            compaction="provider",
         ),
     )
     chosen = replace(row.default, thinking_output="text", service_tier="priority")
@@ -395,6 +406,7 @@ def test_a_setting_is_read_and_set_by_name() -> None:
         value = replace(
             _row(),
             manage_context_server_side=frozenset({False, True}),
+            compaction=frozenset({"bespoke", "provider"}),
         ).values(name)[-1]
         assert value != settings.value(name)
         assert settings.with_value(name, value).value(name) == value
@@ -403,7 +415,11 @@ def test_a_setting_is_read_and_set_by_name() -> None:
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("cache_ttl_sec", "300"), ("manage_context_server_side", 1)],
+    [
+        ("cache_ttl_sec", "300"),
+        ("manage_context_server_side", 1),
+        ("compaction", "remote"),
+    ],
 )
 def test_a_value_no_setting_holds_is_refused(
     name: ModelSettingName,
@@ -418,6 +434,9 @@ def test_values_are_least_committing_first() -> None:
     assert capability.values("thinking_effort") == ("none", "low", "high")
     assert capability.values("cache_ttl_sec") == (300.0, 3600.0)
     assert capability.values("manage_context_server_side") == (False, True)
+    assert capability.values("compaction") == ("bespoke",)
+    both = replace(capability, compaction=frozenset({"provider", "bespoke"}))
+    assert both.values("compaction") == ("bespoke", "provider")
 
 
 def test_typed_text_reads_as_the_value_it_spells() -> None:

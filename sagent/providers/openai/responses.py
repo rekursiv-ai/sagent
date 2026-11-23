@@ -31,7 +31,13 @@ from sagent.model.cost import TokenCount
 from sagent.model.exceptions import DisconnectedError
 from sagent.model.types import Response, TextChunk
 from sagent.providers.openai import wire
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
+from sagent.session.types import (
+    AssistantMessage,
+    ContextCompaction,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+)
 
 
 if TYPE_CHECKING:
@@ -73,7 +79,10 @@ def encode(
     limits = capability.limits
     body: dict[str, object] = {
         "model": capability.wire_model_id or capability.model_id,
-        "input": _input(request.records, limits=limits),
+        "input": [
+            *_input(request.records, limits=limits),
+            *([{"type": "compaction_trigger"}] if request.summarize else []),
+        ],
         "instructions": "\n\n".join(text for text in request.system if text),
         "stream": True,
         "store": False,
@@ -124,8 +133,9 @@ class StreamReader:
         self._settings = settings
         self._records: dict[int, AssistantMessage | Thinking | ToolCall] = {}
         self._refusing: set[str] = set()
-        self._refused = False
+        self._refused = False  # pragma: no mutate[truthiness]
         self._final: dict[str, object] | None = None
+        self._summary: dict[str, object] = {}
 
     def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
         """Take one event and return the text or reasoning it adds.
@@ -202,6 +212,7 @@ class StreamReader:
             tokens=tokens,
             spend=self._spend(tokens, reported=final.get("service_tier")),
             stop_reason=stop_reason,
+            summary=immutable(self._summary),
         )
 
     def _done(self, index: int, *, item: Mapping[str, object]) -> None:
@@ -234,6 +245,8 @@ class StreamReader:
                     encrypted=sealed if isinstance(sealed, str) else None,
                     reasoning_id=str(item.get("id") or ""),
                 )
+        elif kind == "compaction":
+            self._summary = dict(item)
         elif kind == "function_call":
             self._records[index] = ToolCall(
                 call_id=str(item.get("call_id") or ""),
@@ -267,6 +280,18 @@ def _input(
     ids: dict[str, str] = {}
     items: list[dict[str, object]] = []
     for record in wire.flatten(records):
+        # OpenAI's own summary goes back sealed, as it came.
+        if (
+            isinstance(record, ContextCompaction)
+            and "encrypted_content" in record.block
+        ):
+            items.append(
+                {
+                    "type": "compaction",
+                    "encrypted_content": record.block["encrypted_content"],
+                },
+            )
+            continue
         said = wire.user_content(record)
         if said is not None:
             items.append(_user(*said, limits=limits))

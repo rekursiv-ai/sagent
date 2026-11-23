@@ -1,8 +1,22 @@
-"""Keep prompt measurements without retaining copies of conversation history."""
+"""Keep prompt measurements without retaining copies of conversation history.
+
+The same digests bind signed reasoning to what it followed. Anthropic checks,
+when its thinking comes back, that the system prompt, the tools, and every
+record before it are what they were; a compaction that writes its own summary,
+a pruned result, or a reframed prompt changes them. So each signed block keeps
+the digest of what it followed (:func:`stamped`), and every request leaves out
+the blocks whose digest no longer matches (:func:`bound`). A summary the
+vendor wrote (``ContextCompaction``) stands for the records it replaced.
+
+Typical usage example:
+
+  request = bound(request)                          # Stale signed reasoning left out.
+  records = stamped(request, records=reply.records)  # Each digests its prefix.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import hashlib
@@ -14,6 +28,7 @@ from sagent.model.types import Response
 from sagent.session.types import (
     AgentMessage,
     AssistantMessage,
+    ContextCompaction,
     RequestMeasurement,
     SessionContext,
     SessionRecord,
@@ -27,7 +42,7 @@ from sagent.session.types import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from sagent.model.cost import TokenCount
     from sagent.model.types import Request
@@ -301,6 +316,73 @@ class TokenAccounting:
         return found
 
 
+def bound(request: Request) -> Request:
+    """Return ``request`` without the signed reasoning whose prefix has changed.
+
+    Args:
+      request: A request about to be sent.
+
+    Returns:
+      bound: ``request``, each signed ``Thinking`` kept only where its digest is
+        that of the system prompt, the tools, and the records before it now.
+
+    """
+    head = _digest((request.system, _tools(request)))
+    chain = ""
+    kept: list[SessionRecord] = []
+    for record in request.records:
+        # Signed: Anthropic's. OpenAI's carries a reasoning id and is not bound.
+        if (
+            isinstance(record, Thinking)
+            and record.encrypted is not None
+            and record.reasoning_id is None
+            and record.prefix_digest != f"{head}:{chain}"
+        ):
+            continue
+        kept.append(record)
+        chain = _link(chain, record=record)
+    return replace(request, records=kept)
+
+
+def stamped[R: SessionRecord](
+    request: Request,
+    *,
+    records: Sequence[R],
+) -> tuple[R, ...]:
+    """Return a reply's ``records``, each signed ``Thinking`` holding what it followed.
+
+    Args:
+      request: The request the reply answers, as it was sent.
+      records: The reply's records, in order.
+
+    Returns:
+      stamped: ``records``, each signed block's ``prefix_digest`` set.
+
+    """
+    head = _digest((request.system, _tools(request)))
+    chain = digest(request.records)
+    out: list[R] = []
+    for record in records:
+        made = (
+            replace(record, prefix_digest=f"{head}:{chain}")
+            if isinstance(record, Thinking)
+            and record.encrypted is not None
+            and record.reasoning_id is None
+            else record
+        )
+        out.append(made)
+        chain = _link(chain, record=made)
+    return tuple(out)
+
+
+def digest(records: Iterable[SessionRecord]) -> str:
+    """Return the digest of ``records``, in order, as a ``ContextCompaction`` replaces them."""
+    chain = ""
+    for record in records:
+        chain = _link(chain, record=record)
+    return chain
+
+
 def _tokenizer(model: Model) -> str:
     return (
         model.capability.tokenizer
@@ -328,6 +410,19 @@ def _chain(hashes: tuple[str, ...]) -> tuple[str, ...]:
         hasher.update(digest.encode())
         chain.append(hasher.hexdigest())
     return tuple(chain)
+
+
+# When a record was made and where it sat are not sent; a digest only of what is
+# keeps a block valid when a journal reads it back.
+def _link(chain: str, *, record: SessionRecord) -> str:
+    """Return ``chain`` with ``record`` after it."""
+    if isinstance(record, ContextCompaction):
+        return record.replaces
+    plain = to_plain(record)
+    assert isinstance(plain, dict)
+    for unsent in ("timestamp", "context_id", "prefix_digest"):
+        plain.pop(unsent, None)
+    return _digest((chain, plain))
 
 
 def _tools(request: Request) -> tuple[tuple[object, ...], ...]:
