@@ -34,7 +34,7 @@ Consequences:
 
 ## Session records
 
-The session is a sequence of typed, frozen records from `sagent.session.types`: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, typed tool results, `SystemMessage`, compactions, and clears. The history is a tape that only grows; what the model sees of it is resolved from the last clear or compaction on.
+The session is a sequence of typed, frozen records from `sagent.journal.types`: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, typed tool results, `SystemMessage`, compactions, and clears. The history is a tape that only grows; what the model sees of it is resolved from the last clear or compaction on.
 
 Providers need user and model turns to alternate, and each call answered before the next turn. The runtime merges adjacent user-side turns, and repairs at the model-call gate what it cannot keep.
 

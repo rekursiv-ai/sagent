@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from sagent.session.types import PlayAudioResult
+from sagent.journal.types import PlayAudioResult
 from sagent.tools.play_audio import PlayAudio
 from sagent.tools.types import ToolContext, settled
 

@@ -24,8 +24,9 @@ Typical usage example:
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from importlib.resources import files
 from itertools import accumulate
@@ -39,27 +40,9 @@ import re
 
 from treekle import PlainTree, from_plain, json_dumps, mutable
 
-from sagent.agent.scrunch import safe_boundaries
-from sagent.model.capability import ThinkingEffort, literal_members
-from sagent.model.exceptions import (
-    ContextOverflowError,
-    RefusedError,
-    RetryableError,
-)
-from sagent.model.token_accounting import bound, digest
-from sagent.model.types import Request, Response
-from sagent.runtime import types
-from sagent.runtime.context import resolve_context
-from sagent.runtime.tape import (
-    ContextSplice,
-    calls,
-    coalesce_roles,
-    full_tape_mask,
-    sent_records,
-    unpaired_call_ids,
-    unreadable,
-)
-from sagent.session.types import (
+from sagent.agent.compaction.boundaries import safe_boundaries
+from sagent.agent.compaction.usable import usable
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     Attachment,
@@ -73,17 +56,32 @@ from sagent.session.types import (
     ToolMessage,
     UserMessage,
 )
+from sagent.model.capability import ThinkingEffort, literal_members
+from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.model.token_accounting import bound, digest
+from sagent.model.types import Request, Response
+from sagent.runtime import types
+from sagent.runtime.context import resolve_context
+from sagent.runtime.tape import (
+    ContextSplice,
+    calls,
+    coalesce_roles,
+    full_tape_mask,
+    sent_records,
+    unpaired_call_ids,
+    unreadable,
+)
 from sagent.tools.skill import Skill
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Mapping, Sequence
 
     from sagent.agent.types import Agent
+    from sagent.journal.types import SessionRecord
     from sagent.providers.types import Model
     from sagent.runtime.tape import TapeRecord, TapeRef
     from sagent.runtime.types import Job, ModelContextEvent
-    from sagent.session.types import SessionRecord
 
 
 __all__ = [
@@ -159,7 +157,9 @@ class SummaryCompactor:
       summary_tokens: ``S(B)``, the room held for the summary of a ``B``-token
         body; see :func:`summary_tokens`. ``B + S(B)`` must never fall as
         ``B`` grows: :meth:`trigger_tokens` bisects it.
-      max_attempts: Attempts per selected prefix; an overflow shortens its suffix.
+      max_attempts: The most calls each summary, audit, or digest makes, as
+        :func:`~sagent.agent.compaction.usable.usable` retries; an overflow shortens
+        a summary's prefix.
       keep_recent: Entries kept verbatim beside the summary.
       direction: ``"from"`` keeps the tail after the summary; ``"up_to"``
         keeps the head before it.
@@ -479,6 +479,12 @@ class SummaryCompactor:
         except (ContextOverflowError, RetryableError) as exc:
             logger.warning("the provider's summary failed; writing our own: %s", exc)
             return None
+        if response.stop_reason == "refusal":
+            logger.warning(
+                "the provider's summary was refused (%s); writing our own",
+                response.stop_details or "no reason given",
+            )
+            return None
         if not response.summary:
             logger.warning("the provider returned no summary; writing our own")
             return None
@@ -613,9 +619,7 @@ class SummaryCompactor:
         body = _asset("compactor_session_audit")
         if guidance := instructions.strip():
             body = _append_user_guidance(body, guidance)
-        summary = _summary(await self._audited(model, lines, body))
-        if summary is None:
-            raise RuntimeError("The session audit returned no usable summary.")
+        summary = await self._audited(model, lines, body)
         replacement, reason = await self._prefixes(
             model,
             [UserMessage(content=summary)],
@@ -640,53 +644,33 @@ class SummaryCompactor:
 
     # An audit too long for one request has its older half summarized first, as a
     # compaction would, until the rest fits; each round must shrink it, or it fails.
-    async def _audited(self, model: Model, lines: list[str], body: str) -> Response:
-        """Return the reply to the audit request for ``lines``."""
+    async def _audited(self, model: Model, lines: list[str], body: str) -> str:
+        """Return the audit of ``lines``, as a summary."""
         per = model.capability.approx_chars_per_token
         budget = self._room((len(_asset("compactor_system")) + len(body)) / per)
         while k := halve([len(line) / per for line in lines], budget=budget):
-            earlier = await self._digest(model, lines[:k])
-            shorter = (
-                [f"[earlier lines, summarized] {earlier}", *lines[k:]]
-                if earlier is not None
-                else lines
+            older = "\n".join(lines[:k])
+            earlier = await self._audit_summary(
+                model,
+                f"{older}\n\n{_summary_prompt(_asset('compactor'))}",
             )
+            shorter: list[str] = [f"[earlier lines, summarized] {earlier}", *lines[k:]]
             if sum(map(len, shorter)) >= sum(map(len, lines)):
                 raise ContextOverflowError("The session audit could not be cut to fit.")
             lines = shorter
         joined = "\n".join(lines)
-        return await self._answered(
+        return await self._audit_summary(
             model,
-            [UserMessage(content=f"{body}\n\n<session>\n{joined}\n</session>")],
+            f"{body}\n\n<session>\n{joined}\n</session>",
         )
 
-    async def _digest(self, model: Model, lines: list[str]) -> str | None:
-        """Return a summary of ``lines``, as a compaction writes one; ``None`` if none."""
-        joined = "\n".join(lines)
-        prompt = _summary_prompt(_asset("compactor"))
-        response = await self._answered(
-            model,
-            [UserMessage(content=f"{joined}\n\n{prompt}")],
-        )
-        return _summary(response)
-
-    # Refusals come and go: the same request asked again was answered (2026-11-22).
-    async def _answered(
-        self,
-        model: Model,
-        records: Sequence[ModelContextEvent],
-    ) -> Response:
-        """Ask as :meth:`_ask` does, again while refused, up to ``max_attempts`` times."""
-        reasons: list[str] = []
-        for _ in range(self._max_attempts):
-            response = await self._ask(model, records)
-            if response.stop_reason != "refusal":
-                return response
-            logger.warning("session audit refused: %s", response.stop_details)
-            reasons.append(response.stop_details)
-        raise RefusedError(
-            f"The model refused the session audit {self._max_attempts} times:"
-            f" {reasons[-1] or 'no reason given'}",
+    async def _audit_summary(self, model: Model, content: str) -> str:
+        """Return the summary ``content`` asks for, asked as one tool-less message."""
+        return await usable(
+            partial(self._ask, model, [UserMessage(content=content)]),
+            read=_summary,
+            attempts=self._max_attempts,
+            what="session audit",
         )
 
     async def _prefixes(
@@ -758,8 +742,6 @@ class SummaryCompactor:
             force = False
         return render(summaries, remaining), reason
 
-    # An overflow shortens the prefix, a transient failure waits, and a refusal or a
-    # reply with no summary asks again; each counts one attempt.
     async def _prefix_summary(
         self,
         model: Model,
@@ -770,63 +752,33 @@ class SummaryCompactor:
     ) -> tuple[Response, str, int]:
         """Send the largest fitting safe prefix, returning only a validated summary."""
         safe = safe_boundaries(remaining)
-        stops = [i for i in range(1, len(remaining) + 1) if safe[i]]
-        fits = partial(
-            self._prefix_fits,
-            model,
-            remaining,
-            instruction=instruction,
-            retained=retained,
-        )
-        failures: list[Exception] = []
-        for attempt in range(self._max_attempts):
-            # A measured size can undercut an estimate, so sizes need not grow with
-            # the prefix: this finds a stop that fits whose next one does not.
-            fitting = bisect_left(stops, True, key=lambda taken: not fits(taken))
-            if not fitting:
-                raise ContextOverflowError("no nonempty prefix fits a summary call")
-            taken = stops[fitting - 1]
-            request = self._prefix_request(
+        ends = _Ends(
+            ends=[i for i in range(1, len(remaining) + 1) if safe[i]],
+            fits=partial(
+                self._prefix_fits,
                 model,
-                remaining[:taken],
-                instruction,
+                remaining,
+                instruction=instruction,
                 retained=retained,
-            )
-            try:
-                response = await self._stream(model, request)
-            except ContextOverflowError as exc:
-                failures.append(exc)
-                stops = stops[: fitting - 1]
-                continue
-            except RetryableError as exc:
-                failures.append(exc)
-                logger.warning(
-                    "summary call failed (%s); waiting %ss",
-                    exc,
-                    exc.retry_after_sec,
-                )
-                if attempt + 1 < self._max_attempts:
-                    await asyncio.sleep(exc.retry_after_sec)
-                continue
-            summary = _summary(response)
-            if summary is not None:
-                return response, summary, taken
-            failures.append(self._unusable(response))
-        raise failures[-1]
-
-    # Raised only if the last attempt fails as this one did.
-    def _unusable(self, response: Response) -> Exception:
-        """Return the error a reply with no usable summary stands for."""
-        if response.stop_reason == "refusal":
-            logger.warning("summary refused: %s", response.stop_details)
-            return RefusedError(
-                f"The model refused the summary {self._max_attempts} times:"
-                f" {response.stop_details or 'no reason given'}",
-            )
-        return RuntimeError(
-            f"The model returned no usable summary after {self._max_attempts}"
-            " attempts.",
+            ),
         )
+        ends.select()
+        response, summary = await usable(
+            lambda: self._stream(
+                model,
+                self._prefix_request(
+                    model,
+                    remaining[: ends.taken],
+                    instruction,
+                    retained=retained,
+                ),
+            ),
+            read=_summarized,
+            attempts=self._max_attempts,
+            what="summary",
+            shorten=ends.shorten,
+        )
+        return response, summary, ends.taken
 
     def _prefix_fits(
         self,
@@ -886,8 +838,12 @@ class SummaryCompactor:
         )
 
     def _size(self, model: Model, entries: Sequence[ModelContextEvent]) -> int:
-        """Return a block's recorded size, or the best estimate available."""
-        return self._agent.runtime.token_accounting.estimate_block(entries, model=model)
+        """Return a block's recorded size as it is sent, or the best estimate available."""
+        runtime = self._agent.runtime
+        return runtime.token_accounting.estimate_block(
+            runtime.sent(entries),
+            model=model,
+        )
 
     def _fits_request(self, model: Model, request: Request) -> bool:
         """Reserve room for both a summary request and its predicted answer."""
@@ -1217,6 +1173,35 @@ def _summary(response: Response) -> str | None:
     if response.stop_reason == "refusal" or calls(response.records):
         return None
     return _format_summary(_reply(response), finished=_finished(response))
+
+
+def _summarized(response: Response) -> tuple[Response, str] | None:
+    """Return ``response`` and its summary; ``None`` if it has none."""
+    summary = _summary(response)
+    return None if summary is None else (response, summary)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Ends:
+    """Where a summary call's prefix may end, no call cut from its result, and where it does."""
+
+    ends: list[int]
+    fits: Callable[[int], bool]
+    taken: int = 0
+
+    def select(self) -> None:
+        """End the prefix at the last end whose call fits; raise when none does."""
+        # A measured size can undercut an estimate, so sizes need not grow with
+        # the prefix: this finds an end that fits whose next one does not.
+        fitting = bisect_left(self.ends, True, key=lambda end: not self.fits(end))
+        if not fitting:
+            raise ContextOverflowError("no nonempty prefix fits a summary call")
+        self.taken = self.ends[fitting - 1]
+
+    def shorten(self) -> None:
+        """End the prefix earlier, after a call ending where it does overflowed."""
+        self.ends = [end for end in self.ends if end < self.taken]
+        self.select()
 
 
 # A summary its limit cut off is kept, ending in a note that says so.

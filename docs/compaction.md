@@ -78,7 +78,9 @@ async with Agent(model=model, tools=tools, pruner=Pruner) as agent:
     await agent.session.pruner.run()  # Or prune all now, whatever it costs.
 ```
 
-The pruner drops nothing on its own judgment. Before each model call, once keeping a result has cost more than fetching it again and dropping the dead results pays for breaking the prompt cache, it adds a `prune` note listing them, each with what keeping and rereading it costs. The model queues those it no longer needs with `AgentSession(action="prune_queue")`; a listed result left unqueued counts as used. The queue, with the superseded results after its first, drops in one splice once that pays. Past the compaction trigger the note puts compaction off one round, and the queue drops only if that brings the context back under.
+The pruner drops nothing on its own judgment. Before each model call, once keeping a result has cost more than fetching it again and dropping the dead results pays for breaking the prompt cache, it adds a `prune` note listing them, each with what keeping and rereading it costs; each result the model is sent ends with its size, `[<n> tok]`. The model queues those it no longer needs with `AgentSession(action="prune_queue")`, on the runtime's `queued`; a listed result left unqueued counts as used from the note on. The queue, with the superseded results after its first, drops in one splice once that pays, and past the compaction trigger only if that brings the context back under. Only a note posted while the compactor says the context is full puts compaction off, one round, so the model can answer it; each result is offered so once while its note stands.
+
+An agent with no pruner still queues: its queue drops before its next request. A queue for a descendant at rest drops at once.
 
 `agent.model.settings.pruning`, a `PruningPolicy`, says which results may go:
 

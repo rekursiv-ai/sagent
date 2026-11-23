@@ -17,9 +17,8 @@ from treekle import PlainTree, ReadError, from_plain, immutable, json_loads
 
 import pytest
 
-from sagent.lib.userdirs import base_dir_variables
-from sagent.session import types
-from sagent.session.types import (
+from sagent.journal import types
+from sagent.journal.types import (
     FORMER_RESULT_KINDS,
     RENAMED,
     RENAMED_KINDS,
@@ -93,6 +92,7 @@ from sagent.session.types import (
     stored_record,
     timestamp_as_written,
 )
+from sagent.lib.userdirs import base_dir_variables
 
 
 _CWD: Final[Path] = Path(__file__).resolve().parent

@@ -16,6 +16,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.journal.types import AgentSelfResult
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownProviderError
@@ -24,7 +25,6 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.types import ToolWakeSchedules, WakeSchedule
-from sagent.session.types import AgentSelfResult
 from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend

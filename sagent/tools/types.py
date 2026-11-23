@@ -102,8 +102,8 @@ from treekle import PlainTree
 from wesearch.fetch import FetchSession
 from wesearch.fetch.session import default_session
 
+from sagent.journal.types import AgentIdle, ModelIdle, ToolMessage
 from sagent.runtime.exceptions import describe
-from sagent.session.types import AgentIdle, ModelIdle, ToolMessage
 
 
 if TYPE_CHECKING:

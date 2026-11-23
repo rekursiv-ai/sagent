@@ -36,12 +36,12 @@ from typing import TYPE_CHECKING, Final, Literal
 import asyncio
 import functools
 
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     Attachment,
     UserMessage,
 )
+from sagent.runtime import types
 
 
 if TYPE_CHECKING:

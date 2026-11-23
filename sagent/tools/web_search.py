@@ -23,7 +23,7 @@ from wesearch.search.search import search
 from wesearch.search.types import SearchBackends, SearxngCategory
 from wesearch.types.errors import BotDetectionError
 
-from sagent.session.types import WebSearchHit, WebSearchResult
+from sagent.journal.types import WebSearchHit, WebSearchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

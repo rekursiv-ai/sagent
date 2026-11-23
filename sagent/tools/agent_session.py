@@ -28,21 +28,18 @@ import asyncio
 
 from treekle import json_dumps, mutable
 
-from sagent.agent.compactor import Style, SummaryCompactor, text
-from sagent.agent.pruner import (
+from sagent.agent.compaction.compactor import Style, SummaryCompactor, text
+from sagent.agent.compaction.pruner import (
     Pruner,
     Saving,
     left_in,
     limit_tokens,
     prices,
-    prunable,
     saving,
     sizes,
 )
 from sagent.agent.team import Team
-from sagent.model.types import Response
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     Cancelled,
@@ -58,6 +55,9 @@ from sagent.session.types import (
     ToolMessage,
     UserMessage,
 )
+from sagent.model.types import Response
+from sagent.runtime import types
+from sagent.runtime.context import prunable
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.agent.agent import Agent
+    from sagent.journal.types import SessionRecord
     from sagent.runtime.context import ResolvedContext
     from sagent.runtime.types import ModelContextEvent
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 
@@ -220,14 +220,27 @@ class AgentSession:
         if a.action == "search":
             found = await asyncio.to_thread(_search, agent.session.history(), a.text)
             return _said(context, a.action, found)
+        own = agent is self.team[context.label]
         if a.action == "estimate":
-            return _estimate(agent, read, a)
+            entries = read.messages
+            picked = _outputs(entries, a.ids, stub=agent.runtime.stubs.pruned)
+            worth = _worth(agent, entries, picked)
+            lines = [_dropping(picked, worth)]
+            if worth.priced is not None:
+                dollars, breakeven = worth.priced
+                lines.append(
+                    f"It pays for itself after {breakeven:.1f} requests, and saves"
+                    f" about ${dollars:.4f} over the requests left before compaction.",
+                )
+            return ToolOutput(
+                stdout=("\n".join(lines),),
+                result=SessionResult(action=a.action),
+            )
         if a.action in ("prune_queue", "prune_unqueue", "prune_list"):
-            return _queue(agent, read, a)
+            return await _queue(agent, read, a, asker=context.label, own=own)
         # The asker's own is queued behind this call's result: taken ahead of it, a
         # clear or a compaction would detach the call. A descendant's has no such
         # knot: the call waits, and its own result says how it went.
-        own = agent is self.team[context.label]
         calling = asyncio.current_task()
         if a.action == "clear":
             clear = types.SessionClear(sender=context.label)
@@ -268,49 +281,23 @@ class AgentSession:
         return ToolOutput(stdout=(reply,), result=SessionResult(action=a.action))
 
 
-def _estimate(
+# Calls are queued by id, which no splice moves, on the target's runtime; its
+# pruner says what drops and when, before each of its requests, and with none it
+# all drops at the next. An agent at rest makes no request soon to share the
+# rewrite with, so a descendant's queue drops at once; the asker is mid-turn.
+async def _queue(
     agent: Agent,
     read: ResolvedContext,
     a: AgentSession.Arguments,
-) -> ToolOutput[SessionResult, str, str]:
-    """Weigh dropping the tool outputs ``a.ids``, every output of each call they name."""
-    entries = read.messages
-    stub = agent.runtime.stubs.pruned
-    picked = _outputs(entries, a.ids, stub=stub)
-    model = agent.model
-    tokens = sizes(model, entries)
-    worth = saving(
-        tokens,
-        picked,
-        stub=len(stub) / model.capability.approx_chars_per_token,
-        prices=prices(model, prompt=int(sum(tokens))),
-        left=left_in(entries, tokens, limit=limit_tokens(agent)),
-    )
-    lines = [_dropping(picked, worth)]
-    if worth.priced is not None:
-        dollars, breakeven = worth.priced
-        lines.append(
-            f"It pays for itself after {breakeven:.1f} requests, and saves"
-            f" about ${dollars:.4f} over the requests left before compaction.",
-        )
-    return ToolOutput(stdout=("\n".join(lines),), result=SessionResult(action=a.action))
-
-
-# Calls are queued by id, which no splice moves; what the queue drops, and when,
-# is the pruner's to say, before each of the agent's requests.
-def _queue(
-    agent: Agent,
-    read: ResolvedContext,
-    a: AgentSession.Arguments,
+    *,
+    asker: str,
+    own: bool,
 ) -> ToolOutput[SessionResult, str, str]:
     """Queue or unqueue the calls of ``a.ids``, or list the queue; then say where it stands."""
-    pruner = agent.session.pruner
-    queues = isinstance(pruner, Pruner)
-    if not queues:
-        raise ValueError("This agent has no pruner.")
     entries = read.messages
-    queued = pruner.queued
+    queued = agent.runtime.queued
     lines: list[str] = []
+    now = a.action == "prune_queue" and not own and not agent.runtime.turn_under_way
     if a.action == "prune_list":
         lines = [
             f"#{i} {_kind(e, entries)} ({sizes(agent.model, [e])[0]:,.0f} tokens):"
@@ -324,27 +311,77 @@ def _queue(
         named = ", ".join(f"#{i}" for i in picked)
         if a.action == "prune_unqueue":
             for call in calls:
-                queued.pop(call, None)
+                _ = queued.pop(call, None)
             lines = [f"Unqueued {named}."]
         elif not a.reason.strip():
             raise ValueError("Say why in 'reason'.")
         else:
             queued.update(dict.fromkeys(calls, a.reason.strip()))
-            lines = [f"Queued {named}: {a.reason.strip()}"]
-    chosen, worth, due = pruner.pending()
+            lines = [f"{'Dropped' if now else 'Queued'} {named}: {a.reason.strip()}"]
+    pruner = agent.session.pruner
+    if isinstance(pruner, Pruner):
+        chosen, worth, due = pruner.pending()
+    else:
+        chosen = [
+            i
+            for i, e in enumerate(entries)
+            if isinstance(e, ToolMessage)
+            and e.call_id in queued
+            and prunable(e, stub=agent.runtime.stubs.pruned)
+        ]
+        worth, due = (_worth(agent, entries, chosen), True) if chosen else (None, False)
     if worth is None:
         lines.append("Nothing is queued.")
+        return ToolOutput(
+            stdout=("\n".join(lines),),
+            result=SessionResult(action=a.action),
+        )
+    lines.append(_dropping(chosen, worth))
+    if now:
+        request = types.SessionPrune(
+            sender=asker,
+            call_ids=tuple(
+                dict.fromkeys(
+                    e.call_id
+                    for i in chosen
+                    if isinstance(e := entries[i], ToolMessage)
+                ),
+            ),
+            reason=a.reason.strip(),
+        )
+        match await agent.runtime.ask(request):
+            case Failed(exception=exc):
+                raise ValueError(f"The prune was not done: {exc}") from exc
+            case Cancelled():
+                raise ValueError("The prune was not done: the agent quit first.")
+            case Succeeded():
+                pass
+    elif due:
+        lines.append("It drops before the next request.")
+    elif worth.priced is not None:
+        lines.append(
+            f"It is ${-worth.priced[0]:.4f} short of paying; it drops once it pays.",
+        )
     else:
-        lines.append(_dropping(chosen, worth))
-        if due:
-            lines.append("It drops before your next request.")
-        elif worth.priced is not None:
-            lines.append(
-                f"It is ${-worth.priced[0]:.4f} short of paying; it drops once it pays.",
-            )
-        else:
-            lines.append("It drops once it brings the context under compaction.")
+        lines.append("It drops once it brings the context under compaction.")
     return ToolOutput(stdout=("\n".join(lines),), result=SessionResult(action=a.action))
+
+
+def _worth(
+    agent: Agent,
+    entries: Sequence[ModelContextEvent],
+    picked: Sequence[int],
+) -> Saving:
+    """Return what dropping ``picked`` saves, at the agent's model's prices."""
+    model = agent.model
+    tokens = sizes(model, entries)
+    return saving(
+        tokens,
+        picked,
+        stub=len(agent.runtime.stubs.pruned) / model.capability.approx_chars_per_token,
+        prices=prices(model, prompt=int(sum(tokens))),
+        left=left_in(entries, tokens, limit=limit_tokens(agent)),
+    )
 
 
 # A prune stubs every output of a call: a long call's other outputs go too.

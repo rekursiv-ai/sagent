@@ -16,7 +16,7 @@ from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.session.types import ToolMessage, WebFetchResult
+from sagent.journal.types import ToolMessage, WebFetchResult
 from sagent.tools import web_fetch
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.types import ToolContext, settled

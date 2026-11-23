@@ -15,6 +15,20 @@ from treekle import from_plain, json_dumps
 
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model import image
 from sagent.model.capability import ModelLimits, ModelSettings
 from sagent.model.cost import TokenCount
@@ -30,20 +44,6 @@ from sagent.model.exceptions import (
 from sagent.model.types import Request, TextChunk
 from sagent.providers.google import wire
 from sagent.providers.google.api import Google
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    TokenUsage,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 
@@ -53,13 +53,13 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import (
         ModelCapability,
         ThinkingBudget,
         ThinkingEffort,
         ThinkingOutput,
     )
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 
@@ -868,7 +868,9 @@ def test_no_usage_report_is_no_tokens() -> None:
 def test_finish_reasons_speak_the_shared_words(finish: str, stop: str) -> None:
     reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(_event([{"text": "a"}], finish=finish))
-    assert reader.response().stop_reason == stop
+    response = reader.response()
+    assert response.stop_reason == stop
+    assert response.stop_details == (finish if stop == "refusal" else "")
 
 
 def test_the_finish_reason_survives_a_later_event_without_one() -> None:
@@ -889,6 +891,7 @@ def test_a_blocked_prompt_is_a_refusal_with_no_records() -> None:
     reader.feed({"promptFeedback": {}})
     response = reader.response()
     assert (response.records, response.stop_reason) == ((), "refusal")
+    assert response.stop_details == "PROHIBITED_CONTENT"
     assert response.tokens == TokenCount(request=3)
 
 

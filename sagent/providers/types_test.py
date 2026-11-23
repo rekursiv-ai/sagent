@@ -8,6 +8,7 @@ from PIL import Image
 
 import pytest
 
+from sagent.journal.types import Attachment
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.anthropic import wire as anthropic_wire
 from sagent.providers.anthropic.api import Anthropic, AnthropicModel
@@ -44,7 +45,6 @@ from sagent.providers.types import (
     UsageWindow,
 )
 from sagent.providers.vertex.api import Vertex
-from sagent.session.types import Attachment
 
 
 def _members(protocol: type) -> set[str]:

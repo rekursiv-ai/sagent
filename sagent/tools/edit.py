@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Annotated, cast
 import asyncio
 import re
 
+from sagent.journal.types import EditResult, Splice
 from sagent.providers.login import file_lock
-from sagent.session.types import EditResult, Splice
 from sagent.tools.command_analyzer import (
     Invocation,
     operands,

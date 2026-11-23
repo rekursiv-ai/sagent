@@ -42,11 +42,30 @@ from wesearch.fetch import FetchSession
 import pytest
 
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.pruner import Pruner
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
 from sagent.host.strings import ServeDirs
+from sagent.journal import projects
+from sagent.journal.jsonl import JsonlJournal, read_record
+from sagent.journal.projects import list_sessions, project_dir
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    BashResult,
+    SessionContext,
+    SessionRecord,
+    Succeeded,
+    Thinking,
+    ToolMessage,
+    UncategorizedRecord,
+    UncategorizedToolResult,
+    UserMessage,
+    record_classes,
+)
 from sagent.lib.posix.attach import stop, viewers
 from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import serve_command
@@ -72,25 +91,6 @@ from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
-from sagent.session import projects
-from sagent.session.jsonl import JsonlJournal, read_record
-from sagent.session.projects import list_sessions, project_dir
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    AssistantMessage,
-    BashResult,
-    SessionContext,
-    SessionRecord,
-    Succeeded,
-    Thinking,
-    ToolMessage,
-    UncategorizedRecord,
-    UncategorizedToolResult,
-    UserMessage,
-    record_classes,
-)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser, flags
 from sagent.settings.harvest import harvest

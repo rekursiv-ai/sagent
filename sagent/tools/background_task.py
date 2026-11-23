@@ -26,7 +26,7 @@ import math
 
 from treekle import PlainTree
 
-from sagent.session.types import BackgroundTaskResult, ToolMessage
+from sagent.journal.types import BackgroundTaskResult, ToolMessage
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Tool,

@@ -10,8 +10,8 @@ import threading
 
 import pytest
 
+from sagent.journal.types import GrepResult
 from sagent.lib.files.grep import GrepError, Query, Row
-from sagent.session.types import GrepResult
 from sagent.tools import grep
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.grep import Grep

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, ca
 from treekle import PlainTree, from_plain
 
 from sagent.agent.team import Team
+from sagent.journal.types import AgentSelfResult
 from sagent.model.capability import (
     Compaction,
     ThinkingBudget,
@@ -31,7 +32,6 @@ from sagent.providers.catalog import counterpart, successor
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
 from sagent.runtime.types import ToolWakeSchedules, WakeSchedule
-from sagent.session.types import AgentSelfResult
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (

@@ -17,11 +17,11 @@ from __future__ import annotations
 from collections import deque
 from typing import TYPE_CHECKING, ClassVar, override
 
+from sagent.journal.types import AssistantMessage, ToolCall
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.resources import SharedResources
-from sagent.session.types import AssistantMessage, ToolCall
 from sagent.types import AsyncResource
 
 
@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.journal.types import Attachment
     from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderResources, UsageWindow
-    from sagent.session.types import Attachment
 
 
 __all__ = [

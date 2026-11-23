@@ -30,6 +30,19 @@ import time
 
 from treekle import ReadError, from_plain, immutable, json_loads, mutable
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    ContextClear,
+    ContextCompaction,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+    labeled_text,
+)
 from sagent.model import image
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
@@ -43,27 +56,14 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Response, TextChunk
 from sagent.providers.types import UsageWindow
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    ContextClear,
-    ContextCompaction,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UserMessage,
-    labeled_text,
-)
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
+    from sagent.journal.types import Attachment, SessionRecord
     from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
     from sagent.model.types import Request
-    from sagent.session.types import Attachment, SessionRecord
 
 
 __all__ = [

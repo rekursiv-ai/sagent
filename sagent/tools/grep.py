@@ -21,6 +21,7 @@ import re
 
 from treekle import PlainTree
 
+from sagent.journal.types import GrepResult
 from sagent.lib.files.grep import (
     GrepError,
     OutputMode,
@@ -30,7 +31,6 @@ from sagent.lib.files.grep import (
     in_path_order,
     streamed_rows,
 )
-from sagent.session.types import GrepResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,

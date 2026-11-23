@@ -21,7 +21,7 @@ from treekle import PlainTree
 import pytest
 
 from sagent.agent.agent import Agent, spent
-from sagent.agent.compactor import (
+from sagent.agent.compaction.compactor import (
     SummaryCompactor,
     _append_to_first_user,
     _asset,
@@ -30,6 +30,28 @@ from sagent.agent.compactor import (
     _summary,
     halve,
     summary_tokens,
+)
+from sagent.agent.compaction.usable import UnusableReplyError
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    Cancelled,
+    ContextClear,
+    ContextCompaction,
+    Failed,
+    Outcome,
+    SessionContext,
+    Succeeded,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
 )
 from sagent.model.capability import (
     Compaction,
@@ -56,27 +78,6 @@ from sagent.model.types import Request, Response, TextChunk
 from sagent.runtime import types
 from sagent.runtime.context import Tape
 from sagent.runtime.tape import TapeRef, coalesce_roles, full_tape_mask
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    Cancelled,
-    ContextClear,
-    ContextCompaction,
-    Failed,
-    Outcome,
-    SessionContext,
-    Succeeded,
-    SystemMessage,
-    Thinking,
-    TokenUsage,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
 from sagent.tools.skill import Skill, SkillInfo
@@ -91,11 +92,11 @@ from sagent.tools.types import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import ThinkingEffort
     from sagent.providers.types import Model
     from sagent.runtime.tape import ContextSplice
     from sagent.runtime.types import ModelContextEvent
-    from sagent.session.types import SessionRecord
 
 
 _SUMMARY_TEXT = "<analysis>scratch notes</analysis>\n<summary>the gist</summary>"
@@ -664,7 +665,7 @@ async def test_the_summary_replaces_the_history_without_its_analysis(
     provider, agent = _agent(tmp_path, _SUMMARY)
     compactor = SummaryCompactor(agent)
 
-    with caplog.at_level(logging.INFO, logger="sagent.agent.compactor"):
+    with caplog.at_level(logging.INFO, logger="sagent.agent.compaction.compactor"):
         splice = await _compact(compactor, agent, _HISTORY)
 
     assert splice.strategy == "summary"
@@ -774,7 +775,10 @@ async def test_a_reply_that_is_no_summary_preserves_history(
     _hold(agent, _HISTORY)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(RuntimeError, match="no usable summary after 3 attempts"):
+    with pytest.raises(
+        UnusableReplyError,
+        match="last of 3 attempts returned no usable summary",
+    ):
         _ = await _live(agent, SummaryCompactor(agent))
 
     assert len(provider.requests) == 3
@@ -792,29 +796,19 @@ _REFUSED = reply(
 @pytest.mark.asyncio
 async def test_a_summary_refused_every_attempt_says_it_was_refused_and_why(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider, agent = _agent(tmp_path, _REFUSED, _REFUSED, _REFUSED)
     _hold(agent, _HISTORY)
     before = agent.runtime.tape.context().messages
 
-    with (
-        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
-        pytest.raises(
-            RefusedError,
-            match=r"refused the summary 3 times: reasoning_extraction: Blocked\.$",
-        ),
+    with pytest.raises(
+        RefusedError,
+        match=r"refused 3 of 3 attempts at the summary: reasoning_extraction: Blocked\.$",
     ):
         _ = await _live(agent, SummaryCompactor(agent))
 
     assert len(provider.requests) == 3
     assert agent.runtime.tape.context().messages == before
-    assert (
-        caplog.messages.count(
-            "summary refused: reasoning_extraction: Blocked.",
-        )
-        == 3
-    )
 
 
 @pytest.mark.asyncio
@@ -967,6 +961,34 @@ async def test_provider_compaction_asks_the_api_and_keeps_the_tail_whole(
         replaces=digest(request.records),
     )
     assert kept == [_user("and the docs"), sealed]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_provider_summary_says_why_and_writes_our_own(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        _REFUSED,
+        _SUMMARY,
+        capability=_capability(compaction="provider"),
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.agent.compaction.compactor",
+    ):
+        splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+
+    assert splice.strategy == "summary"
+    assert len(provider.requests) == 2
+    assert caplog.messages == [
+        (
+            "the provider's summary was refused (reasoning_extraction: Blocked.);"
+            " writing our own"
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1536,7 +1558,7 @@ async def test_a_transient_failure_is_retried(
         _SUMMARY,
     )
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
+    with caplog.at_level(logging.WARNING, logger="sagent.agent.compaction.usable"):
         splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
 
     assert splice.strategy == "summary"
@@ -2041,7 +2063,10 @@ async def test_a_verified_summary_is_replaced_only_by_a_better_one(
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY, second)
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.agent.compaction.compactor",
+    ):
         splice = await _compact(
             SummaryCompactor(agent, verify_summary=True),
             agent,
@@ -2703,7 +2728,7 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
     provider, agent, compactor = _auditing(tmp_path, _AUDIT, journal=journal)
     _hold(agent, (_user("now this"),))
 
-    with caplog.at_level(logging.INFO, logger="sagent.agent.compactor"):
+    with caplog.at_level(logging.INFO, logger="sagent.agent.compaction.compactor"):
         splice = await _compact(
             compactor,
             agent,
@@ -2806,13 +2831,13 @@ async def test_an_audit_too_long_for_one_request_summarizes_its_older_half(
     ("replies", "error", "match"),
     [
         ((ContextOverflowError("too long"),), ContextOverflowError, "^too long$"),
-        ((RateLimitedError("busy"),), RateLimitedError, "^busy$"),
-        ((reply("no summary here"),), RuntimeError, "no usable summary"),
-        ((_REFUSED,) * 3, RefusedError, "refused the session audit 3 times"),
+        ((RateLimitedError("busy"),) * 3, RateLimitedError, "^busy$"),
+        ((reply("no summary here"),) * 3, UnusableReplyError, "no usable session"),
+        ((_REFUSED,) * 3, RefusedError, "refused 3 of 3 attempts at the session"),
         (
-            (reply("<summary>x</summary>", calls=[call("Read", "c9")]),),
-            RuntimeError,
-            "no usable summary",
+            (reply("<summary>x</summary>", calls=[call("Read", "c9")]),) * 3,
+            UnusableReplyError,
+            "no usable session",
         ),
     ],
     ids=["overflows", "rate-limited", "no-summary", "refused", "tool-call"],
@@ -2836,32 +2861,40 @@ async def test_an_audit_that_cannot_be_had_says_why_and_preserves_history(
 
 
 @pytest.mark.asyncio
-async def test_a_refused_audit_asked_again_may_be_answered(tmp_path: Path) -> None:
-    provider, agent, compactor = _auditing(tmp_path, _REFUSED, _AUDIT)
+@pytest.mark.parametrize(
+    "first",
+    [
+        _REFUSED,
+        reply("no summary here"),
+        OverloadedError("busy", retry_after_sec=0.0),
+    ],
+    ids=["refused", "no-summary", "transient"],
+)
+async def test_an_audit_asked_again_may_be_answered(
+    tmp_path: Path,
+    first: Reply,
+) -> None:
+    """The audit retries as a summary does."""
+    provider, agent, compactor = _auditing(tmp_path, first, _AUDIT)
     _hold(agent, _HISTORY)
 
     splice = await _live(agent, compactor)
 
     assert splice.strategy == "session_audit"
-    first, again = provider.requests
-    assert again.records == first.records
+    asked, again = provider.requests
+    assert again.records == asked.records
 
 
-@pytest.mark.parametrize(
-    "digest",
-    [
-        reply("no summary here"),
-        reply("<summary>" + "z" * 80_000 + "</summary>"),
-        reply("<summary>x</summary>", calls=[call("Read", "c9")]),
-    ],
-    ids=["no-summary", "no-shorter", "tool-call"],
-)
 @pytest.mark.asyncio
-async def test_an_audit_that_will_not_shrink_preserves_history(
+async def test_an_audit_whose_digest_does_not_shrink_it_is_too_long(
     tmp_path: Path,
-    digest: Reply,
 ) -> None:
-    provider, agent, compactor = _auditing(tmp_path, digest, _AUDIT, window=14_000)
+    provider, agent, compactor = _auditing(
+        tmp_path,
+        reply("<summary>" + "z" * 80_000 + "</summary>"),
+        _AUDIT,
+        window=14_000,
+    )
     _hold(agent, (_user("a" * 30_000), _turn("ok"), _user("b" * 30_000)))
 
     before = agent.runtime.tape.context().messages
@@ -2872,17 +2905,35 @@ async def test_an_audit_that_will_not_shrink_preserves_history(
     assert agent.runtime.tape.context().messages == before
 
 
+@pytest.mark.parametrize(
+    ("digest", "error", "match"),
+    [
+        (reply("no summary here"), UnusableReplyError, "no usable session audit"),
+        (
+            reply("<summary>x</summary>", calls=[call("Read", "c9")]),
+            UnusableReplyError,
+            "no usable session audit",
+        ),
+        (_REFUSED, RefusedError, "refused 3 of 3 attempts at the session audit"),
+    ],
+    ids=["no-summary", "tool-call", "refused"],
+)
 @pytest.mark.asyncio
-async def test_an_audit_whose_digest_is_refused_says_it_was_refused(
+async def test_an_audit_whose_digest_fails_says_why_not_that_it_is_too_long(
     tmp_path: Path,
+    digest: Reply,
+    error: type[Exception],
+    match: str,
 ) -> None:
-    provider, agent, compactor = _auditing(tmp_path, *[_REFUSED] * 3, window=14_000)
+    provider, agent, compactor = _auditing(tmp_path, *[digest] * 3, window=14_000)
     _hold(agent, (_user("a" * 30_000), _turn("ok"), _user("b" * 30_000)))
 
-    with pytest.raises(RefusedError, match="refused the session audit 3 times"):
+    before = agent.runtime.tape.context().messages
+    with pytest.raises(error, match=match):
         _ = await _live(agent, compactor)
 
     assert len(provider.requests) == 3
+    assert agent.runtime.tape.context().messages == before
 
 
 @pytest.mark.asyncio
@@ -3136,7 +3187,7 @@ async def test_a_kept_head_also_preserves_the_unanswered_tail(
     ("answer", "error"),
     [
         (_REFUSED, RefusedError),
-        (reply("no tags"), RuntimeError),
+        (reply("no tags"), UnusableReplyError),
         (ContextOverflowError("too long"), ContextOverflowError),
     ],
     ids=["refused", "no-summary", "every-round-dropped"],
@@ -3167,7 +3218,7 @@ async def test_a_failed_summary_preserves_the_history_and_kept_head(
     _hold(agent, history)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(RefusedError, match="refused the summary 3 times"):
+    with pytest.raises(RefusedError, match="refused 3 of 3 attempts at the summary"):
         _ = await _live(
             agent,
             SummaryCompactor(agent, keep_recent=2, direction="up_to"),
@@ -3231,7 +3282,10 @@ def test_the_summary_is_read_past_its_analysis_and_blank_lines(
 def test_a_reply_with_no_summary_says_how_long_it_was(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.agent.compaction.compactor",
+    ):
         assert _summary(reply("I summarized nothing.")) is None
 
     assert caplog.messages == [
@@ -3918,7 +3972,10 @@ async def test_failure_after_a_successful_prefix_leaves_all_history_intact(
     _hold(agent, history)
     before = agent.runtime.tape.context().messages
 
-    with pytest.raises(RuntimeError, match="no usable summary after 3 attempts"):
+    with pytest.raises(
+        UnusableReplyError,
+        match="last of 3 attempts returned no usable summary",
+    ):
         _ = await _live(agent, _unreserved(agent))
 
     assert len(provider.requests) == 4

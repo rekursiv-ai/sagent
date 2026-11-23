@@ -12,7 +12,7 @@ from treekle import PlainTree, from_plain
 
 import pytest
 
-from sagent.session.types import (
+from sagent.journal.types import (
     Attachment,
     ReadResult,
     ToolMessage,

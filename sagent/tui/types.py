@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 import itertools
 
-from sagent.session.types import (
+from sagent.journal.types import (
     ModelIdle,
 )
 from sagent.tools.display import ToolDisplay
@@ -45,6 +45,15 @@ if TYPE_CHECKING:
     from rich.style import Style
     from rich.text import Text
 
+    from sagent.journal.types import (
+        AgentMessage,
+        AssistantMessage,
+        SystemMessage,
+        Thinking,
+        ToolCall,
+        ToolMessage,
+        UserMessage,
+    )
     from sagent.runtime.types import (
         ChildEvent,
         LoginSwitched,
@@ -56,15 +65,6 @@ if TYPE_CHECKING:
         SessionCompactStarted,
         SessionContextUpdateCompleted,
         SessionTitleChanged,
-    )
-    from sagent.session.types import (
-        AgentMessage,
-        AssistantMessage,
-        SystemMessage,
-        Thinking,
-        ToolCall,
-        ToolMessage,
-        UserMessage,
     )
     from sagent.tools.display import Overflow
 else:

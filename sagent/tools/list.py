@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import asyncio
 import time
 
-from sagent.session.types import ListResult
+from sagent.journal.types import ListResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,

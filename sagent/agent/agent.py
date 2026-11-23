@@ -30,21 +30,8 @@ from treekle import PlainTree, from_plain
 
 from sagent.agent.agents_md import AgentsMdConfig, Directives
 from sagent.agent.environment import environment
-from sagent.model.cost import TokenCost, TokenCount
-from sagent.model.types import Response
-from sagent.providers.catalog import CachedModel, ModelMemory, cache_key, recall
-from sagent.providers.table import ModelTags
-from sagent.runtime import types
-from sagent.runtime.context import resolve_context
-from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
-from sagent.runtime.runtime import Compactor, Pruning, Runtime, Sizing
-from sagent.runtime.tape import (
-    ContextSplice,
-    ReferrableTapeEvent,
-    parts_model_turns,
-)
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     AssistantMessage,
@@ -64,6 +51,19 @@ from sagent.session.types import (
     UncategorizedRecord,
     UserMessage,
     now_timestamp,
+)
+from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.types import Response
+from sagent.providers.catalog import CachedModel, ModelMemory, cache_key, recall
+from sagent.providers.table import ModelTags
+from sagent.runtime import types
+from sagent.runtime.context import resolve_context
+from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
+from sagent.runtime.runtime import Compactor, Pruning, Runtime, Sizing
+from sagent.runtime.tape import (
+    ContextSplice,
+    ReferrableTapeEvent,
+    parts_model_turns,
 )
 from sagent.tools.types import Briefing, Reminding, Skipping, ToolContext
 from sagent.types import AsyncResource
@@ -87,10 +87,10 @@ if TYPE_CHECKING:
         Session,
         Shrinker,
     )
+    from sagent.journal.types import Attachment, SessionRecord
     from sagent.model.token_accounting import TokenAccounting
     from sagent.providers.types import Model, ModelCatalog
     from sagent.runtime.tape import TapeRecord
-    from sagent.session.types import Attachment, SessionRecord
     from sagent.tools.types import Tool
 
 

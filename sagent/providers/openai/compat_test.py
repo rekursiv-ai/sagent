@@ -10,6 +10,12 @@ from treekle import ReadError, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import (
+    AssistantMessage,
+    Attachment,
+    Thinking,
+    UserMessage,
+)
 from sagent.model.exceptions import (
     AuthError,
     ContextOverflowError,
@@ -30,12 +36,6 @@ from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.providers.testing import paused_backoff
 from sagent.providers.types import UsageWindow
-from sagent.session.types import (
-    AssistantMessage,
-    Attachment,
-    Thinking,
-    UserMessage,
-)
 
 
 if TYPE_CHECKING:

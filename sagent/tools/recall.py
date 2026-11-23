@@ -35,8 +35,8 @@ from treekle import json_loads
 from wesearch.fetch import ContentParams, PolicyParams, RequestParams, fetch
 
 from sagent.agent.team import Team
-from sagent.session.projects import session_id, spawner_journal
-from sagent.session.types import RecallResult
+from sagent.journal.projects import session_id, spawner_journal
+from sagent.journal.types import RecallResult
 from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (

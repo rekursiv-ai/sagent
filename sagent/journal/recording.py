@@ -14,13 +14,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sagent.session.types import ContextClear
+from sagent.journal.types import ContextClear
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 __all__ = [

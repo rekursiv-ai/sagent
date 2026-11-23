@@ -12,7 +12,7 @@ from treekle import PlainTree
 
 import pytest
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.journal.types import UncategorizedToolResult
 from sagent.settings.harvest import harvest
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output

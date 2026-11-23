@@ -12,10 +12,7 @@ from treekle import json_dumps, mutable
 
 import pytest
 
-from sagent.model.capability import ModelCapability, ModelLimits
-from sagent.model.types import Request
-from sagent.providers.openai import token_count
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     Attachment,
     Thinking,
@@ -25,6 +22,9 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelCapability, ModelLimits
+from sagent.model.types import Request
+from sagent.providers.openai import token_count
 from sagent.tools.read import Read
 
 

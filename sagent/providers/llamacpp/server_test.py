@@ -24,12 +24,12 @@ from treekle import json_dumps
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, UserMessage
 from sagent.lib.posix.pids import kill_and_reap, written_pid
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.llamacpp import server
 from sagent.providers.llamacpp.server import LlamaCpp
 from sagent.providers.resources import SharedResources
-from sagent.session.types import AssistantMessage, UserMessage
 
 
 if TYPE_CHECKING:

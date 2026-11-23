@@ -23,8 +23,8 @@ import time
 
 from treekle import PlainTree, ReadError, from_plain, json_loads
 
+from sagent.journal.types import Attachment, LineSpan, ReadResult
 from sagent.model.image import PDFIUM
-from sagent.session.types import Attachment, LineSpan, ReadResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,

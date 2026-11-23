@@ -8,7 +8,7 @@ from treekle import immutable
 
 import pytest
 
-from sagent.session.types import PlanResult
+from sagent.journal.types import PlanResult
 from sagent.tools.plan import MAX_STEPS, Plan
 from sagent.tools.types import ToolContext, settled
 

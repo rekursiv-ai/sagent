@@ -18,7 +18,7 @@ from wesearch.types.errors import PuzzleChallengeError
 
 import pytest
 
-from sagent.session.types import PaperSearchResult
+from sagent.journal.types import PaperSearchResult
 from sagent.tools import paper_search
 from sagent.tools.paper_search import PaperSearch, _named
 from sagent.tools.types import ToolContext, settled

@@ -15,15 +15,14 @@ from treekle import MutablePlainTree, json_loads
 
 import pytest
 
-from sagent.lib.userdirs import base_dir_variables
-from sagent.session import jsonl
-from sagent.session.jsonl import (
+from sagent.journal import jsonl
+from sagent.journal.jsonl import (
     JournalInUseError,
     JsonlJournal,
     read_record,
     record_line,
 )
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     BashResult,
     ContextClear,
@@ -34,6 +33,7 @@ from sagent.session.types import (
     ToolMessage,
     UserMessage,
 )
+from sagent.lib.userdirs import base_dir_variables
 
 
 @pytest.mark.asyncio

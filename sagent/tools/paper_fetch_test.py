@@ -17,8 +17,8 @@ from wesearch.paper.errors import PaperError
 
 import pytest
 
+from sagent.journal.types import PaperFetchResult
 from sagent.lib.userdirs import base_dir_variables, cache_dir
-from sagent.session.types import PaperFetchResult
 from sagent.tools import paper_fetch
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.types import ToolContext, settled

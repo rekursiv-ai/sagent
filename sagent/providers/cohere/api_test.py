@@ -5,16 +5,16 @@ from typing import override
 import httpx2
 import pytest
 
-from sagent.model.exceptions import DisconnectedError
-from sagent.model.types import Request, Response, TextChunk
-from sagent.providers.cohere.api import Cohere
-from sagent.providers.resources import SharedResources
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     ToolCall,
     ToolMessage,
     UserMessage,
 )
+from sagent.model.exceptions import DisconnectedError
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.cohere.api import Cohere
+from sagent.providers.resources import SharedResources
 
 
 @pytest.mark.asyncio

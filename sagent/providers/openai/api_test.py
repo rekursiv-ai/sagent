@@ -10,12 +10,12 @@ from treekle import json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, UserMessage
 from sagent.model.types import Request, Response
 from sagent.providers.openai import responses
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources
-from sagent.session.types import AssistantMessage, UserMessage
 from sagent.tools.read import Read
 
 

@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from sagent.session.types import (
+from sagent.journal.types import (
     EditResult,
     Splice,
     ToolMessage,

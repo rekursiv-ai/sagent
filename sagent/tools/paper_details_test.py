@@ -19,7 +19,7 @@ from wesearch.paper.types import PaperRecord
 
 import pytest
 
-from sagent.session.types import PaperDetailsResult
+from sagent.journal.types import PaperDetailsResult
 from sagent.tools import (
     paper_details,
 )

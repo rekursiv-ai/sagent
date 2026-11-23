@@ -27,7 +27,7 @@ from wesearch.paper.render import format_block
 
 import cachetools
 
-from sagent.session.types import PaperDetailsResult
+from sagent.journal.types import PaperDetailsResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import (
     listed,

@@ -17,12 +17,12 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.projects import child_journal
+from sagent.journal.types import RecallResult
 from sagent.model.capability import ModelCapability
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.projects import child_journal
-from sagent.session.types import RecallResult
 from sagent.tools import recall
 from sagent.tools.recall import Recall
 from sagent.tools.types import Stream, ToolContext, settled
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.session.types import ToolMessage
+    from sagent.journal.types import ToolMessage
 
 
 def test_a_call_is_summarized_by_its_name_and_runs_beside_anything(

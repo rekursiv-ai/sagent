@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 from sagent.agent.team import Team
 from sagent.host.wire import ToolSpec
+from sagent.journal.projects import project_dir
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.projects import project_dir
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_session import AgentSession

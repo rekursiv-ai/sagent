@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from pygments.lexer import Lexer
     from rich.console import Console
 
-    from sagent.session.types import Splice
+    from sagent.journal.types import Splice
     from sagent.tui.theme import Theme
 
 

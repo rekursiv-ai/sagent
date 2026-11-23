@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, Final, Literal
 
-from sagent.session.types import PlanResult
+from sagent.journal.types import PlanResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

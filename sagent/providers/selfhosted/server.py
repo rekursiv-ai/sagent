@@ -39,6 +39,7 @@ import threading
 
 from treekle import from_plain, json_dumps, mutable
 
+from sagent.journal.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -53,7 +54,6 @@ from sagent.providers.openai import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted.calls import read_calls
 from sagent.providers.table import ModelTags
-from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolMessage
 from sagent.types import AsyncResource
 
 
@@ -65,9 +65,9 @@ if TYPE_CHECKING:
     import torch
     import transformers
 
+    from sagent.journal.types import Attachment
     from sagent.model.types import Request
     from sagent.providers.types import ProviderResources, UsageWindow
-    from sagent.session.types import Attachment
     from sagent.tools.types import Tool
 else:
     from wrapt import lazy_import

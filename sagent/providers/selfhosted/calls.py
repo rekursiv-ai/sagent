@@ -19,7 +19,7 @@ import uuid
 
 from treekle import from_plain, immutable, json_loads
 
-from sagent.session.types import ToolCall
+from sagent.journal.types import ToolCall
 
 
 if TYPE_CHECKING:

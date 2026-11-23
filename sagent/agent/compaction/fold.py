@@ -9,9 +9,10 @@ verbatim, since a prompt's instructions sit at its head.
 
 Every level shrinks or the fold raises, so the tree is at most
 ``log(len / budget)`` levels deep. No chunk is ever dropped: a reply cut off,
-refused, empty, or no shorter than the chunk, or a chunk the provider rejects as too
-long, is retried, then halved -- at its middle line, or mid-line for a single
-long line -- and only a one-character chunk that cannot be summarized fails.
+refused, empty, or no shorter than the chunk is asked again, as
+:func:`~sagent.agent.compaction.usable.usable` retries, then halved -- at its middle
+line, or mid-line for a single long line -- as is at once a chunk the provider
+rejects as too long; only a one-character chunk that cannot be summarized fails.
 
 Typical usage example:
 
@@ -22,16 +23,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
-import asyncio
 import logging
 import math
 import re
 
-from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.agent.compaction.usable import UnusableReplyError, usable
+from sagent.journal.types import AssistantMessage, UserMessage
+from sagent.model.exceptions import (
+    ContextOverflowError,
+    DisconnectedError,
+    RefusedError,
+)
 from sagent.model.types import Request, Response
 from sagent.providers.types import Model
-from sagent.session.types import AssistantMessage, UserMessage
 
 
 __all__ = [
@@ -170,23 +176,15 @@ async def _summarize(chunk: str, *, call: _Call) -> str:
         call.prompt,
     )
     if _tokens(call.model, filled) <= call.call_tokens:
-        for attempt in range(call.attempts):
-            try:
-                summary = await _attempt(filled, call=call)
-            except RetryableError as exc:
-                if attempt + 1 == call.attempts:
-                    raise
-                logger.info("fold attempt waits %ss: %s", exc.retry_after_sec, exc)
-                await asyncio.sleep(exc.retry_after_sec)
-                continue
-            if summary and _tokens(call.model, summary) < size:
-                return summary
-            logger.warning(
-                "fold summary attempt %d/%d failed on a %d-token chunk",
-                attempt + 1,
-                call.attempts,
-                size,
+        try:
+            return await usable(
+                partial(_attempt, filled, call=call),
+                read=partial(_shorter, model=call.model, size=size),
+                attempts=call.attempts,
+                what="fold summary",
             )
+        except (ContextOverflowError, RefusedError, UnusableReplyError) as exc:
+            logger.warning("a %d-token chunk is halved: %s", size, exc)
     if len(chunk) < 2:
         raise FoldError(f"a {size}-token chunk could not be summarized or split")
     return "\n".join([await _summarize(half, call=call) for half in _halve(chunk)])
@@ -226,26 +224,29 @@ def _chunks(text: str, *, model: Model, limit: int) -> list[str]:
     return chunks
 
 
-async def _attempt(prompt: str, *, call: _Call) -> str:
-    """Return one finished, non-empty summary, or ``""`` for a failed attempt."""
+async def _attempt(prompt: str, *, call: _Call) -> Response:
+    """Return the reply to one summary request, its cost spent."""
     reply = None
     request = call.tag(
         Request(records=[UserMessage(content=prompt)], purpose="compaction"),
     )
-    try:
-        async for event in call.model.stream(request):
-            if isinstance(event, Response):
-                reply = event
-    except ContextOverflowError as exc:
-        logger.info("fold attempt failed: %s", exc)
-        return ""
-    if reply is not None:
-        call.spent(reply.spend.total)
-    if reply is None or reply.stop_reason in ("max_tokens", "refusal"):
-        return ""
-    return "".join(
-        r.content or "" for r in reply.records if isinstance(r, AssistantMessage)
+    async for event in call.model.stream(request):
+        if isinstance(event, Response):
+            reply = event
+    if reply is None:
+        raise DisconnectedError("The reply ended before it was finished.")
+    call.spent(reply.spend.total)
+    return reply
+
+
+def _shorter(response: Response, *, model: Model, size: int) -> str | None:
+    """Return the finished reply's words when shorter than ``size`` tokens; else ``None``."""
+    said = "".join(
+        r.content or "" for r in response.records if isinstance(r, AssistantMessage)
     ).strip()
+    if response.stop_reason == "max_tokens" or not said or _tokens(model, said) >= size:
+        return None
+    return said
 
 
 def _halve(chunk: str) -> tuple[str, str]:

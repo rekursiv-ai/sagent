@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     SystemMessage,

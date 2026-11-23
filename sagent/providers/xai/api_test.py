@@ -4,9 +4,9 @@ from dataclasses import replace
 
 import pytest
 
+from sagent.journal.types import Thinking, UserMessage
 from sagent.model.types import Request
 from sagent.providers.xai.api import XAI
-from sagent.session.types import Thinking, UserMessage
 
 
 @pytest.mark.asyncio

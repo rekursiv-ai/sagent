@@ -22,6 +22,8 @@ from treekle import PlainTree, ReadError, json_dumps, json_loads
 
 import pytest
 
+from sagent.journal.jsonl import record_line
+from sagent.journal.types import TokenUsage, UserMessage
 from sagent.scripts.swebench import cli
 from sagent.scripts.swebench.cli import (
     Agent,
@@ -35,14 +37,12 @@ from sagent.scripts.swebench.cli import (
     solve,
     usage,
 )
-from sagent.session.jsonl import record_line
-from sagent.session.types import TokenUsage, UserMessage
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 _TASK = Task(

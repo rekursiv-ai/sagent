@@ -38,7 +38,7 @@ import inspect
 
 from treekle import immutable, mutable
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.journal.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolContext,

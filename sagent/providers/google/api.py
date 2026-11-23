@@ -33,11 +33,11 @@ if TYPE_CHECKING:
 
     import httpx2
 
+    from sagent.journal.types import Attachment
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderResources, UsageWindow
-    from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
 

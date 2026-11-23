@@ -24,7 +24,7 @@ sagent --session /tmp/my-sagent-session/session.jsonl
 from pathlib import Path
 
 from sagent.agent.agent import Agent
-from sagent.session.jsonl import JsonlJournal
+from sagent.journal.jsonl import JsonlJournal
 
 path = Path("/tmp/my-sagent-session/session.jsonl")
 async with JsonlJournal(path) as journal:

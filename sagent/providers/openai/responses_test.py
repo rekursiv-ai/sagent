@@ -13,17 +13,7 @@ from treekle import from_plain, mutable
 
 import pytest
 
-from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
-from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
-from sagent.model.exceptions import (
-    DisconnectedError,
-    RateLimitedError,
-    RefusedError,
-)
-from sagent.model.types import Request, TextChunk
-from sagent.providers.openai import responses, wire
-from sagent.providers.openai.api import OpenAI
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     Attachment,
     ContextClear,
@@ -35,6 +25,16 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import (
+    DisconnectedError,
+    RateLimitedError,
+    RefusedError,
+)
+from sagent.model.types import Request, TextChunk
+from sagent.providers.openai import responses, wire
+from sagent.providers.openai.api import OpenAI
 from sagent.tools.read import Read
 
 
@@ -546,6 +546,48 @@ def test_a_refusal_is_kept_as_what_the_model_said() -> None:
     )
     reader.feed(_completed())
     assert reader.response().records == (AssistantMessage(content="I can't."),)
+
+
+@pytest.mark.parametrize(
+    ("events", "details"),
+    [
+        (
+            [
+                _done(
+                    0,
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "I can't."}],
+                    },
+                ),
+                _completed(),
+            ],
+            "I can't.",
+        ),
+        (
+            [
+                {
+                    "type": "response.incomplete",
+                    "response": {
+                        "status": "incomplete",
+                        "incomplete_details": {"reason": "content_filter"},
+                    },
+                },
+            ],
+            "content_filter",
+        ),
+        ([_completed()], ""),
+    ],
+    ids=["said", "filtered", "answered"],
+)
+def test_a_refusal_says_why_in_its_stop_details(
+    events: list[dict[str, object]],
+    details: str,
+) -> None:
+    reader = _reader()
+    for event in events:
+        reader.feed(event)
+    assert reader.response().stop_details == details
 
 
 def _cost(name: str, tokens: TokenCount, tier: ServiceTier) -> float:

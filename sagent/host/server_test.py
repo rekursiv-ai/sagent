@@ -63,8 +63,8 @@ from sagent.host.wire import (
     encoded,
     received,
 )
+from sagent.journal.types import ReadResult, ToolMessage, UncategorizedToolResult
 from sagent.lib.posix.child import Child
-from sagent.session.types import ReadResult, ToolMessage, UncategorizedToolResult
 from sagent.tools.read import Read
 from sagent.tools.remote import Link, RemoteSession
 

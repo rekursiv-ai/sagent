@@ -13,10 +13,9 @@ from treekle import json_dumps
 
 import pytest
 
-from sagent.lib.userdirs import data_dir
-from sagent.session import projects
-from sagent.session.jsonl import read_record
-from sagent.session.projects import (
+from sagent.journal import projects
+from sagent.journal.jsonl import read_record
+from sagent.journal.projects import (
     child_journal,
     cwd_slug,
     find_sessions,
@@ -31,7 +30,7 @@ from sagent.session.projects import (
     spawner_journal,
     unused_session_path,
 )
-from sagent.session.types import (
+from sagent.journal.types import (
     Attachment,
     ContextClear,
     SessionContext,
@@ -39,6 +38,7 @@ from sagent.session.types import (
     UserMessage,
     record_classes,
 )
+from sagent.lib.userdirs import data_dir
 
 
 def _journal(

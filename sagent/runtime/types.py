@@ -16,10 +16,7 @@ from typing import Literal, Protocol, override
 
 import math
 
-from sagent.model.cost import TokenCost
-from sagent.model.exceptions import RateLimitedError, RetryableError
-from sagent.model.types import Response
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     ContextCompaction,
@@ -31,6 +28,9 @@ from sagent.session.types import (
     ToolMessage,
     UserMessage,
 )
+from sagent.model.cost import TokenCost
+from sagent.model.exceptions import RateLimitedError, RetryableError
+from sagent.model.types import Response
 
 
 __all__ = [

@@ -2,9 +2,9 @@
 
 import pytest
 
+from sagent.journal.types import UserMessage
 from sagent.model.types import Request
 from sagent.providers.perplexity.api import Perplexity
-from sagent.session.types import UserMessage
 from sagent.tools.read import Read
 
 

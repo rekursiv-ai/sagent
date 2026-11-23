@@ -15,17 +15,12 @@ import tracemalloc
 import pytest
 
 from sagent.agent.agent import Agent, NoShrinker
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.pruner import Pruner
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
 from sagent.agent.team import Team
-from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
-from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
-from sagent.model.scripted import ScriptedProvider
-from sagent.providers.catalog import ModelCatalog
-from sagent.runtime import types
-from sagent.session.jsonl import read_record, record_line
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.journal.jsonl import read_record, record_line
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     Cancelled,
@@ -44,6 +39,11 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.runtime import types
 from sagent.tools import agent_session
 from sagent.tools.agent_session import AgentSession
 from sagent.tools.types import ToolContext, settled
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.agent.types import Factory, Shrinker
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 # Anthropic's shape: a read is a tenth of input, a five-minute write a quarter more.
@@ -73,6 +73,7 @@ def _setup(
     *,
     price: TokenPrice | None = _CACHED,
     compactor: Factory[Shrinker] = SummaryCompactor,
+    pruner: Factory[Shrinker] = Pruner,
     journal: RecordingJournal | None = None,
     routed: bool = False,
 ) -> tuple[Agent, AgentSession]:
@@ -96,7 +97,7 @@ def _setup(
         tools=[tool] if routed else [],
         tool_context=ToolContext(cwd=tmp_path),
         compactor=compactor,
-        pruner=Pruner,
+        pruner=pruner,
         journal=journal,
         system_prompt="",
     )
@@ -435,12 +436,6 @@ async def test_only_output_a_drop_would_shrink_can_be_pruned(
         )
 
 
-def _queued(agent: Agent) -> dict[str, str]:
-    pruner = agent.session.pruner
-    assert isinstance(pruner, Pruner)
-    return pruner.queued
-
-
 @pytest.mark.asyncio
 async def test_a_long_call_s_stub_and_news_can_be_queued(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
@@ -464,7 +459,7 @@ async def test_a_long_call_s_stub_and_news_can_be_queued(tmp_path: Path) -> None
         {"action": "prune_queue", "ids": picked, "reason": "x"},
     )
     assert text.startswith(f"Queued #{picked[0]}, #{picked[1]}: x")
-    assert _queued(agent) == {"c2": "x"}
+    assert agent.runtime.queued == {"c2": "x"}
     assert agent.runtime.inbox.drain_nowait() == []
 
 
@@ -518,17 +513,30 @@ async def test_a_queue_says_why_and_how_far_it_is_from_paying(tmp_path: Path) ->
         r"It is \$[\d.]+ short of paying; it drops once it pays\.",
         short,
     )
-    assert _queued(agent) == {"c0": "the file is read"}
+    assert agent.runtime.queued == {"c0": "the file is read"}
     assert agent.runtime.inbox.drain_nowait() == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("price", [None, _CACHED], ids=["unpriced", "paying"])
-async def test_a_queue_that_pays_drops_before_the_next_request(
+@pytest.mark.parametrize(
+    ("price", "pruner", "said"),
+    [
+        (None, Pruner, r"It drops before the next request\."),
+        (_CACHED, Pruner, r"It is \$[\d.]+ short of paying; it drops once it pays\."),
+        (_CACHED, NoShrinker, r"It drops before the next request\."),
+    ],
+    ids=["unpriced", "short", "no-pruner"],
+)
+async def test_an_agent_queues_whatever_its_pruner(
     tmp_path: Path,
     price: TokenPrice | None,
+    pruner: Factory[Shrinker],
+    said: str,
 ) -> None:
-    _, tool = _setup(tmp_path, price=price)
+    """With no pruner to price it, a queue drops at the next request."""
+    agent, tool = _setup(tmp_path, price=price, pruner=pruner)
+    # Ten thousand tokens after it to write again: a pruner waits.
+    agent.session.append(AssistantMessage(content="t" * 40_000))
 
     text = await _ask(
         tool,
@@ -536,7 +544,8 @@ async def test_a_queue_that_pays_drops_before_the_next_request(
         {"action": "prune_queue", "ids": [2], "reason": "spent"},
     )
 
-    assert text.splitlines()[-1] == "It drops before your next request."
+    assert re.fullmatch(said, text.splitlines()[-1])
+    assert agent.runtime.queued == {"c0": "spent"}
 
 
 @pytest.mark.asyncio
@@ -579,16 +588,7 @@ async def test_the_queue_lists_and_unqueues_by_entry(tmp_path: Path) -> None:
         ),
     ]
     assert unqueued == "Unqueued #2.\nNothing is queued."
-    assert _queued(agent) == {}
-
-
-@pytest.mark.asyncio
-async def test_an_agent_with_no_pruner_has_no_queue(tmp_path: Path) -> None:
-    _, tool = _setup(tmp_path)
-    _ = _kid(tool, tmp_path)
-
-    with pytest.raises(ValueError, match=r"^This agent has no pruner\.$"):
-        _ = await _ask(tool, tmp_path, {"agent": "kid", "action": "prune_list"})
+    assert agent.runtime.queued == {}
 
 
 def _kid(
@@ -622,11 +622,10 @@ def _kid(
 
 # The child's model did not ask: it is told nothing.
 @pytest.mark.asyncio
-async def test_a_queue_for_a_child_s_session_lands_in_its_pruner(
-    tmp_path: Path,
-) -> None:
+async def test_a_queue_for_a_busy_child_waits_in_its_runtime(tmp_path: Path) -> None:
     agent, tool = _setup(tmp_path)
     kid = _kid(tool, tmp_path, pruner=Pruner)
+    kid.runtime.turn_under_way = True
 
     text = await _ask(
         tool,
@@ -635,10 +634,71 @@ async def test_a_queue_for_a_child_s_session_lands_in_its_pruner(
     )
 
     assert text.startswith("Queued #2: stale\nDropping #2 saves")
-    assert _queued(kid) == {"k0": "stale"}
-    assert _queued(agent) == {}
+    assert kid.runtime.queued == {"k0": "stale"}
+    assert agent.runtime.queued == {}
     assert agent.runtime.inbox.drain_nowait() == []
     assert kid.runtime.inbox.drain_nowait() == []
+
+
+@pytest.mark.asyncio
+async def test_a_queue_for_an_idle_child_drops_at_once(tmp_path: Path) -> None:
+    """No request of its own is coming to share the rewrite with."""
+    agent, tool = _setup(tmp_path)
+    kid = _kid(tool, tmp_path)
+
+    async with kid:
+        text = await _ask(
+            tool,
+            tmp_path,
+            {"agent": "kid", "action": "prune_queue", "ids": [2], "reason": "stale"},
+        )
+
+    assert text.startswith("Dropped #2: stale\nDropping #2 saves")
+    (dropped,) = [r for r in kid.session if isinstance(r, ToolMessage)]
+    assert dropped.text() == kid.runtime.stubs.pruned
+    assert kid.runtime.queued == {}
+    assert agent.runtime.inbox.drain_nowait() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "said"),
+    [
+        (
+            Failed(exception=IndexError("list index out of range")),
+            "ValueError: The prune was not done: list index out of range",
+        ),
+        (Cancelled(), "ValueError: The prune was not done: the agent quit first."),
+    ],
+    ids=["failed", "the-child-quit"],
+)
+async def test_a_drop_at_once_that_is_not_done_says_why(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: Outcome[None],
+    said: str,
+) -> None:
+    _, tool = _setup(tmp_path)
+    kid = _kid(tool, tmp_path)
+    asked: list[types.RuntimeEvent] = []
+
+    async def ask(request: types.SessionPrune) -> Outcome[None]:
+        asked.append(request)
+        return outcome
+
+    monkeypatch.setattr(kid.runtime, "ask", ask)
+    result = await settled(
+        tool.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"agent": "kid", "action": "prune_queue", "ids": [2], "reason": "stale"},
+        ),
+    )
+
+    assert result.is_error
+    assert result.text().startswith(said)
+    assert asked == [
+        types.SessionPrune(sender="Agent", call_ids=("k0",), reason="stale"),
+    ]
 
 
 # As a prune of it does: one way to learn how an edit of another's session went.

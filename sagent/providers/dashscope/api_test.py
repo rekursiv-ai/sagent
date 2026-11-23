@@ -6,12 +6,12 @@ from dataclasses import replace
 
 import pytest
 
+from sagent.journal.types import UserMessage
 from sagent.model.capability import ModelLimits, model_setting_names
 from sagent.model.exceptions import AuthError, UnknownModelError
 from sagent.model.types import Request
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.openai.compat import OpenAIModel
-from sagent.session.types import UserMessage
 
 
 _REQUEST = Request(records=(UserMessage(content="hi"),))

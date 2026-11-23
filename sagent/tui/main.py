@@ -57,12 +57,33 @@ from wesearch.fetch import FetchSession
 
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.agents_md import TIERS, AgentsMdConfig
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.pruner import Pruner
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
 from sagent.host.shared import host_gate
 from sagent.host.strings import ServeDirs
+from sagent.journal.jsonl import JournalInUseError, JsonlJournal
+from sagent.journal.legacy_journal import (
+    find_old,
+    is_legacy,
+    upgrade,
+)
+from sagent.journal.projects import (
+    find_sessions,
+    latest_session,
+    list_sessions,
+    new_session_path,
+    project_dir,
+    unused_session_path,
+)
+from sagent.journal.types import (
+    Failed,
+    ModelIdle,
+    Succeeded,
+    ToolCall,
+    ToolMessage,
+)
 from sagent.lib.asyncio_stalls import watch_stalls
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.posix.attach import attach, viewers
@@ -82,27 +103,6 @@ from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
-from sagent.session.jsonl import JournalInUseError, JsonlJournal
-from sagent.session.legacy_journal import (
-    find_old,
-    is_legacy,
-    upgrade,
-)
-from sagent.session.projects import (
-    find_sessions,
-    latest_session,
-    list_sessions,
-    new_session_path,
-    project_dir,
-    unused_session_path,
-)
-from sagent.session.types import (
-    Failed,
-    ModelIdle,
-    Succeeded,
-    ToolCall,
-    ToolMessage,
-)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
@@ -161,12 +161,12 @@ if TYPE_CHECKING:
         Factory,
         Shrinker,
     )
+    from sagent.journal.projects import SessionInfo
     from sagent.model.types import Response
     from sagent.providers.types import (
         Model,
         ModelCatalog as Catalog,
     )
-    from sagent.session.projects import SessionInfo
     from sagent.settings.types import Setting
     from sagent.tools.types import Tool
     from sagent.tui.console import ConsolePrinter, Screen, terminal_console

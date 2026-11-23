@@ -28,11 +28,11 @@ from treekle import ReadError, from_plain, json_dumps
 
 import yaml
 
+from sagent.journal.types import MemoryResult
 from sagent.lib.yaml import (
     parse as yaml_parse,
     split_frontmatter,
 )
-from sagent.session.types import MemoryResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

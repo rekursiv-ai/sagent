@@ -13,7 +13,7 @@ from wesearch.browser import BrowserAction, BrowserError, BrowserMode
 from wesearch.mcp.types import BrowserParamsSchema, browser_data
 from wesearch.types.errors import FetchError
 
-from sagent.session.types import Attachment, WebBrowserResult
+from sagent.journal.types import Attachment, WebBrowserResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Arg,

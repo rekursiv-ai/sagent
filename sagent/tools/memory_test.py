@@ -9,7 +9,7 @@ import stat
 import pytest
 import yaml
 
-from sagent.session.types import MemoryResult
+from sagent.journal.types import MemoryResult
 from sagent.tools.memory import Memory
 from sagent.tools.types import ToolContext, settled
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.session.types import ToolMessage
+    from sagent.journal.types import ToolMessage
 
 
 def test_summary_names_the_action_and_the_memory(tmp_path: Path) -> None:

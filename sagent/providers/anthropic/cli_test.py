@@ -23,6 +23,20 @@ from treekle import PlainTree, ReadError, from_plain, json_dumps, json_loads
 import pytest
 import pytest_asyncio
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model.exceptions import (
     AuthError,
     ContextOverflowError,
@@ -37,20 +51,6 @@ from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.testing import refuse_browsers
 from sagent.providers.types import HasLogin
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    ContextClear,
-    SessionContext,
-    SystemMessage,
-    Thinking,
-    TokenUsage,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     Tool,
@@ -67,9 +67,9 @@ if TYPE_CHECKING:
 
     import httpx2
 
+    from sagent.journal.types import SessionRecord
     from sagent.model.capability import ModelSettingName
     from sagent.providers.types import ProcessPool, ToolMount
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 

@@ -86,9 +86,9 @@ from sagent.host.wire import (
     ping,
     received,
 )
+from sagent.journal.types import ToolMessage
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.posix.child import Child, finish
-from sagent.session.types import ToolMessage
 from sagent.types import AsyncResource
 
 

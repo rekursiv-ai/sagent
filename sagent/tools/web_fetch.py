@@ -29,7 +29,7 @@ from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.session.types import WebFetchResult
+from sagent.journal.types import WebFetchResult
 from sagent.tools.command_analyzer import Invocation, replaceable
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (

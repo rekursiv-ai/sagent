@@ -21,6 +21,12 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import Team
 from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.lib.userdirs import config_dir, state_dir
 from sagent.model.capability import (
     ModelCapability,
@@ -35,12 +41,6 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    UncategorizedToolResult,
-    UserMessage,
-)
 from sagent.settings.exceptions import SettingError
 from sagent.settings.harvest import harvest
 from sagent.settings.types import Setting

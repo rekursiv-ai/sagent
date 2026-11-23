@@ -28,26 +28,10 @@ from sagent.agent.agent import (
     spent_by_model,
 )
 from sagent.agent.agents_md import AgentsMdConfig, Directives, directives
-from sagent.agent.compactor import SummaryCompactor
-from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
-from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
-from sagent.model.exceptions import ContextOverflowError, OverloadedError
-from sagent.model.scripted import (
-    Reply,
-    ScriptedModel,
-    ScriptedProvider,
-    call,
-    reply,
-)
-from sagent.model.types import Request, Response
-from sagent.providers.catalog import ModelCatalog
-from sagent.providers.table import ModelTable
-from sagent.runtime import runtime, types
-from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
-from sagent.runtime.tape import MaskRange, sent_records
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AgentIdle,
     AgentMessage,
     AssistantMessage,
@@ -73,6 +57,22 @@ from sagent.session.types import (
     stored_plain,
     stored_record,
 )
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
+from sagent.model.exceptions import ContextOverflowError, OverloadedError
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
+)
+from sagent.model.types import Request, Response
+from sagent.providers.catalog import ModelCatalog
+from sagent.providers.table import ModelTable
+from sagent.runtime import runtime, types
+from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
+from sagent.runtime.tape import MaskRange, sent_records
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
 from sagent.tools.types import (
@@ -1528,38 +1528,48 @@ def test_a_codex_reply_between_its_events_is_one_turn(tmp_path: Path) -> None:
     ]
 
 
-def _cost(request: int) -> TokenUsage:
-    return TokenUsage(info=immutable({"request": request}))
-
-
 @pytest.mark.parametrize(
     ("records", "costs"),
     [
         (
-            (AssistantMessage(content="a"), _cost(1), UserMessage(content="u")),
+            (
+                AssistantMessage(content="a"),
+                TokenUsage(info=immutable({"request": 1})),
+                UserMessage(content="u"),
+            ),
             [1],
         ),
         (
             (
                 ToolCall(call_id="c", name="Read"),
-                _cost(1),
+                TokenUsage(info=immutable({"request": 1})),
                 _done("c"),
                 AssistantMessage(content="b"),
             ),
             [1, 0],
         ),
-        ((AssistantMessage(content="a"), _cost(1)), [1]),
+        (
+            (AssistantMessage(content="a"), TokenUsage(info=immutable({"request": 1}))),
+            [1],
+        ),
         (
             (
                 AssistantMessage(content="a"),
-                _cost(1),
+                TokenUsage(info=immutable({"request": 1})),
                 _BOOKKEEPING,
-                _cost(7),
+                TokenUsage(info=immutable({"request": 7})),
                 UserMessage(content="u"),
             ),
             [1],
         ),
-        ((_cost(9), AssistantMessage(content="a"), UserMessage(content="u")), [0]),
+        (
+            (
+                TokenUsage(info=immutable({"request": 9})),
+                AssistantMessage(content="a"),
+                UserMessage(content="u"),
+            ),
+            [0],
+        ),
     ],
     ids=["a-user-turn", "the-next-reply", "the-end", "a-childs-after", "one-before"],
 )

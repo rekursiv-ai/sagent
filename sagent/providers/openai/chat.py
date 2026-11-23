@@ -29,24 +29,24 @@ from treekle import (
     mutable,
 )
 
-from sagent.model.cost import TokenCount
-from sagent.model.exceptions import DisconnectedError
-from sagent.model.types import Response, TextChunk
-from sagent.providers.openai import wire
-from sagent.session.types import (
+from sagent.journal.types import (
     AssistantMessage,
     Thinking,
     ToolCall,
     ToolMessage,
 )
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import DisconnectedError
+from sagent.model.types import Response, TextChunk
+from sagent.providers.openai import wire
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from sagent.journal.types import Attachment
     from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
     from sagent.model.types import Request
-    from sagent.session.types import Attachment
 
 
 __all__ = [
@@ -163,7 +163,7 @@ class StreamReader:
         self._calls: dict[int, _Call] = {}
         self._usage: dict[str, object] = {}
         self._finish = ""
-        self._refused = False
+        self._refusals: list[str] = []
 
     def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
         """Take one event and return the text and reasoning it adds.
@@ -215,7 +215,8 @@ class StreamReader:
             if block.get("type") == "thinking"
             for part in _objects(block.get("thinking"))
         )
-        self._refused = self._refused or bool(refusal)
+        if refusal:
+            self._refusals.append(refusal)
         self._text.extend(part for part in (text, refusal) if part)
         chunks: list[TextChunk] = []
         if thinking:
@@ -269,6 +270,11 @@ class StreamReader:
             if call.call_id
         )
         tokens = _tokens(self._usage)
+        stop_reason = _stop_reason(
+            self._finish,
+            refused=bool(self._refusals),
+            called=any(isinstance(record, ToolCall) for record in records),
+        )
         return Response(
             records=tuple(records),
             tokens=tokens,
@@ -278,11 +284,10 @@ class StreamReader:
                 datetime.now(UTC).date(),
             ]
             * tokens,
-            stop_reason=_stop_reason(
-                self._finish,
-                refused=self._refused,
-                called=any(isinstance(record, ToolCall) for record in records),
-            ),
+            stop_reason=stop_reason,
+            stop_details=("".join(self._refusals) or self._finish)
+            if stop_reason == "refusal"
+            else "",
         )
 
     def _reasoning(self, delta: Mapping[str, object]) -> None:

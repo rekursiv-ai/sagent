@@ -15,7 +15,8 @@ import re
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.journal.types import UserMessage
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -52,7 +53,6 @@ from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHostedModel
 from sagent.providers.table import ModelTable, ModelTags
 from sagent.providers.types import HasLogins
-from sagent.session.types import UserMessage
 from sagent.tools.types import ToolContext
 from sagent.types import AsyncResource
 

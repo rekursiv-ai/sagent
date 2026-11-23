@@ -37,6 +37,28 @@ import os
 
 from treekle import PlainTree, ReadError, from_plain, json_loads
 
+from sagent.journal.jsonl import record_line
+from sagent.journal.projects import is_session, legacy_log
+from sagent.journal.types import (
+    FORMER_TAPE_KINDS,
+    AgentMessage,
+    AgentSpawnResult,
+    AssistantMessage,
+    Attachment,
+    BashResult,
+    ContextClear,
+    EditResult,
+    ReadResult,
+    SessionRecord,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+    WebFetchResult,
+    WriteResult,
+)
 from sagent.lib.files.owner_only import write_private
 from sagent.lib.userdirs import data_dir
 from sagent.model.types import Response
@@ -57,28 +79,6 @@ from sagent.runtime.tape import (
     merge_mask_ranges,
     splice_safe_repair,
     unpaired_call_ids,
-)
-from sagent.session.jsonl import record_line
-from sagent.session.projects import is_session, legacy_log
-from sagent.session.types import (
-    FORMER_TAPE_KINDS,
-    AgentMessage,
-    AgentSpawnResult,
-    AssistantMessage,
-    Attachment,
-    BashResult,
-    ContextClear,
-    EditResult,
-    ReadResult,
-    SessionRecord,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
-    WebFetchResult,
-    WriteResult,
 )
 
 

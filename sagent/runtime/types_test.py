@@ -11,6 +11,15 @@ import re
 
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    SessionContext,
+    SystemMessage,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
 from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.runtime.tape import ContextSplice, TapeRef
@@ -21,15 +30,6 @@ from sagent.runtime.types import (
     SessionCompacted,
     WakeSchedule,
     wire_role,
-)
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    SessionContext,
-    SystemMessage,
-    ToolMessage,
-    UncategorizedToolResult,
-    UserMessage,
 )
 
 
@@ -53,7 +53,7 @@ def test_whatever_watches_a_call_fail_decides_about_a_suspended_one_too() -> Non
         and "ModelResponseSuspended" not in text
     }
     # The pruner hears a call only when it replied; its ``Failed`` is a prune's.
-    assert unheard == {"agent/agent.py", "agent/pruner.py"}
+    assert unheard == {"agent/agent.py", "agent/compaction/pruner.py"}
 
 
 def test_what_a_compaction_did_takes_every_field_from_the_override() -> None:

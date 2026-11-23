@@ -23,16 +23,16 @@ import httpx2
 import mcp.types as mcp_types
 import pytest
 
-from sagent.providers import tool_server
-from sagent.providers.testing import send
-from sagent.providers.tool_server import McpMount, McpToolServer
-from sagent.session.types import (
+from sagent.journal.types import (
     Attachment,
     BashResult,
     ToolCall,
     ToolMessage,
     UncategorizedToolResult,
 )
+from sagent.providers import tool_server
+from sagent.providers.testing import send
+from sagent.providers.tool_server import McpMount, McpToolServer
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
 

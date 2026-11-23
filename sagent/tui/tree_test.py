@@ -17,7 +17,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 import pytest
 
 from sagent.agent.types import Agent
-from sagent.session.types import ToolCall
+from sagent.journal.types import ToolCall
 from sagent.tui import tree
 from sagent.tui.theme import load_theme
 from sagent.tui.tree import Row, pick, render, rows

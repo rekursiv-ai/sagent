@@ -66,6 +66,25 @@ import logging
 import math
 import time
 
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    BackgroundTaskResult,
+    Cancelled,
+    ContextCompaction,
+    Failed,
+    ModelIdle,
+    Outcome,
+    SessionContext,
+    Succeeded,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+    now_timestamp,
+)
 from sagent.model.exceptions import (
     ContextOverflowError,
     DisconnectedError,
@@ -75,7 +94,12 @@ from sagent.model.token_accounting import TokenAccounting, bound, stamped
 from sagent.model.types import Request, Response, TextChunk
 
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
-from sagent.runtime.context import Tape, stubbed, widen_barrier_mask
+from sagent.runtime.context import (
+    Tape,
+    prunable,
+    stubbed,
+    widen_barrier_mask,
+)
 from sagent.runtime.exceptions import (
     UserFacingError,
     describe,
@@ -136,25 +160,6 @@ from sagent.runtime.types import (
     UserMessageCompleted,
     WakeSchedule,
 )
-from sagent.session.types import (
-    AgentIdle,
-    AgentMessage,
-    AssistantMessage,
-    BackgroundTaskResult,
-    Cancelled,
-    ContextCompaction,
-    Failed,
-    ModelIdle,
-    Outcome,
-    SessionContext,
-    Succeeded,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    ToolMessage,
-    UserMessage,
-    now_timestamp,
-)
 from sagent.tools.background_task import (
     BackgroundTask,
     background_delay,
@@ -179,8 +184,8 @@ if TYPE_CHECKING:
         Sequence,
     )
 
+    from sagent.journal.types import SessionRecord
     from sagent.providers.types import Model
-    from sagent.session.types import SessionRecord
     from sagent.tools.types import Tool
 
 
@@ -423,10 +428,10 @@ class Compactor(Protocol):
 
 @runtime_checkable
 class Pruning(Protocol):
-    """What drops old tool results before a model call, when that costs less."""
+    """What drops the queued tool results before a model call, when that costs less."""
 
     def prune(self) -> bool:
-        """Drop what pays to drop, now; return whether anything was."""
+        """Drop what pays to drop, or ask the model; return whether compaction waits."""
         ...
 
 
@@ -493,6 +498,10 @@ class Runtime:
         self.reply_room: Callable[[], int] | None = None
         self.prune: Callable[[], bool] | None = None
         self.result_note: Callable[[ToolMessage], str] | None = None
+        self.queued: dict[str, str] = {}
+        """Calls whose outputs the model queued to drop, each with why: dropped before
+        a model call, when ``prune`` finds it pays, or at once with no ``prune``."""
+
         self.before_tool_spawn: Callable[[Response], UserMessage | None] | None = None
         self.context_updates: (
             Callable[[], Sequence[SystemMessage | AgentMessage | SessionContextUpdate]]
@@ -551,10 +560,10 @@ class Runtime:
         self._last_request: float | None = None
         # Automatic compactions since the last reply; two in a row stop trying.
         self._auto_compactions = 0
-        # Whether the last compaction failed. A reply leaves the context it could not
-        # compact, so none is tried again on its own until the user writes, retries,
-        # or clears, or one asked for succeeds; each reply retried it before
-        # (2026-11-22).
+        # Whether the last compaction failed as asking again soon cannot cure: a
+        # refusal, no usable summary, a context too long. A reply leaves the context
+        # as it was, so none is tried again on its own until a message comes in or
+        # a retry is asked; each reply retried it before (2026-11-22).
         self._compaction_failed = False  # pragma: no mutate[truthiness]
 
         self.compact_task: asyncio.Task[SessionCompactCompleted | None] | None = None
@@ -1039,7 +1048,11 @@ class Runtime:
         """
         if not indices:
             return
-        context = stubbed(self.tape.context().messages, indices, stub=self.stubs.pruned)
+        before = self.tape.context().messages
+        for i in indices:
+            if isinstance(output := before[i], ToolMessage):
+                _ = self.queued.pop(output.call_id or "", None)
+        context = stubbed(before, indices, stub=self.stubs.pruned)
         _ = self.tape.append_splice(
             mask=full_tape_mask(self.tape),
             replacement=tuple(context),
@@ -1207,11 +1220,9 @@ class Runtime:
         if item.due_after is not None:
             self._commit_due(self._opened(item))
             return
-        # The user writing during a suspension asks to try now, as after a failed
-        # compaction.
+        # The user writing during a suspension asks to try now.
         if isinstance(item, UserMessage):
             self.recheck_quota = True
-            self._compaction_failed = False
             self._end_suspension()
         if isinstance(item, SystemMessage):
             # A nudge to a busy agent is moot: it is told again at its next idle if
@@ -1331,10 +1342,9 @@ class Runtime:
             ModelIdle,
             AgentIdle,
         )
-        # A new conversation does not inherit the old one's failure, its wait for a
-        # rate limit, or its failed compaction.
+        # A new conversation does not inherit the old one's failure, or its wait
+        # for a rate limit.
         self._end_suspension()
-        self._compaction_failed = False
         self.tape.append_clear()
         # A tool that finished as the user cleared posted its result behind the
         # ``SessionClear``; delivering it would carry the wiped session's work into
@@ -1753,8 +1763,10 @@ class Runtime:
         else:
             self._compaction_trigger = ""
         if not isinstance(ending.outcome, Cancelled):
-            self._compaction_failed = isinstance(ending.outcome, Failed)
-        if not isinstance(ending.outcome, Cancelled):
+            self._compaction_failed = isinstance(
+                ending.outcome,
+                Failed,
+            ) and not isinstance(ending.outcome.exception, RetryableError)
             self.tape.append_history(ending)
         self._end(request, ending)
 
@@ -1852,15 +1864,30 @@ class Runtime:
                 self.publish(news)
 
     # Prune first: a drop that brings the context back under the compaction trigger
-    # spares the compaction, and a note of what may be pruned puts it off a round,
-    # so the model can answer it. Compact when the compactor says the request would
-    # not fit; twice with no model call between means compacting does not help, so
-    # the call goes ahead and the provider's error says why.
+    # spares the compaction. Only a full context's note of what may be pruned puts
+    # compaction off, one round, so the model can answer it. Compact when the
+    # compactor says the request would not fit; twice with no model call between
+    # means compacting does not help, so the call goes ahead and the provider's
+    # error says why.
     async def _start_round(self) -> None:
         """Prune, compact, or call the model, whichever the context is due."""
-        pruned = self.prune is not None and self.prune()
+        context = self.tape.context().messages
+        here = {e.call_id for e in context if isinstance(e, ToolMessage)}
+        self.queued = {c: why for c, why in self.queued.items() if c in here}
+        if self.prune is None:
+            stub = self.stubs.pruned
+            self.drop(
+                [
+                    i
+                    for i, e in enumerate(context)
+                    if isinstance(e, ToolMessage)
+                    and e.call_id in self.queued
+                    and prunable(e, stub=stub)
+                ],
+            )
+        waits = self.prune is not None and self.prune()
         if (
-            not pruned
+            not waits
             and self.compactor is not None
             and self.compact_due is not None
             and self._auto_compactions < 2
@@ -1975,6 +2002,7 @@ class Runtime:
         for earlier in self._take(ModelResponseStarted):
             self._commit_due(earlier)
         self.tape.append_history(message)
+        self._compaction_failed = False
         self._stand(message, "in_turn")
         self.publish(message)
 
@@ -2394,6 +2422,30 @@ class Runtime:
         self.inbox.push_back(queued)
         return queued
 
+    # What sizes a block sizes this too: a measured request matches only the records
+    # it sent, footers included.
+    def sent(self, entries: Sequence[ModelContextEvent]) -> list[SessionRecord]:
+        """Return ``entries`` as a request sends them, each tool result with its note.
+
+        Args:
+          entries: A context, or part of one.
+
+        Returns:
+          records: As :func:`sent_records` gives them, each tool result ending with
+            its ``result_note``, which is never kept.
+
+        """
+        records = sent_records(
+            entries,
+            keep_senders_apart=self.model.capability.keeps_user_turns_apart,
+            provider=self.model.provider.name,
+        )
+        note = self.result_note
+        return [
+            r if note is None or not isinstance(r, ToolMessage) else _noted(r, note(r))
+            for r in records
+        ]
+
     def request(
         self,
         *,
@@ -2414,25 +2466,16 @@ class Runtime:
             ``0`` bypasses it for sizing without recursion.
 
         Returns:
-          request: The system prompt, the context and ``after``, and every tool;
-            each tool result ends with its ``result_note``, which is never kept.
+          request: The system prompt, ``sent`` of the context, ``after``, and
+            every tool.
 
         """
-        records = sent_records(
-            self.tape.context().messages if context is None else context,
-            keep_senders_apart=self.model.capability.keeps_user_turns_apart,
-            provider=self.model.provider.name,
-        )
-        note = self.result_note
         return self.tagged(
             Request(
                 system=self.system,
                 records=[
-                    *(
-                        r
-                        if note is None or not isinstance(r, ToolMessage)
-                        else _noted(r, note(r))
-                        for r in records
+                    *self.sent(
+                        self.tape.context().messages if context is None else context,
                     ),
                     *after,
                 ],

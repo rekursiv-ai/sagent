@@ -17,9 +17,9 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import MessageKind, Team
+from sagent.journal.types import AgentMessage, AgentSendResult
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AgentMessage, AgentSendResult
 from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn

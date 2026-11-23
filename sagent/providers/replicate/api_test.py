@@ -15,6 +15,15 @@ from treekle import ReadError, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    UserMessage,
+)
 from sagent.model.exceptions import AuthError, DisconnectedError
 from sagent.model.types import Request, Response
 from sagent.providers.catalog import ModelCatalog
@@ -24,21 +33,12 @@ from sagent.providers.replicate import api
 from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
-from sagent.session.types import (
-    AgentMessage,
-    AssistantMessage,
-    Attachment,
-    SystemMessage,
-    Thinking,
-    ToolCall,
-    UserMessage,
-)
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.session.types import SessionRecord
+    from sagent.journal.types import SessionRecord
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ Iterate `agent.runtime` for every event published from then on, or add a callbac
 
 ```python
 from sagent.runtime import types
-from sagent.session.types import Succeeded
+from sagent.journal.types import Succeeded
 
 
 def observe(event: types.RuntimeEvent) -> None:

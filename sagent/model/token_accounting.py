@@ -24,8 +24,7 @@ import json
 
 from treekle import mutable, to_plain
 
-from sagent.model.types import Response
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentMessage,
     AssistantMessage,
     ContextCompaction,
@@ -39,6 +38,7 @@ from sagent.session.types import (
     UserMessage,
     stored_plain,
 )
+from sagent.model.types import Response
 
 
 if TYPE_CHECKING:

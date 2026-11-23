@@ -17,7 +17,7 @@ from wesearch.types.errors import BotDetectionError, CooldownError
 
 import pytest
 
-from sagent.session.types import (
+from sagent.journal.types import (
     ToolMessage,
     WebSearchHit,
     WebSearchResult,

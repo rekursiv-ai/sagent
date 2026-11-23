@@ -68,10 +68,10 @@ from sagent.host.wire import (
     ping,
     received,
 )
+from sagent.journal.types import RemoteToolResult, ToolMessage
 from sagent.lib.userdirs import config_dir
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime.exceptions import describe
-from sagent.session.types import RemoteToolResult, ToolMessage
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import Stream, ToolStreamingResult, json_schema, parse
 from sagent.types import AsyncResource

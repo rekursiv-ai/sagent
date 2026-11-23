@@ -35,10 +35,10 @@ import re
 import shutil
 import uuid
 
+from sagent.journal.jsonl import read_record
+from sagent.journal.types import SessionContext, UserMessage, stored_names
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.userdirs import data_dir
-from sagent.session.jsonl import read_record
-from sagent.session.types import SessionContext, UserMessage, stored_names
 
 
 if TYPE_CHECKING:

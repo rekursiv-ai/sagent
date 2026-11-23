@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING
 
 import time
 
-from sagent.model.cost import TokenCount
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     Succeeded,
 )
+from sagent.model.cost import TokenCount
+from sagent.runtime import types
 
 
 if TYPE_CHECKING:

@@ -8,8 +8,8 @@ import pytest
 
 from sagent.agent.agent import Agent, NoShrinker, RuntimeSession
 from sagent.agent.agents_md import AgentsMdConfig
-from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.pruner import Pruner
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
 from sagent.agent.types import (
     Agent as AgentProtocol,
     Factory,
@@ -17,15 +17,15 @@ from sagent.agent.types import (
     Session,
     Shrinker,
 )
-from sagent.model.scripted import ScriptedProvider, reply
-from sagent.session.jsonl import JsonlJournal
-from sagent.session.recording import RecordingJournal
-from sagent.session.types import (
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
     AssistantMessage,
     ContextClear,
     UncategorizedRecord,
     UserMessage,
 )
+from sagent.model.scripted import ScriptedProvider, reply
 from sagent.tools.types import ToolContext
 
 

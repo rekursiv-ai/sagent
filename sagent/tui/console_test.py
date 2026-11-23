@@ -15,11 +15,11 @@ from rich.text import Text
 
 import pytest
 
-from sagent.lib.userdirs import config_dir
-from sagent.runtime import types
-from sagent.session.types import (
+from sagent.journal.types import (
     AgentIdle,
 )
+from sagent.lib.userdirs import config_dir
+from sagent.runtime import types
 from sagent.tools.bash import Bash
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.console import (

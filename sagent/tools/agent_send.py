@@ -23,7 +23,7 @@ import asyncio
 import logging
 
 from sagent.agent.team import Team
-from sagent.session.types import AgentSendResult
+from sagent.journal.types import AgentSendResult
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import (
     Arg,

@@ -45,8 +45,8 @@ import threading
 
 from treekle import PlainTree, from_plain, json_dumps, json_loads
 
-from sagent.session.jsonl import read_record
-from sagent.session.types import TokenUsage
+from sagent.journal.jsonl import read_record
+from sagent.journal.types import TokenUsage
 
 
 _CWD: Final[Path] = Path(__file__).resolve().parent

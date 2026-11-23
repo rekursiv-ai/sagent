@@ -22,9 +22,9 @@ import time
 
 import pytest
 
+from sagent.journal.types import BashResult, ToolMessage
 from sagent.lib.posix.child import Child
 from sagent.lib.posix.pids import gone_within, running
-from sagent.session.types import BashResult, ToolMessage
 from sagent.tools import bash
 from sagent.tools.bash import (
     Bash,

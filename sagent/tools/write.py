@@ -16,9 +16,9 @@ import hashlib
 import os
 import uuid
 
+from sagent.journal.types import WriteResult
 from sagent.lib.userdirs import state_dir
 from sagent.providers.login import file_lock
-from sagent.session.types import WriteResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import (
     ToolOutput,

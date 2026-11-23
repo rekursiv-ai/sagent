@@ -23,16 +23,16 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from sagent.model.cost import TokenCost
-    from sagent.providers.catalog import CachedModel
-    from sagent.providers.types import Model
-    from sagent.runtime.runtime import Runtime
-    from sagent.session.types import (
+    from sagent.journal.types import (
         Attachment,
         RequestMeasurement,
         SessionRecord,
         UncategorizedRecord,
     )
+    from sagent.model.cost import TokenCost
+    from sagent.providers.catalog import CachedModel
+    from sagent.providers.types import Model
+    from sagent.runtime.runtime import Runtime
     from sagent.tools.types import Tool
 
 
