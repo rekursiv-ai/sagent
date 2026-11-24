@@ -501,6 +501,18 @@ def _contents(
         if role == "user" and any("functionResponse" in part for part in parts):
             answered = _answers(parts)
             parts[:] = [*answered, *(p for p in parts if not _in(p, answered))]
+        elif role == "model":
+            # Gemini 3+ rejects an unsigned function call in the current turn
+            # (400), as happens after switching from another provider; parallel
+            # calls sign only the first, so only an unsigned first call takes
+            # Google's bypass sentinel.
+            for part in parts:
+                if "functionCall" in part:
+                    part.setdefault(
+                        "thoughtSignature",
+                        "skip_thought_signature_validator",
+                    )
+                    break
     return [{"role": role, "parts": parts} for role, parts in turns]
 
 

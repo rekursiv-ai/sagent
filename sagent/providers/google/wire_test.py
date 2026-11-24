@@ -229,6 +229,60 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
     ]
 
 
+def test_an_unsigned_call_turn_carries_the_skip_signature_on_its_first_call() -> None:
+    """History from another provider has no Gemini signature; Gemini 3+ rejects it."""
+    contents = _contents(
+        UserMessage(content="check"),
+        AssistantMessage(content="checking"),
+        ToolCall(call_id="c1", name="Read", arguments={"path": "a.py"}),
+        ToolCall(call_id="c2", name="Read", arguments={"path": "b.py"}),
+        ToolMessage(
+            call_id="c1",
+            state="done",
+            stdout=("a",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolMessage(
+            call_id="c2",
+            state="done",
+            stdout=("b",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolCall(
+            call_id="c3",
+            name="Bash",
+            arguments={"cmd": "ls"},
+            extra={"thoughtSignature": ""},
+        ),
+        ToolMessage(
+            call_id="c3",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
+    assert contents[1] == {
+        "role": "model",
+        "parts": [
+            {"text": "checking"},
+            {
+                "functionCall": {"name": "Read", "args": {"path": "a.py"}},
+                "thoughtSignature": "skip_thought_signature_validator",
+            },
+            {"functionCall": {"name": "Read", "args": {"path": "b.py"}}},
+        ],
+    }
+    assert contents[3] == {
+        "role": "model",
+        "parts": [
+            {
+                "functionCall": {"name": "Bash", "args": {"cmd": "ls"}},
+                "thoughtSignature": "skip_thought_signature_validator",
+            },
+        ],
+    }
+
+
 def test_a_result_whose_call_is_gone_is_named_by_its_id() -> None:
     contents = _contents(
         ToolMessage(
@@ -346,7 +400,15 @@ def test_a_context_clear_sends_its_summary_then_its_history() -> None:
     )
     assert contents == [
         {"role": "user", "parts": [{"text": "We fixed it."}]},
-        {"role": "model", "parts": [{"functionCall": {"name": "Read", "args": {}}}]},
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "functionCall": {"name": "Read", "args": {}},
+                    "thoughtSignature": "skip_thought_signature_validator",
+                },
+            ],
+        },
         {
             "role": "user",
             "parts": [
