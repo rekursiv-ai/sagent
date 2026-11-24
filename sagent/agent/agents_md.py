@@ -519,7 +519,7 @@ def _read(
         meta, body = frontmatter(raw)
     except yaml.YAMLError as e:
         logger.warning(
-            "Skipping %s: its frontmatter will not parse: %s",  # pragma: no mutate[diagnostic-text]
+            "Skipping %s: its frontmatter will not parse: %s",  # pragma: no mutate[diagnostic-text] -- Only an operator reads this log line; no test matches it.
             resolved,
             e,
         )

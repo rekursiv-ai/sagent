@@ -245,7 +245,9 @@ def declared_extras(wheel: Wheel) -> tuple[str, ...]:
     if not names:
         return ()
     metadata = parser.Parser().parsestr(wheel.read(names[0]))
-    extras = metadata.get_all("Provides-Extra")  # pragma: no mutate[case-insensitive]
+    # pragma: no mutate[case-insensitive] start -- Metadata names ignore case.
+    extras = metadata.get_all("Provides-Extra")
+    # pragma: no mutate end
     return tuple(extras or ())
 
 

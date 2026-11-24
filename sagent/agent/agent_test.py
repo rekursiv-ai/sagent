@@ -1657,6 +1657,26 @@ async def test_each_turn_is_journaled_with_what_it_cost(tmp_path: Path) -> None:
     }
 
 
+def test_a_reply_journals_the_measurement_it_was_made_with() -> None:
+    measured = RequestMeasurement(
+        tokenizer="tokenizer",
+        model="scripted/scripted",
+        frame="frame",
+        prefix="prefix",
+        records=2,
+        prompt=37,
+    )
+    made = Response(
+        records=(AssistantMessage(content="hi"),),
+        stop_reason="end_turn",
+        measurement=measured,
+    )
+
+    (_, usage) = agent_module._journaled([made])
+    assert isinstance(usage, TokenUsage)
+    assert usage.measurement is measured
+
+
 @pytest.mark.asyncio
 async def test_a_compaction_starts_a_new_window_in_the_journal(tmp_path: Path) -> None:
     journal = RecordingJournal()
@@ -2004,6 +2024,20 @@ def test_an_agent_without_the_environment_is_told_only_its_model(
     assert _updated(session) == []
 
 
+def test_a_context_update_is_timed_as_the_context_it_puts_in_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, agent = _agent(tmp_path)
+    when = datetime(2026, 10, 24, 13, tzinfo=UTC)
+    monkeypatch.setattr(agent_module, "now_timestamp", lambda: when)
+
+    (update,) = _session(agent).updates()
+
+    assert isinstance(update, types.SessionContextUpdate)
+    assert update.timestamp == when == update.context.timestamp
+
+
 def test_settings_already_stated_are_not_stated_again(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path)
     session = _session(agent)
@@ -2184,6 +2218,17 @@ def test_allowing_a_tool_the_agent_lacks_is_refused() -> None:
     assert agent.allowed == frozenset({"_Tool"})
     agent.allowed = None
     assert agent.allowed is None
+
+
+def test_a_later_context_naming_no_skipped_file_keeps_the_last_named() -> None:
+    named = (Path("/a/AGENTS.md"),)
+
+    last = agent_module._last_stated(
+        [SessionContext(skipped_instruction_files=named), SessionContext()],
+        offered=frozenset(),
+    )
+
+    assert last.skipped_instruction_files == named
 
 
 def test_the_context_names_each_file_skipped_once_it_is(tmp_path: Path) -> None:
@@ -2735,6 +2780,17 @@ def test_what_a_journal_says_was_spent(
             {"sol-6.1": 2.5},
             id="a-compactions-spend-on-the-model-in-force",
         ),
+        pytest.param((ContextClear(),), {}, id="a-clear-that-spent-nothing"),
+        pytest.param(
+            (ContextClear(extra={"spend_usd": 0.5}),),
+            {"": 0.5},
+            id="a-clear-that-spent-half",
+        ),
+        pytest.param(
+            (ContextClear(extra={"spend_usd": 2.0}),),
+            {"": 2.0},
+            id="a-clear-that-spent-two-before-any-model",
+        ),
     ],
 )
 def test_what_a_journal_says_was_spent_on_each_model(
@@ -2966,6 +3022,27 @@ async def test_an_agent_closes_the_models_it_was_given(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_model_closed_in_the_background_leaves_the_closing_set(
+    tmp_path: Path,
+) -> None:
+    provider = _Counting()
+    first, second = (provider["scripted"] for _ in range(2))
+    agent = Agent(
+        model=first,
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=_config(tmp_path),
+    )
+    async with agent:
+        agent.model = second
+        agent.runtime.publish(AgentIdle())
+        await asyncio.sleep(0)
+        assert first.closed == 1
+        await asyncio.gather(*agent._closing)
+        await asyncio.sleep(0)
+        assert agent._closing == set()
+
+
+@pytest.mark.asyncio
 async def test_a_model_swapped_for_one_of_its_own_name_is_closed_by_the_next_call(
     tmp_path: Path,
 ) -> None:
@@ -3165,6 +3242,24 @@ def test_a_journal_from_before_resumes_a_long_call_s_news_and_end_as_today_s(
         ),
         ToolMessage(call_id="c1", state="done", stdout=("out",)).restated("gone"),
     ]
+
+
+def test_a_wake_with_no_text_resumes_as_an_empty_result(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        SystemMessage(content=None, subtype="wake", call_id="c1"),
+    )
+    _, agent = _agent(tmp_path, journal=journal)
+
+    _session(agent).resume()
+
+    stdouts = [
+        r.stdout
+        for r in _session(agent)
+        if isinstance(r, ToolMessage) and r.call_id == "c1"
+    ]
+    assert ("",) in stdouts
 
 
 def test_a_call_s_news_pruned_alone_resumes_with_its_late_result_whole(
@@ -3613,6 +3708,22 @@ async def test_a_resume_goes_on_counting_turns_and_windows(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_resume_adds_its_counts_to_those_already_kept(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        UserMessage(content="one"),
+        ContextClear(system_prompt="S", history=(UserMessage(content="gist"),)),
+    )
+    _, agent = _agent(tmp_path, journal=journal)
+    agent.runtime.turns = 10
+    agent.runtime.compactions = 20
+
+    async with agent:
+        assert (agent.runtime.turns, agent.runtime.compactions) == (11, 21)
+
+
+@pytest.mark.asyncio
 async def test_a_resume_counts_its_turns_off_the_loop(tmp_path: Path) -> None:
     """A long session's journal takes seconds to read; the loop must not wait on it."""
     journal = _Threaded()
@@ -3913,6 +4024,12 @@ def test_a_splice_written_once_is_not_written_again(tmp_path: Path) -> None:
 
     contents = [r.content for r in journal.history() if isinstance(r, UserMessage)]
     assert contents == ["one", "two", "three"]
+
+
+def test_the_default_prompt_is_the_asset_beside_the_agent_module() -> None:
+    asset = Path(agent_module.__file__).parent / "assets" / "system_prompt.md"
+
+    assert default_system_prompt() == asset.read_text(encoding="utf-8")
 
 
 def test_the_default_prompt_reads_as_utf8_whatever_the_locale(

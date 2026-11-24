@@ -846,8 +846,7 @@ async def test_daemon_serves_controls_and_hands_state_to_exec(
     try:
         async with asyncio.timeout(5):
             while not (dirs.state / "daemon.sock").exists():  # noqa: ASYNC110 -- Wait for the real socket bind.
-                # The daemon is another process; only its socket reports its status.
-                await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+                await asyncio.sleep(0.01)  # house-ignore[sleep] -- No ready event.
         assert (await control(dirs, DaemonControl())).source_version == "old"
         with (
             (dirs.state / "daemon.lock").open("r") as held,
@@ -898,8 +897,7 @@ async def test_daemon_serves_controls_and_hands_state_to_exec(
                 with contextlib.suppress(FileNotFoundError, ConnectionRefusedError):
                     if (await control(dirs, DaemonControl())).source_version == "new":
                         break
-                # The daemon is another process; only its socket reports its status.
-                await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+                await asyncio.sleep(0.01)  # house-ignore[sleep] -- No ready event.
         reader, writer = await asyncio.open_unix_connection(
             socket_address(dirs.state / "daemon.sock"),
         )
@@ -1021,8 +1019,7 @@ async def _ready(dirs: ServeDirs) -> DaemonStatus:
         while True:
             with contextlib.suppress(FileNotFoundError, ConnectionRefusedError):
                 return await control(dirs, DaemonControl())
-            # The daemon is another process; only its socket reports its status.
-            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- Only its socket reports.
 
 
 @pytest.mark.asyncio
@@ -1972,14 +1969,12 @@ async def test_tls_worker_batch_releases_descriptors_and_public_routes(
             while any(  # noqa: ASYNC110 -- The daemon publishes cleanup in this file.
                 row.token_id for row in strings.listing(dirs).sessions or ()
             ):
-                # The daemon publishes cleanup to a file; nothing signals the write.
-                await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+                await asyncio.sleep(0.01)  # house-ignore[sleep] -- Write: no event.
         assert len(local_daemon.started) == 4
         assert all(worker.task.done() for worker in local_daemon.started)
         async with asyncio.timeout(5):
             while (count := len(list((process / "fd").iterdir()))) > baseline:  # noqa: ASYNC110 -- TLS transport closure follows session removal.
-                # The loop closes the descriptors on its own schedule; nothing signals it.
-                await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+                await asyncio.sleep(0.01)  # house-ignore[sleep] -- Close: no event.
         counts.append(count)
         assert count == baseline, counts
         observer.writer.write(encoded(Bye()))

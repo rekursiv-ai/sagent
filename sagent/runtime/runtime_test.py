@@ -6,6 +6,7 @@ It also holds the hypothesis properties of the request, coalescing, and rescue p
 from __future__ import annotations
 
 from collections.abc import (
+    AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -109,10 +110,12 @@ from sagent.runtime.tape import (
     splice_safe_repair,
 )
 from sagent.runtime.types import (
+    AgentMessageCompleted,
     ModelContextEvent,
     ModelHalt,
     ModelHaltCompleted,
     ModelMessage,
+    ModelMessageCompleted,
     ModelResponseCompleted,
     ModelResponseStarted,
     ModelResponseSuspended,
@@ -968,6 +971,7 @@ def test_a_request_for_part_of_the_context_is_sent_as_the_live_one_starts() -> N
     part = rt.request(context=entries[:6], after=(_user("summarize"),)).records
 
     assert part[:-1] == live[: len(part) - 1]
+    assert len(part) == len(live)
     assert part[-1] == _user("summarize")
     assert rt.request(context=entries).records == live
 
@@ -9749,6 +9753,9 @@ async def test_a_reply_not_taken_fails_once_and_keeps_what_came_with_it(
     assert isinstance(record.exc_info, tuple)
     assert record.exc_info[1] is broke
     assert _failures(h.events) == [broke]
+    assert [e.outcome for e in h.events if isinstance(e, ModelMessageCompleted)] == [
+        Failed(exception=broke),
+    ]
     assert h.texts() == ["go", "b", "c", "answered"]
     # The reply not taken was not asked for again before the input behind it.
     assert [h.user_texts(i) for i in range(len(h.requests()))] == [["go\n\nb\n\nc"]]
@@ -11080,6 +11087,588 @@ def test_a_resumed_call_cancelled_for_want_of_a_result_says_when() -> None:
     ]
     assert arrived.state == "cancelled"
     assert arrived.timestamp is not None
+
+
+def test_a_message_ends_as_its_own_kind_of_message_ends() -> None:
+    outcome = Succeeded(value=None)
+    agent = runtime._message_ending(AgentMessage(content="hi"), outcome)
+    system = runtime._message_ending(SystemMessage(content="note"), outcome)
+    assert isinstance(agent, AgentMessageCompleted)
+    assert agent.outcome == outcome
+    assert isinstance(system, SystemMessageCompleted)
+    assert system.outcome == outcome
+
+
+def test_a_call_run_again_takes_the_next_id_no_run_gave() -> None:
+    used: set[str] = set()
+    assert list(itertools.islice(runtime._fresh_ids("c", used=used), 2)) == [
+        "c",
+        "c_1",
+    ]
+    assert list(itertools.islice(runtime._fresh_ids("c", used=used), 2)) == [
+        "c",
+        "c_2",
+    ]
+
+
+def test_stamping_marks_only_the_calls_not_yet_stamped() -> None:
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    words = AssistantMessage(content="hi")
+    stamped_call = ToolCall(call_id="kept", name="echo", timestamp=when)
+    fresh_call = ToolCall(call_id="fresh", name="echo")
+    out = runtime._stamped(
+        Response(records=(words, stamped_call, fresh_call), stop_reason="end_turn"),
+    )
+    assert out.records[0] == words
+    assert out.records[1] == stamped_call
+    assert isinstance(out.records[2], ToolCall)
+    assert out.records[2].timestamp is not None
+
+
+def _bare() -> tuple[Runtime, list[RuntimeEvent]]:
+    """Return a runtime nothing drives, and the events it publishes."""
+    rt = Runtime(model=ScriptedProvider()["scripted"], session_id="s")
+    events: list[RuntimeEvent] = []
+    rt.observers.append(events.append)
+    return rt, events
+
+
+async def _park() -> None:
+    await asyncio.Event().wait()
+
+
+async def _stubborn() -> None:
+    """Park again once cancelled, as a task taking its time to stop does."""
+    try:
+        await _park()
+    except asyncio.CancelledError:
+        await _park()
+
+
+@contextlib.asynccontextmanager
+async def _parked(
+    rt: Runtime,
+    status: Literal["waited", "apart", "answered"],
+    *,
+    stubborn: bool = False,
+) -> AsyncGenerator[runtime._Call]:
+    """Register the call ``c1``, run by a parked task, in ``rt``."""
+    task = asyncio.create_task(_stubborn() if stubborn else _park())
+    parked = runtime._Call(
+        call=ToolCall(call_id="c1", name="echo"),
+        key=None,
+        task=task,
+        background=False,
+        status=status,
+        refusal=None,
+    )
+    rt._calls["c1"] = parked
+    await asyncio.sleep(0)
+    try:
+        yield parked
+    finally:
+        for _ in range(2):
+            _ = task.cancel()
+            await asyncio.sleep(0)
+        _ = await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("over", ["task-done", "answered", "stopping"])
+@pytest.mark.asyncio
+async def test_a_detached_call_already_over_is_not_killed_again(over: str) -> None:
+    rt, events = _bare()
+    status = "answered" if over == "answered" else "apart"
+    async with _parked(rt, status, stubborn=over == "stopping") as parked:
+        if over == "task-done":
+            _ = parked.task.cancel()
+            _ = await asyncio.gather(parked.task, return_exceptions=True)
+        elif over == "stopping":
+            _ = parked.task.cancel()
+            await asyncio.sleep(0)
+            assert parked.stopping
+        cancelling = parked.task.cancelling()
+
+        rt._kill_detached(parked)
+
+        assert (parked.status, parked.task.cancelling()) == (status, cancelling)
+        assert rt._requests == []
+        assert events == []
+
+
+@pytest.mark.asyncio
+async def test_killing_a_detached_call_cancels_it_and_answers_it_cancelled() -> None:
+    rt, _ = _bare()
+    async with _parked(rt, "apart") as parked:
+        rt._kill_detached(parked)
+
+        assert parked.status == "answered"
+        assert parked.task.cancelling() == 1
+        (entry,) = rt._requests
+        assert entry.stage == "held"
+        assert isinstance(entry.request, ToolMessage)
+        assert entry.request.state == "cancelled"
+        assert entry.request.shown == rt.stubs.cancelled
+
+
+@pytest.mark.parametrize(
+    ("status", "told"),
+    [("answered", 0), ("apart", 1)],
+    ids=["result-taken", "still-running"],
+)
+@pytest.mark.asyncio
+async def test_a_wake_asked_of_a_call_whose_result_is_taken_tells_nothing(
+    status: Literal["apart", "answered"],
+    told: int,
+) -> None:
+    rt, events = _bare()
+    async with _parked(rt, status) as parked:
+        parked.watch = runtime._Watch(
+            name="echo",
+            started=time.monotonic(),
+            waking=True,
+        )
+
+        rt._tell_wakes()
+
+    assert len([e for e in events if isinstance(e, ToolMessage)]) == told
+    assert len(rt.tape) == told
+
+
+@pytest.mark.asyncio
+async def test_foreground_of_a_call_the_model_waits_on_is_none() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("ok"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        assert await h.finished(h.runtime.foreground("t1")) is None
+
+
+@pytest.mark.asyncio
+async def test_foreground_of_a_call_whose_result_is_taken_is_none() -> None:
+    rt, _ = _bare()
+    async with _parked(rt, "answered"):
+        assert await asyncio.wait_for(rt.foreground("c1"), 1) is None
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_has_started_is_no_longer_asleep() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1"), call("echo", "t2", delay=3_600)]),
+        reply("ok"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        jobs = h.runtime.jobs
+        assert (jobs["t1"].status, jobs["t2"].status) == ("running", "sleeping")
+
+
+@pytest.mark.asyncio
+async def test_a_detached_call_is_apart_whether_detached_at_the_start_or_later() -> (
+    None
+):
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "b1", background=True), call("echo", "t1")]),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.runtime.wake_schedules = ToolWakeSchedules(default=None)
+        h.push(_user("go"))
+        await h.until(lambda: len(tool.started) == 2)
+        assert h.runtime._calls["b1"].status == "apart"
+        assert h.runtime._calls["t1"].status == "waited"
+        h.push(ToolDetach(call_id="t1"))
+        await h.seen(ToolDetachCompleted)
+        assert h.runtime._calls["t1"].status == "apart"
+
+
+@pytest.mark.asyncio
+async def test_a_detach_names_its_stub_and_a_call_not_waited_on_is_cancelled() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "a", key="/f", tag="a"),
+                call("echo", "b", key="/f", tag="b"),
+            ],
+        ),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.runtime.wake_schedules = ToolWakeSchedules(default=None)
+        h.push(_user("go"))
+        await h.until(lambda: "a" in tool.started)
+        h.push(ToolDetach(call_id="a"), ToolDetach(call_id="nope"))
+        await h.seen(ToolDetachCompleted, 2)
+    # Queued behind ``a``, ``b`` never ran, so it has written nothing to show.
+    assert [h.results(c)[0].text() for c in ("a", "b")] == [Stubs().detached] * 2
+    assert [e.outcome for e in h.events if isinstance(e, ToolDetachCompleted)] == [
+        Succeeded(value=h.results("a")[0]),
+        Cancelled(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_kill_tells_whether_it_stopped_a_call_and_the_call_s_end_cancelled() -> (
+    None
+):
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        *_replies(2),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        h.push(ToolHalt(call_id="nope"), ToolHalt(call_id="t1"))
+        await h.seen(ToolHaltCompleted, 2)
+        await h.seen(ToolCallCompleted)
+    assert [e.outcome for e in h.events if isinstance(e, ToolHaltCompleted)] == [
+        Cancelled(),
+        Succeeded(value=None),
+    ]
+    assert [e.outcome for e in h.events if isinstance(e, ToolCallCompleted)] == [
+        Cancelled(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_result_for_a_call_waited_on_is_due_now_whatever_its_tool_said() -> (
+    None
+):
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("ok"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        h.push(
+            ToolMessage(call_id="t1", state="done", stdout=("x",), due_after=ModelIdle),
+        )
+        await h.seen(_answered)
+    (taped,) = h.results("t1")
+    (published,) = [
+        e for e in h.events if isinstance(e, ToolMessage) and e.state == "done"
+    ]
+    assert (taped.due_after, published.due_after) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("hooked", "provider"),
+    [(True, "scripted"), (False, "")],
+    ids=["hook-named-logins", "no-hook"],
+)
+@pytest.mark.asyncio
+async def test_a_suspension_names_the_provider_and_logins_only_when_the_hook_gave_some(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hooked: bool,
+    provider: str,
+) -> None:
+    resets = {"default": datetime(2030, 1, 1, tzinfo=UTC)}
+
+    async def after(exc: BaseException) -> Mapping[str, datetime]:
+        del exc
+        return resets
+
+    _ = _recording_timers(monkeypatch)
+    async with Harness(RateLimitedError("slow down", retry_after_sec=30)) as h:
+        h.runtime.persistent_retry = True
+        if hooked:
+            h.runtime.after_failure = after
+        h.push(_user("go"))
+        await h.seen(ModelResponseSuspended)
+    (suspended,) = [e for e in h.events if isinstance(e, ModelResponseSuspended)]
+    assert suspended.provider == (h.runtime.model.provider.name if hooked else "")
+    assert suspended.provider == provider
+    assert suspended.reset_at_by_login == (resets if hooked else {})
+
+
+@pytest.mark.parametrize(
+    ("rested", "outcome"),
+    [
+        ("rest", Cancelled()),
+        ("job", Succeeded(value=None)),
+        ("compaction", Succeeded(value=None)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_halt_succeeds_when_a_turn_is_under_way_or_work_is_going_on(
+    rested: str,
+    outcome: Cancelled | Succeeded[None],
+) -> None:
+    talk, summarizer = Talking(), Summarizer(hold=True)
+    async with Harness(
+        reply(calls=[call("talk", "t1", background=True)]),
+        *_replies(2),
+        tools=[talk],
+        compactor=summarizer,
+    ) as h:
+        if rested == "job":
+            await _apart(h, talk)
+            # The reply is done and the job runs on: the turn is under way, nothing at work.
+            assert h.runtime.turn_under_way
+            assert not h.runtime.at_work
+        elif rested == "compaction":
+            h.runtime.tape.append_history(_user("old"))
+            h.runtime.hold_for_user()
+            h.push(SessionCompact())
+            await h.until(summarizer.entered.is_set)
+            assert h.runtime.at_work
+            assert not h.runtime.turn_under_way
+        h.push(ModelHalt())
+        await h.seen(ModelHaltCompleted)
+        talk.end()
+    assert [e.outcome for e in h.events if isinstance(e, ModelHaltCompleted)] == [
+        outcome,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_clear_ends_the_message_taken_in_before_it_cancelled() -> None:
+    async with Harness(reply("never")) as h:
+        h.push(_user("go"), SessionClear())
+        await h.seen(SessionClearCompleted)
+    assert [e.outcome for e in h.events if isinstance(e, UserMessageCompleted)] == [
+        Cancelled(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_quit_tells_it_ended_as_asked() -> None:
+    async with Harness() as h:
+        pass
+    assert [e.outcome for e in h.events if isinstance(e, SessionQuitCompleted)] == [
+        Succeeded(value=None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_input_queued_with_a_retry_waits_for_the_turn_it_restarts() -> None:
+    async with Harness(AuthError("signed out"), reply("ok"), reply("after")) as h:
+        h.push(_user("hi"))
+        await h.seen(_turn_failed)
+        await spin()
+        h.push(ModelRetry(), UserMessage(due_after=ModelIdle, content="later"))
+        await h.seen(_answered, 2)
+    assert h.texts() == ["hi", "ok", "later", "after"]
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_compaction_asked_during_another_ends_unasked() -> None:
+    rt, events = _bare()
+    rt._compacting = SessionCompact()
+
+    await rt._on_compact(SessionCompact(trigger="auto"))
+
+    assert rt._requests == []
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_the_reply_of_a_call_stopped_is_dropped_and_told_cancelled() -> None:
+    rt, events = _bare()
+    stale = ModelMessage(response=reply("late"))
+    rt._abandoned.append(stale)
+
+    assert await rt._dispatch(stale, later=()) is False
+
+    assert events == [ModelMessageCompleted(outcome=Cancelled())]
+    assert rt._abandoned == []
+
+
+@pytest.mark.asyncio
+async def test_an_advisory_hook_that_raises_is_logged_with_its_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rt, _ = _bare()
+
+    async def before(turn_start: bool) -> None:
+        del turn_start
+        raise RuntimeError("before broke")
+
+    async def after(exc: BaseException) -> Mapping[str, datetime]:
+        del exc
+        raise RuntimeError("after broke")
+
+    with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+        assert await rt._after_failure(RuntimeError("model broke")) == {}
+        rt.after_failure = after
+        rt.before_call = before
+        assert await rt._after_failure(RuntimeError("model broke")) == {}
+        await rt._before_call(turn_start=True)
+    assert caplog.messages == [
+        "after_failure raised: after broke",
+        "before_call raised: before broke",
+    ]
+
+
+def test_an_observer_that_raises_is_logged_by_event_and_the_others_are_told(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rt, told = _bare()
+
+    def broken(event: RuntimeEvent) -> None:
+        del event
+        raise RuntimeError("observer broke")
+
+    rt.observers.insert(0, broken)
+    with caplog.at_level(logging.ERROR, logger=runtime.__name__):
+        rt.publish(SessionSaveDue())
+    assert caplog.messages == ["observer raised on SessionSaveDue"]
+    assert told == [SessionSaveDue()]
+
+
+def test_a_cache_due_this_instant_is_cold() -> None:
+    h = Harness()
+    h.provider.capability = replace(
+        h.provider.capability,
+        cache_ttl_sec=frozenset({0.0, 300.0}),
+    )
+    model = h.provider["scripted"]
+    model.settings = replace(model.settings, cache_ttl_sec=300.0)
+    h.runtime.model = model
+    h.runtime._last_request = 100.0
+    assert h.runtime._cache_left(369.0) == 1.0
+    assert h.runtime._cache_left(370.0) == math.inf
+
+
+def test_what_a_call_wrote_is_read_as_the_view_shows_it_less_its_newlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown = ["abX\n\n", "cd  \n", ""]
+
+    def view(
+        self: ToolContext,
+        lines: Sequence[str],
+        *,
+        reserve: int = 0,
+        cap: int = 0,
+        note: str = "",
+    ) -> tuple[str, bool]:
+        del self, lines, reserve, cap, note
+        return shown.pop(0), False
+
+    monkeypatch.setattr(ToolContext, "view", view)
+    rt, _ = _bare()
+    watch = runtime._Watch(name="talk", started=0.0)
+    watch.items.append("one\n")
+    assert rt._look(watch) == "abX"
+    watch.items.append("two\n")
+    assert rt._look(watch) == "cd  "
+    assert watch.seen == 2
+    assert rt._look(watch) == ""
+
+
+def test_a_long_call_s_news_says_how_long_it_has_run() -> None:
+    rt, _ = _bare()
+    watch = runtime._Watch(name="talk", started=time.monotonic() - 100.0)
+    watch.items.append("hit\n")
+    assert rt._progress("t1", watch) == "[talk t1 still running after 100s]\nhit"
+
+
+@pytest.mark.asyncio
+async def test_a_result_read_in_part_shows_only_what_the_model_has_not_seen() -> None:
+    rt, _ = _bare()
+    async with _parked(rt, "apart") as parked:
+        parked.watch = runtime._Watch(
+            name="echo",
+            started=0.0,
+            items=["a\n", "b\n"],
+            seen=1,
+        )
+        result = ToolMessage(
+            call_id="c1",
+            state="done",
+            stdout=("a\n", "b\n"),
+            stderr=("oops\n",),
+        )
+
+        unseen = rt._unseen(parked, result)
+
+    assert unseen.shown == "b"
+    assert (unseen.stdout, unseen.stderr) == (result.stdout, result.stderr)
+
+
+def test_a_rewrite_keeps_the_calls_after_a_record_that_is_no_call() -> None:
+    rt, _ = _bare()
+    words = AssistantMessage(content="hi")
+    made = call("echo", "c1")
+
+    rewritten, refusals = rt._rewrite_calls(
+        replace(reply(calls=[made]), records=(words, made)),
+    )
+
+    assert rewritten.records == (words, made)
+    assert refusals == {}
+
+
+def test_a_lone_nudge_drives_a_model_call() -> None:
+    rt, _ = _bare()
+    rt.tape.append_history(SystemMessage(content="you owe a reply", subtype="nudge"))
+    assert rt._should_call_model()
+
+
+def test_a_prune_finds_an_output_only_a_splice_holds() -> None:
+    rt, events = _bare()
+    held = ToolMessage(call_id="x", state="done", stdout=("out",))
+    _ = rt.tape.append_splice(replacement=(held,), paired_externally=frozenset({"x"}))
+    item = SessionPrune(call_ids=("x",))
+    _ = rt._opened(item)
+
+    rt._on_prune(item)
+
+    assert [e.outcome for e in events if isinstance(e, SessionPruneCompleted)] == [
+        Succeeded(value=None),
+    ]
+
+
+def test_each_request_sent_counts_a_step_of_the_turn() -> None:
+    rt, _ = _bare()
+    steps = [rt.sending(rt.request()).step for _ in range(3)]
+    assert steps == [0, 1, 2]
+    assert rt._steps == 3
+
+
+def test_a_request_names_where_the_agent_stands_in_its_conversation() -> None:
+    rt, _ = _bare()
+    rt.conversation = "conv"
+    rt.agent = "kid"
+    rt.parent = "par"
+    rt.parent_turn = 3
+    rt.root_prompt = "root"
+    rt.name = "/root/kid"
+    rt.turns = 5
+    rt.turn_started_ms = 77
+    rt.compactions = 2
+    rt._steps = 4
+    rt._compaction_trigger = "manual"
+
+    request = rt.tagged(rt.request())
+
+    assert (
+        request.compaction,
+        request.session,
+        request.agent,
+        request.parent,
+        request.parent_turn,
+        request.root_prompt,
+        request.name,
+        request.window,
+        request.turn,
+        request.turn_started_ms,
+        request.step,
+    ) == ("manual", "conv", "kid", "par", 3, "root", "/root/kid", 2, 5, 77, 4)
+    rt.agent = ""
+    assert rt.tagged(rt.request()).agent == "conv"
 
 
 if __name__ == "__main__":

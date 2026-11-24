@@ -336,10 +336,9 @@ class Endpoint:
                 self.error = "the server closed the connection"
             self._writer, self.tried = None, True
             await self._note()
-            # Reconnect backoff while the server is out of contact.
             await asyncio.sleep(
                 self._out_of_contact(),
-            )  # house-ignore[sleep] -- See above.
+            )  # house-ignore[sleep] -- Reconnect backoff while out of contact.
 
     async def call(
         self,
@@ -559,7 +558,7 @@ class Endpoint:
         if self._lost_at is None:
             self._lost_at = now
         # ``>`` would do as well: the clock never lands exactly on the grace.
-        elif now - self._lost_at >= self._grace_sec:  # pragma: no mutate
+        elif now - self._lost_at >= self._grace_sec:  # pragma: no mutate -- Never ties.
             silent = f"{self.name} was out of contact for {self._grace_sec:g} seconds."
             for result in self._pending.values():
                 _fail(result, ValueError(f"{silent} {_UNKNOWN}"))

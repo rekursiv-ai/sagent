@@ -5764,8 +5764,7 @@ def _poll(ready: Callable[[], bool], *, timeout_sec: float) -> bool:
     while not ready():
         if time.monotonic() > deadline:
             return False
-        # Polls state another loop's thread changes; nothing signals across them.
-        time.sleep(0.01)  # house-ignore[sleep] -- See above.
+        time.sleep(0.01)  # house-ignore[sleep] -- Another loop's thread: no event.
     return True
 
 

@@ -22,14 +22,14 @@ __all__ = ["configure_hypothesis", "hypothesis_profile_name"]
 # Never mutated, nor is configure_hypothesis: every root conftest calls both at
 # import, so mutmut's forced-fail run raises while loading the conftest, which it
 # rejects as a bad test command.
-def hypothesis_profile_name() -> str:  # pragma: no mutate block
+def hypothesis_profile_name() -> str:  # pragma: no mutate block -- Mutmut can't load.
     """Return the explicit profile, or choose dev/ci from the environment."""
     return os.environ.get("HYPOTHESIS_PROFILE") or (
         "ci" if os.environ.get("CI", "") else "dev"
     )
 
 
-def configure_hypothesis() -> None:  # pragma: no mutate block
+def configure_hypothesis() -> None:  # pragma: no mutate block -- Mutmut can't load it.
     """Register the property-testing budgets and load the one for this run."""
     # Hypothesis defaults to .hypothesis/ in each checkout.
     configuration.set_hypothesis_home_dir(

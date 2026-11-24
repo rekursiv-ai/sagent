@@ -381,8 +381,7 @@ def test_a_process_on_a_terminal_names_it_and_a_daemon_has_none() -> None:
         deadline = time.monotonic() + 10
         while controlling_terminal(on_terminal.pid) is None:
             assert time.monotonic() < deadline
-            # The child's terminal is set by another process; nothing signals it.
-            time.sleep(0.01)  # house-ignore[sleep] -- See above.
+            time.sleep(0.01)  # house-ignore[sleep] -- No event marks the change.
         assert controlling_terminal(on_terminal.pid) == os.ttyname(follower)
     finally:
         for process in (daemon, on_terminal):

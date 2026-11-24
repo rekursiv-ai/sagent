@@ -119,7 +119,7 @@ class NoShrinker:
         """Return ``False``: never due."""
         return False
 
-    async def run(self, instructions: str = "") -> None:  # pragma: no mutate -- unread
+    async def run(self, instructions: str = "") -> None:  # pragma: no mutate -- Unread.
         """Refuse to shrink.
 
         Args:
@@ -491,7 +491,7 @@ class Agent(AsyncResource):
         def observer(event: types.RuntimeEvent) -> None:
             queue.put_nowait((event, ended.done()))
 
-        answered = False  # pragma: no mutate[truthiness]
+        answered = False  # pragma: no mutate[truthiness] -- Only truth is read.
         self.runtime.observers.append(observer)
         try:
             while True:
@@ -1291,7 +1291,7 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
     calling: set[str] = set()
     # A usage after the reply's own is a child's.
     usage: TokenUsage | None = None
-    priced = False  # pragma: no mutate[truthiness]
+    priced = False  # pragma: no mutate[truthiness] -- Only truth is read.
     for record in _flatten(records):
         if isinstance(record, AssistantMessage | Thinking | ToolCall):
             spoke = any(isinstance(e, UserMessage | AgentMessage) for e in held)
@@ -1317,7 +1317,7 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
         if isinstance(record, TokenUsage):
             if priced:
                 usage = record
-                priced = False  # pragma: no mutate[truthiness]
+                priced = False  # pragma: no mutate[truthiness] -- Only truth is read.
             continue
         if not isinstance(
             record,
@@ -1329,7 +1329,7 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
             | ContextCompaction,
         ):
             continue
-        priced = False  # pragma: no mutate[truthiness]
+        priced = False  # pragma: no mutate[truthiness] -- Only truth is read.
         if isinstance(record, ToolMessage):
             calling.discard(record.call_id)
         elif isinstance(record, UserMessage | AgentMessage) and not calling:

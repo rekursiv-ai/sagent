@@ -552,7 +552,7 @@ def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
         f'{{"py/object": "{name}"'.encode()
         for name in stored_names(SessionContext.__name__)
     )
-    prompted = False  # pragma: no mutate[truthiness]
+    prompted = False  # pragma: no mutate[truthiness] -- The guard `not prompted` reads only the flag's truth.
     title = model = ""
     records = 0
     try:

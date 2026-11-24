@@ -1567,7 +1567,7 @@ def stored_plain(
     plain = to_plain(
         record,
         classes=classes or record_classes(),
-        sort=False,  # pragma: no mutate[truthiness]
+        sort=False,  # pragma: no mutate[truthiness] -- Only attribute_names reads sort, and tests it for truth alone.
         default_concrete_types=CONCRETE_TYPES,
     )
     assert isinstance(plain, dict)

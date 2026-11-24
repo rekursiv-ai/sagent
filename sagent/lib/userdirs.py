@@ -260,4 +260,6 @@ def runtime_dir_variables(*, logind: Path = Path("/run/user")) -> dict[str, str]
 
 def _env(name: str) -> str:
     """Return ``name``'s value, or empty when unset: both read as unset, per spec."""
-    return os.environ.get(name, "")  # pragma: no mutate[truthiness]
+    # pragma: no mutate[truthiness] start -- Only truth is read.
+    return os.environ.get(name, "")
+    # pragma: no mutate end

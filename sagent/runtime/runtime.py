@@ -540,8 +540,10 @@ class Runtime:
         # Whether a model call was told to start and neither ``AgentIdle`` nor a
         # stop was told since: the turn a halt or a clear stops. ``AgentIdle`` is
         # told only with the inbox empty, so state alone cannot say it.
-        self.turn_under_way = False  # pragma: no mutate[truthiness]
-        self.has_quit = False  # pragma: no mutate[truthiness]
+        # pragma: no mutate[truthiness] start -- Only truth is read.
+        self.turn_under_way = False
+        # pragma: no mutate end
+        self.has_quit = False  # pragma: no mutate[truthiness] -- Only truth is read.
 
         self.model_call: (
             asyncio.Task[ModelMessage | ModelResponseCompleted | None] | None
@@ -564,7 +566,9 @@ class Runtime:
         # refusal, no usable summary, a context too long. A reply leaves the context
         # as it was, so none is tried again on its own until a message comes in or
         # a retry is asked; each reply retried it before (2026-11-22).
-        self._compaction_failed = False  # pragma: no mutate[truthiness]
+        # pragma: no mutate[truthiness] start -- Only truth is read.
+        self._compaction_failed = False
+        # pragma: no mutate end
 
         self.compact_task: asyncio.Task[SessionCompactCompleted | None] | None = None
         self._compacting: SessionCompact | None = None
@@ -780,7 +784,9 @@ class Runtime:
         # One pushed twice is one request held twice: acted on twice, ended once,
         # where the first push ends.
         elif entry.stage != "open":
-            entry = _Taken(request=request, owed=False)  # pragma: no mutate[truthiness]
+            # pragma: no mutate[truthiness] start -- Only truth is read.
+            entry = _Taken(request=request, owed=False)
+            # pragma: no mutate end
         else:
             self._requests.remove(entry)
         entry.stage, entry.until = stage, until
@@ -1112,11 +1118,13 @@ class Runtime:
                 and not self.inbox.gate_armed
                 and self.inbox.empty()
             ):
-                self.turn_under_way = False  # pragma: no mutate[truthiness]
+                # pragma: no mutate[truthiness] start -- Only truth is read.
+                self.turn_under_way = False
+                # pragma: no mutate end
                 self.publish(AgentIdle())
             self._awaited = self.inbox.awaiting
             items = await self.inbox.drain()
-            reply_failed = False  # pragma: no mutate[truthiness]
+            reply_failed = False  # pragma: no mutate[truthiness] -- Only truth is read.
             for at, item in enumerate(items):
                 later = items[at + 1 :]
                 # One event that fails to dispatch is logged; the rest of its batch
@@ -1371,7 +1379,9 @@ class Runtime:
     def _end_turn(self, outcome: Outcome[None]) -> None:
         """Tell that the model's work on the turn stopped, and that each message it took in ended so."""
         if not isinstance(outcome, Succeeded):
-            self.turn_under_way = False  # pragma: no mutate[truthiness]
+            # pragma: no mutate[truthiness] start -- Only truth is read.
+            self.turn_under_way = False
+            # pragma: no mutate end
         self.publish(ModelIdle(outcome=outcome))
         self._end_messages(outcome)
 
@@ -1853,7 +1863,9 @@ class Runtime:
         for cid, call in self._calls.items():
             watch = call.watch
             if watch is not None and watch.waking and call.status != "answered":
-                watch.waking = False  # pragma: no mutate[truthiness]
+                # pragma: no mutate[truthiness] start -- Only truth is read.
+                watch.waking = False
+                # pragma: no mutate end
                 news = ToolMessage(
                     call_id=cid,
                     timestamp=now_timestamp(),
@@ -2163,7 +2175,7 @@ class Runtime:
                     ),
                 )
                 logger.debug(
-                    "runtime repeated call id replaced: %s -> %s",  # pragma: no mutate[diagnostic-text]
+                    "runtime repeated call id replaced: %s -> %s",  # pragma: no mutate[diagnostic-text] -- Only a developer reads the debug log.
                     given.call_id,
                     record.call_id,
                 )
@@ -2546,7 +2558,7 @@ class Runtime:
             if isinstance(e, ContextCompaction) and unreadable(e, provider=provider)
         }
         if sealed:
-            # pragma: no mutate[diagnostic-text] start
+            # pragma: no mutate[diagnostic-text] start -- Only users read this error.
             names = ", ".join(sorted(sealed))
             raise UserFacingError(
                 f"The context holds a summary only {names} can read, and"

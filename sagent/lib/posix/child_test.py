@@ -724,8 +724,7 @@ async def test_a_niced_group_lowers_its_session_s_autogroup(
             started.append(child.process.pid)
             seen.append(_autogroup(child.process.pid))
             await child.stop()
-            # The kernel takes one autogroup change per 100 ms; the retry waits it out.
-            await asyncio.sleep(0.1)  # house-ignore[sleep] -- See above.
+            await asyncio.sleep(0.1)  # house-ignore[sleep] -- One autogroup per 100 ms.
 
 
 @_AUTOGROUPS

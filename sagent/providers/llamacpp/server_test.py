@@ -629,8 +629,7 @@ async def _written(path: Path) -> None:
         while True:
             if _has_text(path):
                 return
-            # The stand-in is another process; only its file says what it did.
-            await asyncio.sleep(0.005)  # house-ignore[sleep] -- See above.
+            await asyncio.sleep(0.005)  # house-ignore[sleep] -- Its file is the signal.
 
 
 def _has_text(path: Path) -> bool:

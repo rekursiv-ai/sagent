@@ -45,10 +45,12 @@ def main() -> int:
       code: The process exit code; for ``run``, how many cases failed.
 
     """
+    # pragma: no mutate[diagnostic-text] start -- Help text.
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),  # pragma: no mutate[diagnostic-text]
+        description=(__doc__ or "").strip(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # pragma: no mutate end
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args())
     logging.basicConfig(level=logging.INFO, format="%(message)s")

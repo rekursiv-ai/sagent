@@ -63,11 +63,11 @@ class ActionParser(argparse.ArgumentParser):
             # A fixed width, not the terminal's: the help is sent and kept as is,
             # and each reader's screen wraps it.
             formatter_class=partial(argparse.RawDescriptionHelpFormatter, width=80),
-            allow_abbrev=False,  # pragma: no mutate[truthiness]
+            allow_abbrev=False,  # pragma: no mutate[truthiness] -- argparse reads allow_abbrev only as a truth value.
         )
         # Python 3.14 colors help on a terminal, and the TUI shows the codes as
         # text. Set here, not passed: 3.12's constructor takes no ``color``.
-        self.color = False  # pragma: no mutate[truthiness]
+        self.color = False  # pragma: no mutate[truthiness] -- argparse reads color only as a truth value, in _set_color.
 
     def setting(
         self,
