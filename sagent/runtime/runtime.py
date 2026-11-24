@@ -84,7 +84,6 @@ from sagent.journal.types import (
     ToolMessage,
     UserMessage,
     now_timestamp,
-    pairings,
 )
 from sagent.model.exceptions import (
     ContextOverflowError,
@@ -977,26 +976,13 @@ class Runtime:
             None,
         )
 
-    # A resumed context's calls ran in a process that has ended, so no result will
-    # follow; and a clean quit's cancellations are never committed. A call left with
-    # no result at all is answered now, at the end, so every reader of the journal
-    # pairs it at once: left to the repair at the next model call, it waits for the
-    # user's next message and is written in a new window, which Chat does not read.
+    # A resumed context's detached calls ran in a process that has ended, so no
+    # result will follow; and a clean quit's cancellations are never committed.
     def settle_detached(self) -> None:
-        """Answer each call left with no result ``[interrupted]``; cancel each a stub answers."""
-        messages = self.tape.context().messages
-        for cid in pairings(messages)[1]:
-            self._append_late(
-                ToolMessage(
-                    call_id=cid,
-                    timestamp=now_timestamp(),
-                    state="failed",
-                    stderr=("[interrupted]",),
-                ),
-            )
+        """Deliver a cancellation for each call answered only by a stub, running nowhere."""
         pending: list[str] = []
         answered: set[str] = set()
-        for entry in messages:
+        for entry in self.tape.context().messages:
             if not isinstance(entry, ToolMessage):
                 continue
             if entry.state == "pending":
