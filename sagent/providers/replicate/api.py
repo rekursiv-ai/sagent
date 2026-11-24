@@ -101,8 +101,7 @@ class Replicate(OpenAICompatible):
                 url = prediction.get("urls", {}).get("get", "")
                 prediction = await self.prediction(url)
                 if prediction["status"] in ("starting", "processing"):
-                    # The prediction runs remotely and pushes nothing.
-                    await asyncio.sleep(0.5)  # house-ignore[sleep] -- See above.
+                    await asyncio.sleep(0.5)  # house-ignore[sleep] -- Remote: no push.
         if prediction["status"] != "succeeded":
             raise RuntimeError(
                 f"Replicate prediction {prediction['status']}: {prediction.get('error') or 'no error detail'}",

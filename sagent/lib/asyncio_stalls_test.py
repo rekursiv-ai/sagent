@@ -15,8 +15,7 @@ from sagent.lib.asyncio_stalls import watch_stalls
 
 def _hog_the_loop(seconds: float) -> None:
     """Hold the loop's thread, as synchronous work in a callback does."""
-    # The stall is what is measured: wall time the loop's thread is held.
-    time.sleep(seconds)  # house-ignore[sleep] -- See above.
+    time.sleep(seconds)  # house-ignore[sleep] -- The stall is the measured wall time.
 
 
 @pytest.mark.asyncio
@@ -43,8 +42,7 @@ async def test_a_loop_that_keeps_up_logs_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING), watch_stalls(threshold_sec=0.01):
-        # Idle across several of the watcher's pings, each answered at once.
-        await asyncio.sleep(0.05)  # house-ignore[sleep] -- See above.
+        await asyncio.sleep(0.05)  # house-ignore[sleep] -- Idles across its pings.
     assert caplog.records == []
 
 

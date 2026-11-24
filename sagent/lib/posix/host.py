@@ -299,8 +299,8 @@ class Host:
         self._written = 0
         """Every byte the child wrote so far: the offset its next byte has."""
 
-        self._recent_trimmed = False  # pragma: no mutate[truthiness]
-        self._scrollback_failed = False  # pragma: no mutate[truthiness]
+        self._recent_trimmed = False  # pragma: no mutate[truthiness] -- Only `if self._recent_trimmed:` reads it, as a truth value.
+        self._scrollback_failed = False  # pragma: no mutate[truthiness] -- Only `not self._scrollback_failed` reads it, as a truth value.
         self._interrupted: int | None = None
         self._stopping: asyncio.Task[None] | None = None
 

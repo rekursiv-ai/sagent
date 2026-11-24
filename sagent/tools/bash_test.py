@@ -1820,8 +1820,7 @@ async def _open_descriptors_once_closed(expected: int) -> int:
     for _ in range(5000):
         if _open_descriptors() == expected:
             break
-        # The loop closes the descriptors on its own schedule; nothing signals it.
-        await asyncio.sleep(0.001)  # house-ignore[sleep] -- See above.
+        await asyncio.sleep(0.001)  # house-ignore[sleep] -- Closing has no event.
     return _open_descriptors()
 
 
@@ -1837,8 +1836,7 @@ async def _written_pids(directory: Path, *names: str) -> list[int]:
             texts = [_read_text(directory / name) for name in names]
             if all(texts):
                 return [int(text) for text in texts]
-            # The shell's jobs are other processes; only their files say what they did.
-            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- Jobs report by file.
 
 
 async def _written_text(path: Path) -> str:
@@ -1848,8 +1846,7 @@ async def _written_text(path: Path) -> str:
             text = _read_text(path)
             if text:
                 return text
-            # The shell's jobs are other processes; only their files say what they did.
-            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- Jobs report by file.
 
 
 async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
@@ -1858,8 +1855,7 @@ async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
     while _is_listed(pid):
         if time.monotonic() > deadline:
             return False
-        # The shell's jobs are other processes; only their files say what they did.
-        await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
+        await asyncio.sleep(0.01)  # house-ignore[sleep] -- Jobs report only by file.
     return True
 
 
@@ -1911,8 +1907,7 @@ async def _alone_within(pid: int, *, seconds: float = 3.0) -> bool:
     while await _running_in(group) - {pid}:
         if time.monotonic() > deadline:
             return False
-        # The shell's jobs are other processes; only their files say what they did.
-        await asyncio.sleep(0.005)  # house-ignore[sleep] -- See above.
+        await asyncio.sleep(0.005)  # house-ignore[sleep] -- Jobs report only by file.
     return True
 
 

@@ -154,7 +154,7 @@ class Feed:
             halter, self.halter = self.halter, None
             if not self.cut_short:
                 return
-            self.cut_short = False  # pragma: no mutate[truthiness]
+            self.cut_short = False  # pragma: no mutate[truthiness] -- Only the halt check reads it, as truth.
             self.pending.append(f"[halted by {halter or 'user'}]")
         elif isinstance(stopped, Failed):
             self.pending.append(f"[failed] {describe(stopped.exception)}")
@@ -172,12 +172,12 @@ class Feed:
                 self.send()
                 return
             if self.worked:
-                self.worked = False  # pragma: no mutate[truthiness]
+                self.worked = False  # pragma: no mutate[truthiness] -- Only the idle check reads it, as truth.
                 self.pending.append(
                     f"[idle: {self.watched} does nothing until messaged]",
                 )
         elif isinstance(event, types.SessionClearCompleted):
-            self.cut_short = False  # pragma: no mutate[truthiness]
+            self.cut_short = False  # pragma: no mutate[truthiness] -- Only the halt check reads it, as truth.
         elif not (
             isinstance(event, types.SessionCompactCompleted)
             and isinstance(event.outcome, Succeeded)

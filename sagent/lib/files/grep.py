@@ -391,7 +391,7 @@ def _grep_rg(
         ahead = collections.deque(
             run(batch) for batch in itertools.islice(batches, os.cpu_count() or 1)
         )
-        found = False  # pragma: no mutate[truthiness]
+        found = False  # pragma: no mutate[truthiness] -- ``found`` is tested only for truth, in ``if found``.
         while True:
             if first is not None:
                 # Ripgrep separates context groups with ``--``, but only within

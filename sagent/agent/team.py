@@ -207,7 +207,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         so their idle does not."""
 
         # Whether the user has said anything yet; their first message wakes debtors.
-        self._woken = False  # pragma: no mutate[truthiness]
+        self._woken = False  # pragma: no mutate[truthiness] -- Only `if self._woken:` reads it, as a truth value.
 
     @override
     def __getitem__(self, label: str) -> Agent:
@@ -908,7 +908,7 @@ class _Dun:
             event,
             (types.ModelHaltCompleted, types.SessionClearCompleted),
         ):
-            self._cut_short = False  # pragma: no mutate[truthiness]
+            self._cut_short = False  # pragma: no mutate[truthiness] -- Only the `and` in the `elif` above reads it, as a truth value.
             how = "halted" if isinstance(event, types.ModelHaltCompleted) else "cleared"
             self._ended(f"[{self.label} {how}]", owed, heard=self._fed())
         # The run goes on after the wait: nothing it owes is answered for it. No
@@ -920,10 +920,10 @@ class _Dun:
                 f"[{self.label} waiting until {local_time(event.retry_at)}]"
                 f" {describe(event.exception)}",
                 owed,
-                spawn_tells=False,  # pragma: no mutate[truthiness]
+                spawn_tells=False,  # pragma: no mutate[truthiness] -- Only `if spawn_tells and` reads it, as a truth value.
             )
         elif isinstance(event, AgentIdle) and self._worked:
-            self._worked = False  # pragma: no mutate[truthiness]
+            self._worked = False  # pragma: no mutate[truthiness] -- Only the `and` in the `elif` above reads it, as a truth value.
             last, self._last_call = self._last_call, None
             self._idled(owed, last)
 
@@ -1099,7 +1099,7 @@ class _Precedence:
         # ``None`` until the first call takes up the user's choice.
         self._seat: _Seat | None = None
         # Whether a call has been made: a session's first move is no news.
-        self._started = False  # pragma: no mutate[truthiness]
+        self._started = False  # pragma: no mutate[truthiness] -- Only `not` and `or` read it, as truth values.
 
     async def before_call(self, turn_start: bool) -> None:
         """Move to the first login with quota left: off a spent one, or at a turn's start.

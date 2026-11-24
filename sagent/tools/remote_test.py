@@ -45,6 +45,7 @@ from sagent.host.wire import (
     Result,
     ToolsChanged,
     ToolSpec,
+    UnreadLineError,
     Welcome,
     decoded,
     encoded,
@@ -1417,6 +1418,23 @@ async def test_a_call_fails_at_its_grace_however_long_the_next_redial_is(
 
 
 @pytest.mark.asyncio
+async def test_a_call_fails_exactly_at_its_grace_and_not_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _clock(monkeypatch)
+    endpoint = _endpoint(_dials(), retry_sec=1.0, grace_sec=10.0)
+    waiting = endpoint._pending["call"] = asyncio.Future[ToolMessage]()
+    _ = endpoint._out_of_contact()
+    clock.now = 9.0
+    _ = endpoint._out_of_contact()
+    assert not waiting.done()
+    clock.now = 10.0
+    _ = endpoint._out_of_contact()
+    with pytest.raises(ValueError, match="out of contact for 10 seconds"):
+        _ = waiting.result()
+
+
+@pytest.mark.asyncio
 async def test_only_a_new_session_s_welcome_forgets_the_agents_there(
     tmp_path: Path,
 ) -> None:
@@ -2136,6 +2154,397 @@ def _clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     clock = _Clock()
     monkeypatch.setattr(remote, "time", SimpleNamespace(monotonic=clock))
     return clock
+
+
+def test_a_local_link_asks_for_no_tools_and_lets_agents_message(tmp_path: Path) -> None:
+    link = local_link(tmp_path / "daemon.sock")
+    assert (link.tools, link.peer_messaging, link.bare_labels) == ((), True, True)
+
+
+def test_a_tls_link_asks_for_the_saved_tools_with_its_token() -> None:
+    link = tls_link(SavedRemote(url=_URL, tools=("Read",)))
+    assert (link.where, link.token, link.tools) == ("gpu1:7777", "t", ("Read",))
+
+
+@pytest.mark.asyncio
+async def test_a_tls_link_closes_a_connection_whose_certificate_it_cannot_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = asyncio.Event()
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        _ = await received(reader)
+        closed.set()
+        writer.close()
+
+    seen: list[asyncio.StreamWriter] = []
+
+    def unreadable(writer: asyncio.StreamWriter) -> str:
+        seen.append(writer)
+        raise ValueError("no certificate")
+
+    monkeypatch.setattr(remote, "peer_fingerprint", unreadable)
+    server = await asyncio.start_server(
+        serve,
+        "127.0.0.1",
+        0,
+        ssl=server_context(tmp_path),
+        limit=MAX_LINE_BYTES,
+    )
+    port = cast(tuple[str, int], server.sockets[0].getsockname())[1]
+    link = tls_link(SavedRemote(url=f"sagent://127.0.0.1:{port}/SHA256:{'0' * 64}/t"))
+    async with server:
+        with pytest.raises(ValueError, match="no certificate"):
+            _ = await link.dial()
+        assert seen[0].is_closing()
+        async with asyncio.timeout(5):
+            await closed.wait()
+
+
+def _quick(dial: Dial) -> Endpoint:
+    return Endpoint(
+        Link(dial=dial, name="gpu1"),
+        session_id="s",
+        client="laptop",
+        team=Team(catalog=ModelCatalog(factories={})),
+        retry_sec=3600.0,
+        ping_sec=0.01,
+    )
+
+
+def test_an_endpoint_at_an_ipv6_address_is_named_by_its_host() -> None:
+    endpoint = _endpoint_on(
+        Team(catalog=ModelCatalog(factories={})),
+        Link(dial=_dials(), where="::1:8080"),
+    )
+    assert endpoint.name == "::1"
+
+
+@pytest.mark.asyncio
+async def test_a_dial_that_never_connects_fails_after_the_silence() -> None:
+    async def dial() -> Streams:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    endpoint = _quick(dial)
+    task = asyncio.create_task(endpoint.run())
+    try:
+        async with asyncio.timeout(5):
+            await endpoint.until(lambda e: e.error == "TimeoutError")
+    finally:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_never_welcomes_is_given_up_after_the_silence() -> None:
+    async def dial() -> Streams:
+        return asyncio.StreamReader(), cast(asyncio.StreamWriter, Mock())
+
+    endpoint = _quick(dial)
+    task = asyncio.create_task(endpoint.run())
+    try:
+        async with asyncio.timeout(5):
+            await endpoint.until(lambda e: e.error == "TimeoutError")
+    finally:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_an_endpoint_says_ping_when_it_has_nothing_else_to_say(
+    tmp_path: Path,
+) -> None:
+    said = asyncio.Event()
+    heard: list[Message | None] = []
+
+    async def take(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome_line(tools={}))
+        heard.append(await received(reader))
+        said.set()
+        _ = await reader.read()
+
+    async with _scripted(tmp_path, take, ping_sec=0.01):
+        async with asyncio.timeout(5):
+            await said.wait()
+    assert isinstance(heard[0], Ping)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_line_fails_its_call_and_its_description_by_id(
+    endpoint: Endpoint,
+    connection: _Connection,
+) -> None:
+    call = endpoint._pending["x"] = asyncio.Future[ToolMessage]()
+    asked = endpoint._describing["x"] = asyncio.Future[ToolSpec | None]()
+    endpoint._unread("x", UnreadLineError("cannot read", id="x"), connection.writer)
+    record = call.result()
+    assert (record.call_id, record.state, record.result) == (
+        "",
+        "done",
+        RemoteToolResult(endpoint="gpu1", exit_code=1),
+    )
+    with pytest.raises(ValueError, match=re.escape("cannot read")):
+        _ = asked.result()
+    assert connection.lines == [encoded(Ack(id="x"))]
+
+
+@pytest.mark.asyncio
+async def test_a_call_lost_while_disconnected_comes_back_done_with_exit_one(
+    endpoint: Endpoint,
+    connection: _Connection,
+) -> None:
+    endpoint._writer = connection.writer
+    endpoint._granted({"Gate": "d"})
+    calling = asyncio.create_task(
+        endpoint.call(agent="a", window="w", tool="Gate", arguments={}),
+    )
+    await asyncio.sleep(0)
+    [(call_id, waiting)] = endpoint._pending.items()
+    waiting.set_exception(ValueError("gone"))
+    record = await calling
+    assert (record.call_id, record.wire_id, record.state, record.result) == (
+        "",
+        call_id,
+        "done",
+        RemoteToolResult(endpoint="gpu1", exit_code=1),
+    )
+    assert endpoint._said == {}
+
+
+@pytest.mark.asyncio
+async def test_an_endpoint_names_the_tools_it_offers_when_asked_for_another(
+    endpoint: Endpoint,
+    connection: _Connection,
+) -> None:
+    endpoint._writer = connection.writer
+    endpoint._granted({"Read": "d", "Bash": "e"})
+    with pytest.raises(ValueError, match=re.escape("it offers Read, Bash.")):
+        _ = await endpoint.call(agent="a", window="w", tool="Grep", arguments={})
+
+
+def test_peer_messaging_lists_only_the_agents_that_allow_it(
+    endpoint: Endpoint,
+    connection: _Connection,
+    team: MagicMock,
+) -> None:
+    team.__iter__ = Mock(side_effect=lambda: iter(("a", "b")))
+
+    def allowed(label: str) -> bool:
+        return label == "a"
+
+    team.peer_messaging = Mock(side_effect=allowed)
+    endpoint._peer_messaging = True
+    endpoint._writer = connection.writer
+    endpoint.publish()
+    assert connection.lines == [encoded(Peers(labels=("a@laptop",)))]
+
+
+def test_a_session_with_no_client_names_this_machine() -> None:
+    assert RemoteSession([])._client == socket.gethostname()
+
+
+def test_a_session_redials_at_two_seconds_at_first(tmp_path: Path) -> None:
+    (endpoint,) = (
+        RemoteSession([local_link(tmp_path / "daemon.sock")]).endpoints().values()
+    )
+    assert endpoint._redial_sec == 2.0
+
+
+@pytest.mark.asyncio
+async def test_a_name_removed_before_the_session_opens_leaves_nothing_to_end(
+    tmp_path: Path,
+) -> None:
+    session = RemoteSession([local_link(tmp_path / "daemon.sock")])
+    session.set_links([])
+    assert session.endpoints() == {}
+    assert session._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_a_name_added_before_the_session_opens_starts_nothing(
+    tmp_path: Path,
+) -> None:
+    session = RemoteSession([])
+    session.set_links([local_link(tmp_path / "daemon.sock")])
+    assert list(session.endpoints()) == ["local"]
+    assert session._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_a_name_removed_while_open_has_its_task_cancelled(
+    tmp_path: Path,
+) -> None:
+    async with RemoteSession(
+        [local_link(tmp_path / "daemon.sock")],
+        retry_sec=3600.0,
+    ) as session:
+        (endpoint,) = session.endpoints().values()
+        task = session._tasks[endpoint]
+        session.set_links([])
+        async with asyncio.timeout(5):
+            _ = await asyncio.wait([task])
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_listing_names_each_kind_of_tool_with_commas(
+    endpoint: Endpoint,
+    connection: _Connection,
+) -> None:
+    endpoint._writer = connection.writer
+    endpoint.tools = {"Read": _READ.digest, "Train": _TRAIN.digest}
+    session = RemoteSession([])
+    session._endpoints = [endpoint]
+    tool = RemoteTool(remote=session, local={"Read": _READ, "Train": _TRAIN})
+    listing = (await settled(tool.call(ToolContext(), {}))).text()
+    assert listing == "gpu1  up\n  same as here: Read, Train"
+
+
+@pytest.mark.asyncio
+async def test_a_listing_with_no_endpoints_is_a_done_record_with_no_call_id() -> None:
+    record = await RemoteTool(remote=RemoteSession([])).call(ToolContext(), {}).result
+    assert record == ToolMessage(
+        call_id="",
+        state="done",
+        stdout=("No endpoints; add one with `sagent remote add`.",),
+        result=RemoteToolResult(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_listing_of_two_endpoints_has_one_line_each(tmp_path: Path) -> None:
+    session = RemoteSession(
+        [local_link(tmp_path / "a.sock"), local_link(tmp_path / "b.sock")],
+    )
+    record = await settled(RemoteTool(remote=session).call(ToolContext(), {}))
+    assert record.text() == (
+        "local  down: not yet connected\nlocal-2  down: not yet connected"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_endpoint_is_answered_with_the_ones_there_are(
+    tmp_path: Path,
+) -> None:
+    session = RemoteSession(
+        [local_link(tmp_path / "a.sock"), local_link(tmp_path / "b.sock")],
+    )
+    with pytest.raises(ValueError, match=re.escape("endpoints: local, local-2.")):
+        _ = (
+            await RemoteTool(remote=session)
+            .call(
+                ToolContext(),
+                {"endpoint": "nope"},
+            )
+            .result
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_endpoint_with_none_there_says_none() -> None:
+    tool = RemoteTool(remote=RemoteSession([]))
+    with pytest.raises(ValueError, match=re.escape("endpoints: none.")):
+        _ = await tool.call(ToolContext(), {"endpoint": "nope"}).result
+
+
+@pytest.mark.asyncio
+async def test_a_call_naming_an_endpoint_and_no_tool_is_a_done_record(
+    tmp_path: Path,
+) -> None:
+    session = RemoteSession([local_link(tmp_path / "daemon.sock")])
+    record = (
+        await RemoteTool(remote=session)
+        .call(
+            ToolContext(),
+            {"endpoint": "local"},
+        )
+        .result
+    )
+    assert record == ToolMessage(
+        call_id="",
+        state="done",
+        stdout=("local  down: not yet connected",),
+        result=RemoteToolResult(endpoint="local"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tool_asked_for_its_schema_is_a_done_record_from_the_local_spec(
+    endpoint: Endpoint,
+) -> None:
+    endpoint.tools = {"Read": _READ.digest}
+    session = RemoteSession([])
+    session._endpoints = [endpoint]
+    tool = RemoteTool(remote=session, local={"Read": _READ})
+    record = await tool.call(
+        ToolContext(),
+        {"endpoint": "gpu1", "tool": "Read"},
+    ).result
+    assert record == ToolMessage(
+        call_id="",
+        state="done",
+        stdout=(
+            f"{_READ.description}\n\nSchema:\n{json_dumps(_READ.schema, indent=2)}",
+        ),
+        result=RemoteToolResult(endpoint="gpu1"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_run_of_agent_send_is_refused_by_name() -> None:
+    tool = RemoteTool(remote=RemoteSession([]))
+    with pytest.raises(ValueError, match=r"^Use AgentSend directly"):
+        _ = await tool.call(
+            ToolContext(),
+            {"endpoint": "gpu1", "tool": "AgentSend"},
+        ).result
+
+
+def test_a_reminder_names_each_endpoint(endpoint: Endpoint, tmp_path: Path) -> None:
+    other = _endpoint_on(
+        Team(catalog=ModelCatalog(factories={})),
+        local_link(tmp_path / "daemon.sock"),
+    )
+    session = RemoteSession([])
+    session._endpoints = [endpoint, other]
+    assert RemoteTool(remote=session).reminder(ToolContext()) == (
+        "remote: gpu1 (down), local (down)"
+    )
+
+
+def test_each_agent_is_reminded_of_a_change_by_its_own_label(
+    endpoint: Endpoint,
+    connection: _Connection,
+) -> None:
+    endpoint._writer = connection.writer
+    session = RemoteSession([])
+    session._endpoints = [endpoint]
+    tool = RemoteTool(remote=session)
+    a, b = ToolContext(label="a"), ToolContext(label="b")
+    endpoint._granted({"Read": "d"})
+    assert tool.reminder(a) == "remote: gpu1 (up: Read)"
+    assert tool.reminder(b) == "remote: gpu1 (up: Read)"
+    endpoint._granted({"Train": "e"})
+    assert tool.reminder(a) == "remote: gpu1 (up: Train; tools changed)"
+    assert tool.reminder(b) == "remote: gpu1 (up: Train; tools changed)"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["pattern", "path", "url", "query", "file_path", "command", "description"],
+)
+def test_each_argument_that_says_what_a_run_does_is_summarized(key: str) -> None:
+    tool = RemoteTool(remote=RemoteSession([]))
+    run = {"endpoint": "gpu1", "tool": "Grep", "arguments": {key: "x"}}
+    assert tool.summary(run) == "RemoteTool gpu1 Grep x"
+
+
+def test_publish_before_connecting_sends_nothing_and_raises_nothing(
+    team: Team,
+    tmp_path: Path,
+) -> None:
+    endpoint = _endpoint_on(team, local_link(tmp_path / "daemon.sock"))
+    endpoint.publish()
 
 
 if __name__ == "__main__":
