@@ -1402,6 +1402,28 @@ def test_a_resume_cancels_each_pending_call_left_unanswered_past_an_answered_one
     validate_context(rt.tape.context().messages)
 
 
+def test_a_resume_answers_each_call_its_process_never_answered_interrupted() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"], session_id="s")
+    for record in (
+        _user("go"),
+        reply(calls=[call("echo", "a"), call("echo", "b"), call("echo", "c")]),
+        ToolMessage(call_id="a", state="failed", stderr=("done",)),
+        ToolMessage(call_id="b", state="pending", shown="[running]"),
+    ):
+        _ = rt.tape.append_history(record)
+
+    rt.settle_detached()
+
+    messages = rt.tape.context().messages
+    assert [
+        (e.call_id, e.state, e.text())
+        for e in messages
+        if isinstance(e, ToolMessage) and e.timestamp is not None
+    ] == [("c", "failed", "[interrupted]"), ("b", "cancelled", Stubs().cancelled)]
+    assert not any(isinstance(r, ContextSplice) for r in rt.tape)
+    validate_context(messages)
+
+
 @pytest.mark.parametrize(
     ("background", "where"),
     [(True, "background tool 'echo' crashed"), (False, "cohort tool 'echo' crashed")],
