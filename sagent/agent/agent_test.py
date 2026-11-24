@@ -1620,6 +1620,30 @@ async def test_a_call_still_running_when_its_session_ended_resumes_killed(
 
 
 @pytest.mark.asyncio
+async def test_a_call_its_ended_process_never_answered_is_journaled_interrupted_at_resume(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        UserMessage(content="move"),
+        ToolCall(call_id="c1", name="Echo"),
+    )
+    provider, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        pass
+
+    assert provider.requests == []
+    assert [type(r) for r in journal].count(ContextClear) == 1
+    (answered,) = [r for r in journal if isinstance(r, ToolMessage)]
+    assert (answered.call_id, answered.state, answered.text()) == (
+        "c1",
+        "failed",
+        "[interrupted]",
+    )
+
+
+@pytest.mark.asyncio
 async def test_each_turn_is_journaled_with_what_it_cost(tmp_path: Path) -> None:
     journal = RecordingJournal()
     tokens = TokenCount(
