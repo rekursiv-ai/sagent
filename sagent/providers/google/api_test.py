@@ -6,12 +6,19 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import TYPE_CHECKING, override
 
+import asyncio
+
 from treekle import ReadError, json_dumps, json_loads
 
 import httpx2
 import pytest
 
-from sagent.journal.types import AssistantMessage, Attachment, UserMessage
+from sagent.journal.types import (
+    AssistantMessage,
+    Attachment,
+    Succeeded,
+    UserMessage,
+)
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
     AuthError,
@@ -28,12 +35,19 @@ from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
 from sagent.providers.testing import paused_backoff
+from sagent.runtime.runtime import Runtime
+from sagent.runtime.types import (
+    ModelResponseCompleted,
+    ModelResponseTextStreamed,
+    SessionQuit,
+)
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 
     from sagent.model.capability import ModelCapability
+    from sagent.runtime.types import RuntimeEvent
 
 
 _REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
@@ -138,6 +152,56 @@ async def test_stream_posts_the_request_and_yields_text_then_the_response() -> N
         "end_turn",
         TokenCount(request=7, response=2),
     )
+
+
+@pytest.mark.asyncio
+async def test_a_looping_stream_closes_before_the_runtime_sends_queued_input() -> None:
+    tail = _LoopingBody()
+    server = _Server(replies=[httpx2.Response(200, stream=tail), _ok("Next.")])
+    async with _Served(server) as shared, asyncio.TaskGroup() as tasks:
+        runtime = Runtime(model=Google(resources=shared)["gemini-neon-4.0"])
+        seen: list[RuntimeEvent] = []
+        runtime.observers.append(seen.append)
+        queued = UserMessage(content="Follow up")
+        held = asyncio.Event()
+        runtime.observers.append(
+            lambda _: held.set() if runtime.pending_mid_stream() == (queued,) else None,
+        )
+        runtime.push(UserMessage(content="First"))
+        tasks.create_task(runtime.run_forever())
+        try:
+            async with asyncio.timeout(2):
+                await tail.waiting.wait()
+                answered = runtime.submit(queued)
+                await held.wait()
+                tail.go.set()
+                outcome = await answered
+        finally:
+            runtime.push(SessionQuit())
+    assert isinstance(outcome, Succeeded)
+    assert tail.closed
+    assert not tail.read_past_cutoff
+    first, second = [e.outcome for e in seen if isinstance(e, ModelResponseCompleted)]
+    assert isinstance(first, Succeeded)
+    assert isinstance(second, Succeeded)
+    assert first.value.stop_reason == "max_tokens"
+    assert first.value.records == (AssistantMessage(content="Valid prefix."),)
+    assert [e.text for e in seen if isinstance(e, ModelResponseTextStreamed)] == [
+        "Valid prefix.",
+        "Next.",
+    ]
+    assert [
+        r for r in runtime.request().records if isinstance(r, AssistantMessage)
+    ] == [
+        AssistantMessage(content="Valid prefix."),
+        AssistantMessage(content="Next."),
+    ]
+    _, follow_up = server.requests
+    assert _body(follow_up)["contents"] == [
+        {"role": "user", "parts": [{"text": "First"}]},
+        {"role": "model", "parts": [{"text": "Valid prefix."}]},
+        {"role": "user", "parts": [{"text": "Follow up"}]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -524,6 +588,29 @@ async def _broken(head: bytes) -> AsyncIterator[bytes]:
     raise httpx2.ReadError("Connection reset by peer")
 
 
+class _LoopingBody(httpx2.AsyncByteStream):
+    """A Neon reply with a control run split across SSE frames."""
+
+    def __init__(self) -> None:
+        self.waiting = asyncio.Event()
+        self.go = asyncio.Event()
+        self.closed = False
+        self.read_past_cutoff = False
+
+    @override
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield _sse(_event("Valid prefix." + "\r" * 80)).replace(b"\n", b"\r\n")
+        self.waiting.set()
+        await self.go.wait()
+        yield _sse(_event("\r" * 64_527)).replace(b"\n", b"\r\n")
+        self.read_past_cutoff = True
+        yield _sse(_event("", finish="MAX_TOKENS"))
+
+    @override
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 async def _stream(
     events: AsyncIterator[TextChunk | Response],
 ) -> list[TextChunk | Response]:
@@ -637,7 +724,7 @@ class _Dropping(Google):
         *,
         model: str,
         request: Request,
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncGenerator[dict[str, object]]:
         del body, model, request
         yield _event("so far")
         raise DisconnectedError("flaky", retry_after_sec=7.0)
