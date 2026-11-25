@@ -22,16 +22,20 @@ def _hog_the_loop(seconds: float) -> None:
 async def test_a_stall_is_logged_once_with_its_length_and_the_code_holding_the_loop(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    entered = time.monotonic()
     with caplog.at_level(logging.WARNING), watch_stalls(threshold_sec=0.005):
+        # Answered pings first: the watch goes on after the loop keeps up.
+        await asyncio.sleep(0.02)  # house-ignore[sleep] -- Idles across its pings.
         # The block's end joins the watcher, so its report is in before the assert.
         _hog_the_loop(0.04)
+    held = time.monotonic() - entered
     (stalled,) = caplog.records
     said = stalled.getMessage()
     first, stack = said.split("\n", 1)
     match = re.fullmatch(r"event loop stalled (\d\.\d{3}) s; it was running:", first)
     assert match is not None, first
-    # Seen at most a threshold late, and logged once the loop runs again.
-    assert 0.025 <= float(match.group(1)) <= 0.08
+    # Seen at most a threshold late; timed inside the block, however slow the host.
+    assert 0.025 <= float(match.group(1)) <= round(held, 3)
     assert all(line.startswith(("  File ", "    ")) for line in stack.splitlines())
     assert "in _hog_the_loop\n    time.sleep(seconds)" in stack
     assert stalled.name == "sagent.lib.asyncio_stalls"
