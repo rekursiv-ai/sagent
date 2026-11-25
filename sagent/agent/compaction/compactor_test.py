@@ -943,12 +943,13 @@ async def test_provider_compaction_asks_the_api_and_keeps_the_tail_whole(
 
     (request,) = provider.requests
     assert request.summarize
+    assert (request.purpose, request.max_response_tokens) == ("compaction", 0)
     assert (request.system, request.tools) == (
         agent.runtime.request().system,
         agent.runtime.request().tools,
     )
     assert _texts(request.records) == _texts(_records(_HISTORY))
-    assert splice.strategy == "provider_summary"
+    assert (splice.strategy, splice.summary_fallback_reason) == ("provider_summary", "")
     summary, *kept = splice.replacement
     assert summary == ContextCompaction(
         summary="The user fixed a bug.",
@@ -963,14 +964,24 @@ async def test_provider_compaction_asks_the_api_and_keeps_the_tail_whole(
     assert kept == [_user("and the docs"), sealed]
 
 
+@pytest.mark.parametrize(
+    ("refused", "why"),
+    [
+        (_REFUSED, "reasoning_extraction: Blocked."),
+        (reply("I will not.", stop_reason="refusal"), "no reason given"),
+    ],
+    ids=["details", "none"],
+)
 @pytest.mark.asyncio
 async def test_a_refused_provider_summary_says_why_and_writes_our_own(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    refused: Response,
+    why: str,
 ) -> None:
     provider, agent = _agent(
         tmp_path,
-        _REFUSED,
+        refused,
         _SUMMARY,
         capability=_capability(compaction="provider"),
     )
@@ -984,10 +995,7 @@ async def test_a_refused_provider_summary_says_why_and_writes_our_own(
     assert splice.strategy == "summary"
     assert len(provider.requests) == 2
     assert caplog.messages == [
-        (
-            "the provider's summary was refused (reasoning_extraction: Blocked.);"
-            " writing our own"
-        ),
+        f"the provider's summary was refused ({why}); writing our own",
     ]
 
 
@@ -1200,6 +1208,7 @@ async def test_a_resumed_sealed_summary_is_rewritten_from_the_journal(
 @pytest.mark.asyncio
 async def test_a_provider_summary_that_fails_falls_back_to_bespoke(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     refusal: Exception,
 ) -> None:
     provider, agent = _agent(
@@ -1209,10 +1218,17 @@ async def test_a_provider_summary_that_fails_falls_back_to_bespoke(
         capability=_capability(compaction="provider"),
     )
 
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.agent.compaction.compactor",
+    ):
+        splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
 
     assert [r.summarize for r in provider.requests] == [True, False]
     assert splice.strategy == "summary"
+    assert caplog.messages == [
+        f"the provider's summary failed; writing our own: {refusal}",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1244,7 @@ async def test_nothing_to_summarize_asks_the_provider_nothing(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_a_provider_that_returns_no_summary_falls_back_to_bespoke(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider, agent = _agent(
         tmp_path,
@@ -1236,11 +1253,40 @@ async def test_a_provider_that_returns_no_summary_falls_back_to_bespoke(
         capability=_capability(compaction="provider"),
     )
 
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.agent.compaction.compactor",
+    ):
+        splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
 
     assert [r.summarize for r in provider.requests] == [True, False]
     assert splice.strategy == "summary"
     assert "Summary:\nthe gist" in _lead(splice)
+    assert caplog.messages == ["the provider returned no summary; writing our own"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", ["The user fixed a bug."]],
+    ids=["empty", "list"],
+)
+@pytest.mark.asyncio
+async def test_a_provider_summary_with_no_text_keeps_its_block_alone(
+    tmp_path: Path,
+    content: PlainTree,
+) -> None:
+    block: dict[str, PlainTree] = {"type": "compaction", "content": content}
+    _, agent = _agent(
+        tmp_path,
+        Response(records=(), stop_reason="compaction", summary=block),
+        capability=_capability(compaction="provider"),
+    )
+
+    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+
+    summary = splice.replacement[0]
+    assert isinstance(summary, ContextCompaction)
+    assert (splice.strategy, summary.summary) == ("provider_summary", None)
 
 
 def test_a_note_after_compaction_follows_a_provider_summary() -> None:
