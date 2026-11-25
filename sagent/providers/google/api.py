@@ -231,7 +231,7 @@ class Google(HasModels, AsyncResource):
         *,
         model: str,
         request: Request,
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncGenerator[dict[str, object]]:
         """Stream the reply to ``body``, retrying a short failure before the first event.
 
         Args:
@@ -249,24 +249,41 @@ class Google(HasModels, AsyncResource):
         """
         url = f"{self.endpoint('streamGenerateContent', model=model)}?alt=sse"
         posted = await self.envelope(body, model=model, request=request)
+        opened: list[AsyncGenerator[dict[str, object]]] = []
 
-        async def attempt() -> AsyncIterator[dict[str, object]]:
-            async with self._reply(url, body=posted) as response:
-                async for event in wire.events(response.aiter_lines()):
-                    yield self.unwrap(event)
+        def started() -> AsyncGenerator[dict[str, object]]:
+            opened.append(self._attempt(url, body=posted))
+            return opened[-1]
 
-        async for event in retried(
-            attempt,
-            gate=self.resources.gate,
-            key=self.gate_key(model),
-            recheck_quota=request.recheck_quota,
-        ):
-            yield event
+        try:
+            async for event in retried(
+                started,
+                gate=self.resources.gate,
+                key=self.gate_key(model),
+                recheck_quota=request.recheck_quota,
+            ):
+                yield event
+        finally:
+            # ``retried`` leaves the attempt it is reading open when its caller
+            # stops early; the reply's stream would stay open until collected.
+            for each in opened:
+                await each.aclose()
 
     async def reply(self, url: str, *, body: Mapping[str, object]) -> dict[str, object]:
         """POST ``body`` to ``url`` and return the JSON reply."""
         async with self._reply(url, body=body) as response:
             return json_loads(await response.aread(), dict[str, object])
+
+    async def _attempt(
+        self,
+        url: str,
+        *,
+        body: Mapping[str, object],
+    ) -> AsyncGenerator[dict[str, object]]:
+        """Stream one attempt at the reply to ``body``, as events."""
+        async with self._reply(url, body=body) as response:
+            async for event in wire.events(response.aiter_lines()):
+                yield self.unwrap(event)
 
     @contextlib.asynccontextmanager
     async def _reply(
@@ -376,9 +393,14 @@ class GoogleModel(AsyncResource):
         reader = wire.StreamReader(capability=self.capability)
         body = self.encode(request)
         model = self.capability.wire_model_id or self.capability.model_id
-        async for event in self.provider.events(body, model=model, request=request):
-            for chunk in reader.feed(event):
-                yield chunk
+        async with contextlib.aclosing(
+            self.provider.events(body, model=model, request=request),
+        ) as events:
+            async for event in events:
+                for chunk in reader.feed(event):
+                    yield chunk
+                if reader.looping:
+                    break
         yield reader.response()
 
 

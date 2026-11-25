@@ -423,6 +423,25 @@ def test_empty_words_from_the_model_are_left_out() -> None:
     assert _contents(AssistantMessage(content=""), AssistantMessage()) == []
 
 
+@pytest.mark.parametrize("compacted", [False, True])
+def test_a_saved_looping_tail_is_not_sent_with_the_follow_up(
+    *,
+    compacted: bool,
+) -> None:
+    old = AssistantMessage(
+        content="Valid prefix.\n" + "\r" * 65_090,
+        extra={"thoughtSignature": "legacy-text-signature"},
+    )
+    empty = AssistantMessage(content="\r" * 128)
+    history = (UserMessage(content="First"), old, empty)
+    prior = (ContextClear(history=history),) if compacted else history
+    assert _contents(*prior, UserMessage(content="Next")) == [
+        {"role": "user", "parts": [{"text": "First"}]},
+        {"role": "model", "parts": [{"text": "Valid prefix.\n"}]},
+        {"role": "user", "parts": [{"text": "Next"}]},
+    ]
+
+
 @pytest.mark.parametrize("signature", ["", 7])
 def test_an_empty_or_odd_signature_is_not_sent(signature: PlainTree) -> None:
     (content,) = _contents(
@@ -862,12 +881,114 @@ def test_reasoning_and_a_signed_answer_in_fragments() -> None:
     assert response.spend.total > 0
 
 
+@pytest.mark.parametrize(("char", "thinking"), [("\r", False), ("\x00", True)])
+def test_looping_keeps_only_the_prefix_and_complete_signed_calls(
+    char: str,
+    *,
+    thinking: bool,
+) -> None:
+    reader = wire.StreamReader(capability=_capability())
+    signed = {"thoughtSignature": "text-signature"}
+    tool = {
+        "functionCall": {"id": "c", "name": "Read", "args": {"path": "a.py"}},
+        "thoughtSignature": "call-signature",
+    }
+    chunks = reader.feed(
+        _event([{"text": "prefix" + char * 127, "thought": thinking}]),
+    )
+    before_cutoff = reader.looping
+    chunks.extend(
+        reader.feed(
+            _event(
+                [
+                    {"text": char + "unread", "thought": thinking, **signed},
+                    {"text": "also unread"},
+                    tool,
+                ],
+            ),
+        ),
+    )
+    assert (before_cutoff, reader.looping) == (False, True)
+    assert chunks == [TextChunk(text="prefix", thinking=thinking)]
+    response = reader.response()
+    assert (response.stop_reason, response.stop_details) == (
+        "max_tokens",
+        f"Stopped at 128 consecutive U+{ord(char):04X} characters.",
+    )
+    assert response.records == (
+        Thinking(content="prefix") if thinking else AssistantMessage(content="prefix"),
+        ToolCall(
+            call_id="c",
+            name="Read",
+            arguments={"path": "a.py"},
+            extra={"thoughtSignature": "call-signature"},
+        ),
+    )
+    history = (
+        *response.records,
+        ToolMessage(call_id="c", state="done", stdout=("ok",)),
+    )
+    contents = _contents(ContextClear(summary="Read a file", history=history))
+    assert contents[1]["parts"] == [
+        *([] if thinking else [{"text": "prefix"}]),
+        {
+            "functionCall": {"name": "Read", "args": {"path": "a.py"}},
+            "thoughtSignature": "call-signature",
+        },
+    ]
+    assert contents[2]["parts"] == [
+        {"functionResponse": {"name": "Read", "response": {"content": "ok"}}},
+    ]
+
+
+def test_repetitive_formats_and_progress_keep_their_text_and_signature() -> None:
+    reader = wire.StreamReader(capability=_capability())
+    table = "| name | value |\r\n| --- | --- |\r\n" + "| a | b |\r\n" * 200
+    code = "```py\n" + "\t" * 160 + " " * 160 + "pass\n```\n"
+    rule = "-" * 1024 + "\n" * 160
+    json = '{"base64": "' + "A" * 4096 + '"}\n'
+    progress = "\r1%\r" + "\r2%\r" * 200
+    short_run = "\r" * 127
+    text = (table, code, rule, json, progress, short_run[:-1])
+    chunks = [chunk for part in text for chunk in reader.feed(_event([{"text": part}]))]
+    chunks.extend(
+        reader.feed(
+            _event([{"text": "", "thoughtSignature": "sig"}], finish="STOP"),
+        ),
+    )
+    answer = "".join(text)
+    assert "".join(chunk.text for chunk in chunks) == answer
+    assert reader.response().records == (
+        AssistantMessage(content=answer, extra={"thoughtSignature": "sig"}),
+    )
+    assert reader.response().stop_reason == "end_turn"
+
+
+def test_short_control_runs_in_distinct_channels_do_not_combine() -> None:
+    reader = wire.StreamReader(capability=_capability())
+    short = "\r" * 127
+    assert reader.feed(_event([{"text": "think" + short, "thought": True}])) == [
+        TextChunk(text="think", thinking=True),
+    ]
+    chunks = reader.feed(_event([{"text": "\rDone."}], finish="STOP"))
+    assert chunks == [
+        TextChunk(text=short, thinking=True),
+        TextChunk(text="\rDone.", record=1),
+    ]
+    assert reader.response().records == (
+        Thinking(content="think" + short),
+        AssistantMessage(content="\rDone."),
+    )
+
+
 def test_a_signature_on_reasoning_alone_stays_with_the_reasoning() -> None:
     reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
-    reader.feed(_event([{"text": "hmm", "thought": True, "thoughtSignature": "s"}]))
-    reader.feed(_event([], finish="STOP"))
+    reader.feed(_event([{"text": "hmm\r", "thought": True, "thoughtSignature": "s"}]))
+    assert reader.feed(_event([], finish="STOP")) == [
+        TextChunk(text="\r", thinking=True),
+    ]
     assert reader.response().records == (
-        Thinking(content="hmm", extra={"thoughtSignature": "s"}),
+        Thinking(content="hmm\r", extra={"thoughtSignature": "s"}),
     )
 
 

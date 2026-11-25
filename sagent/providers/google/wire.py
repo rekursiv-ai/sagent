@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import base64
 import logging
@@ -87,6 +87,13 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# Gemini can loop on one control character, such as ``\r``, after a finished answer
+# and keep going until its output limit: 65k carriage returns over 10-15 minutes,
+# invisible in Chat while the user's messages wait. A reply is cut at this many in
+# a row. Printable runs (base64), line feeds, and indentation can be intentional.
+_CONTROL_RUN = re.compile(r"([\x00-\x08\x0b-\x1f\x7f])\1*")
+_LOOP_LENGTH: Final = 128
 
 
 def encode(
@@ -233,6 +240,13 @@ class StreamReader:
         self._usage: dict[str, object] = {}
         self._finish: str | None = None
         self._blocked: str | None = None
+        self._pending: TextChunk | None = None
+        self._looping = ""
+
+    @property
+    def looping(self) -> bool:
+        """Return whether the reply was cut off for looping on a control character."""
+        return bool(self._looping)
 
     def feed(self, event: Mapping[str, object]) -> list[TextChunk]:
         """Take one event, and return the text it adds.
@@ -256,11 +270,14 @@ class StreamReader:
         finish = first.get("finishReason")
         if isinstance(finish, str) and finish:
             self._finish = finish
-        chunks: list[TextChunk] = []
-        for part in _objects(_object(first.get("content")).get("parts")):
-            chunk = self._part(part)
-            if chunk is not None:
-                chunks.append(chunk)
+        chunks = [
+            chunk
+            for part in _objects(_object(first.get("content")).get("parts"))
+            for chunk in self._part(part)
+        ]
+        if self._finish is not None and self._pending is not None:
+            pending, self._pending = self._pending, None
+            chunks.append(self._remember(pending.text, thinking=pending.thinking))
         return chunks
 
     def response(self) -> Response:
@@ -275,13 +292,21 @@ class StreamReader:
         """
         if self._blocked is not None:
             stop_reason, stop_details = "refusal", self._blocked
+        elif self._looping:
+            # Reported as the length limit, which every caller already reads as
+            # an unfinished reply; the details say the client cut it.
+            stop_reason, stop_details = "max_tokens", self._looping
         elif self._finish is not None:
             stop_reason = _stop_reason(self._finish, called=bool(self._calls))
             stop_details = self._finish if stop_reason == "refusal" else ""
         else:
             raise DisconnectedError("Gemini's stream ended before its reply finished.")
+        # The text signature is optional, unlike those on calls. After a local
+        # cutoff the final signature may be unread or the signed text changed.
         signed: dict[str, PlainTree] = (
-            {} if self._signature is None else {"thoughtSignature": self._signature}
+            {}
+            if self._signature is None or self._looping
+            else {"thoughtSignature": self._signature}
         )
         text = "".join(self._text)
         records: list[AssistantMessage | Thinking | ToolCall] = []
@@ -306,17 +331,18 @@ class StreamReader:
             stop_details=stop_details,
         )
 
-    def _part(self, part: Mapping[str, object]) -> TextChunk | None:
-        """Take one part of a candidate; return it as text when it is text."""
+    def _part(self, part: Mapping[str, object]) -> Iterator[TextChunk]:
+        """Take one part of a candidate and yield the text ready to show."""
         raw = part.get("thoughtSignature")
         signature = raw if isinstance(raw, str) and raw else None
+        # Complete calls in this event already arrived, even if its text was cut off.
         if "functionCall" in part:
             call = _object(part.get("functionCall"))
             name, call_id = call.get("name"), call.get("id")
             # A call with no name could never be answered; the next request
             # would carry it and fail.
             if not isinstance(name, str) or not name:
-                return None
+                return
             self._calls.append(
                 ToolCall(
                     # Gemini rarely names a call; ours need an id to pair results.
@@ -328,17 +354,42 @@ class StreamReader:
                     extra={} if signature is None else {"thoughtSignature": signature},
                 ),
             )
-            return None
+            return
         text = part.get("text")
-        if not isinstance(text, str):
-            return None
-        # Gemini 3 signs the reply's text; echoing it back keeps the model's
-        # reasoning, and a continuation without it is rejected.
+        if not isinstance(text, str) or self._looping:
+            return
+        # An empty terminal part can carry the thought signature.
         if signature is not None:
             self._signature = signature
-        if not text:
-            return None
-        if part.get("thought") is True:
+        if text:
+            yield from self._guarded_text(text, thinking=part.get("thought") is True)
+
+    def _guarded_text(self, text: str, *, thinking: bool) -> Iterator[TextChunk]:
+        """Hold only the trailing control run until it ends or hits the cutoff."""
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            if pending.thinking == thinking:
+                text = pending.text + text
+            else:
+                yield self._remember(pending.text, thinking=pending.thinking)
+        for run in _CONTROL_RUN.finditer(text):
+            if run.end() - run.start() >= _LOOP_LENGTH:
+                self._looping = (
+                    f"Stopped at {_LOOP_LENGTH} consecutive"
+                    f" U+{ord(run[1]):04X} characters."
+                )
+                logger.warning("Gemini stream: %s", self._looping)
+                text = text[: run.start()]
+                break
+            if run.end() == len(text):
+                self._pending = TextChunk(text=run[0], thinking=thinking)
+                text = text[: run.start()]
+        if text:
+            yield self._remember(text, thinking=thinking)
+
+    def _remember(self, text: str, *, thinking: bool) -> TextChunk:
+        """Collect and return a chunk in its final response record."""
+        if thinking:
             self._thoughts.append(text)
             return TextChunk(text=text, thinking=True)
         self._text.append(text)
@@ -568,6 +619,13 @@ def _parts(
             note = f"<system-reminder>\n{record.text()}\n</system-reminder>"
             return [("user", {"text": note})]
         case AssistantMessage(content=str() as text) if text:
+            # Trim control-character loops that older replies carried through
+            # compaction and back into Gemini requests.
+            if len(text) >= _LOOP_LENGTH and _CONTROL_RUN.fullmatch(
+                text[-_LOOP_LENGTH:],
+            ):
+                clean = text.rstrip(text[-1])
+                return [("model", {"text": clean})] if clean else []
             return [("model", _signed({"text": text}, extra=record.extra))]
         case ToolCall(name=name, arguments=arguments):
             call: dict[str, object] = {
