@@ -67,6 +67,7 @@ __all__ = [
     "cache_dir",
     "config_dir",
     "data_dir",
+    "relocated_base_dir_variables",
     "runtime_dir_variables",
     "state_dir",
 ]
@@ -232,6 +233,31 @@ def base_dir_variables() -> dict[str, str]:
             "LOCALAPPDATA",
         )
         if (value := _env(name))
+    }
+
+
+def relocated_base_dir_variables(folder: Path) -> dict[str, str]:
+    """Return the variables that lay out each base directory under ``folder``.
+
+    A child process given them keeps its own files in ``folder`` while its ``HOME``
+    stays another's: one that signs in with a login a vendor keeps under ``~``
+    (``~/.codex``), say. Each lies where a ``HOME`` of ``folder`` puts it, and apart
+    from the others, so deleting the cache loses no data or state.
+
+    Args:
+      folder: The folder that stands in for ``HOME``.
+
+    Returns:
+      variables: The four ``XDG_*_HOME``, as on Linux, and ``LOCALAPPDATA``, as on
+        Windows.
+
+    """
+    return {
+        "XDG_DATA_HOME": str(folder / ".local" / "share"),
+        "XDG_CONFIG_HOME": str(folder / ".config"),
+        "XDG_CACHE_HOME": str(folder / ".cache"),
+        "XDG_STATE_HOME": str(folder / ".local" / "state"),
+        "LOCALAPPDATA": str(folder / "AppData" / "Local"),
     }
 
 

@@ -14,6 +14,7 @@ from sagent.lib.userdirs import (
     cache_dir,
     config_dir,
     data_dir,
+    relocated_base_dir_variables,
     runtime_dir_variables,
     state_dir,
 )
@@ -181,6 +182,41 @@ def test_a_child_given_the_base_dir_variables_alone_resolves_the_same_dirs(
         monkeypatch.setenv(name, value)
 
     assert [helper(platform=plat) for helper in helpers] == parent
+
+
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_a_child_given_relocated_base_dir_variables_lays_out_its_folder_as_a_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    plat: str,
+) -> None:
+    """As a HOME of its folder would, on Linux, and on Windows ``data_dir``'s rule.
+
+    Each its own, so deleting the cache loses no data or state; its HOME stays its
+    parent's, where a vendor keeps a login (``~/.codex``).
+    """
+    own = tmp_path / "own"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "parent"))
+    given = relocated_base_dir_variables(own)
+
+    monkeypatch.setattr(os, "environ", {"HOME": str(tmp_path / "home")})
+    for name, value in given.items():
+        monkeypatch.setenv(name, value)
+
+    assert "HOME" not in given
+    assert [
+        helper(platform=plat) for helper in (data_dir, config_dir, cache_dir, state_dir)
+    ] == (
+        [own / "AppData" / "Local"] * 4
+        if plat == "win32"
+        else [
+            own / ".local" / "share",
+            own / ".config",
+            own / ".cache",
+            own / ".local" / "state",
+        ]
+    )
 
 
 @pytest.mark.parametrize(
