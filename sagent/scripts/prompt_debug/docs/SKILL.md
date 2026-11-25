@@ -377,4 +377,3 @@ Then restate the one-line finding and the exact edit made.
 | `sleep N` to wait for a background arm | `wait $PID`; gate on the event, never a guessed duration |
 | Writing a new trial runner instead of using the harness | Write a mode or an experiment; the harness owns retries and concurrency |
 | `nohup ... &` inside ONE tool call | The call blocks on the shell's children anyway -- backgrounding hides failures without saving time |
-
