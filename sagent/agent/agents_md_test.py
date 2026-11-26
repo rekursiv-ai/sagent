@@ -967,8 +967,11 @@ def test_frontmatter_splits_off_its_mapping(
 def test_frontmatter_names_no_source_unless_given() -> None:
     with pytest.raises(yaml.YAMLError) as raised:
         _ = agents_md.frontmatter("---\na: 1\na: 2\n---\n")
+    with pytest.raises(yaml.YAMLError) as named:
+        _ = agents_md.frontmatter("---\na: 1\na: 2\n---\n", source="SKILL.md")
 
     assert str(raised.value).startswith("line 3:")
+    assert str(named.value).startswith("SKILL.md, line 3:")
 
 
 @pytest.mark.parametrize(

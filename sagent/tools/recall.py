@@ -24,12 +24,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from importlib.resources import files
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, TypedDict
 
 import asyncio
 import os
-import re
 
 from treekle import json_loads
 from wesearch.fetch import ContentParams, PolicyParams, RequestParams, fetch
@@ -96,9 +94,8 @@ class Recall:
 
     key: str = field(default="", repr=False)
     """The server's API key, for the ``url`` it is given with: a change of that
-    setting drops it. ``""`` sends the environment's key to the environment's
-    server (``$TRACKINIZER_TOKEN``, else what ``$TRACKINIZER_TOKEN_FILE``
-    holds), and no key to a ``url`` given here."""
+    setting drops it. ``""`` sends ``$TRACKINIZER_TOKEN`` to the environment's
+    server, and no key to a ``url`` given here."""
 
     session: str = ""
     """The id the process's own session is stored under, its first agent's;
@@ -145,9 +142,9 @@ class Recall:
             result comes only if the server searched no vectors.
 
         Raises:
-          ValueError: No server or no session is set, the environment's key
-            cannot be read or sent, the caller is in no team, the agent named
-            is not one agent or keeps no journal, or the limit is out of bounds.
+          ValueError: No server or no session is set, the caller is in no team,
+            the agent named is not one agent or keeps no journal, or the limit
+            is out of bounds.
           FetchError: The server failed or could not be reached.
 
         """
@@ -174,7 +171,9 @@ class Recall:
             )
         # The environment's key is for the environment's server: sent to a server
         # named here, it would hand that server another's key.
-        key = self.key or ("" if self.url else _environment_key())
+        key = self.key or (
+            "" if self.url else os.environ.get("TRACKINIZER_TOKEN") or ""
+        )
         near = target_agent(
             self.team,
             context=context,
@@ -262,27 +261,3 @@ def _spawned_id(agent: Agent, *, label: str) -> str:
     if journal is None:
         raise ValueError(f"{label} keeps no journal, so no session of it is stored.")
     return "" if spawner_journal(journal) is None else session_id(journal)
-
-
-# The same variables, order and refusals as ``trax``, trackinizer's CLI, reads its key
-# by (its ``connection._env_key``), which sagent does not import: one environment must
-# name one key to both. A key is refused here with none of its text:
-# sent, a newline or a non-ASCII character in it fails with an error that quotes it.
-def _environment_key() -> str:
-    """Return ``$TRACKINIZER_TOKEN``, else the key in ``$TRACKINIZER_TOKEN_FILE``."""
-    key = os.environ.get("TRACKINIZER_TOKEN") or ""
-    refusal = "TRACKINIZER_TOKEN must be printable ASCII with no whitespace"
-    if not key and (path := os.environ.get("TRACKINIZER_TOKEN_FILE") or ""):
-        try:
-            held = Path(path).read_bytes()
-        except OSError as error:
-            raise ValueError(
-                f"TRACKINIZER_TOKEN_FILE {path}: {error.strerror}",
-            ) from None
-        # What is no text reads as a character no key holds, so it is refused below
-        # as any other is: read as text, the failure would quote its bytes.
-        key = held.decode(errors="replace").strip()
-        refusal = f"TRACKINIZER_TOKEN_FILE {path} must hold printable ASCII with no whitespace"
-    if key and re.fullmatch(r"[!-~]+", key) is None:
-        raise ValueError(refusal)
-    return key

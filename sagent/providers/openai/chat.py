@@ -162,7 +162,7 @@ class StreamReader:
         self._thinking: list[str] = []
         self._calls: dict[int, _Call] = {}
         self._usage: dict[str, object] = {}
-        self._finish = ""
+        self._finish = ""  # pragma: no mutate[truthiness] -- Only truth is read.
         self._refusals: list[str] = []
 
     def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
@@ -298,7 +298,6 @@ class StreamReader:
                 for block in from_plain(
                     delta.get("content"),
                     list[dict[str, PlainTree]],
-                    default=list[dict[str, PlainTree]](),
                 )
                 if block.get("type") == "thinking"
             )
@@ -363,16 +362,11 @@ def _messages(
     if system:
         messages.append({"role": "system", "content": system})
     images: list[dict[str, object]] = []
-    # What is said while a turn's calls still wait for their tool messages is said
-    # after them: a server takes those right after the turn that made the calls.
-    held: list[dict[str, object]] = []
-    open_calls: set[str] = set()
     turn: _Turn | None = None
-    for record in wire.flatten(request.records):
+    for record in wire.results_first(request.records):
         if isinstance(record, (AssistantMessage, Thinking, ToolCall)):
             if turn is None:
-                _flush(messages, images=images, held=held)
-                open_calls.clear()
+                _flush(messages, images=images)
                 turn = _Turn()
                 messages.append(turn.message)
             turn.add(record, ids=ids, reasoning_field=reasoning_field)
@@ -383,27 +377,21 @@ def _messages(
                 content_blocks=reasoning_content_blocks,
                 reasoning_field=reasoning_field,
             )
-            if isinstance(record, ToolCall):
-                open_calls.add(record.call_id)
             continue
         said = wire.user_content(record)
         if said is not None:
             turn = None
-            if open_calls:
-                held.append(_user(*said, limits=limits))
-                continue
-            _flush(messages, images=images, held=held)
+            _flush(messages, images=images)
             messages.append(_user(*said, limits=limits))
         elif isinstance(record, ToolMessage):
             turn = None
-            open_calls.discard(record.call_id)
             messages.append(_result(record, ids=ids))
             images.extend(
                 {"type": "image_url", "image_url": {"url": url}}
                 for attachment in record.attachments
                 if (url := wire.image_url(attachment, limits=limits)) is not None
             )
-    _flush(messages, images=images, held=held)
+    _flush(messages, images=images)
     # A turn of reasoning this server is not sent says nothing, and an empty
     # assistant message is rejected.
     empty = {"role": "assistant", "content": None}
@@ -541,18 +529,15 @@ def _result(result: ToolMessage, *, ids: dict[str, str]) -> dict[str, object]:
 
 
 # Tool messages must be contiguous, so a run of results' images waits for the
-# run to end and then goes out as one user message, then what was held behind it.
+# run to end and then goes out as one user message.
 def _flush(
     messages: list[dict[str, object]],
     *,
     images: list[dict[str, object]],
-    held: list[dict[str, object]],
 ) -> None:
     if images:
         messages.append({"role": "user", "content": list(images)})
         images.clear()
-    messages.extend(held)
-    held.clear()
 
 
 def _stop_reason(finish: str, *, refused: bool, called: bool) -> str:

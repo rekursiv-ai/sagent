@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import locale
 import stat
 
 import pytest
@@ -15,6 +16,7 @@ from sagent.tools.types import ToolContext, settled
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from treekle import PlainTree
@@ -93,6 +95,35 @@ async def test_a_save_writes_the_memory_and_heads_the_index_with_it(
         "- [older](user_older.md) -- the first\n"
     )
     assert stat.S_IMODE((tmp_path / "m").stat().st_mode) == 0o700
+
+
+@pytest.fixture
+def ascii_locale() -> Iterator[None]:
+    """Make the platform's default text encoding ASCII, as under ``LANG=C``."""
+    held = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, held)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("ascii_locale")
+async def test_memories_and_their_index_are_utf8_whatever_the_locale(
+    tmp_path: Path,
+) -> None:
+    memory = Memory(directory=tmp_path)
+    first = await _save(memory, "naïve", content="crème")
+    again = await _save(memory, "naïve", content="brûlée")
+    other = await _save(memory, "été")
+    # Read back as itself, the stored name keeps another that files alike out.
+    alike = await _save(memory, "na ve")
+    assert [m.is_error for m in (first, again, other, alike)] == [False] * 3 + [True]
+    assert "brûlée" in (tmp_path / "feedback_na_ve.md").read_bytes().decode()
+    assert memory.briefing(ToolContext(cwd=tmp_path)).endswith(
+        "- [été](feedback_t.md) -- été\n- [naïve](feedback_na_ve.md) -- naïve",
+    )
 
 
 @pytest.mark.asyncio
@@ -297,8 +328,16 @@ async def test_a_quoted_name_in_frontmatter_that_will_not_parse_is_unquoted(
         b"---\n- a list\n---\n\nx\n",
         b"---\nname: [1]\n---\n\nx\n",
         b"\xff\xfe",
+        b"---\ntags: [unclosed\n---\n\nx\n",
     ],
-    ids=["no-frontmatter", "unclosed", "not-a-mapping", "no-string-name", "not-utf8"],
+    ids=[
+        "no-frontmatter",
+        "unclosed",
+        "not-a-mapping",
+        "no-string-name",
+        "not-utf8",
+        "broken-with-no-name",
+    ],
 )
 async def test_a_file_that_names_no_memory_is_replaced_by_its_name(
     tmp_path: Path,
@@ -373,6 +412,11 @@ async def test_a_call_that_names_no_memory_or_lacks_one_is_an_error(
     assert result.is_error is True
     assert result.call_id == ""
     assert result.text() == message
+    assert result.result == MemoryResult(
+        action=str(arguments["action"]),
+        name=str(arguments["name"]),
+        exit_code=1,
+    )
     assert not (tmp_path / "MEMORY.md").exists()
 
 

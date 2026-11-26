@@ -285,7 +285,7 @@ def test_a_skill_whose_frontmatter_will_not_parse_is_skipped_with_a_warning(
     with caplog.at_level(logging.WARNING):
         skills = Skill(user_dir=tmp_path / "u").discover(tmp_path)
     assert _names(skills) == ["good"]
-    assert str(path) in caplog.text
+    assert caplog.text.count(str(path)) == 1
     assert "line " in caplog.text
 
 

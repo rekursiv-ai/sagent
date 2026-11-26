@@ -118,7 +118,6 @@ async def test_unset_settings_are_read_from_the_environment_and_no_key_sends_non
     monkeypatch.setenv("TRACKINIZER_URL", "https://trax.example/")
     monkeypatch.setenv("TRAX_SESSION", "00000000-0000-0000-0000-000000000009")
     monkeypatch.delenv("TRACKINIZER_TOKEN", raising=False)
-    monkeypatch.delenv("TRACKINIZER_TOKEN_FILE", raising=False)
     asked = _answers(monkeypatch)
 
     result = await _called(Recall(team=team), tmp_path, {"limit": 2})
@@ -181,99 +180,6 @@ async def test_the_environment_s_key_goes_to_the_environment_s_server_alone(
             {"Authorization": "Bearer given"},
         ),
     ]
-
-
-@pytest.mark.asyncio
-async def test_the_key_is_the_token_else_what_the_token_file_holds(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team, _agent = _team(tmp_path)
-    monkeypatch.setenv("TRACKINIZER_URL", "https://trax.example")
-    monkeypatch.setenv("TRAX_SESSION", "00000000-0000-0000-0000-000000000009")
-    held = tmp_path / "key"
-    _ = held.write_text(" from-file\n")
-    asked = _answers(monkeypatch)
-
-    monkeypatch.delenv("TRACKINIZER_TOKEN", raising=False)
-    monkeypatch.setenv("TRACKINIZER_TOKEN_FILE", str(held))
-    _ = await _called(Recall(team=team), tmp_path, {})
-    # With the token set the file is not read: this one is not there.
-    monkeypatch.setenv("TRACKINIZER_TOKEN", "from-env")
-    monkeypatch.setenv("TRACKINIZER_TOKEN_FILE", str(tmp_path / "missing"))
-    _ = await _called(Recall(team=team), tmp_path, {})
-
-    assert [request.content.headers for _, request, _ in asked] == [
-        {"Authorization": "Bearer from-file"},
-        {"Authorization": "Bearer from-env"},
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("token", "held", "refusal"),
-    [
-        ("", None, "TRACKINIZER_TOKEN_FILE {path}: No such file or directory"),
-        (
-            "",
-            b"two words",
-            "TRACKINIZER_TOKEN_FILE {path} must hold printable ASCII with no whitespace",
-        ),
-        (
-            "",
-            "calf\u00e9".encode(),
-            "TRACKINIZER_TOKEN_FILE {path} must hold printable ASCII with no whitespace",
-        ),
-        # No text at all: read as text, its bytes would be quoted in the failure.
-        (
-            "",
-            b"\xffkey",
-            "TRACKINIZER_TOKEN_FILE {path} must hold printable ASCII with no whitespace",
-        ),
-        (
-            "two words",
-            None,
-            "TRACKINIZER_TOKEN must be printable ASCII with no whitespace",
-        ),
-        (
-            "calf\u00e9",
-            None,
-            "TRACKINIZER_TOKEN must be printable ASCII with no whitespace",
-        ),
-    ],
-    ids=[
-        "no-file",
-        "file-with-a-space",
-        "file-not-ascii",
-        "file-not-text",
-        "token-with-a-space",
-        "token-not-ascii",
-    ],
-)
-async def test_a_key_that_cannot_be_read_or_sent_is_refused_without_its_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    token: str,
-    held: bytes | None,
-    refusal: str,
-) -> None:
-    team, _agent = _team(tmp_path)
-    monkeypatch.setenv("TRACKINIZER_URL", "https://trax.example")
-    monkeypatch.setenv("TRAX_SESSION", "00000000-0000-0000-0000-000000000009")
-    monkeypatch.setenv("TRACKINIZER_TOKEN", token)
-    path = tmp_path / "key"
-    monkeypatch.setenv("TRACKINIZER_TOKEN_FILE", str(path))
-    if held is not None:
-        _ = path.write_bytes(held)
-    asked = _answers(monkeypatch, _found(_hit("a")))
-
-    result = await _called(Recall(team=team), tmp_path, {})
-
-    assert (result.state, result.stderr) == (
-        "failed",
-        (f"ValueError: {refusal.format(path=path)}",),
-    )
-    assert asked == []
 
 
 @pytest.mark.asyncio

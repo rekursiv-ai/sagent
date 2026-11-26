@@ -343,9 +343,13 @@ def _load(
         logger.warning("Skipping unreadable skill %s.", path)
         return None
     try:
-        meta, body = frontmatter(raw, source=str(path))
+        meta, body = frontmatter(raw)
     except yaml.YAMLError as e:
-        logger.warning("Skipping skill %s: its frontmatter will not parse: %s", path, e)
+        logger.warning(
+            "Skipping skill %s: its frontmatter will not parse: %s",  # pragma: no mutate[diagnostic-text] -- Only an operator reads this log line; a test reads only its path and line.
+            path,
+            e,
+        )
         skipped.append(path)
         return None
     try:

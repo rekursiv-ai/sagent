@@ -51,7 +51,6 @@ from sagent.runtime.tape import (
     mask_ranges_overlap,
     parts_model_turns,
     splice_safe_repair,
-    unpaired_call_ids,
 )
 from sagent.runtime.types import (
     ModelContextEvent,
@@ -229,7 +228,7 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     """
     found, still_open = pairings(messages)
     # Whether the last turn was the model's.
-    after_model = False
+    after_model = False  # pragma: no mutate[truthiness] -- Only truth is read.
     for entry, pairing in zip(messages, found, strict=True):
         match pairing.role:
             case "note":
@@ -238,7 +237,9 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                     and not pairing.waiting
                     and parts_model_turns(entry)
                 ):
-                    after_model = False
+                    after_model = (
+                        False  # pragma: no mutate[truthiness] -- Only truth is read.
+                    )
             case "reply":
                 if pairing.left_open:
                     raise InvalidContextError(
@@ -260,7 +261,9 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                     f"user message before tool results: pending {sorted(pairing.waiting)}",
                 )
             case _:
-                after_model = False
+                after_model = (
+                    False  # pragma: no mutate[truthiness] -- Only truth is read.
+                )
     if still_open:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(still_open)}",
@@ -543,10 +546,8 @@ class Tape(Sequence[TapeRecord]):
         sanitized = splice_safe_repair(resolved.messages)
         self.append_splice(
             mask=full_tape_mask(self._records),
-            insert_after=None,
             replacement=tuple(sanitized),
             strategy="context_rescue",
-            paired_externally=unpaired_call_ids(sanitized),
             # The repair drops what cannot be paired.
             discards_content=True,
         )
@@ -627,7 +628,8 @@ def stubbed(
     """Return ``context`` with the tool outputs at ``indices`` reading ``stub``.
 
     A detached call's stub, a killed call's, and a wake's news keep their first
-    line, which says which call it is and what became of it.
+    line, which says which call it is and what became of it. An output the stub
+    would not shorten is left as it is.
 
     Args:
       context: The entries.
@@ -646,7 +648,8 @@ def stubbed(
         output = out[i]
         if not isinstance(output, ToolMessage):
             raise TypeError(f"Entry {i} is no tool output.")
-        out[i] = _pruned(output, stub=stub)
+        if prunable(output, stub=stub):
+            out[i] = _pruned(output, stub=stub)
     return out
 
 

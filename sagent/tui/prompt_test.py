@@ -387,15 +387,18 @@ def test_tab_while_idle_sends_the_line_deferred() -> None:
 
 @pytest.mark.asyncio
 async def test_enter_and_tab_while_streaming_stage_into_their_panes() -> None:
+    """A streamed chunk not yet taken from the inbox is no halt to make room for."""
     prompt = _Prompt()
     prompt.runtime.model_call = asyncio.create_task(asyncio.sleep(0))
+    chunk = types.ModelResponseTextStreamed(text="Sure", response_record_index=0)
+    prompt.runtime.inbox.push_back(chunk)
     for text in ("q1", "q2"):
         prompt.type(text)
         prompt.press(Keys.ControlM)
     for text in ("d1", "d2"):
         prompt.type(text)
         prompt.press(Keys.ControlI)
-    assert prompt.pushed() == []
+    assert prompt.pushed() == [chunk]
     assert prompt.panes.queue == Staged(text="q1\n\nq2")
     assert prompt.panes.deferred == Staged(text="d1\n\nd2")
     assert prompt.buffer.text == ""
@@ -610,6 +613,21 @@ def test_tab_at_an_idle_deferred_stop_sends_its_attachments() -> None:
     assert prompt.pushed() == [
         UserMessage(due_after=AgentIdle, content="D", attachments=(_PNG,)),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_pane_left_edited_is_given_up_even_once_edited_back(
+    busy: _Prompt,
+) -> None:
+    busy.history("h1", "h2")
+    busy.panes.stage("Q", deferred=False)
+    busy.press(Keys.Up)
+    busy.buffer.text = "Q2"
+    busy.press(Keys.Up)
+    busy.press(Keys.Down)
+    busy.buffer.text = "Q"
+    busy.press(Keys.Up)
+    assert (busy.buffer.text, busy.panes.queue) == ("h2", None)
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1069,21 @@ def test_an_unchanged_frame_never_repaints_and_a_changed_one_does() -> None:
 
     asyncio.run(go())
     assert len(repaints) == 1
+
+
+def test_the_screen_is_compared_five_times_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waited: list[float] = []
+
+    async def tick(delay_sec: float) -> None:
+        waited.append(delay_sec)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", tick)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(repaint_on_change(lambda: None, lambda: "idle"))
+    assert waited == [0.2]
 
 
 @pytest.mark.asyncio

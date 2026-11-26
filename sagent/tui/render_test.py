@@ -770,16 +770,21 @@ def test_a_spawn_s_result_says_what_its_child_used(
     assert printer.printed[-1] == ("note", note)
 
 
-def test_a_spawn_another_harness_logged_says_nothing_of_a_child() -> None:
+@pytest.mark.parametrize(
+    "spawned",
+    [
+        AgentSpawnResult(prompt="go"),
+        AgentSpawnResult(agent_id="watcher", agent_kind="watcher", state="running"),
+    ],
+    ids=["another-harness-logged-it", "a-watcher-just-started"],
+)
+def test_a_spawn_with_no_finished_child_says_nothing_of_one(
+    spawned: AgentSpawnResult,
+) -> None:
     render, printer = _renderer()
     render(_turn(call("AgentSpawn", "1", prompt="go")))
     render(
-        ToolMessage(
-            call_id="1",
-            state="done",
-            stdout=("said",),
-            result=AgentSpawnResult(prompt="go"),
-        ),
+        ToolMessage(call_id="1", state="done", stdout=("said",), result=spawned),
     )
     assert [kind for kind, _ in printer.printed if kind == "note"] == []
 

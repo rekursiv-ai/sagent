@@ -551,7 +551,7 @@ def _messages(request: Request) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     if system := "\n\n".join(text for text in request.system if text):
         messages.append({"role": "system", "content": system})
-    for record in wire.flatten(request.records):
+    for record in wire.results_first(request.records):
         if isinstance(record, (AssistantMessage, ToolCall)):
             # The model's records since another turn merge into one message.
             if not messages or messages[-1]["role"] != "assistant":

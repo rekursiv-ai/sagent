@@ -287,7 +287,8 @@ def frontmatter(raw: str, *, source: str = "") -> tuple[dict[str, object], str]:
 
     Args:
       raw: The file's text; a leading byte-order mark is dropped.
-      source: Where ``raw`` came from, named in errors.
+      source: Where ``raw`` came from, named in errors; empty for a caller whose
+        own message names it.
 
     Returns:
       meta: The frontmatter's mapping; empty when there is none, or it is no
