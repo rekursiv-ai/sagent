@@ -163,6 +163,9 @@ def test_each_binding_after_the_first_walks_no_item() -> None:
     assert len(walked) == 1
     pytest_collection_modifyitems(cast(pytest.Config, cast(object, _Config([]))), items)
     assert len(walked) == 2
+    # A lazily collecting xdist worker passes one list per file on one config.
+    pytest_collection_modifyitems(config, [*items])
+    assert len(walked) == 3
 
 
 @pytest.mark.parametrize(("markexpr", "marked"), [("golden", True), ("", False)])

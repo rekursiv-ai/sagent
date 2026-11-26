@@ -78,8 +78,10 @@ _KEYWORDS: Final = frozenset(("and", "or", "not", "True", "False"))
 
 
 _LAST_ROOT: Final = pytest.StashKey[Path]()
-_MARKED: Final = pytest.StashKey[None]()
 """The XDG root ``isolate_user_dirs`` made for this process's previous test."""
+
+_MARKED: Final = pytest.StashKey[list[pytest.Item]]()
+"""The item list the hook last marked; a lazily collecting worker passes one per file."""
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -410,9 +412,9 @@ def pytest_collection_modifyitems(
     # Every package conftest re-exports this hook so its export runs it, and pytest
     # calls each binding on the session's whole item list: five in the monorepo,
     # each walking all ~100k items again.
-    if _MARKED in config.stash:
+    if config.stash.get(_MARKED, None) is items:
         return
-    config.stash[_MARKED] = None
+    config.stash[_MARKED] = items
     marker = "golden: tests that assert against a golden"
     if marker not in config.getini("markers"):
         config.addinivalue_line("markers", marker)
