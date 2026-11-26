@@ -1,0 +1,1545 @@
+"""Tests for the Gemini wire: requests out, streamed replies and errors in."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime, tzinfo
+from pathlib import Path
+from typing import TYPE_CHECKING, Self, override
+from unittest.mock import Mock, call
+
+import base64
+import logging
+
+from treekle import from_plain, json_dumps
+
+import pytest
+
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
+from sagent.model import image
+from sagent.model.capability import ModelLimits, ModelSettings
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import (
+    AuthError,
+    BillingError,
+    ContextOverflowError,
+    DisconnectedError,
+    OverloadedError,
+    RateLimitedError,
+    RequestTooLargeError,
+)
+from sagent.model.types import Request, TextChunk
+from sagent.providers.google import wire
+from sagent.providers.google.api import Google
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolOutput, ToolStreamingResult, whole_output
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+
+    from treekle import PlainTree
+
+    from sagent.journal.types import SessionRecord
+    from sagent.model.capability import (
+        ModelCapability,
+        ThinkingBudget,
+        ThinkingEffort,
+        ThinkingOutput,
+    )
+    from sagent.tools.types import ToolContext
+
+
+@pytest.fixture(autouse=True)
+def isolated_uploads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    def shrink(data: bytes, *, max_edge_px: int, max_bytes: int) -> tuple[bytes, str]:
+        del max_edge_px, max_bytes
+        return data, "image/png"
+
+    wire._upload.cache_clear()
+    monkeypatch.setattr(image, "shrink", shrink)
+    try:
+        yield
+    finally:
+        wire._upload.cache_clear()
+
+
+def test_a_turn_s_function_responses_come_before_anything_else_said_by_the_user() -> (
+    None
+):
+    """A model's calls are answered first; a note taped among them is read after."""
+    contents = _contents(
+        UserMessage(content="go"),
+        ToolCall(call_id="a", name="Echo"),
+        SystemMessage(content="later", subtype="nudge"),
+        ToolMessage(call_id="a", state="done", stdout=("ok",)),
+    )
+    parts = from_plain(contents[2]["parts"], list[dict[str, object]])
+    assert [next(iter(part)) for part in parts] == ["functionResponse", "text"]
+
+
+def test_a_user_message_is_one_user_content_and_nothing_else() -> None:
+    assert _encode(UserMessage(content="hello")) == {
+        "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+        "generationConfig": _LEVEL,
+    }
+
+
+def test_encode_asks_no_more_than_the_room_the_request_leaves() -> None:
+    capability = _capability()
+    body = wire.encode(
+        Request(max_response_tokens=9_000),
+        capability=capability,
+        settings=capability.default,
+    )
+    assert body["generationConfig"] == {"maxOutputTokens": 9_000, **_LEVEL}
+
+
+def test_the_system_prompt_joins_its_nonempty_parts() -> None:
+    body = _encode(UserMessage(content="hi"), system=("Be terse.", "", "Rules."))
+    assert body["systemInstruction"] == {"parts": [{"text": "Be terse.\n\nRules."}]}
+
+
+def test_an_all_empty_system_prompt_is_left_out() -> None:
+    assert "systemInstruction" not in _encode(UserMessage(content="hi"), system=("",))
+
+
+@pytest.mark.parametrize("content", ["", None])
+def test_an_empty_user_message_sends_one_empty_part(content: str | None) -> None:
+    assert _contents(UserMessage(content=content)) == [
+        {"role": "user", "parts": [{"text": ""}]},
+    ]
+
+
+def test_images_and_pdfs_ride_inline_and_other_attachments_are_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    png, pdf = b"image", b"pdf"
+    message = UserMessage(
+        content="look",
+        attachments=(
+            Attachment(mime_descriptor="text/plain", data=b"x"),
+            Attachment(mime_descriptor="image/png", data=png),
+            Attachment(mime_descriptor="application/pdf", data=pdf),
+        ),
+    )
+    with caplog.at_level(logging.WARNING):
+        (content,) = _contents(message)
+    assert content["parts"] == [
+        {"text": "look"},
+        {"inlineData": {"mimeType": "image/png", "data": _b64(png)}},
+        {"inlineData": {"mimeType": "application/pdf", "data": _b64(pdf)}},
+    ]
+    assert caplog.messages == ["Gemini reads no text/plain attachment; leaving it out."]
+
+
+@pytest.mark.parametrize(("edge", "bytes_limit"), [(2, 0), (0, 3), (2, 3)])
+def test_an_image_upload_forwards_both_limits_and_uses_the_returned_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+    edge: int,
+    bytes_limit: int,
+) -> None:
+    shrunk = Mock(return_value=(b"new", "image/webp"))
+    monkeypatch.setattr(image, "shrink", shrunk)
+    capability = _capability(
+        limits=ModelLimits(max_image_edge_px=edge, max_image_bytes=bytes_limit),
+    )
+    message = UserMessage(
+        attachments=(Attachment(mime_descriptor="image/png", data=b"image"),),
+    )
+    assert _first_part(_contents(message, capability=capability)) == {
+        "inlineData": {"mimeType": "image/webp", "data": "bmV3"},
+    }
+    shrunk.assert_called_once_with(b"image", max_edge_px=edge, max_bytes=bytes_limit)
+
+
+def test_a_conversation_with_calls_results_and_signatures() -> None:
+    png = b"image"
+    contents = _contents(
+        UserMessage(content="run ls"),
+        Thinking(content="hmm"),
+        AssistantMessage(content="calling", extra={"thoughtSignature": "sig-text"}),
+        ToolCall(
+            call_id="c1",
+            name="Bash",
+            arguments={"cmd": "ls"},
+            extra={"thoughtSignature": "sig-a"},
+        ),
+        ToolCall(call_id="c2", name="Bash", arguments={"cmd": "pwd"}),
+        ToolMessage(
+            call_id="c1",
+            state="done",
+            stdout=(
+                "a.py",
+                Attachment(mime_descriptor="image/png", data=png),
+            ),
+            result=UncategorizedToolResult(),
+        ),
+        ToolMessage(
+            call_id="c2",
+            state="done",
+            stdout=("denied",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+        TokenUsage(),
+        UserMessage(content="and?"),
+    )
+    # As the old builder sent it: the reasoning's text stays home, each part
+    # keeps its own signature, and results and the next words share a turn.
+    assert contents == [
+        {"role": "user", "parts": [{"text": "run ls"}]},
+        {
+            "role": "model",
+            "parts": [
+                {"text": "calling", "thoughtSignature": "sig-text"},
+                {
+                    "functionCall": {"name": "Bash", "args": {"cmd": "ls"}},
+                    "thoughtSignature": "sig-a",
+                },
+                {"functionCall": {"name": "Bash", "args": {"cmd": "pwd"}}},
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {"functionResponse": {"name": "Bash", "response": {"content": "a.py"}}},
+                {"inlineData": {"mimeType": "image/png", "data": _b64(png)}},
+                {
+                    "functionResponse": {
+                        "name": "Bash",
+                        "response": {"content": "[Error] denied"},
+                    },
+                },
+                {"text": "and?"},
+            ],
+        },
+    ]
+
+
+def test_an_unsigned_call_turn_carries_the_skip_signature_on_its_first_call() -> None:
+    """History from another provider has no Gemini signature; Gemini 3+ rejects it."""
+    contents = _contents(
+        UserMessage(content="check"),
+        AssistantMessage(content="checking"),
+        ToolCall(call_id="c1", name="Read", arguments={"path": "a.py"}),
+        ToolCall(call_id="c2", name="Read", arguments={"path": "b.py"}),
+        ToolMessage(
+            call_id="c1",
+            state="done",
+            stdout=("a",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolMessage(
+            call_id="c2",
+            state="done",
+            stdout=("b",),
+            result=UncategorizedToolResult(),
+        ),
+        ToolCall(
+            call_id="c3",
+            name="Bash",
+            arguments={"cmd": "ls"},
+            extra={"thoughtSignature": ""},
+        ),
+        ToolMessage(
+            call_id="c3",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
+    assert contents[1] == {
+        "role": "model",
+        "parts": [
+            {"text": "checking"},
+            {
+                "functionCall": {"name": "Read", "args": {"path": "a.py"}},
+                "thoughtSignature": "skip_thought_signature_validator",
+            },
+            {"functionCall": {"name": "Read", "args": {"path": "b.py"}}},
+        ],
+    }
+    assert contents[3] == {
+        "role": "model",
+        "parts": [
+            {
+                "functionCall": {"name": "Bash", "args": {"cmd": "ls"}},
+                "thoughtSignature": "skip_thought_signature_validator",
+            },
+        ],
+    }
+
+
+def test_a_result_whose_call_is_gone_is_named_by_its_id() -> None:
+    contents = _contents(
+        ToolMessage(
+            call_id="lost",
+            state="done",
+            stdout=("x",),
+            result=UncategorizedToolResult(),
+        ),
+    )
+    assert _first_part(contents)["functionResponse"]["name"] == "lost"
+
+
+def test_an_empty_error_result_gets_no_error_mark() -> None:
+    contents = _contents(
+        ToolMessage(
+            call_id="c",
+            state="done",
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+    )
+    assert _first_part(contents)["functionResponse"]["response"] == {"content": ""}
+
+
+def test_harness_notes_ride_the_user_side_as_reminders() -> None:
+    contents = _contents(
+        SystemMessage(content="mind the tests"),
+        SystemMessage(content=""),
+        SessionContext(cwd=Path("/w"), model="gemini"),
+        SessionContext(),
+        UserMessage(content="go"),
+    )
+    assert contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "<system-reminder>\nmind the tests\n</system-reminder>"},
+                {
+                    "text": "<system-reminder>\nWorking directory: /w\nModel: gemini"
+                    "\n</system-reminder>",
+                },
+                {"text": "go"},
+            ],
+        },
+    ]
+
+
+def test_another_agents_words_are_attributed() -> None:
+    contents = _contents(
+        AgentMessage(sender="lead", content="status?"),
+        AgentMessage(sender="lead"),
+        AgentMessage(content=None),
+    )
+    assert contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "[from lead]: status?"},
+                {"text": "[from lead]: "},
+                {"text": ""},
+            ],
+        },
+    ]
+
+
+def test_another_persons_words_are_attributed_as_an_agents_are() -> None:
+    contents = _contents(
+        UserMessage(sender="bob", content="hi"),
+        UserMessage(content="mine"),
+    )
+    assert contents == [
+        {"role": "user", "parts": [{"text": "[from user bob]: hi"}, {"text": "mine"}]},
+    ]
+
+
+def test_another_agents_and_a_cleared_historys_images_are_shrunk_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shrunk = Mock(return_value=(b"new", "image/webp"))
+    monkeypatch.setattr(image, "shrink", shrunk)
+    capability = _capability(limits=ModelLimits(max_image_edge_px=2))
+    attachments = (Attachment(mime_descriptor="image/png", data=b"image"),)
+    contents = _contents(
+        AgentMessage(sender="lead", attachments=attachments),
+        ContextClear(history=(UserMessage(attachments=attachments),)),
+        capability=capability,
+    )
+    assert contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "[from lead]: "},
+                {"inlineData": {"mimeType": "image/webp", "data": "bmV3"}},
+                {"inlineData": {"mimeType": "image/webp", "data": "bmV3"}},
+            ],
+        },
+    ]
+    shrunk.assert_called_once_with(b"image", max_edge_px=2, max_bytes=0)
+
+
+def test_a_context_clear_sends_its_summary_then_its_history() -> None:
+    contents = _contents(
+        ContextClear(
+            summary="We fixed it.",
+            history=(
+                ToolCall(call_id="c", name="Read", arguments={}),
+                ToolMessage(
+                    call_id="c",
+                    state="done",
+                    stdout=("text",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        ),
+        ContextClear(history=(UserMessage(content="next"),)),
+    )
+    assert contents == [
+        {"role": "user", "parts": [{"text": "We fixed it."}]},
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "functionCall": {"name": "Read", "args": {}},
+                    "thoughtSignature": "skip_thought_signature_validator",
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {"functionResponse": {"name": "Read", "response": {"content": "text"}}},
+                {"text": "next"},
+            ],
+        },
+    ]
+
+
+def test_empty_words_from_the_model_are_left_out() -> None:
+    assert _contents(AssistantMessage(content=""), AssistantMessage()) == []
+
+
+@pytest.mark.parametrize("compacted", [False, True])
+def test_a_saved_looping_tail_is_not_sent_with_the_follow_up(
+    *,
+    compacted: bool,
+) -> None:
+    old = AssistantMessage(
+        content="Valid prefix.\n" + "\r" * 65_090,
+        extra={"thoughtSignature": "legacy-text-signature"},
+    )
+    empty = AssistantMessage(content="\r" * 128)
+    history = (UserMessage(content="First"), old, empty)
+    prior = (ContextClear(history=history),) if compacted else history
+    assert _contents(*prior, UserMessage(content="Next")) == [
+        {"role": "user", "parts": [{"text": "First"}]},
+        {"role": "model", "parts": [{"text": "Valid prefix.\n"}]},
+        {"role": "user", "parts": [{"text": "Next"}]},
+    ]
+
+
+@pytest.mark.parametrize("signature", ["", 7])
+def test_an_empty_or_odd_signature_is_not_sent(signature: PlainTree) -> None:
+    (content,) = _contents(
+        AssistantMessage(content="a", extra={"thoughtSignature": signature}),
+    )
+    assert content["parts"] == [{"text": "a"}]
+
+
+def test_tools_are_declared_without_additional_properties() -> None:
+    schema: Mapping[str, PlainTree] = {
+        "type": "object",
+        "properties": {
+            "cmd": {"type": "string"},
+            "opts": {
+                "anyOf": [
+                    {"type": "object", "additionalProperties": False},
+                    {"type": "null"},
+                ],
+            },
+        },
+        "additionalProperties": False,
+    }
+    body = _encode(UserMessage(content="x"), tools=(_Tool(schema=schema),))
+    assert body["tools"] == [
+        {
+            "functionDeclarations": [
+                {
+                    "name": "Bash",
+                    "description": "Run it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cmd": {"type": "string"},
+                            "opts": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+                        },
+                    },
+                },
+            ],
+        },
+    ]
+
+
+def test_no_budget_sends_a_token_budget_row_no_thinking_config() -> None:
+    assert _thinking("gemini-flash-2.5", budget="none", effort="high") is None
+
+
+@pytest.mark.parametrize("budget", ["none", "auto", "fixed"])
+def test_gemini_3_is_sent_its_level_whatever_the_budget(budget: ThinkingBudget) -> None:
+    """Gemini 3 cannot stop thinking, so its level is the only say over how much."""
+    config = _thinking("gemini-pro-3.1", budget=budget, effort="low")
+    assert config == {"includeThoughts": False, "thinkingLevel": "low"}
+
+
+@pytest.mark.parametrize(
+    ("effort", "level"),
+    [("low", "low"), ("medium", "medium"), ("high", "high")],
+)
+def test_gemini_3_sends_a_thinking_level(effort: ThinkingEffort, level: str) -> None:
+    config = _thinking("gemini-pro-3.1", budget="fixed", effort=effort, output="text")
+    assert config == {"includeThoughts": True, "thinkingLevel": level}
+
+
+def test_gemini_4_neon_s_most_effort_is_xhigh() -> None:
+    config = _thinking("gemini-neon-4.0", budget="auto", effort="xhigh")
+    assert config == {"includeThoughts": False, "thinkingLevel": "xhigh"}
+
+
+def test_gemini_3s_least_effort_is_minimal() -> None:
+    config = _thinking("gemini-flash-lite-3.5", budget="auto", effort="min")
+    assert config == {"includeThoughts": False, "thinkingLevel": "minimal"}
+
+
+@pytest.mark.parametrize(
+    ("effort", "budget"),
+    [
+        ("min", 1024),
+        ("low", 4096),
+        ("medium", 8192),
+        ("high", 16_384),
+        ("xhigh", 20_480),
+        ("max", 24_576),
+    ],
+)
+def test_gemini_2_5_sends_a_token_budget(effort: ThinkingEffort, budget: int) -> None:
+    config = _thinking("gemini-pro-2.5", budget="fixed", effort=effort, output="text")
+    assert config == {"includeThoughts": True, "thinkingBudget": budget}
+
+
+def test_gemini_2_5_auto_sends_a_dynamic_budget() -> None:
+    assert _thinking("gemini-flash-2.5", budget="auto", effort="high") == {
+        "includeThoughts": False,
+        "thinkingBudget": -1,
+    }
+
+
+@pytest.mark.parametrize("budget", ["auto", "fixed"])
+def test_a_row_offering_no_effort_says_nothing_of_one(budget: ThinkingBudget) -> None:
+    capability, settings = Google.models().resolve("gemini-flash-2.5")
+    capability = replace(capability, thinking_effort=frozenset({"none"}))
+    settings = replace(
+        settings,
+        thinking_effort="none",
+        thinking_budget=budget,
+        thinking_output="text",
+    )
+    assert _encoded_thinking(capability, settings) == {"includeThoughts": True}
+
+
+def test_a_leveled_row_offering_no_level_is_sent_nothing_without_a_budget() -> None:
+    """Only a level could stop Gemini 3's thinking; a row with none has no say."""
+    capability, settings = Google.models().resolve("gemini-pro-3.1")
+    capability = replace(capability, thinking_effort=frozenset({"none"}))
+    settings = replace(settings, thinking_effort="none", thinking_budget="none")
+    assert _encoded_thinking(capability, settings) is None
+
+
+@pytest.mark.parametrize("budget", ["auto", "fixed"])
+def test_gemini_2_5_with_no_effort_is_sent_a_zero_budget(
+    budget: ThinkingBudget,
+) -> None:
+    assert _thinking("gemini-flash-2.5", budget=budget) == {
+        "includeThoughts": False,
+        "thinkingBudget": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("as_level", "effort"),
+    [(True, "max"), (True, "none")],
+)
+def test_an_effort_the_wire_cannot_say_is_refused(
+    as_level: bool,
+    effort: ThinkingEffort,
+) -> None:
+    capability = replace(
+        Google.models()["gemini-pro-3.1"],
+        effort_as_level=as_level,
+        thinking_effort=frozenset({effort, "low"}),
+        thinking_budget=frozenset({"fixed"}),
+        thinking_output=frozenset({"none"}),
+    )
+    # A row never offers these with a level beside them: Gemini 3 has no level that
+    # stops its thinking.
+    settings = replace(
+        capability.default,
+        thinking_effort=effort,
+        thinking_budget="fixed",
+        thinking_output="none",
+    )
+    with pytest.raises(ValueError, match=effort):
+        _encoded_thinking(capability, settings)
+
+
+def test_the_estimate_is_text_over_characters_per_token_plus_image_tiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sized = Mock(return_value=(769, 2))
+    paged = Mock(return_value=((2.0, 3.0),) * 3)
+    monkeypatch.setattr(image, "size", sized)
+    monkeypatch.setattr(image, "pages", paged)
+    capability = _capability()
+    text = {"parts": [{"text": "text"}]}
+    assert wire.estimate(text, capability=capability) == int(
+        len(json_dumps(text)) / 4.0,
+    )
+    wide = _inline("image/png", b"image")
+    pdf = _inline("application/pdf", b"pdf")
+    body = {"parts": [{"text": "text"}, {"nested": [wide, "s"]}, pdf]}
+    # The inline bytes are no text; the image is two 768-pixel tiles wide.
+    dropped = {
+        "parts": [
+            {"text": "text"},
+            {"nested": [dict[str, object](), "s"]},
+            dict[str, object](),
+        ],
+    }
+    assert wire.estimate(body, capability=capability) == (
+        int(len(json_dumps(dropped)) / 4.0) + (2 + 3) * 258
+    )
+    sized.assert_called_once_with(b"image", max_edge_px=0)
+    paged.assert_called_once_with(b"pdf")
+
+
+@pytest.mark.parametrize(("width", "tiles"), [(768, 1), (769, 2), (1537, 3)])
+def test_tiles_are_768_pixels_wide(
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    tiles: int,
+) -> None:
+    sized = Mock(return_value=(width, 2))
+    monkeypatch.setattr(image, "size", sized)
+    capability = _capability()
+    wide = {"parts": [_inline("image/png", b"wide")]}
+    base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
+    assert wire.estimate(wide, capability=capability) == base + tiles * 258
+    sized.assert_called_once_with(b"wide", max_edge_px=0)
+
+
+def test_a_small_image_is_one_tile_and_a_tall_one_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sized = Mock(side_effect=[(2, 3), (2, 769)])
+    monkeypatch.setattr(image, "size", sized)
+    capability = _capability()
+    small = {"parts": [_inline("image/png", b"small")]}
+    tall = {"parts": [_inline("image/png", b"tall")]}
+    base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
+    assert wire.estimate(small, capability=capability) == base + 258
+    assert wire.estimate(tall, capability=capability) == base + 2 * 258
+    assert sized.call_args_list == [
+        call(b"small", max_edge_px=0),
+        call(b"tall", max_edge_px=0),
+    ]
+
+
+def test_each_images_tiles_add_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    sized = Mock(side_effect=[(2, 3), (769, 2)])
+    monkeypatch.setattr(image, "size", sized)
+    capability = _capability()
+    two = {
+        "parts": [_inline("image/png", b"small"), _inline("image/png", b"wide")],
+    }
+    empty = {"parts": [dict[str, object](), dict[str, object]()]}
+    assert wire.estimate(two, capability=capability) == (
+        wire.estimate(empty, capability=capability) + (1 + 2) * 258
+    )
+    assert sized.call_args_list == [
+        call(b"small", max_edge_px=0),
+        call(b"wide", max_edge_px=0),
+    ]
+
+
+def test_an_inline_pdf_is_258_tokens_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = Mock(return_value=((2.0, 3.0),) * 3)
+    monkeypatch.setattr(image, "pages", paged)
+    capability = _capability()
+    pdf = {"parts": [_inline("application/pdf", b"pdf")]}
+    base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
+    assert wire.estimate(pdf, capability=capability) == base + 3 * 258
+    paged.assert_called_once_with(b"pdf")
+
+
+def test_inline_data_without_an_image_is_no_tile() -> None:
+    capability = _capability()
+    odd = {"parts": [{"inlineData": {"mimeType": "image/png"}}]}
+    base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
+    assert wire.estimate(odd, capability=capability) == base
+
+
+@pytest.mark.asyncio
+async def test_events_join_data_lines_up_to_a_blank_line() -> None:
+    events = await _events(
+        'data: {"a":',
+        "data: 1}",
+        "",
+        "event: ignored",
+        ": comment",
+        'data: {"b": 2}',
+    )
+    assert events == [{"a": 1}, {"b": 2}]
+
+
+@pytest.mark.asyncio
+async def test_other_lines_inside_an_event_do_not_end_it() -> None:
+    events = await _events(
+        'data: {"a":',
+        "event: x",
+        "data: 1}",
+        "",
+        "data: [",
+        "data: 2]",
+    )
+    assert events == [{"a": 1}]
+
+
+@pytest.mark.asyncio
+async def test_the_last_event_needs_no_blank_line() -> None:
+    assert await _events('data: {"a":', "data: 1}") == [{"a": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_blank_line_with_no_data_is_no_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        assert await _events("", "", 'data: {"a": 1}', "", "") == [{"a": 1}]
+    assert caplog.messages == []
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_event_is_logged_and_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        events = await _events("data: {not-json}", "", 'data: {"ok": true}', "")
+    assert events == [{"ok": True}]
+    (message,) = caplog.messages
+    assert message.startswith(
+        "Gemini sent a malformed stream event: Expecting property name",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_event_that_is_no_object_is_malformed() -> None:
+    assert await _events("data: [1]", "", 'data: {"ok": 1}') == [{"ok": 1}]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stream_is_no_events_and_no_error() -> None:
+    assert await _events() == []
+
+
+@pytest.mark.asyncio
+async def test_a_stream_of_only_malformed_events_raises() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^Gemini's stream held only malformed events\.$",
+    ) as raised:
+        await _events("data: {not-json}", "", "data: nope", "", "data: [1")
+    # The last bad event is the cause, for whoever debugs the vendor.
+    assert "delimiter" in str(raised.value.__cause__)
+
+
+def test_text_and_a_call_stop_as_a_tool_use() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    chunks = reader.feed(
+        _event(
+            [
+                {"text": "calling"},
+                {
+                    "functionCall": {"name": "Bash", "args": {"cmd": "ls"}},
+                    "thoughtSignature": "sig-fc",
+                },
+            ],
+            finish="STOP",
+            usage={"promptTokenCount": 10, "candidatesTokenCount": 5},
+        ),
+    )
+    assert chunks == [TextChunk(text="calling")]
+    response = reader.response()
+    message, call = response.records
+    assert message == AssistantMessage(content="calling")
+    assert isinstance(call, ToolCall)
+    assert (call.name, dict(call.arguments)) == ("Bash", {"cmd": "ls"})
+    assert call.extra == {"thoughtSignature": "sig-fc"}
+    assert call.call_id.startswith("call_")
+    assert len(call.call_id) == len("call_") + 24
+    assert response.stop_reason == "tool_use"
+    assert response.tokens == TokenCount(request=10, response=5)
+
+
+def test_each_call_gets_its_own_id_unless_gemini_names_one() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        _event(
+            [
+                {"functionCall": {"name": "A"}},
+                {"functionCall": {"name": "B"}},
+                {"functionCall": {"id": "given", "name": "C", "args": {"k": 1}}},
+            ],
+            finish="STOP",
+        ),
+    )
+    a, b, c = reader.response().records
+    assert isinstance(a, ToolCall)
+    assert isinstance(b, ToolCall)
+    assert isinstance(c, ToolCall)
+    assert a.call_id != b.call_id
+    assert (a.arguments, a.extra) == ({}, {})
+    assert c.call_id == "given"
+
+
+def test_a_call_with_no_name_is_dropped_and_an_empty_signature_ignored() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        _event(
+            [
+                {"functionCall": {"args": {}}},
+                {"functionCall": {"name": ""}},
+                {"functionCall": {"name": "A", "id": ""}, "thoughtSignature": ""},
+                {"text": "ok", "thoughtSignature": ""},
+                {"text": 5},
+            ],
+            finish="STOP",
+        ),
+    )
+    message, call = reader.response().records
+    assert message == AssistantMessage(content="ok")
+    assert isinstance(call, ToolCall)
+    assert (call.name, call.extra) == ("A", {})
+    assert call.call_id.startswith("call_")
+
+
+def test_reasoning_and_a_signed_answer_in_fragments() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    chunks = [
+        *reader.feed(_event([{"text": "hmm", "thought": True}])),
+        *reader.feed(_event([{"text": "He"}])),
+        *reader.feed(_event([{"text": "", "thoughtSignature": "sig-0"}])),
+        *reader.feed(
+            _event(
+                [{"text": "llo", "thoughtSignature": "sig-text"}],
+                finish="STOP",
+                usage={
+                    "promptTokenCount": 1000,
+                    "cachedContentTokenCount": 400,
+                    "toolUsePromptTokenCount": 10,
+                    "candidatesTokenCount": 5,
+                    "thoughtsTokenCount": 7,
+                },
+            ),
+        ),
+    ]
+    assert chunks == [
+        TextChunk(text="hmm", thinking=True),
+        TextChunk(text="He", record=1),
+        TextChunk(text="llo", record=1),
+    ]
+    response = reader.response()
+    assert response.records == (
+        Thinking(content="hmm"),
+        AssistantMessage(content="Hello", extra={"thoughtSignature": "sig-text"}),
+    )
+    assert response.stop_reason == "end_turn"
+    # The prompt count holds the cache; reasoning bills as output.
+    assert response.tokens == TokenCount(request=610, response=12, cache_read=400)
+    capability = Google.models()["gemini-pro-3.1"]
+    assert (
+        response.spend
+        == capability.prices[
+            "auto",
+            response.tokens.prompt,
+            datetime.now(UTC).date(),
+        ]
+        * response.tokens
+    )
+    assert response.spend.total > 0
+
+
+@pytest.mark.parametrize(("char", "thinking"), [("\r", False), ("\x00", True)])
+def test_looping_keeps_only_the_prefix_and_complete_signed_calls(
+    char: str,
+    *,
+    thinking: bool,
+) -> None:
+    reader = wire.StreamReader(capability=_capability())
+    signed = {"thoughtSignature": "text-signature"}
+    tool = {
+        "functionCall": {"id": "c", "name": "Read", "args": {"path": "a.py"}},
+        "thoughtSignature": "call-signature",
+    }
+    chunks = reader.feed(
+        _event([{"text": "prefix" + char * 127, "thought": thinking}]),
+    )
+    before_cutoff = reader.looping
+    chunks.extend(
+        reader.feed(
+            _event(
+                [
+                    {"text": char + "unread", "thought": thinking, **signed},
+                    {"text": "also unread"},
+                    tool,
+                ],
+            ),
+        ),
+    )
+    assert (before_cutoff, reader.looping) == (False, True)
+    assert chunks == [TextChunk(text="prefix", thinking=thinking)]
+    response = reader.response()
+    assert (response.stop_reason, response.stop_details) == (
+        "max_tokens",
+        f"Stopped at 128 consecutive U+{ord(char):04X} characters.",
+    )
+    assert response.records == (
+        Thinking(content="prefix") if thinking else AssistantMessage(content="prefix"),
+        ToolCall(
+            call_id="c",
+            name="Read",
+            arguments={"path": "a.py"},
+            extra={"thoughtSignature": "call-signature"},
+        ),
+    )
+    history = (
+        *response.records,
+        ToolMessage(call_id="c", state="done", stdout=("ok",)),
+    )
+    contents = _contents(ContextClear(summary="Read a file", history=history))
+    assert contents[1]["parts"] == [
+        *([] if thinking else [{"text": "prefix"}]),
+        {
+            "functionCall": {"name": "Read", "args": {"path": "a.py"}},
+            "thoughtSignature": "call-signature",
+        },
+    ]
+    assert contents[2]["parts"] == [
+        {"functionResponse": {"name": "Read", "response": {"content": "ok"}}},
+    ]
+
+
+def test_repetitive_formats_and_progress_keep_their_text_and_signature() -> None:
+    reader = wire.StreamReader(capability=_capability())
+    table = "| name | value |\r\n| --- | --- |\r\n" + "| a | b |\r\n" * 200
+    code = "```py\n" + "\t" * 160 + " " * 160 + "pass\n```\n"
+    rule = "-" * 1024 + "\n" * 160
+    json = '{"base64": "' + "A" * 4096 + '"}\n'
+    progress = "\r1%\r" + "\r2%\r" * 200
+    short_run = "\r" * 127
+    text = (table, code, rule, json, progress, short_run[:-1])
+    chunks = [chunk for part in text for chunk in reader.feed(_event([{"text": part}]))]
+    chunks.extend(
+        reader.feed(
+            _event([{"text": "", "thoughtSignature": "sig"}], finish="STOP"),
+        ),
+    )
+    answer = "".join(text)
+    assert "".join(chunk.text for chunk in chunks) == answer
+    assert reader.response().records == (
+        AssistantMessage(content=answer, extra={"thoughtSignature": "sig"}),
+    )
+    assert reader.response().stop_reason == "end_turn"
+
+
+def test_short_control_runs_in_distinct_channels_do_not_combine() -> None:
+    reader = wire.StreamReader(capability=_capability())
+    short = "\r" * 127
+    assert reader.feed(_event([{"text": "think" + short, "thought": True}])) == [
+        TextChunk(text="think", thinking=True),
+    ]
+    chunks = reader.feed(_event([{"text": "\rDone."}], finish="STOP"))
+    assert chunks == [
+        TextChunk(text=short, thinking=True),
+        TextChunk(text="\rDone.", record=1),
+    ]
+    assert reader.response().records == (
+        Thinking(content="think" + short),
+        AssistantMessage(content="\rDone."),
+    )
+
+
+def test_a_signature_on_reasoning_alone_stays_with_the_reasoning() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(_event([{"text": "hmm\r", "thought": True, "thoughtSignature": "s"}]))
+    assert reader.feed(_event([], finish="STOP")) == [
+        TextChunk(text="\r", thinking=True),
+    ]
+    assert reader.response().records == (
+        Thinking(content="hmm\r", extra={"thoughtSignature": "s"}),
+    )
+
+
+def test_the_last_usage_report_is_the_total() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(_event([{"text": "a"}], usage={"promptTokenCount": 3}))
+    reader.feed(_event([], finish="STOP"))
+    reader.feed({"usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 2}})
+    assert reader.response().tokens == TokenCount(request=9, response=2)
+
+
+def test_a_cached_count_above_the_prompt_bills_no_negative_request() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        _event(
+            [],
+            finish="STOP",
+            usage={"promptTokenCount": 1, "cachedContentTokenCount": 5},
+        ),
+    )
+    assert reader.response().tokens.request == 0
+
+
+def test_an_event_without_candidates_adds_nothing() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    assert reader.feed({"usageMetadata": {"promptTokenCount": 1}}) == []
+    assert reader.feed({"candidates": "garbage"}) == []
+    assert reader.feed(_event(["not a part", {"inlineData": {}}], finish="STOP")) == []
+    response = reader.response()
+    assert response.records == ()
+    assert response.tokens == TokenCount(request=1)
+
+
+def test_no_usage_report_is_no_tokens() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        _event([{"text": "a", "thought": True}, {"text": "b", "thought": True}]),
+    )
+    reader.feed(_event([], finish="STOP"))
+    response = reader.response()
+    assert response.records == (Thinking(content="ab"),)
+    assert response.tokens == TokenCount()
+
+
+@pytest.mark.parametrize(
+    ("finish", "stop"),
+    [
+        ("MAX_TOKENS", "max_tokens"),
+        ("SAFETY", "refusal"),
+        ("RECITATION", "refusal"),
+        ("LANGUAGE", "refusal"),
+        ("BLOCKLIST", "refusal"),
+        ("PROHIBITED_CONTENT", "refusal"),
+        ("SPII", "refusal"),
+        ("IMAGE_SAFETY", "refusal"),
+        ("MALFORMED_FUNCTION_CALL", "MALFORMED_FUNCTION_CALL"),
+        ("OTHER", "OTHER"),
+    ],
+)
+def test_finish_reasons_speak_the_shared_words(finish: str, stop: str) -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(_event([{"text": "a"}], finish=finish))
+    response = reader.response()
+    assert response.stop_reason == stop
+    assert response.stop_details == (finish if stop == "refusal" else "")
+
+
+def test_the_finish_reason_survives_a_later_event_without_one() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(_event([{"text": "a"}], finish="MAX_TOKENS"))
+    reader.feed(_event([{"text": "b"}]))
+    assert reader.response().stop_reason == "max_tokens"
+
+
+def test_a_blocked_prompt_is_a_refusal_with_no_records() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        {
+            "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
+            "usageMetadata": {"promptTokenCount": 3},
+        },
+    )
+    reader.feed({"promptFeedback": {}})
+    response = reader.response()
+    assert (response.records, response.stop_reason) == ((), "refusal")
+    assert response.stop_details == "PROHIBITED_CONTENT"
+    assert response.tokens == TokenCount(request=3)
+
+
+@pytest.mark.parametrize("reason", ["", 3])
+def test_an_empty_or_odd_block_reason_blocks_nothing(reason: object) -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed({"promptFeedback": {"blockReason": reason}})
+    with pytest.raises(DisconnectedError):
+        reader.response()
+
+
+def test_a_stream_that_ends_unfinished_is_a_dropped_connection() -> None:
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
+    reader.feed(
+        _event(
+            [{"text": "part"}],
+            usage={"promptTokenCount": 4, "candidatesTokenCount": 1},
+        ),
+    )
+    reader.feed({"candidates": [{"finishReason": ""}]})
+    with pytest.raises(
+        DisconnectedError,
+        match=r"^Gemini's stream ended before its reply finished\.$",
+    ):
+        reader.response()
+
+
+def test_a_reply_is_priced_at_the_card_in_force_on_its_utc_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wire, "datetime", _Clock)
+    # gemini-flash-3.8 doubles its rates on 2027-01-01.
+    reader = wire.StreamReader(capability=Google.models()["gemini-flash-3.8"])
+    reader.feed(_event([], finish="STOP", usage={"promptTokenCount": 1_000_000}))
+    assert reader.response().spend.request == 1.5
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "kind"),
+    [
+        (400, "Request Entity Too Large", RequestTooLargeError),
+        (413, "too big", RequestTooLargeError),
+        (400, "request_too_large", RequestTooLargeError),
+        (400, "exceeds the maximum request size of 20MB", RequestTooLargeError),
+        (400, "The number of bytes exceeds the limit", RequestTooLargeError),
+        (400, "Payload too large", RequestTooLargeError),
+        # Ambiguous between bytes and tokens: a 413 decides it is bytes.
+        (413, "Request exceeds the maximum size", RequestTooLargeError),
+        (
+            413,
+            (
+                "The input token count (1200000) exceeds the maximum number of tokens"
+                " allowed (1048576)."
+            ),
+            ContextOverflowError,
+        ),
+        (400, "Input token count is too high", ContextOverflowError),
+        (413, "It exceeds the maximum number of tokens allowed", ContextOverflowError),
+        # Ambiguous, but not a 413: read as the token window.
+        (400, "Your input exceeds the maximum allowed", ContextOverflowError),
+        (400, "maximum context length is 8192", ContextOverflowError),
+        (400, "context_length_exceeded", ContextOverflowError),
+        (400, "Input too large", ContextOverflowError),
+        (400, "Input too long", ContextOverflowError),
+        (400, "Prompt is too long", ContextOverflowError),
+        (400, "prompt too long", ContextOverflowError),
+        (400, "contents: too_long", ContextOverflowError),
+        (400, "string_above_max_length", ContextOverflowError),
+        (400, "the context window was exceeded", ContextOverflowError),
+        (400, "context window overflow", ContextOverflowError),
+        (400, "context window maximum reached", ContextOverflowError),
+        (400, "model context exceeded", ContextOverflowError),
+        (400, "The billing account is disabled", BillingError),
+        (429, "Your prepayment credits ran out", BillingError),
+        (429, "credits are depleted", BillingError),
+        (403, "This API requires billing to be enabled", BillingError),
+        (401, "expired", AuthError),
+        (403, "denied", AuthError),
+        (400, "API key not valid. Please pass a valid API key.", AuthError),
+        (429, "slow down", RateLimitedError),
+        (500, "boom", OverloadedError),
+        (503, "busy", OverloadedError),
+        (408, "timeout", OverloadedError),
+        (409, "aborted", OverloadedError),
+        (400, "bad field", RuntimeError),
+    ],
+)
+def test_an_error_reply_maps_to_the_most_specific_error(
+    status: int,
+    message: str,
+    kind: type[Exception],
+) -> None:
+    error = wire.to_exception(
+        status,
+        body={"error": {"code": status, "message": message}},
+    )
+    assert type(error) is kind
+    assert message in str(error)
+
+
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        ("'model context' field missing in tools schema", RuntimeError),
+        ("context window settings are invalid", RuntimeError),
+    ],
+)
+def test_a_window_phrase_without_its_marker_is_no_overflow(
+    message: str,
+    kind: type[Exception],
+) -> None:
+    assert type(wire.to_exception(400, body={"error": {"message": message}})) is kind
+
+
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [
+        ("UNAUTHENTICATED", AuthError),
+        ("PERMISSION_DENIED", AuthError),
+        ("RESOURCE_EXHAUSTED", RateLimitedError),
+        ("UNAVAILABLE", OverloadedError),
+        ("INTERNAL", OverloadedError),
+        ("DEADLINE_EXCEEDED", OverloadedError),
+    ],
+)
+def test_the_status_name_decides_without_an_http_status(
+    status: str,
+    kind: type[Exception],
+) -> None:
+    error = wire.to_exception(0, body={"error": {"status": status, "message": "m"}})
+    assert type(error) is kind
+
+
+def test_a_rate_limit_waits_as_retry_info_advises() -> None:
+    error = wire.to_exception(
+        429,
+        body={
+            "error": {
+                "message": "quota",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.Help"},
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": "bad",
+                    },
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": "17.5s",
+                    },
+                ],
+            },
+        },
+        headers={"Retry-After": "3"},
+    )
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == 17.5
+
+
+@pytest.mark.parametrize(
+    ("header", "wait_sec"),
+    [("3", 3.0), ("-5", 0.0), ("999999", 691_200.0), ("soon", 0.0), ("inf", 0.0)],
+)
+def test_without_retry_info_the_header_advises(header: str, wait_sec: float) -> None:
+    error = wire.to_exception(503, body="busy", headers={"Retry-After": header})
+    assert isinstance(error, OverloadedError)
+    assert error.retry_after_sec == wait_sec
+
+
+@pytest.mark.parametrize(("delay", "wait_sec"), [("-4s", 0.0), ("999999s", 691_200.0)])
+def test_retry_info_is_bounded_too(delay: str, wait_sec: float) -> None:
+    error = wire.to_exception(
+        429,
+        body={"error": {"details": [{"@type": "x.RetryInfo", "retryDelay": delay}]}},
+    )
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == wait_sec
+
+
+def test_retry_info_with_an_odd_delay_defers_to_the_header() -> None:
+    error = wire.to_exception(
+        429,
+        body={
+            "error": {
+                "details": [
+                    {"@type": "x.RetryInfo", "retryDelay": 5},
+                    {"retryDelay": "9s"},
+                ],
+            },
+        },
+        headers={"retry-after": "2"},
+    )
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == 2.0
+
+
+@pytest.mark.parametrize(
+    ("message", "wait_sec"),
+    [
+        # As agy 1.2.2 relayed the server's own words (antigravity-cli#1018).
+        (
+            (
+                "Individual quota reached. Please upgrade your subscription to"
+                " increase your limits. Resets in 2h39m52s."
+            ),
+            2 * 3_600 + 39 * 60 + 52,
+        ),
+        ("Your quota will reset after 155h19m17s.", 155 * 3_600 + 19 * 60 + 17),
+        ("Resets in 500ms.", 0.5),
+        ("Resets in 2h.", 2 * 3_600),
+    ],
+)
+def test_a_spent_quota_without_advice_waits_for_the_reset_it_names(
+    message: str,
+    wait_sec: float,
+) -> None:
+    """Unread, the wait was nothing, and the spent quota looked like a throttle."""
+    body = [{"error": {"status": "RESOURCE_EXHAUSTED", "message": message}}]
+    error = wire.to_exception(429, body=body)
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == pytest.approx(wait_sec)
+    # A quota that resets is the login's, spent for every model it serves.
+    assert error.limit == "quota"
+
+
+def test_no_advice_is_no_wait() -> None:
+    error = wire.to_exception(429, body={"error": {"message": "m"}})
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == 0.0
+
+
+def test_a_throttle_that_merely_mentions_quota_is_no_spent_quota() -> None:
+    """The API's per-minute throttle says ``check quota``, and resets on its own."""
+    body = {
+        "error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Resource has been exhausted (e.g. check quota).",
+        },
+    }
+    error = wire.to_exception(429, body=body)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == ""
+
+
+def test_code_assist_wraps_its_error_in_a_list() -> None:
+    error = wire.to_exception(
+        429,
+        body=[
+            {"error": {"message": "capacity", "status": "RESOURCE_EXHAUSTED"}},
+            {"error": {"message": "second", "status": "INTERNAL"}},
+        ],
+    )
+    assert isinstance(error, RateLimitedError)
+    assert str(error) == "capacity"
+
+
+def test_a_text_body_is_the_message() -> None:
+    error = wire.to_exception(418, body="I'm a teapot")
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "Gemini replied 418 : I'm a teapot"
+
+
+def test_an_unknown_error_names_its_status_and_kind() -> None:
+    error = wire.to_exception(
+        400,
+        body={"error": {"status": "INVALID_ARGUMENT", "message": "m"}},
+    )
+    assert str(error) == "Gemini replied 400 INVALID_ARGUMENT: m"
+
+
+# What Gemini 3.1 is sent at its defaults: its level, as it cannot stop thinking,
+# and its thought summaries, so the session keeps them.
+_LEVEL: Mapping[str, object] = {
+    "thinkingConfig": {"includeThoughts": True, "thinkingLevel": "high"},
+}
+
+
+def _capability(*, limits: ModelLimits | None = None) -> ModelCapability:
+    capability = Google.models()["gemini-pro-3.1"]
+    if limits is None:
+        return capability
+    return replace(capability, limits=limits)
+
+
+def _encode(
+    *records: SessionRecord,
+    system: tuple[str, ...] = (),
+    tools: Sequence[_Tool] = (),
+    budget: ThinkingBudget = "none",
+) -> dict[str, object]:
+    capability = _capability()
+    settings = replace(capability.default, thinking_budget=budget)
+    return wire.encode(
+        Request(system=system, records=records, tools=tools),
+        capability=capability,
+        settings=settings,
+    )
+
+
+def _contents(
+    *records: SessionRecord,
+    capability: ModelCapability | None = None,
+) -> list[dict[str, object]]:
+    capability = capability or _capability()
+    body = wire.encode(
+        Request(records=records),
+        capability=capability,
+        settings=capability.default,
+    )
+    return from_plain(body["contents"], list[dict[str, object]])
+
+
+def _first_part(
+    contents: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Return the first content's first part, which holds one object."""
+    return from_plain(contents[0]["parts"], list[dict[str, dict[str, object]]])[0]
+
+
+def _thinking(
+    model: str,
+    *,
+    budget: ThinkingBudget,
+    effort: ThinkingEffort = "none",
+    output: ThinkingOutput = "none",
+) -> object:
+    capability, settings = Google.models().resolve(model)
+    settings = replace(
+        settings,
+        thinking_budget=budget,
+        thinking_effort=effort,
+        thinking_output=output,
+    )
+    return _encoded_thinking(capability, settings)
+
+
+def _encoded_thinking(capability: ModelCapability, settings: ModelSettings) -> object:
+    body = wire.encode(
+        Request(records=(UserMessage(content="q"),)),
+        capability=capability,
+        settings=settings,
+    )
+    config = from_plain(body["generationConfig"], dict[str, object])
+    return config.get("thinkingConfig")
+
+
+def _event(
+    parts: list[object],
+    *,
+    finish: str = "",
+    usage: Mapping[str, int] | None = None,
+) -> dict[str, object]:
+    candidate: dict[str, object] = {"content": {"role": "model", "parts": parts}}
+    if finish:
+        candidate["finishReason"] = finish
+    event: dict[str, object] = {"candidates": [candidate]}
+    if usage is not None:
+        event["usageMetadata"] = dict(usage)
+    return event
+
+
+async def _events(*lines: str) -> list[dict[str, object]]:
+    return [event async for event in wire.events(_lines(lines))]
+
+
+async def _lines(lines: Sequence[str]) -> AsyncIterator[str]:
+    for line in lines:
+        yield line
+
+
+@pytest.mark.parametrize(
+    ("mime", "pixels", "edge", "pages", "tokens"),
+    [
+        ("image/png", (1537, 769), 0, 0, 258 * 3 * 2),
+        ("image/png", (2, 3), 3, 0, 258),
+        ("application/pdf", (2, 3), 0, 3, 258 * 3),
+        ("text/plain", (2, 3), 0, 0, 0),
+    ],
+    ids=["tiled-image", "small-image", "pdf", "unsent"],
+)
+def test_an_attachment_bills_258_per_tile_or_page(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mime: str,
+    pixels: tuple[int, int],
+    edge: int,
+    pages: int,
+    tokens: int,
+) -> None:
+    sized = Mock(return_value=pixels)
+    paged = Mock(return_value=((2.0, 3.0),) * pages)
+    monkeypatch.setattr(image, "size", sized)
+    monkeypatch.setattr(image, "pages", paged)
+    attachment = Attachment(mime_descriptor=mime, data=b"attachment")
+    assert (
+        wire.attachment_tokens(
+            attachment,
+            limits=ModelLimits(max_image_edge_px=edge),
+        )
+        == tokens
+    )
+    assert sized.call_args_list == (
+        [call(b"attachment", max_edge_px=edge)] if mime.startswith("image/") else []
+    )
+    assert paged.call_args_list == (
+        [call(b"attachment")] if mime == "application/pdf" else []
+    )
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def _inline(mime: str, data: bytes) -> dict[str, object]:
+    return {"inlineData": {"mimeType": mime, "data": _b64(data)}}
+
+
+class _Clock(datetime):
+    """A clock on 2027-06-01 in UTC, and still in 2026 in any other zone."""
+
+    @classmethod
+    @override
+    def now(cls, tz: tzinfo | None = None) -> Self:
+        if tz is UTC:
+            return cls(2027, 6, 1, tzinfo=UTC)
+        return cls(2026, 6, 1)
+
+
+class _Tool:
+    """A tool the model may call; only its name, description, and schema are sent."""
+
+    def __init__(self, *, schema: Mapping[str, PlainTree]) -> None:
+        self.name = "Bash"
+        self.description = "Run it."
+        self.schema = schema
+        self.display = ToolDisplay()
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
+        del context, arguments
+        return ToolOutput(result=UncategorizedToolResult())
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

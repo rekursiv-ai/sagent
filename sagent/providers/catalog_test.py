@@ -1,0 +1,1386 @@
+"""Tests for the catalog: providers by name, built once, closed with it."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta, timezone
+from functools import partial
+from importlib.resources import files
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, cast, override
+
+import math
+import re
+
+import pytest
+
+from sagent.agent.agent import Agent
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.journal.types import UserMessage
+from sagent.model.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettingName,
+    ModelSettings,
+    model_setting_names,
+    typed_text,
+)
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import UnknownModelError, UnknownProviderError
+from sagent.model.scripted import ScriptedModel, ScriptedProvider, reply
+from sagent.model.types import Request
+from sagent.providers import catalog as catalog_module
+from sagent.providers.anthropic.api import Anthropic, AnthropicModel
+from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
+from sagent.providers.azure.api import Azure
+from sagent.providers.bedrock.api import Bedrock
+from sagent.providers.catalog import (
+    CachedModel,
+    ModelCatalog,
+    ModelMemory,
+    counterpart,
+    default_provider,
+    listings,
+    recall,
+    successor,
+)
+from sagent.providers.google.api import GoogleModel
+from sagent.providers.google.cli import GoogleCLIModel
+from sagent.providers.nvidia.api import NVIDIA
+from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
+from sagent.providers.replicate.api import Replicate
+from sagent.providers.selfhosted import server
+from sagent.providers.selfhosted.server import SelfHostedModel
+from sagent.providers.table import ModelTable, ModelTags
+from sagent.providers.types import HasLogins
+from sagent.tools.types import ToolContext
+from sagent.types import AsyncResource
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    import httpx2
+
+    from sagent.providers.catalog import Listed
+    from sagent.providers.types import Model, ProviderResources, UsageWindow
+
+
+def test_every_registered_provider_is_built_under_its_name() -> None:
+    catalog = ModelCatalog()
+    for name in catalog.factories:
+        provider = catalog[name]
+        assert provider.name == name
+        assert provider.resources is catalog
+
+
+def test_all_vendor_adapters_are_registered() -> None:
+    expected = {
+        "openrouter",
+        "deepseek",
+        "zai",
+        "xai",
+        "mistral",
+        "groq",
+        "cerebras",
+        "together",
+        "fireworks",
+        "deepinfra",
+        "cohere",
+        "perplexity",
+        "nvidia",
+        "huggingface",
+        "bedrock",
+        "azure",
+        "vertex",
+        "cloudflare",
+        "replicate",
+        "ollama",
+        "lmstudio",
+    }
+    assert expected <= ModelCatalog().factories.keys()
+
+
+@pytest.fixture(params=[listed.section for listed in listings()])
+def rows(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> list[tuple[str, ModelCapability]]:
+    """Return each provider's rows, as ``provider/model``, with their capabilities.
+
+    SelfHosted reads its window from the model's config on the Hub, which took
+    2.5s; the window it states is not what these tests check.
+    """
+
+    def stated(path: str, *, trust_remote_code: bool) -> int:
+        del path, trust_remote_code
+        return 262_144
+
+    monkeypatch.setattr(server, "_window", stated)
+    catalog = ModelCatalog()
+    name = cast(str, request.param)
+    provider = catalog[name]
+    return [(f"{name}/{model}", provider[model].capability) for model in provider]
+
+
+def test_every_row_offers_the_effort_it_starts_at(
+    rows: list[tuple[str, ModelCapability]],
+) -> None:
+    """A row's default is one it offers, so nothing falls to a neighbor unstated."""
+    unoffered: dict[str, str] = {}
+    for row, capability in rows:
+        try:
+            capability.check(capability.default)
+        except ValueError as e:
+            unoffered[row] = str(e)
+    assert unoffered == {}
+
+
+def test_every_row_starts_at_the_size_its_prices_name(
+    rows: list[tuple[str, ModelCapability]],
+) -> None:
+    """The default's size is resolved once, from the row's own prices."""
+    unresolved = {
+        row: default.context_size
+        for row, capability in rows
+        if (default := capability.default).context_size
+        != capability.prices[default.context_size.context_name]
+    }
+    assert unresolved == {}
+
+
+def test_every_row_budgets_replies_with_its_documented_context_limits(
+    tmp_path: Path,
+    rows: list[tuple[str, ModelCapability]],
+) -> None:
+    """Cap replies in known windows unless server-side truncation is verified."""
+    for row, capability in rows:
+        limits = capability.limits
+        used = max(1, limits.max_request_tokens - 1)
+        model = ScriptedProvider(capability=capability)["scripted"]
+        agent = Agent(
+            model=model,
+            system_prompt="",
+            tool_context=ToolContext(cwd=tmp_path),
+        )
+        agent.runtime.tape.append_history(reply(tokens=TokenCount(request=used)))
+        room = SummaryCompactor(agent).reply_room()
+        if limits.truncates_at_context is True or limits.max_request_tokens <= 0:
+            assert room == 0, row
+        else:
+            remaining = max(1, limits.context_tokens * 95 // 100 - used)
+            assert room == remaining, row
+            response = Request(max_response_tokens=room).response_tokens(limits)
+            assert 0 < response <= remaining, row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("section", [listed.section for listed in listings()])
+async def test_every_setting_a_row_offers_changes_what_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+) -> None:
+    """A value that changes nothing sent is a label: ``anthropic-cli`` once said
+    ``nothink`` while ``claude`` thought at its own medium.
+
+    Each value is sent beside the defaults, and beside every other setting at
+    its most committing, so a setting that matters only under another (an
+    output under some effort) still shows.
+    """
+    monkeypatch.setattr(server, "_window", _stated_window)
+    request = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
+    catalog = ModelCatalog()
+    unsent: list[str] = []
+    provider = catalog[section]
+    for model_name in provider:
+        model = provider[model_name]
+        capability = model.capability
+        plural: dict[ModelSettingName, tuple[object, ...]] = {
+            f: v for f in model_setting_names() if len(v := capability.values(f)) > 1
+        }
+        committed = capability.default
+        for field, values in plural.items():
+            committed = committed.with_value(field, values[-1])
+        for field, values in plural.items():
+            sent: dict[object, set[str]] = {value: set[str]() for value in values}
+            for base in (capability.default, committed):
+                for value in values:
+                    model.settings = capability.with_choices(base, {field: value})
+                    # The compaction setting is sent on a compaction's request,
+                    # which asks the API to summarize when it is ``provider``.
+                    asked = replace(
+                        request,
+                        summarize=field == "compaction"
+                        and model.settings.compaction == "provider",
+                    )
+                    sent[value].add(await _sent(model, asked))
+            same = [v for v in values if sum(sent[v] == s for s in sent.values()) > 1]
+            if same:
+                unsent.append(f"{section}/{model_name} {field}: {same}")
+        await model.aclose()
+    await catalog.aclose()
+    assert unsent == []
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("anthropic", Anthropic),
+        ("anthropic-cli", AnthropicCLI),
+    ],
+)
+def test_a_section_name_builds_its_provider_class(name: str, kind: type) -> None:
+    assert isinstance(ModelCatalog()[name], kind)
+
+
+@pytest.mark.parametrize("section", [listed.section for listed in listings()])
+def test_every_listed_provider_names_models_or_requires_deployment_configuration(
+    section: str,
+) -> None:
+    provider = ModelCatalog()[section]
+    if section in {"azure", "bedrock", "nvidia", "replicate"}:
+        assert list(provider) == []
+        with pytest.raises(UnknownModelError, match="models=ModelTable"):
+            provider["default"]
+    else:
+        assert list(provider)
+
+
+@pytest.mark.parametrize("kind", [Azure, Bedrock, NVIDIA, Replicate])
+@pytest.mark.asyncio
+async def test_deployment_catalogs_integrate_through_the_public_factory_api(
+    kind: type[OpenAICompatible],
+) -> None:
+    prices = PriceCatalog(window=8192)
+    row = ModelCapability(
+        model_id="private-1.0",
+        wire_model_id="deployment",
+        limits=ModelLimits(max_request_tokens=8192, max_response_tokens=1024),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+    table = ModelTable(rows=(row,), roles={"default": row.model_id})
+    async with ModelCatalog(
+        factories={kind.section: partial(kind, models=table)},
+    ) as catalog:
+        provider = catalog[kind.section]
+        assert list(provider) == [row.model_id]
+        model = catalog.model(f"{kind.section}/default", current=kind.section)
+        assert model.provider is provider
+        assert provider.resources is catalog
+        assert model.capability is row
+        assert model.settings == row.default
+
+
+def test_the_default_provider_is_the_first_listed() -> None:
+    assert default_provider() == listings()[0].section
+    assert default_provider() in ModelCatalog().factories
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [listed for listed in listings() if isinstance(listed, HasLogins)],
+    ids=[listed.section for listed in listings() if isinstance(listed, HasLogins)],
+)
+def test_a_named_account_signs_every_login_provider_in_as_it(listed: Listed) -> None:
+    factory = ModelCatalog(account="work").factories[listed.section]
+
+    assert isinstance(factory, partial)
+    assert (factory.func, factory.keywords) == (listed, {"account": "work"})
+
+
+def test_a_named_account_leaves_a_provider_without_a_login_as_it_is() -> None:
+    assert ModelCatalog(account="work").factories["anthropic"] is Anthropic
+
+
+@pytest.mark.parametrize("account", [None, "default", ""])
+def test_the_default_account_keeps_each_providers_own_login(
+    account: str | None,
+) -> None:
+    factories = ModelCatalog(account=account).factories
+    assert not any(isinstance(factory, partial) for factory in factories.values())
+
+
+@pytest.mark.parametrize("account", ["../x", "a/b", "-x", "a b", "work.x", "a..b"])
+def test_an_account_that_is_no_name_is_refused(account: str) -> None:
+    with pytest.raises(ValueError, match="is not a name"):
+        ModelCatalog(account=account)
+
+
+@pytest.mark.parametrize("account", ["Work", "w2", "a_b-C"])
+def test_an_account_of_letters_digits_and_separators_is_a_name(account: str) -> None:
+    assert ModelCatalog(account=account).account == account
+
+
+def test_using_an_account_signs_in_as_it_from_then_on() -> None:
+    catalog = ModelCatalog()
+    catalog.allow(["anthropic-cli", "openai"])
+    before = catalog["anthropic-cli"]
+
+    catalog.use_account("work")
+
+    assert catalog.account == "work"
+    assert list(catalog.factories) == ["anthropic-cli", "openai"]
+    factory = catalog.factories["anthropic-cli"]
+    assert isinstance(factory, partial)
+    assert factory.keywords == {"account": "work"}
+    assert catalog["anthropic-cli"] is not before
+
+
+@pytest.mark.parametrize("account", [None, "default", ""])
+def test_using_the_default_account_again_keeps_each_providers_own_login(
+    account: str | None,
+) -> None:
+    catalog = ModelCatalog(account="work")
+    catalog.use_account(account)
+    assert catalog.account is None
+    assert not isinstance(catalog.factories["anthropic-cli"], partial)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_left_by_an_account_switch_closes_with_the_catalog() -> None:
+    built: list[_Recorded] = []
+
+    def per_account(account: str | None) -> dict[str, _Factory]:
+        del account
+        return {"a": _Factory(built=built)}
+
+    catalog = ModelCatalog(factories=per_account)
+    catalog["a"]
+    catalog.use_account("work")
+    catalog["a"]
+    assert [provider.closes for provider in built] == [0, 0]
+
+    await catalog.aclose()
+
+    assert [provider.closes for provider in built] == [1, 1]
+
+
+def test_switching_back_to_an_account_finds_its_providers_as_left() -> None:
+    built: list[_Recorded] = []
+
+    def per_account(account: str | None) -> dict[str, _Factory]:
+        del account
+        return {"a": _Factory(built=built)}
+
+    catalog = ModelCatalog(factories=per_account)
+    first = catalog["a"]
+    catalog.use_account(None)
+    assert catalog["a"] is first, "the account in use is no switch"
+    catalog.use_account("work")
+    work = catalog["a"]
+    catalog.use_account("default")
+    assert catalog["a"] is first
+    catalog.use_account("work")
+    assert catalog["a"] is work
+    assert built == [first, work]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_signed_in_as_another_account_leaves_the_catalog_s_own() -> (
+    None
+):
+    built: list[_Recorded] = []
+    asked: list[str | None] = []
+
+    def per_account(account: str | None) -> dict[str, _Factory]:
+        asked.append(account)
+        return {"a": _Factory(built=built)}
+
+    catalog = ModelCatalog(factories=per_account)
+    mine = catalog["a"]
+    work = catalog.signed_in("a", account="work")
+
+    assert catalog.account is None
+    assert catalog["a"] is mine
+    assert work is not mine
+    assert catalog.signed_in("a", account="work") is work
+    assert catalog.signed_in("a", account="default") is mine
+    assert asked == [None, "work"]
+    await catalog.aclose()
+    assert [provider.closes for provider in built] == [1, 1]
+
+
+def test_a_catalog_of_fixed_factories_has_no_accounts() -> None:
+    catalog = ModelCatalog(factories={"work": Anthropic})
+    with pytest.raises(ValueError, match="builds its providers for no account"):
+        catalog.use_account("work")
+    with pytest.raises(ValueError, match="builds its providers for no account"):
+        ModelCatalog(factories={"work": Anthropic}, account="work")
+    assert (
+        ModelCatalog(factories={"work": Anthropic}, account="default").account is None
+    )
+
+
+def test_a_provider_is_built_once_on_first_lookup() -> None:
+    built: list[_Recorded] = []
+    catalog = ModelCatalog(factories={"work": _Factory(built=built)})
+    assert built == []  # Building waits for the first lookup.
+    first = catalog["work"]
+    assert catalog["work"] is first
+    assert built == [first]
+
+
+def test_given_factories_replace_the_registry() -> None:
+    catalog = ModelCatalog(factories={"work": Anthropic})
+    work = catalog["work"]
+    assert isinstance(work, Anthropic)
+    assert work.name == "work"
+    assert work.resources is catalog
+    with pytest.raises(
+        UnknownProviderError,
+        match=r"^unknown provider 'anthropic'; known: work$",
+    ):
+        catalog["anthropic"]
+
+
+def test_an_unknown_provider_names_the_known_ones() -> None:
+    catalog = ModelCatalog()
+    with pytest.raises(
+        UnknownProviderError,
+        match=rf"^unknown provider 'nope'; known: {', '.join(catalog.factories)}$",
+    ):
+        catalog["nope"]
+
+
+@pytest.mark.parametrize(
+    ("spelling", "name"),
+    [
+        ("openai-sub", "openai-sub"),
+        ("OpenAISub", "openai-sub"),
+        ("openai_sub", "openai-sub"),
+        ("OPENAI SUB", "openai-sub"),
+        ("oaisub", "openai-sub"),
+        ("osub", "openai-sub"),
+        ("antcli", "anthropic-cli"),
+        ("OpenAI", "openai"),
+        ("LlamaCpp", "llamacpp"),
+        ("ds", "dashscope"),
+    ],
+)
+def test_a_provider_answers_to_every_spelling_of_its_name(
+    spelling: str,
+    name: str,
+) -> None:
+    catalog = ModelCatalog()
+    assert catalog.name(spelling) == name
+    assert catalog[spelling] is catalog[name]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    listings(),
+    ids=[listed.section for listed in listings()],
+)
+def test_each_provider_declares_its_own_aliases(listed: Listed) -> None:
+    # Inherited, a subclass's aliases would be its parent's: ``oapi`` naming
+    # ``openai-sub``.
+    assert "aliases" in vars(listed)
+
+
+@pytest.mark.parametrize(
+    ("alias", "section"),
+    [(alias, listed.section) for listed in listings() for alias in listed.aliases],
+)
+def test_a_provider_answers_to_each_alias_it_declares(
+    alias: str,
+    section: str,
+) -> None:
+    """Two providers declaring one alias would both match, and neither answer."""
+    assert ModelCatalog().name(alias) == section
+
+
+def test_a_declared_alias_wins_over_another_providers_abbreviation() -> None:
+    # ``acli`` abbreviates ``anthropicclinic`` too; only the declaration
+    # keeps a new provider from making it ambiguous.
+    catalog = ModelCatalog(
+        factories={
+            "anthropic-cli": AnthropicCLI,
+            "anthropic-clinic": AnthropicCLI,
+        },
+    )
+    assert catalog.name("acli") == "anthropic-cli"
+
+
+_VENDORS = {
+    "anthropic": ("a", "ant", "anth", "anthropic"),
+    "openai": ("o", "oai", "openai"),
+    "google": ("g", "goo", "google"),
+}
+
+
+def _kinds(vendor: str) -> list[str]:
+    """Return how each of ``vendor``'s providers is reached: ``api``, ``cli``, ..."""
+    return [
+        "api" if listed.section == vendor else kind
+        for listed in listings()
+        for head, _, kind in [listed.section.partition("-")]
+        if head == vendor
+    ]
+
+
+def test_each_vendor_offers_its_api_and_another_way_in() -> None:
+    assert all("api" in _kinds(vendor) for vendor in _VENDORS)
+    assert all(len(_kinds(vendor)) > 1 for vendor in _VENDORS)
+
+
+@pytest.mark.parametrize(
+    ("spelling", "name"),
+    [
+        (f"{short}{kind}", vendor if kind == "api" else f"{vendor}-{kind}")
+        for vendor, shorts in _VENDORS.items()
+        for short in shorts
+        for kind in _kinds(vendor)
+    ],
+)
+def test_a_vendor_short_or_whole_then_its_transport_names_the_provider(
+    spelling: str,
+    name: str,
+) -> None:
+    """``aapi``, ``antcli``, ``oaisub``, ``googleapi``: the API is the bare vendor."""
+    assert ModelCatalog().name(spelling) == name
+
+
+def test_any_run_of_separators_in_a_name_is_dropped() -> None:
+    assert ModelCatalog().name("OpenAI--Sub") == "openai-sub"
+
+
+def test_a_cached_repos_line_names_its_provider_alone() -> None:
+    """A model id may hold a slash: the provider is what precedes the first."""
+    provider = _windowed()
+    other = provider["narrow"]
+    memory = ModelMemory.from_model(
+        provider["wide"],
+        {
+            "selfhosted/org/narrow-1.0": CachedModel(
+                capability=other.capability,
+                settings=other.settings,
+            ),
+        },
+    )
+    assert memory.cache[0].startswith("selfhosted/narrow-1.0")
+
+
+@pytest.mark.parametrize(
+    ("spelling", "message"),
+    [
+        ("oai", r"^provider 'oai' could be any of: openai, openai-sub$"),
+        ("sub", r"^unknown provider 'sub'; known: "),
+        ("", r"^unknown provider ''; known: "),
+        ("nasub", r"^unknown provider 'nasub'; known: "),
+    ],
+)
+def test_a_spelling_no_single_provider_answers_to_is_refused(
+    spelling: str,
+    message: str,
+) -> None:
+    with pytest.raises(UnknownProviderError, match=message):
+        ModelCatalog().name(spelling)
+
+
+def test_allowing_narrows_the_catalog_to_the_providers_named() -> None:
+    catalog = ModelCatalog()
+    assert catalog.allow(["osub", "antcli", "openai-sub"]) == [
+        "openai-sub",
+        "anthropic-cli",
+    ]
+    assert list(catalog.factories) == ["openai-sub", "anthropic-cli"]
+    with pytest.raises(UnknownProviderError, match="known: openai-sub, anthropic-cli"):
+        catalog["anthropic"]
+
+
+def test_allowing_names_every_spelling_that_answers_to_nothing() -> None:
+    catalog = ModelCatalog()
+    with pytest.raises(
+        UnknownProviderError,
+        match=rf"^unknown providers ghost, zed; known: {', '.join(catalog.factories)}$",
+    ):
+        catalog.allow(["zed", "openai", "ghost"])
+    assert list(catalog.factories) == list(ModelCatalog().factories)
+
+
+class _Serving(ScriptedProvider):
+    """Serves only the models in ``serves``, refusing the rest as a table does."""
+
+    def __init__(
+        self,
+        *,
+        serves: frozenset[str],
+        name: str = "",
+        resources: ProviderResources | None = None,
+    ) -> None:
+        super().__init__(name=name, resources=resources)
+        self.serves = serves
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        if model not in self.serves:
+            raise UnknownModelError(f"{self.name} has no {model!r}.")
+        return super().__getitem__(model)
+
+
+def _serving() -> ModelCatalog:
+    return ModelCatalog(
+        factories={
+            "anthropic": partial(_Serving, serves=frozenset({"opus"})),
+            "anthropic-cli": partial(_Serving, serves=frozenset({"opus"})),
+            "openai-sub": partial(_Serving, serves=frozenset({"gpt"})),
+            "google": partial(_Serving, serves=frozenset({"gemini"})),
+            "selfhosted": partial(
+                _Serving,
+                serves=frozenset({"local/m", "google/gemma"}),
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "current", "served_by"),
+    [
+        ("opus", "anthropic-cli", "anthropic-cli"),
+        ("opus", "openai-sub", "anthropic"),
+        ("gpt", "anthropic-cli", "openai-sub"),
+        ("anthropic-cli/opus", "openai-sub", "anthropic-cli"),
+        ("antcli/opus", "anthropic", "anthropic-cli"),
+        ("local/m", "anthropic-cli", "selfhosted"),
+        ("selfhosted/google/gemma", "anthropic-cli", "selfhosted"),
+    ],
+)
+def test_a_model_comes_from_the_provider_named_else_current_else_the_first_serving_it(
+    name: str,
+    current: str,
+    served_by: str,
+) -> None:
+    assert _serving().model(name, current=current).provider.name == served_by
+
+
+def test_the_allow_list_orders_which_provider_serves_a_bare_model() -> None:
+    catalog = _serving()
+    catalog.allow(["openai-sub", "anthropic-cli", "anthropic"])
+    assert catalog.model("opus", current="openai-sub").provider.name == "anthropic-cli"
+
+
+@pytest.mark.parametrize(
+    ("name", "error"),
+    [
+        ("nope", "anthropic-cli has no 'nope'."),
+        ("openai-sub/opus", "openai-sub has no 'opus'."),
+    ],
+)
+def test_a_model_no_provider_serves_raises_the_first_refusal(
+    name: str,
+    error: str,
+) -> None:
+    with pytest.raises(UnknownModelError, match=f"^{re.escape(error)}"):
+        _serving().model(name, current="anthropic-cli")
+
+
+class _AnyRepo(ScriptedProvider):
+    """Serves any ``ORG/NAME``, as SelfHosted takes one for a Hugging Face repo."""
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        if "/" not in model:
+            raise UnknownModelError(f"{model!r} is no repo id.")
+        return super().__getitem__(model)
+
+
+@pytest.mark.parametrize("name", ["anthropic/opus-9", "openai-sub/opus"])
+def test_a_provider_named_that_refuses_is_the_answer(name: str) -> None:
+    """A typo in a model a provider was named for never downloads a repo instead."""
+    catalog = ModelCatalog(
+        factories={
+            "anthropic": partial(_Serving, serves=frozenset({"opus"})),
+            "openai-sub": partial(_Serving, serves=frozenset({"gpt"})),
+            "selfhosted": _AnyRepo,
+        },
+    )
+    with pytest.raises(UnknownModelError, match="selfhosted/"):
+        catalog.model(name, current="anthropic")
+
+
+# A price of 0 is none published.
+def _tiered(models: dict[str, float], *, roles: dict[str, str]) -> ScriptedProvider:
+    """Serve ``models``, newest first in each family, each at its reply price per MTok."""
+    rows = tuple(
+        ModelCapability(
+            model_id=model_id,
+            limits=ModelLimits(max_request_tokens=200_000),
+            prices=(
+                prices := PriceCatalog(
+                    prices=(
+                        {PriceCondition(): TokenPrice(response=response)}
+                        if response
+                        else {}
+                    ),
+                    window=200_000,
+                )
+            ),
+            default=ModelSettings(context_size=prices["fullcontext"]),
+        )
+        for model_id, response in models.items()
+    )
+    return ScriptedProvider(models=ModelTable(rows=rows, roles=roles))
+
+
+def _anthropic() -> ScriptedProvider:
+    return _tiered(
+        {
+            "fable-5.2": 40.0,
+            "mythos-5.2": 50.0,
+            "opus-5.5": 25.0,
+            "opus-4.6": 25.0,
+            "sonnet-5.5": 15.0,
+            "haiku-4.5": 5.0,
+            "spark-1.0": 0.4,
+            "relic-1.0": 0.0,
+            # A family of two words is its own: ``opus-pro``, not ``opus``.
+            "opus-pro-4.0": 0.5,
+        },
+        roles={
+            "best": "fable",
+            "default": "opus",
+            "everyday": "sonnet",
+            "utility": "haiku",
+        },
+    )
+
+
+def _openai() -> ScriptedProvider:
+    return _tiered(
+        {"astra-6.2": 40.0, "sol-6.2": 10.0, "sonnet-5.5": 15.0, "luna-6.0": 0.5},
+        roles={"best": "astra", "default": "sol", "utility": "luna"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "asked"),
+    [
+        # Served there too, it is kept.
+        ("sonnet-5.5", "sonnet-5.5"),
+        # Not served: the role it fills here, by name or by family.
+        ("opus-5.5", "default"),
+        ("opus-4.6", "default"),
+        ("fable-5.2", "best"),
+        # In no role: the role whose model here costs nearest it.
+        ("mythos-5.2", "best"),
+        ("spark-1.0", "utility"),
+        ("opus-pro-4.0", "utility"),
+        # Priced nowhere: the default.
+        ("relic-1.0", "default"),
+    ],
+)
+async def test_a_provider_that_lacks_the_model_is_asked_for_the_same_role(
+    current: str,
+    asked: str,
+) -> None:
+    """``opus`` is Anthropic's default, so on OpenAI it is OpenAI's: ``sol``."""
+    assert await counterpart(_openai(), _anthropic()[current]) == asked
+
+
+# A prompt past 1,000 tokens replies at 40 throughout.
+def _dated(*, until: float, after: float) -> ScriptedProvider:
+    """Serve ``banded-1.0``: a small prompt's reply at ``until``, from 2026-12-01 ``after``."""
+    prices = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(0, 1_001)): TokenPrice(response=until),
+            PriceCondition(
+                token_size_range=(0, 1_001),
+                effective_date=date(2026, 12, 1),
+            ): TokenPrice(response=after),
+            PriceCondition(token_size_range=(1_001, math.inf)): TokenPrice(
+                response=40.0,
+            ),
+        },
+        window=200_000,
+    )
+    row = ModelCapability(
+        model_id="banded-1.0",
+        limits=ModelLimits(max_request_tokens=200_000),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+    return ScriptedProvider(models=ModelTable(rows=(row,)))
+
+
+@pytest.mark.asyncio
+async def test_a_model_in_no_role_is_priced_by_its_small_prompt_reply() -> None:
+    """Not the long-prompt band: most replies follow a small prompt."""
+    banded = _dated(until=0.5, after=0.5)["banded"]
+    assert await counterpart(_openai(), banded) == "utility"
+
+
+@pytest.mark.asyncio
+async def test_a_model_is_priced_on_today_s_date_in_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vendors date prices in UTC; the local day can still be the one before."""
+
+    class _Clock:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            # 01:00 UTC on Dec 1 is still Nov 30 west of Greenwich.
+            if tz is UTC:
+                return datetime(2026, 12, 1, 1, tzinfo=UTC)
+            return datetime(2026, 11, 30, 17, tzinfo=timezone(timedelta(hours=-8)))
+
+    monkeypatch.setattr(catalog_module, "datetime", _Clock)
+    banded = _dated(until=0.5, after=40.0)["banded"]
+    assert await counterpart(_openai(), banded) == "best"
+
+
+@pytest.mark.asyncio
+async def test_a_role_the_other_lacks_is_its_nearest_tier() -> None:
+    """A ``default`` fills ``best`` and ``everyday`` too, but never ``utility``."""
+    defaulted = _tiered({"sol-6.2": 10.0}, roles={"default": "sol"})
+    assert await counterpart(defaulted, _anthropic()["haiku"]) == "everyday"
+    lacking = _tiered({"luna-6.0": 0.5}, roles={"utility": "luna"})
+    assert await counterpart(lacking, _anthropic()["opus"]) == "utility"
+
+
+@pytest.mark.asyncio
+async def test_a_model_in_every_role_counts_as_the_default() -> None:
+    """Else one model a provider names for each would always ask for the best."""
+    zai = _tiered(
+        {"glm-5.3": 3.0},
+        roles=dict.fromkeys(("best", "default", "everyday", "utility"), "glm"),
+    )
+    assert await counterpart(_openai(), zai["glm"]) == "default"
+
+
+@pytest.mark.asyncio
+async def test_a_role_unpriced_there_is_never_the_nearest_price() -> None:
+    free = _tiered(
+        {"astra-6.2": 40.0, "free-1.0": 0.0},
+        roles={"best": "astra", "utility": "free"},
+    )
+    assert await counterpart(free, _anthropic()["mythos-5.2"]) == "best"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_names_no_role_is_refused() -> None:
+    unroled = _tiered({"sol-6.2": 10.0}, roles={})
+    with pytest.raises(UnknownModelError, match="names no model for any role"):
+        await counterpart(unroled, _anthropic()["opus"])
+
+
+@pytest.mark.asyncio
+async def test_a_model_from_a_provider_of_no_roles_takes_the_nearest_price() -> None:
+    unroled = _tiered({"opus-5.5": 25.0}, roles={})
+    assert await counterpart(_openai(), unroled["opus-5.5"]) == "best"
+
+
+def _windowed() -> ScriptedProvider:
+    """Serve ``wide-1.0``, with a 1M window, and ``narrow-1.0``, with 200k."""
+
+    def row(model_id: str, window: int, tiers: frozenset[str]) -> ModelCapability:
+        prices = PriceCatalog(window=window)
+        return ModelCapability(
+            model_id=model_id,
+            limits=ModelLimits(max_request_tokens=window),
+            prices=prices,
+            thinking_effort=frozenset({"none", "high"}),
+            thinking_budget=frozenset({"none", "auto"}),
+            service_tier=frozenset(t for t in ("auto", "priority") if t in tiers),
+            default=ModelSettings(context_size=prices["fullcontext"]),
+        )
+
+    rows = (
+        row("wide-1.0", 1_000_000, frozenset({"auto", "priority"})),
+        row("narrow-1.0", 200_000, frozenset({"auto"})),
+    )
+    return ScriptedProvider(models=ModelTable(rows=rows))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "name", "context"),
+    [
+        ("wide+300k", "wide", 300_000),
+        ("wide+300k", "wide+200k", 200_000),
+        ("wide", "wide", 1_000_000),
+        ("wide+300k", "narrow", 200_000),
+    ],
+)
+async def test_a_successor_keeps_a_chosen_size_unless_named(
+    current: str,
+    name: str,
+    context: int,
+) -> None:
+    provider = _windowed()
+    after = await successor(provider.__getitem__, name, current=provider[current])
+    assert after.settings.context_size.tokens == context
+
+
+@pytest.mark.asyncio
+async def test_a_successor_adopts_the_settings_and_takes_a_named_effort() -> None:
+    provider = _windowed()
+    current = provider["wide"]
+    current.settings = replace(current.settings, thinking_effort="high")
+    kept = await successor(provider.__getitem__, "narrow", current=current)
+    named = await successor(provider.__getitem__, "narrow+none", current=current)
+    assert (kept.settings.thinking_effort, named.settings.thinking_effort) == (
+        "high",
+        "none",
+    )
+    with pytest.raises(ValueError, match="thinking_effort='low' is not offered"):
+        await successor(provider.__getitem__, "narrow+low", current=current)
+
+
+@pytest.mark.asyncio
+async def test_a_named_effort_turns_thinking_on_where_it_cannot_be_off() -> None:
+    prices = PriceCatalog(window=1_000)
+    capped = ModelCapability(
+        model_id="capped-1.0",
+        limits=ModelLimits(max_request_tokens=1_000),
+        prices=prices,
+        thinking_effort=frozenset({"high", "max"}),
+        thinking_budget=frozenset({"none", "auto"}),
+        thinking_off_max_effort="high",
+        default=ModelSettings(
+            thinking_effort="high",
+            thinking_budget="auto",
+            context_size=prices["fullcontext"],
+        ),
+    )
+    provider = ScriptedProvider(models=ModelTable(rows=(capped,)))
+    current = provider["capped"]
+    current.settings = replace(current.settings, thinking_budget="none")
+    after = await successor(provider.__getitem__, "capped+maxthink", current=current)
+    assert (after.settings.thinking_effort, after.settings.thinking_budget) == (
+        "max",
+        "auto",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_successor_takes_a_named_tier_in_any_position() -> None:
+    provider = _windowed()
+    current = provider["wide"]
+    after = await successor(provider.__getitem__, "wide+fast+200k", current=current)
+    assert (after.settings.service_tier, after.settings.context_size.tokens) == (
+        "priority",
+        200_000,
+    )
+    with pytest.raises(ValueError, match="service_tier='flex' is not offered"):
+        await successor(provider.__getitem__, "wide+flex", current=current)
+
+
+@pytest.mark.asyncio
+async def test_a_successor_takes_the_choices_its_name_spells() -> None:
+    provider = _windowed()
+    after = await successor(
+        provider.__getitem__,
+        "wide budget=auto",
+        current=provider["wide"],
+    )
+    assert after.settings.thinking_budget == "auto"
+    message = "budget: 'fixed' is not one of: none, auto"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        await successor(provider.__getitem__, "wide budget=fixed", current=after)
+    with pytest.raises(ValueError, match=r"^speed is no choice"):
+        await successor(provider.__getitem__, "wide speed=1", current=after)
+
+
+@pytest.mark.asyncio
+async def test_a_successor_restores_what_a_model_was_left_with() -> None:
+    provider = _windowed()
+    left = provider["narrow+100k"]
+    left.settings = replace(left.settings, thinking_effort="high")
+    cache = {
+        "scripted/narrow-1.0": CachedModel(
+            capability=left.capability,
+            settings=left.settings,
+        ),
+    }
+    current = provider["wide"]
+
+    back = await successor(
+        provider.__getitem__,
+        "narrow",
+        current=current,
+        model_cache=cache,
+    )
+    tagged = await successor(
+        provider.__getitem__,
+        "narrow+none",
+        current=current,
+        model_cache=cache,
+    )
+
+    fresh = provider["narrow"]
+    again = await successor(
+        provider.__getitem__,
+        "narrow",
+        current=back,
+        model_cache={
+            "scripted/narrow-1.0": CachedModel(
+                capability=fresh.capability,
+                settings=fresh.settings,
+            ),
+        },
+    )
+
+    assert (back.settings.thinking_effort, back.settings.context_size.tokens) == (
+        "high",
+        100_000,
+    )
+    assert tagged.settings.thinking_effort == "none"
+    assert back.settings is not left.settings
+    assert again.settings.context_size.tokens == 100_000
+
+
+def test_a_model_line_spells_the_model_as_its_name_takes_it() -> None:
+    model = _windowed()["wide+300k"]
+    model.settings = replace(
+        model.settings,
+        service_tier="priority",
+        thinking_budget="auto",
+    )
+    assert (
+        str(
+            ModelTags.from_settings(
+                model.capability,
+                model.settings,
+                provider="scripted",
+                account="work",
+            ),
+        )
+        == (
+            "work@scripted/wide-1.0+300k+nothink+priority budget=auto"  # codespell:ignore nothink
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_builds_the_model_and_its_cache_from_their_lines() -> None:
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, models=_windowed().models)},
+    )
+    memory = ModelMemory(
+        model="scripted/wide-1.0+300k+highthink budget=auto",
+        cache=("scripted/narrow-1.0+highthink",),
+    )
+
+    model, cache = await recall(memory, catalog=catalog)
+
+    settings = model.settings
+    assert (
+        settings.context_size.tokens,
+        settings.thinking_effort,
+        settings.thinking_budget,
+    ) == (
+        300_000,
+        "high",
+        "auto",
+    )
+    assert list(cache) == ["scripted/narrow-1.0"]
+    assert cache["scripted/narrow-1.0"].settings.thinking_effort == "high"
+    assert cache["scripted/narrow-1.0"].capability.model_id == "narrow-1.0"
+    assert (
+        str(ModelTags.from_settings(model.capability, settings, provider="scripted"))
+        == memory.model
+    )
+
+
+class _Repos(ScriptedProvider):
+    """Serves any model, and keeps each name it was asked for."""
+
+    def __init__(self, *, name: str = "", resources: ProviderResources | None = None):
+        super().__init__(name=name, resources=resources)
+        self.asked: list[str] = []
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        self.asked.append(model)
+        return super().__getitem__(model)
+
+
+@pytest.mark.parametrize(
+    ("line", "account"),
+    [("work@repos/org/m", "work"), ("repos/org/m", None)],
+    ids=["named", "default"],
+)
+@pytest.mark.asyncio
+async def test_recall_signs_in_as_its_line_says_and_asks_for_the_whole_repo(
+    line: str,
+    account: str | None,
+) -> None:
+    """A Hugging Face repo id holds a slash of its own."""
+    accounts: list[str | None] = []
+
+    def per_account(named: str | None) -> dict[str, type[_Repos]]:
+        accounts.append(named)
+        return {"repos": _Repos}
+
+    catalog = ModelCatalog(factories=per_account)
+    model, _ = await recall(ModelMemory(model=line), catalog=catalog)
+    provider = catalog.signed_in("repos", account=account)
+    assert model.provider is provider
+    assert isinstance(provider, _Repos)
+    assert (provider.name, provider.asked) == ("repos", ["org/m"])
+    assert accounts[-1] == account
+
+
+@pytest.mark.asyncio
+async def test_recall_reads_a_line_journaled_before_the_tags_were_renamed() -> None:
+    """A resumed session's journal says ``+large+high``; it means ``+fullcontext+highthink``."""
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, models=_windowed().models)},
+    )
+    memory = ModelMemory(
+        model="scripted/wide-1.0+large+high budget=auto",
+        cache=("scripted/narrow-1.0+high",),
+    )
+
+    model, cache = await recall(memory, catalog=catalog)
+
+    assert str(
+        ModelTags.from_settings(model.capability, model.settings, provider="scripted"),
+    ) == ("scripted/wide-1.0+fullcontext+highthink budget=auto")
+    assert cache["scripted/narrow-1.0"].settings.thinking_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_recall_closes_a_model_its_line_sets_as_no_longer_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+
+    async def aclose(model: ScriptedModel) -> None:
+        closed.append(model.capability.model_id)
+
+    monkeypatch.setattr(ScriptedModel, "aclose", aclose)
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, models=_windowed().models)},
+    )
+
+    with pytest.raises(ValueError, match=r"^budget: 'never' is not one of"):
+        await recall(
+            ModelMemory(model="scripted/wide-1.0 budget=never"),
+            catalog=catalog,
+        )
+
+    assert closed == ["wide-1.0"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "stops"),
+    [
+        # Effort is ``low`` to ``max``; ``none`` is no level Anthropic has.
+        ("anthropic", "opus-5.5", False),
+        ("anthropic", "opus-4.6", False),
+        ("anthropic", "opus-4.5", False),
+        # Gemini 3 and 2.5 Pro think whatever is asked; 2.5 Flash takes a 0 budget.
+        ("google", "gemini-pro-3.1", False),
+        ("google", "gemini-flash-3.6", False),
+        ("google", "gemini-pro-2.5", False),
+        ("google", "gemini-flash-2.5", True),
+        ("moonshot", "kimi-3.0", False),
+        ("dashscope", "qwen-2400b-a95b-3.8", False),
+        ("dashscope", "qwen-max-3.8", True),
+        ("openai", "astra-6.0", False),
+        ("openai", "sol-6.1", False),
+        ("openai", "luna-6.0", True),
+    ],
+)
+def test_an_effort_of_none_is_offered_only_where_the_vendor_stops_reasoning(
+    provider: str,
+    model: str,
+    stops: bool,
+) -> None:
+    effort = ModelCatalog()[provider][model].capability.thinking_effort
+    assert ("none" in effort) is stops
+
+
+@pytest.mark.asyncio
+async def test_closing_closes_each_provider_before_what_they_share() -> None:
+    built: list[_Recorded] = []
+    async with ModelCatalog(
+        factories={"a": _Factory(built=built), "b": _Factory(built=built)},
+    ) as catalog:
+        client = catalog.http
+        catalog["a"]
+        catalog["b"]
+    assert [provider.closed_with for provider in built] == [client, client]
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_a_closed_catalog_builds_afresh() -> None:
+    built: list[_Recorded] = []
+    catalog = ModelCatalog(factories={"a": _Factory(built=built)})
+    first = catalog["a"]
+    await catalog.aclose()
+    assert catalog["a"] is not first
+    await catalog.aclose()
+    assert [provider.closes for provider in built] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_failing_to_close_leaves_none_of_the_rest_open() -> None:
+    built: list[_Recorded] = []
+    catalog = ModelCatalog(
+        factories={"a": _Factory(built=built), "b": _Factory(built=built)},
+    )
+    client = catalog.http
+    catalog["a"]
+    catalog["b"]
+    built[0].fails = True
+    with pytest.raises(RuntimeError, match=r"^a would not close$"):
+        await catalog.aclose()
+    assert [provider.closes for provider in built] == [1, 1]
+    assert client.is_closed
+
+
+class _Recorded(AsyncResource):
+    """A provider serving no model, which notes what it saw when it closed."""
+
+    aliases: ClassVar[tuple[str, ...]] = ()
+
+    def __init__(self, *, name: str, resources: ProviderResources) -> None:
+        self._name = name
+        self._resources = resources
+        self.closes = 0
+        self.fails = False
+        self.closed_with: httpx2.AsyncClient | None = None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def resources(self) -> ProviderResources:
+        return self._resources
+
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        return ()
+
+    def __getitem__(self, model: str) -> Model:
+        raise KeyError(model)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    @override
+    async def aclose(self) -> None:
+        self.closes += 1
+        # The client a provider still uses is open until every provider closes.
+        client = self._resources.http
+        self.closed_with = None if client.is_closed else client
+        if self.fails:
+            raise RuntimeError(f"{self._name} would not close")
+
+
+class _Factory:
+    """Builds ``_Recorded`` providers, keeping each it built."""
+
+    def __init__(self, *, built: list[_Recorded]) -> None:
+        self._built = built
+
+    def __call__(self, *, name: str, resources: ProviderResources) -> _Recorded:
+        provider = _Recorded(name=name, resources=resources)
+        self._built.append(provider)
+        return provider
+
+
+def test_a_repo_whose_org_names_a_provider_says_so_only_when_one_hosts_repos() -> None:
+    """Without SelfHosted, a refused ``provider/model`` is the provider's refusal."""
+    catalog = ModelCatalog(
+        factories={"anthropic": partial(_Serving, serves=frozenset({"opus"}))},
+    )
+    with pytest.raises(UnknownModelError, match=r"^anthropic has no 'gone'\.$"):
+        catalog.model("anthropic/gone", current="anthropic")
+
+
+@pytest.mark.parametrize(
+    ("account", "line"),
+    [
+        (None, "scripted/wide-1.0+300k+nothink"),  # codespell:ignore nothink
+        ("work", "work@scripted/wide-1.0+300k+nothink"),  # codespell:ignore nothink
+    ],
+)
+def test_a_memory_names_the_account_its_model_signs_in_as(
+    account: str | None,
+    line: str,
+) -> None:
+    provider = _windowed()
+    model = provider["wide+300k"]
+    other = provider["narrow"]
+    memory = ModelMemory.from_model(
+        model,
+        {
+            "scripted/narrow-1.0": CachedModel(
+                capability=other.capability,
+                settings=other.settings,
+            ),
+            "scripted/wide-1.0": CachedModel(
+                capability=model.capability,
+                settings=model.settings,
+            ),
+        },
+        account=account,
+    )
+    assert (memory.model, memory.account) == (line, account)
+    assert memory.cache == (
+        "scripted/narrow-1.0+fullcontext+nothink",  # codespell:ignore nothink
+    )
+
+
+def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent(
+    tmp_path: Path,
+) -> None:
+    """One list of names: a field it adds that a match misses fails here."""
+    text = (files("sagent.providers.anthropic") / "anthropic.yaml").read_text()
+    sent = (
+        "\n  anthropic:\n"
+        "    sends:\n"
+        "      [thinking_effort, thinking_budget, thinking_output, service_tier,\n"
+        "       cache_ttl_sec, manage_context_server_side, compaction]\n"
+    )
+    assert text.count(sent) == 1
+    path = tmp_path / "unsent.yaml"
+    path.write_text(text.replace(sent, "\n  anthropic:\n    sends: []\n"))
+    unsent = ModelTable.from_yaml(path, section="anthropic")["opus-5.5"]
+    sent = Anthropic.models()["opus-5.5"]
+    for name in model_setting_names():
+        for value in sent.values(name):
+            assert sent.parse_value(name, f" {typed_text(value).upper()} ") == value
+            assert sent.default.with_value(name, value).value(name) == value
+        assert unsent.values(name) == (unsent.default.value(name),)
+
+
+def _stated_window(path: str, *, trust_remote_code: bool) -> int:
+    """Stand in for reading a SelfHosted model's config from the Hub."""
+    del path, trust_remote_code
+    return 40
+
+
+async def _sent(model: Model, request: Request) -> str:
+    """Return what ``model`` sends for ``request``, as it leaves this process."""
+    match model:
+        case AnthropicModel():
+            return repr(model.encode(request))
+        case AnthropicCLIModel():
+            # ``claude`` takes some settings as flags, the rest from its environment.
+            return repr(
+                (model.command(request, url="http://mcp"), await model.environment()),
+            )
+        case OpenAIModel():
+            return repr(model.provider.encode(request, model=model))
+        case GoogleModel():
+            return repr(model.encode(request))
+        case GoogleCLIModel():
+            return repr(model.command(Path("/workdir")))
+        case SelfHostedModel():
+            return repr(server.template_options(request, settings=model.settings))
+        case _:
+            raise AssertionError(f"Say what {type(model).__name__} sends.")
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

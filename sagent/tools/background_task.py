@@ -1,431 +1,367 @@
-"""``BackgroundTask`` tool: manage background tasks.
+"""Background jobs: any tool call run detached, and the tool that manages them.
 
-Conceptual model is bash job control: ``&`` (background), ``jobs``
-(list), ``kill %N`` (cancel), ``fg %N`` (foreground). Any tool call
-can be backgrounded by setting ``background: true`` in its
-parameters; the dispatch layer in ``agent.py`` handles this before
-the directive reaches the tool. This tool manages the resulting
-tasks.
+A call may carry ``background: true`` to run detached, or ``delay: N`` to start
+N seconds later; the runtime answers such a call at once with a pending stub,
+and delivers the real result later. A call may also carry ``wake_every: N``, to
+have what it wrote told every N seconds while it runs, in place of its tool's
+schedule. The runtime offers each tool with those keys (:func:`controls`) added to
+its schema, and strips them before the tool runs. ``BackgroundTask`` lists,
+cancels, or waits for the jobs run apart.
 
-The dataclass that represents a tracked task (``BackgroundTaskEntry``)
-and the per-tool schema wrapper (``BackgroundAwareTool``) live in
-``agent/background.py`` -- the agent layer needs them at module load
-time, and keeping them under ``tools/`` would force every tool module
-to load before ``agent/`` is fully initialized.
+Typical usage example:
+
+  tool = offered(Read())                     # what the model is shown
+  delay = background_delay(call.arguments)   # None: run it now
+  streaming_result = tool.call(context, without_controls(call.arguments))
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 
-import asyncio
-import time
+import math
 
-from treekle import PlainTree, immutable
+from treekle import PlainTree
 
-from sagent.agent.agent import Agent
-from sagent.agent.session_io import append_persistent_agent_lifecycle
-from sagent.agent.state import (
-    AgentLike,
-    agent_registry,
-    current_agent_var,
-)
-from sagent.tools.core import load_tool_description
-from sagent.types.exceptions import describe
-from sagent.types.runtime import (
-    CANCELLED_PLACEHOLDER,
-    DetachedResult,
-    RuntimeEvent,
-    ToolResult,
-    ToolResultKind,
+from sagent.journal.types import BackgroundTaskResult, ToolMessage
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import (
+    Tool,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from sagent.agent.background import BackgroundTaskEntry
+    from sagent.runtime.types import Job
+    from sagent.tools.types import ToolContext
 
 
 __all__ = [
     "BackgroundTask",
-    "cancel_persistent_subagent",
-    "shutdown_persistent_subagent",
+    "JobTable",
+    "Offered",
+    "background_delay",
+    "backgroundable",
+    "controls",
+    "offered",
+    "wake_period",
+    "without_controls",
 ]
 
 
+class JobTable(Protocol):
+    """What ``BackgroundTask`` reads and asks of the runtime running it."""
+
+    @property
+    def jobs(self) -> Mapping[str, Job]:
+        """Return the calls still running, by call id."""
+        ...
+
+    async def foreground(self, call_id: str) -> ToolMessage | None:
+        """Wait for the background call ``call_id``; ``None`` if there is none."""
+        ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class BackgroundTask:
-    """Tool: list, cancel, or foreground background tasks."""
+    """List, cancel, or wait for background jobs."""
 
-    name: str = "BackgroundTask"
-    tool_id: str = "application/x-tool-backgroundtask"
-    clearable_results: bool = False
-    description: str = load_tool_description("BackgroundTask")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["list", "cancel", "foreground"],
-                    "description": "Which operation to perform.",
-                },
-                "id": {
-                    "type": "string",
-                    "description": "Job id (required for cancel and foreground).",
-                },
-            },
-            "required": ["operation"],
-        },
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        operation: Annotated[
+            Literal["list", "cancel", "foreground"],
+            "Which operation to perform.",
+        ]
+        id: Annotated[str, "The job id; required for cancel and foreground."] = ""
+
+    name = "BackgroundTask"
+    description = (files(__package__) / "assets" / "backgroundtask.md").read_text(
+        encoding="utf-8",
     )
+    schema = json_schema(Arguments)
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this background-task operation.
+    display: ToolDisplay = field(default=ToolDisplay())
 
-        Args:
-          args: Directive with ``operation`` and optional ``id``.
-
-        Returns:
-          label: ``BackgroundTask <op> [<id>]`` line shown before invocation.
-
-        """
-        op = str(args.get("operation", "?"))
-        job_id = args.get("id")
-        if job_id:
-            return f"BackgroundTask {op} {job_id}"
-        return f"BackgroundTask {op}"
-
-    def prompt(self) -> str:
-        """Return background-task usage guidance for the system prompt.
-
-        Returns:
-          contribution: Per-request prompt fragment describing ``background``
-              / ``delay`` directives and ``BackgroundTask`` operations.
-
-        """
-        return (
-            "Any tool call can include `background: true` to run it "
-            "asynchronously (result delivered to inbox on completion). "
-            "Add `delay: N` (seconds) to sleep before executing "
-            "(implies background). Use BackgroundTask to list, cancel, "
-            "or foreground running jobs."
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``BackgroundTask <operation>``, then the job id if any."""
+        job = arguments.get("id")
+        return f"BackgroundTask {arguments.get('operation', '?')}" + (
+            "" if job in (None, "") else f" {job}"
         )
 
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: background-task control has no shared resource."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: managing jobs touches no resource another call uses."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Dispatch a list, cancel, or foreground operation.
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[BackgroundTaskResult, str, str]:
+        """Refuse: the jobs are the runtime's, which calls :meth:`manage` instead.
 
         Args:
-          args: Directive with ``operation`` (``list``/``cancel``/
-              ``foreground``) and optional ``id``.
+          context: The calling agent's state; not read.
+          arguments: What the model passed; not read.
 
         Returns:
-          result: Listing table, cancel confirmation, or the foregrounded
-              task's ``ToolResult``; error when ``id`` is missing or unknown.
+          streaming_result: An error saying that ``BackgroundTask`` runs only
+            inside an agent's runtime.
 
         """
-        op = str(args.get("operation", ""))
-        job_id = str(args.get("id", ""))
-
-        agent = current_agent_var.get(None)
-        if agent is None:
-            return ToolResult(
-                call_id="",
-                content="BackgroundTask: no active agent",
-                is_error=True,
-            )
-
-        if op == "list":
-            return self._list(agent)
-        if op == "cancel":
-            return self._cancel(agent, job_id)
-        if op == "foreground":
-            return await self._foreground(agent, job_id)
-        return ToolResult(
-            call_id="",
-            content=f"Unknown operation: {op!r}",
-            is_error=True,
+        del context, arguments
+        return whole_output(
+            ToolOutput(
+                stderr=("BackgroundTask runs only inside an agent's runtime.",),
+                result=BackgroundTaskResult(exit_code=1),
+            ),
         )
 
-    def _list(self, agent: AgentLike) -> ToolResult:
-        """Render the current background-task table."""
-        # Hidden infra tasks (REPL pump, daemons) are filtered out --
-        # they're internal and not user/model-actionable.
-        jobs = {q: j for q, j in agent.background.items() if not j.hidden}
-        if not jobs:
-            return ToolResult(call_id="", content="No background tasks.")
-        lines: list[str] = []
-        now = time.time()
-        for qid, job in jobs.items():
-            elapsed = now - job.started
-            phase = (
-                "cancelled"
-                if job.task.cancelled()
-                else (
-                    "completed"
-                    if job.task.done()
-                    else (
-                        "sleeping"
-                        if job.delay_sec > 0 and elapsed < job.delay_sec
-                        else "running"
-                    )
-                )
-            )
-            lines.append(f"{qid}  {job.tool_name:<20s}  {phase:<10s}  {elapsed:.0f}s")
-        header = f"{'ID':<8s}  {'TOOL':<20s}  {'PHASE':<10s}  ELAPSED"
-        return ToolResult(call_id="", content=header + "\n" + "\n".join(lines))
+    async def manage(
+        self,
+        table: JobTable,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolMessage:
+        """Do ``operation`` on ``table``'s background jobs.
 
-    def _cancel(self, agent: AgentLike, job_id: str) -> ToolResult:
-        """Cancel a tracked background task by job id."""
-        if not job_id:
-            return ToolResult(
+        Args:
+          table: The runtime running this call.
+          arguments: What the model passed, as ``BackgroundTask.Arguments``.
+
+        Returns:
+          result: The job listing, the cancellation, the job's own result, or
+            an error naming what was wrong.
+
+        """
+        a = parse(arguments, BackgroundTask.Arguments)
+        jobs = {
+            cid: job
+            for cid, job in table.jobs.items()
+            if job.status in ("sleeping", "detached")
+        }
+        if a.operation == "list":
+            return _listing(jobs)
+        if not a.id:
+            return ToolMessage(
                 call_id="",
-                content="cancel requires an id",
-                is_error=True,
+                state="done",
+                stderr=(f"{a.operation} requires an id.",),
+                result=BackgroundTaskResult(exit_code=1),
             )
-        job = agent.background.get(job_id)
-        if job is None or job.hidden:
-            return ToolResult(
-                call_id="",
-                content=f"No such job: {job_id}",
-                is_error=True,
-            )
-        if job.kind == "subagent":
-            # Strip the ``persistent:`` prefix to recover the child's label;
-            # ``cancel_persistent_subagent`` owns the full graceful path
-            # (lifecycle write + child shutdown + cancel_background).
-            label = job.queue_id.removeprefix("persistent:")
-            _ = cancel_persistent_subagent(agent, label)
-        else:
-            _ = job.task.cancel()
-            # Explicit-bg entries live in the agent's bg registry; cohort-
-            # detached entries land in ``runtime.detached`` and clean
-            # themselves up when the task completes.
-            agent.cancel_background(job_id)
-        return ToolResult(
+        job = jobs.get(a.id)
+        unknown = ToolMessage(
             call_id="",
-            content=f"Cancelled: {job.tool_name} ({job_id})",
+            state="done",
+            stderr=(f"No background job {a.id!r}; list shows them.",),
+            result=BackgroundTaskResult(exit_code=1),
         )
-
-    # Tracked tasks post results via ``DetachedResult`` to the runtime inbox; the task
-    # object itself returns ``None``. If the result has already been spliced into
-    # history (splice fires when the runtime drains the ``DetachedResult``), read it
-    # from there; otherwise wait for the event.
-    async def _foreground(self, agent: AgentLike, job_id: str) -> ToolResult:
-        """Resolve a tracked background task to its result."""
-        if not job_id:
-            return ToolResult(
+        # A call the model waits on already is no background job to manage.
+        if a.operation == "cancel" or (job is None and a.id in table.jobs):
+            if job is None:
+                return unknown
+            job.cancel()
+            return ToolMessage(
                 call_id="",
-                content="foreground requires an id",
-                is_error=True,
+                state="done",
+                stdout=(f"Cancelling {job.call.name} ({a.id}).",),
+                result=BackgroundTaskResult(operation="cancel", job_id=a.id),
             )
-        job = agent.background.get(job_id)
-        if job is None or job.hidden:
-            return ToolResult(
-                call_id="",
-                content=f"No such job: {job_id}",
-                is_error=True,
-            )
-        if job.kind == "subagent" and job.lifecycle == "serviced":
-            return ToolResult(
-                call_id="",
-                content=(
-                    "Serviced subagent jobs cannot be foregrounded; use AgentSend "
-                    "to message the child or BackgroundTask cancel to stop it."
-                ),
-                is_error=True,
-            )
-        call_id = job.call_id or job.queue_id
-        spliced = _find_history_result(agent, call_id)
-        if spliced is None:
-            # No try/finally: only a job whose result was actually collected is
-            # cancelled, so a raise or cancellation above must leave it running
-            # for a later drain rather than reach the cancel below.
-            spliced = await _await_detached(agent, call_id, job)
-        agent.cancel_background(job_id)
-        return ToolResult(
-            call_id="",
-            content=spliced.content,
-            is_error=spliced.is_error,
-        )
+        # A job already done may still be asked for: its result is given again.
+        result = await table.foreground(a.id)
+        return unknown if result is None else result
 
 
-def shutdown_persistent_subagent(agent: AgentLike, job: BackgroundTaskEntry) -> None:
-    """Shut down a persistent child through its public lifecycle hook.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Offered:
+    """A tool as the model is shown it: its schema also takes the control keys."""
+
+    tool: Tool
+    schema: Mapping[str, PlainTree]
+
+    @property
+    def name(self) -> str:
+        """Return the tool's name."""
+        return self.tool.name
+
+    @property
+    def description(self) -> str:
+        """Return the tool's description."""
+        return self.tool.description
+
+    @property
+    def display(self) -> ToolDisplay:
+        """Return the tool's display."""
+        return self.tool.display
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return the tool's label for a call, without the control keys."""
+        return self.tool.summary(without_controls(arguments))
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return the tool's key for a call, without the control keys."""
+        return self.tool.serialize_key(context, without_controls(arguments))
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[object, object, object]:
+        """Run the tool, without the control keys."""
+        return self.tool.call(context, without_controls(arguments))
+
+
+def backgroundable(tool: Tool) -> bool:
+    """Return whether ``tool`` takes the control keys.
+
+    A tool declaring any of them keeps its own (AgentSend's ``delay`` schedules a
+    message); taking it over would run the call late and drop its argument.
 
     Args:
-      agent: Parent agent owning the child.
-      job: Background-task entry for the persistent child.
-
-    """
-    child = agent_registry.get(job.queue_id)
-    if child is None:
-        return
-    parent_agent = agent if isinstance(agent, _get_agent_class()) else None
-    child_agent = child if isinstance(child, _get_agent_class()) else None
-    if job.persistent_run_id and parent_agent is not None and child_agent is not None:
-        append_persistent_agent_lifecycle(
-            parent_agent,
-            child_agent,
-            job.queue_id,
-            job.persistent_run_id,
-            state="cancelled",
-            notify_on_asleep=job.notify_on_asleep,
-        )
-    child.shutdown(force=True)
-
-
-def cancel_persistent_subagent(agent: AgentLike, label: str) -> bool:
-    """Gracefully cancel a persistent subagent and clear parent bookkeeping.
-
-    Single helper used by every cancel path (``BackgroundTask cancel``,
-    ``/kill <label>``). Writes the terminal ``cancelled`` lifecycle
-    record when the parent owns a matching ``BackgroundTaskEntry``,
-    then forces the child to shut down and unregisters the parent
-    bookkeeping. Falls back to a registry-only shutdown when the parent
-    has no matching bg entry -- the child still stops, but no lifecycle
-    record is written because the parent never owned the run id.
-
-    Args:
-      agent: Parent agent.
-      label: Persistent child's registry label.
+      tool: The tool.
 
     Returns:
-      cancelled: True when a child was found and shut down; False when
-          no child matched ``label``.
+      backgroundable: ``False`` for ``BackgroundTask`` and for a tool that
+        declares one of the control keys.
 
     """
-    queue_id = f"persistent:{label}"
-    job = agent.background.get(queue_id)
-    if job is not None and job.kind == "subagent":
-        shutdown_persistent_subagent(agent, job)
-        agent.cancel_background(queue_id)
-        return True
-    child = agent_registry.get(label)
-    if child is None:
-        return False
-    child.shutdown(force=True)
-    return True
+    properties = tool.schema.get("properties")
+    declared = isinstance(properties, Mapping) and bool(controls(properties))
+    return not declared and not isinstance(tool, BackgroundTask)
 
 
-def _get_agent_class() -> type[Agent]:
-    """Resolve the concrete ``Agent`` class lazily."""
-    return Agent
+def offered(tool: Tool) -> Tool:
+    """Return ``tool`` as the model is shown it: with the control keys if it takes them.
+
+    Args:
+      tool: The tool.
+
+    Returns:
+      offered: An ``Offered`` whose schema adds the control keys, or ``tool`` itself
+        when it is not backgroundable.
+
+    """
+    if not backgroundable(tool):
+        return tool
+    raw = tool.schema.get("properties")
+    properties = dict(raw) if isinstance(raw, Mapping) else {}
+    properties["background"] = {
+        "type": "boolean",
+        "description": "Run in the background; the result arrives in a later message.",
+    }
+    properties["delay"] = {
+        "type": "number",
+        "minimum": 0,
+        "description": "Seconds to wait before running; implies background.",
+    }
+    properties["wake_every"] = {
+        "type": "number",
+        "minimum": 1,
+        "description": (
+            "Seconds between wakes while the call runs: each tells you what it"
+            " wrote since the last, or that it wrote nothing. Omit for your usual"
+            " schedule."
+        ),
+    }
+    return Offered(tool=tool, schema={**tool.schema, "properties": properties})
 
 
-# A ``CANCELLED`` result is a valid final answer here (a killed job's outcome is
-# "cancelled"); only a still-running ``PENDING`` stub is skipped.
-def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Return the most recent final (non-``PENDING``) result for ``call_id``."""
-    for entry in reversed(agent.runtime.context().messages):
-        if (
-            isinstance(entry, ToolResult)
-            and entry.call_id == call_id
-            and entry.kind is not ToolResultKind.PENDING
-        ):
-            return entry
-    return None
+def background_delay(arguments: Mapping[str, PlainTree]) -> float | None:
+    """Return how long to wait before running a call in the background.
+
+    Args:
+      arguments: What the model passed, control keys included.
+
+    Returns:
+      delay: Seconds to wait, or ``None`` to run the call now, in the foreground.
+
+    Raises:
+      TypeError: ``background`` is not a boolean, or ``delay`` not a number.
+      ValueError: ``delay`` is negative, or no finite number (NaN, infinity).
+
+    """
+    background = arguments.get("background", False)
+    delay = arguments.get("delay", 0)
+    if not isinstance(background, bool):
+        raise TypeError(f"'background' must be a boolean, got {background!r}.")
+    if isinstance(delay, bool) or not isinstance(delay, int | float):
+        raise TypeError(f"'delay' must be seconds, at least 0, got {delay!r}.")
+    if not math.isfinite(delay) or delay < 0:
+        raise ValueError(f"'delay' must be seconds, at least 0, got {delay!r}.")
+    return float(delay) if background or delay > 0 else None
 
 
-async def _await_detached(
-    agent: AgentLike,
-    call_id: str,
-    job: BackgroundTaskEntry,
-) -> ToolResult:
-    """Wait for a ``DetachedResult`` matching ``call_id`` and return it."""
-    fut = cast(asyncio.Future[ToolResult], asyncio.get_running_loop().create_future())
+def wake_period(arguments: Mapping[str, PlainTree]) -> float | None:
+    """Return how often a call asks to have what it wrote told.
 
-    def on_event(event: RuntimeEvent) -> None:
-        if fut.done():
-            return
-        if isinstance(event, DetachedResult) and event.call_id == call_id:
-            fut.set_result(_tool_result_from_detached(event))
+    Args:
+      arguments: What the model passed, control keys included.
 
-    agent.runtime.observers.append(on_event)
-    try:
-        try:
-            await asyncio.shield(job.task)
-        except asyncio.CancelledError:
-            if fut.done():
-                return fut.result()
-            event = _splice_from_inbox_items(
-                agent,
-                call_id,
-                agent.runtime.inbox.drain_nowait(),
-            )
-            if event is not None:
-                return event
-            if job.task.cancelled():
-                return ToolResult(
-                    call_id=call_id,
-                    content=CANCELLED_PLACEHOLDER,
-                    is_error=True,
-                    kind=ToolResultKind.CANCELLED,
-                )
-            raise
-        except Exception as exc:  # noqa: BLE001 -- A detached tool failure must become a user-visible ToolResult.
-            if fut.done():
-                return fut.result()
-            return ToolResult(
-                call_id=call_id,
-                content=describe(exc),
-                is_error=True,
-            )
-        if fut.done():
-            return fut.result()
-        event = await _drain_detached(agent, call_id)
-        if event is not None:
-            return event
-        return await fut
-    finally:
-        if not fut.done():
-            fut.cancel()
-        if on_event in agent.runtime.observers:
-            agent.runtime.observers.remove(on_event)
+    Returns:
+      period: Seconds between looks, or ``None`` for its tool's own schedule.
+
+    Raises:
+      TypeError: ``wake_every`` is not a number.
+      ValueError: ``wake_every`` is under a second, or no finite number (NaN,
+        infinity).
+
+    """
+    every = arguments.get("wake_every")
+    if every is None:
+        return None
+    if isinstance(every, bool) or not isinstance(every, int | float):
+        raise TypeError(f"'wake_every' must be seconds, at least 1, got {every!r}.")
+    if not math.isfinite(every) or every < 1:
+        raise ValueError(f"'wake_every' must be seconds, at least 1, got {every!r}.")
+    return float(every)
 
 
-async def _drain_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Drain one inbox batch and return a matching detached result if present."""
-    return _splice_from_inbox_items(agent, call_id, await agent.runtime.inbox.drain())
+def controls(arguments: Mapping[str, PlainTree]) -> dict[str, PlainTree]:
+    """Return the keys of ``arguments`` that are the runtime's to read, never the tool's."""
+    return {
+        k: v for k, v in arguments.items() if k in ("background", "delay", "wake_every")
+    }
 
 
-def _splice_from_inbox_items(
-    agent: AgentLike,
-    call_id: str,
-    items: list[RuntimeEvent],
-) -> ToolResult | None:
-    """Splice one detached result from ``items`` and restore the rest."""
-    keep: list[RuntimeEvent] = []
-    result: ToolResult | None = None
-    for item in items:
-        if isinstance(item, DetachedResult) and item.call_id == call_id:
-            result = _splice_detached(agent, item)
-        else:
-            keep.append(item)
-    if keep:
-        agent.runtime.inbox.push_front(*keep)
-    return result
+def without_controls(arguments: Mapping[str, PlainTree]) -> dict[str, PlainTree]:
+    """Return ``arguments`` without :func:`controls`."""
+    kept = controls(arguments)
+    return {k: v for k, v in arguments.items() if k not in kept}
 
 
-# The result is returned as the ``BackgroundTask foreground`` tool's own answer (forward
-# delivery -- the model asked for it). The original ``[Running in background]``
-# placeholder is left in place: it is the honest record that the call was backgrounded,
-# and rewriting it in-slot would be a silent back-patch.
-def _splice_detached(agent: AgentLike, event: DetachedResult) -> ToolResult:
-    """Return the foreground result for a drained ``DetachedResult``."""
-    del agent
-    return _tool_result_from_detached(event)
-
-
-def _tool_result_from_detached(event: DetachedResult) -> ToolResult:
-    """Convert a detached runtime event into a foreground tool result."""
-    return ToolResult(
-        call_id=event.call_id,
-        content=event.content,
-        is_error=event.is_error,
+def _listing(jobs: Mapping[str, Job]) -> ToolMessage[BackgroundTaskResult]:
+    """Return one row per job: id, tool, status, and seconds since it was asked for."""
+    listing = "No background jobs."
+    if jobs:
+        width = max(len(cid) for cid in jobs)
+        rows = [
+            f"{cid:<{width}}  {job.call.name:<20}  "
+            f"{'sleeping' if job.status == 'sleeping' else 'running':<8}  "
+            f"{job.elapsed_sec:.0f}s"
+            for cid, job in jobs.items()
+        ]
+        header = f"{'ID':<{width}}  {'TOOL':<20}  {'STATUS':<8}  ELAPSED"
+        listing = "\n".join((header, *rows))
+    return ToolMessage(
+        call_id="",
+        state="done",
+        stdout=(listing,),
+        result=BackgroundTaskResult(operation="list"),
     )

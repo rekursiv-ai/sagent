@@ -1,1 +1,1 @@
-"""Self-hosted provider family: transport modules and the model catalog."""
+"""Hugging Face models, loaded into this process and run with transformers."""

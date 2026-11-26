@@ -1,0 +1,471 @@
+"""Tests for what a model offers, where it starts, and how its choices move."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import itertools
+import math
+import re
+
+import pytest
+
+from sagent.model.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettingName,
+    ModelSettings,
+    PruningPolicy,
+    ThinkingBudget,
+    ThinkingEffort,
+    literal_members,
+    model_setting_names,
+    typed_text,
+)
+from sagent.model.context import ContextSize, ContextSizeName
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
+
+
+def _banded(*tops: int, window: int = 1_000_000) -> PriceCatalog:
+    """Return ``auto`` prices rising after each of ``tops``, within ``window``."""
+    edges: tuple[int | float, ...] = (0, *(top + 1 for top in tops), math.inf)
+    return PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(int(lo), hi)): TokenPrice(request=float(i))
+            for i, (lo, hi) in enumerate(itertools.pairwise(edges))
+        },
+        window=window,
+    )
+
+
+def _size(name: ContextSizeName, tokens: int, shown: str) -> ContextSize:
+    return ContextSize(context_name=name, tokens=tokens, display_name=shown)
+
+
+def _row(prices: PriceCatalog | None = None) -> ModelCapability:
+    catalog = prices if prices is not None else _banded(272_000)
+    return ModelCapability(
+        model_id="m",
+        limits=ModelLimits(max_request_tokens=catalog.window),
+        prices=catalog,
+        thinking_effort=frozenset({"none", "low", "high"}),
+        thinking_budget=frozenset({"none", "auto"}),
+        thinking_output=frozenset({"none", "text"}),
+        service_tier=frozenset({"auto", "default", "priority"}),
+        cache_ttl_sec=frozenset({300.0, 3600.0}),
+        manage_context_server_side=frozenset({False}),
+        default=ModelSettings(
+            thinking_effort="low",
+            cache_ttl_sec=300.0,
+            context_size=catalog["fullcontext"],
+        ),
+    )
+
+
+def test_every_class_is_default_constructible_and_hashable() -> None:
+    capability = ModelCapability()
+    assert capability.default == ModelSettings()
+    assert hash(capability) == hash(ModelCapability())
+
+
+@pytest.mark.parametrize(
+    ("limits", "tokens"),
+    [
+        (ModelLimits(max_request_tokens=200_000), 200_000),
+        (ModelLimits(max_request_tokens=200_000, max_context_tokens=272_000), 272_000),
+    ],
+)
+def test_the_window_input_and_output_share_is_the_context_else_the_input(
+    limits: ModelLimits,
+    tokens: int,
+) -> None:
+    assert limits.context_tokens == tokens
+
+
+def test_check_passes_what_is_offered() -> None:
+    row = _row()
+    row.check(row.default)
+    row.check(replace(row.default, thinking_effort="high", service_tier="priority"))
+    for size in (*row.prices.sizes(), row.prices[258_000]):
+        row.check(replace(row.default, context_size=size))
+    ModelCapability().check(ModelSettings())
+
+
+@pytest.mark.parametrize(
+    ("settings", "match"),
+    [
+        (
+            replace(_row().default, thinking_effort="max"),
+            "thinking_effort='max' is not offered by m",
+        ),
+        (replace(_row().default, thinking_budget="fixed"), "thinking_budget='fixed'"),
+        (
+            replace(_row().default, thinking_output="redacted"),
+            "thinking_output='redacted'",
+        ),
+        (
+            replace(_row().default, service_tier="flex"),
+            "allowed: 'auto', 'default', 'priority'",
+        ),
+        (replace(_row().default, cache_ttl_sec=0.0), "cache_ttl_sec=0.0"),
+        (
+            replace(_row().default, manage_context_server_side=True),
+            "manage_context_server_side=True",
+        ),
+        (
+            replace(_row().default, compaction="provider"),
+            "compaction='provider' is not offered by m; allowed: 'bespoke'",
+        ),
+        (
+            replace(_row().default, context_size=_size("fullcontext", 2_000_000, "2m")),
+            "context_size=2m is not offered by m; allowed: 1 to 1m",
+        ),
+        (
+            replace(
+                _row().default,
+                context_size=_size("smallcontext", 500_000, "500k"),
+            ),
+            "context_size=500k is not offered by m; allowed: 1 to 1m",
+        ),
+    ],
+)
+def test_check_names_what_is_not_offered_and_what_is(
+    settings: ModelSettings,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _row().check(settings)
+
+
+def test_thinking_off_is_refused_above_the_effort_that_allows_it() -> None:
+    # Anthropic's Opus 5 and Haiku 5.5 take ``thinking: disabled`` only at
+    # ``high`` effort or below; above it the API answers 400.
+    row = replace(
+        _row(),
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        thinking_off_max_effort="high",
+    )
+    row.check(replace(row.default, thinking_effort="high", thinking_budget="none"))
+    row.check(replace(row.default, thinking_effort="xhigh", thinking_budget="auto"))
+    with pytest.raises(
+        ValueError,
+        match="thinking_budget='none' is not offered by m at thinking_effort='xhigh';"
+        " allowed: thinking_effort up to 'high'",
+    ):
+        row.check(replace(row.default, thinking_effort="xhigh", thinking_budget="none"))
+
+
+def _capped() -> ModelCapability:
+    """Return a row taking thinking off at ``high`` effort or below, on by default."""
+    row = _row()
+    return replace(
+        row,
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        thinking_off_max_effort="high",
+        default=replace(row.default, thinking_budget="auto"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "choices", "after"),
+    [
+        # What is chosen now stands; what it conflicts with yields.
+        (("xhigh", "auto"), {"thinking_budget": "none"}, ("high", "none")),
+        (("high", "none"), {"thinking_effort": "xhigh"}, ("xhigh", "auto")),
+        (("low", "none"), {"thinking_effort": "high"}, ("high", "none")),
+        (("xhigh", "none"), {"thinking_output": "text"}, ("xhigh", "auto")),
+        (
+            ("low", "auto"),
+            {"thinking_effort": "xhigh", "thinking_budget": "none"},
+            ("xhigh", "none"),
+        ),
+    ],
+    ids=["budget-chosen", "effort-chosen", "within-cap", "neither-chosen", "both"],
+)
+def test_with_choices_keeps_what_is_chosen_and_yields_what_it_conflicts_with(
+    before: tuple[ThinkingEffort, ThinkingBudget],
+    choices: dict[ModelSettingName, object],
+    after: tuple[ThinkingEffort, ThinkingBudget],
+) -> None:
+    row = _capped()
+    effort, budget = before
+    settings = replace(row.default, thinking_effort=effort, thinking_budget=budget)
+    chosen = row.with_choices(settings, choices)
+    assert (chosen.thinking_effort, chosen.thinking_budget) == after
+    assert chosen.thinking_output == choices.get("thinking_output", "none")
+
+
+def test_a_budget_that_must_yield_turns_thinking_on_though_off_by_default() -> None:
+    row = replace(_capped(), default=replace(_capped().default, thinking_budget="none"))
+    off = replace(row.default, thinking_effort="high")
+    assert row.with_choices(off, {"thinking_effort": "xhigh"}).thinking_budget == "auto"
+    always_off = replace(row, thinking_budget=frozenset({"none"}))
+    stuck = always_off.with_choices(off, {"thinking_effort": "xhigh"})
+    assert stuck.thinking_budget == "none"
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        always_off.check(stuck)
+
+
+def test_with_choices_on_an_uncapped_row_is_each_value_set() -> None:
+    row = _row()
+    chosen = row.with_choices(
+        replace(row.default, thinking_budget="none"),
+        {"thinking_effort": "high", "service_tier": "priority"},
+    )
+    assert chosen == replace(
+        row.default,
+        thinking_effort="high",
+        thinking_budget="none",
+        service_tier="priority",
+    )
+    with pytest.raises(ValueError, match="is no choice"):
+        row.with_choices(row.default, {"cache_ttl_sec": "soon"})
+
+
+def test_fit_turns_thinking_on_where_its_effort_cannot_turn_it_off() -> None:
+    row = replace(
+        _row(),
+        thinking_effort=frozenset({"low", "high", "xhigh"}),
+        default=replace(_row().default, thinking_budget="auto"),
+    )
+    capped = replace(row, thinking_off_max_effort="high")
+    off = replace(row.default, thinking_effort="xhigh", thinking_budget="none")
+    fitted = capped.fit(off, was=row)
+    assert (fitted.thinking_effort, fitted.thinking_budget) == ("xhigh", "auto")
+    capped.check(fitted)
+    within = replace(off, thinking_effort="high")
+    assert capped.fit(within, was=row).thinking_budget == "none"
+
+
+def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
+    row = _row()
+    other = replace(
+        row,
+        thinking_effort=frozenset({"none", "high"}),
+        cache_ttl_sec=frozenset({3600.0}),
+        default=replace(row.default, thinking_effort="none", cache_ttl_sec=3600.0),
+    )
+    chosen = replace(row.default, thinking_effort="low", thinking_budget="auto")
+    fitted = other.fit(chosen, was=row)
+    assert (fitted.thinking_effort, fitted.thinking_budget, fitted.cache_ttl_sec) == (
+        "none",
+        "auto",
+        3600.0,
+    )
+
+
+def test_fit_keeps_every_choice_offered_whole() -> None:
+    row = replace(
+        _row(),
+        manage_context_server_side=frozenset({False, True}),
+        compaction=frozenset({"bespoke", "provider"}),
+    )
+    chosen = ModelSettings(
+        thinking_effort="high",
+        thinking_budget="auto",
+        thinking_output="text",
+        service_tier="priority",
+        cache_ttl_sec=3600.0,
+        manage_context_server_side=True,
+        compaction="provider",
+        context_size=row.prices["smallcontext"],
+        pruning=PruningPolicy(keep_recent=2),
+    )
+
+    assert row.fit(chosen, was=row) == chosen
+
+
+def test_fit_takes_the_default_of_every_choice_not_offered() -> None:
+    row = _row()
+    plain = ModelCapability(
+        model_id="plain",
+        thinking_effort=frozenset({"medium"}),
+        thinking_budget=frozenset({"fixed"}),
+        thinking_output=frozenset({"redacted"}),
+        service_tier=frozenset({"flex"}),
+        cache_ttl_sec=frozenset({60.0}),
+        manage_context_server_side=frozenset({True}),
+        compaction=frozenset({"provider"}),
+        default=ModelSettings(
+            thinking_effort="medium",
+            thinking_budget="fixed",
+            thinking_output="redacted",
+            service_tier="flex",
+            cache_ttl_sec=60.0,
+            manage_context_server_side=True,
+            compaction="provider",
+        ),
+    )
+    chosen = replace(row.default, thinking_output="text", service_tier="priority")
+
+    fitted = plain.fit(chosen, was=row)
+
+    assert replace(fitted, context_size=plain.default.context_size) == plain.default
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            ModelSettings(thinking_effort="max"),
+            "thinking_effort='max' is not offered by this model; allowed: 'none'",
+        ),
+        (
+            ModelSettings(context_size=_size("fullcontext", 500, "500")),
+            "context_size=500 is not offered by this model; allowed: 1 to 100",
+        ),
+    ],
+)
+def test_a_model_with_no_name_is_this_model(
+    settings: ModelSettings,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        ModelCapability(prices=PriceCatalog(window=100)).check(settings)
+
+
+def test_a_model_with_no_name_is_this_model_where_thinking_cannot_be_off() -> None:
+    row = ModelCapability(
+        thinking_effort=frozenset({"low", "high"}),
+        thinking_off_max_effort="low",
+        prices=PriceCatalog(window=100),
+    )
+    message = (
+        "thinking_budget='none' is not offered by this model at"
+        " thinking_effort='high'; allowed: thinking_effort up to 'low'"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        row.check(ModelSettings(thinking_effort="high"))
+
+
+def test_a_tier_priced_flat_keeps_the_size_another_tier_bands() -> None:
+    prices = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(0, 272_001)): TokenPrice(request=1.0),
+            PriceCondition(token_size_range=(272_001, math.inf)): TokenPrice(),
+            PriceCondition(service_tier="priority"): TokenPrice(request=2.0),
+        },
+        window=1_000_000,
+    )
+    row = _row(prices)
+    small = replace(row.default, context_size=prices["smallcontext"])
+
+    row.check(replace(small, service_tier="priority"))
+
+
+def test_fit_takes_a_default_model_s_settings_onto_a_default_model() -> None:
+    capability = ModelCapability()
+
+    assert capability.fit(ModelSettings(), was=capability) == ModelSettings()
+
+
+def test_fit_keeps_a_named_size_named_on_the_new_model() -> None:
+    wide, narrow = _row(_banded(272_000)), _row(_banded(100_000, window=200_000))
+    small = replace(wide.default, context_size=wide.prices["smallcontext"])
+    assert narrow.fit(small, was=wide).context_size == _size(
+        "smallcontext",
+        100_000,
+        "100k",
+    )
+
+
+def test_fit_keeps_a_counted_size_a_count_within_the_window() -> None:
+    wide, narrow = _row(_banded(272_000)), _row(_banded(window=200_000))
+    counted = replace(wide.default, context_size=wide.prices[300_000])
+    assert narrow.fit(counted, was=wide).context_size == _size(
+        "fullcontext",
+        200_000,
+        "200k",
+    )
+    counted = replace(wide.default, context_size=wide.prices[150_000])
+    assert narrow.fit(counted, was=wide).context_size == _size(
+        "fullcontext",
+        150_000,
+        "150k",
+    )
+
+
+def test_fit_falls_back_to_the_default_tier_when_one_is_not_offered() -> None:
+    row = _row()
+    flex = replace(row, service_tier=frozenset({"auto", "flex"}))
+    chosen = replace(row.default, service_tier="flex")
+    assert row.fit(chosen, was=flex).service_tier == "auto"
+
+
+def _offering() -> ModelCapability:
+    return ModelCapability(
+        thinking_effort=frozenset({"high", "none", "low"}),
+        cache_ttl_sec=frozenset({3600.0, 300.0}),
+    )
+
+
+def test_a_setting_is_read_and_set_by_name() -> None:
+    settings = ModelSettings()
+    for name in model_setting_names():
+        # The most committing value, which no default is.
+        value = replace(
+            _row(),
+            manage_context_server_side=frozenset({False, True}),
+            compaction=frozenset({"bespoke", "provider"}),
+        ).values(name)[-1]
+        assert value != settings.value(name)
+        assert settings.with_value(name, value).value(name) == value
+    assert settings.with_value("cache_ttl_sec", 300).value("cache_ttl_sec") == 300.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("cache_ttl_sec", "300"),
+        ("manage_context_server_side", 1),
+        ("compaction", "remote"),
+    ],
+)
+def test_a_value_no_setting_holds_is_refused(
+    name: ModelSettingName,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{name}={value!r} is no choice$"):
+        ModelSettings().with_value(name, value)
+
+
+def test_values_are_least_committing_first() -> None:
+    capability = _offering()
+    assert capability.values("thinking_effort") == ("none", "low", "high")
+    assert capability.values("cache_ttl_sec") == (300.0, 3600.0)
+    assert capability.values("manage_context_server_side") == (False, True)
+    assert capability.values("compaction") == ("bespoke",)
+    both = replace(capability, compaction=frozenset({"provider", "bespoke"}))
+    assert both.values("compaction") == ("bespoke", "provider")
+
+
+def test_typed_text_reads_as_the_value_it_spells() -> None:
+    capability = _offering()
+    assert capability.parse_value("thinking_effort", " HIGH ") == "high"
+    assert capability.parse_value("cache_ttl_sec", "300") == 300.0
+    assert capability.parse_value("manage_context_server_side", "True") is True
+    message = "'max' is not one of: none, low, high"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        capability.parse_value("thinking_effort", "max")
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(True, "true"), (False, "false"), (300.0, "300"), (0.5, "0.5"), ("high", "high")],
+)
+def test_a_value_is_typed_as_a_user_types_it(value: object, text: str) -> None:
+    assert typed_text(value) == text
+
+
+def test_literal_members_reads_the_size_names_in_order() -> None:
+    assert literal_members(ContextSizeName) == (
+        "smallcontext",
+        "midcontext",
+        "fullcontext",
+    )
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

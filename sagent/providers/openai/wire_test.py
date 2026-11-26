@@ -1,0 +1,741 @@
+"""Tests for what the OpenAI wires share: events, user turns, errors, limits."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import base64
+import io
+import time
+import uuid
+
+from PIL import Image
+
+import pytest
+
+from sagent.journal.types import (
+    AgentMessage,
+    AssistantMessage,
+    Attachment,
+    ContextClear,
+    SessionContext,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
+from sagent.model.capability import ModelLimits
+from sagent.model.exceptions import (
+    AuthError,
+    BillingError,
+    ContextOverflowError,
+    OverloadedError,
+    RateLimitedError,
+    RefusedError,
+    RequestTooLargeError,
+)
+from sagent.model.types import Request
+from sagent.providers.openai import wire
+from sagent.providers.types import UsageWindow
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from sagent.model.capability import ThinkingEffort
+
+
+@pytest.fixture
+def now(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Freeze the clock at a known instant."""
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    return 1_000.0
+
+
+def _png(width: int, height: int) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), "red").save(out, format="PNG")
+    return out.getvalue()
+
+
+async def _lines(*lines: str) -> AsyncIterator[str]:
+    for line in lines:
+        yield line
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "astra-6.2",
+        "sol-6.2",
+        "astra-6.0",
+        "sol-6.1",
+        "terra-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "gpt-5.6",
+        "terra-5.6",
+        "luna-5.6",
+    ],
+)
+def test_gpt_5_6_on_reasons_over_every_turn(model_id: str) -> None:
+    assert wire.gpt_6(model_id)
+    assert not wire.gpt_6(model_id.upper())
+
+
+@pytest.mark.parametrize(
+    ("effort", "named"),
+    [("min", "minimal"), ("low", "low"), ("max", "max")],
+)
+def test_an_effort_is_sent_as_openai_names_it(
+    effort: ThinkingEffort,
+    named: str,
+) -> None:
+    assert wire.effort(effort) == named
+
+
+@pytest.mark.asyncio
+async def test_events_are_each_data_line_until_done() -> None:
+    lines = _lines(
+        "event: response.created",
+        'data: {"type": "a"}',
+        "",
+        ": keep-alive",
+        "data: not json",
+        "data: [1, 2]",
+        'data:{"type": "b"}',
+        "data: [DONE]",
+        'data: {"type": "after"}',
+    )
+    assert [event async for event in wire.events(lines)] == [
+        {"type": "a"},
+        {"type": "b"},
+    ]
+    # A body that ends without ``[DONE]`` ends the events too.
+    assert [event async for event in wire.events(_lines('data: {"type": "c"}'))] == [
+        {"type": "c"},
+    ]
+
+
+def test_flatten_replaces_each_clear_with_its_summary_and_history() -> None:
+    inner = ContextClear(summary="older", history=(UserMessage(content="a"),))
+    records = [
+        ContextClear(summary="so far", history=(inner, AssistantMessage(content="b"))),
+        ContextClear(history=(UserMessage(content="c"),)),
+        UserMessage(content="d"),
+    ]
+    assert list(wire.flatten(records)) == [
+        UserMessage(content="so far"),
+        UserMessage(content="older"),
+        UserMessage(content="a"),
+        AssistantMessage(content="b"),
+        UserMessage(content="c"),
+        UserMessage(content="d"),
+    ]
+
+
+def test_what_is_said_while_calls_wait_follows_their_results() -> None:
+    held, late, early, nudge = (
+        UserMessage(content="held"),
+        UserMessage(content="late"),
+        UserMessage(content="early"),
+        SystemMessage(content="nudge", subtype="nudge"),
+    )
+    records = [
+        early,
+        ToolCall(call_id="a", name="Read"),
+        Thinking(content="hm"),
+        ToolCall(call_id="b", name="Read"),
+        held,
+        ToolMessage(call_id="a", state="done"),
+        TokenUsage(),
+        ToolMessage(call_id="b", state="done"),
+        nudge,
+        AssistantMessage(content="again"),
+        ToolCall(call_id="c", name="Read"),
+        late,
+    ]
+    assert list(wire.results_first(records)) == [
+        early,
+        records[1],
+        records[2],
+        records[3],
+        records[5],
+        records[6],
+        records[7],
+        held,
+        nudge,
+        records[9],
+        records[10],
+        late,
+    ]
+
+
+def test_a_turn_waits_for_each_of_its_calls_and_no_answered_one() -> None:
+    held, later = UserMessage(content="held"), UserMessage(content="later")
+    records = [
+        ToolCall(call_id="a", name="Read"),
+        Thinking(content="hm"),
+        ToolCall(call_id="b", name="Read"),
+        held,
+        ToolMessage(call_id="b", state="done"),
+        later,
+        ToolMessage(call_id="a", state="done"),
+    ]
+    assert list(wire.results_first(records)) == [
+        *records[:3],
+        *records[4::2],
+        held,
+        later,
+    ]
+
+
+def test_what_waited_is_said_once_its_turn_s_results_end_or_a_result_follows() -> None:
+    held, said = UserMessage(content="held"), UserMessage(content="said")
+    ended = [
+        ToolCall(call_id="a", name="Read"),
+        held,
+        ToolMessage(call_id="a", state="done"),
+        AssistantMessage(content="next"),
+    ]
+    assert list(wire.results_first(ended)) == [ended[0], ended[2], held, ended[3]]
+    stray = ToolMessage(call_id="z", state="done")
+    answered = [ToolCall(call_id="a", name="Read"), held, ended[2], said, stray]
+    assert list(wire.results_first(answered)) == [ended[0], ended[2], held, said, stray]
+
+
+def test_a_new_turn_says_what_waited_on_calls_it_never_answered() -> None:
+    held = UserMessage(content="held")
+    records = [
+        ToolCall(call_id="a", name="Read"),
+        held,
+        AssistantMessage(content="next"),
+    ]
+    assert list(wire.results_first(records)) == [records[0], held, records[2]]
+
+
+def test_user_content_is_what_each_record_says_on_the_users_side() -> None:
+    image = Attachment(mime_descriptor="image/png", data=b"x")
+    assert wire.user_content(UserMessage(content="hi", attachments=(image,))) == (
+        "hi",
+        (image,),
+    )
+    assert wire.user_content(UserMessage()) == ("", ())
+    # A person other than the session's user is named, as another agent is.
+    assert wire.user_content(
+        UserMessage(content="hi", sender="bob", attachments=(image,)),
+    ) == ("[from user bob]: hi", (image,))
+    assert wire.user_content(
+        AgentMessage(content="done", sender="worker", attachments=(image,)),
+    ) == ("[from worker]: done", (image,))
+    assert wire.user_content(AgentMessage(content="anon")) == ("anon", ())
+    assert wire.user_content(AgentMessage(sender="worker")) == (
+        "[from worker]: ",
+        (),
+    )
+    assert wire.user_content(SystemMessage(content="note")) == (
+        "<system-reminder>\nnote\n</system-reminder>",
+        (),
+    )
+    assert wire.user_content(SessionContext(cwd=Path("/w"))) == (
+        "<system-reminder>\nWorking directory: /w\n</system-reminder>",
+        (),
+    )
+    for unsaid in (
+        SystemMessage(content=""),
+        SessionContext(),
+        AssistantMessage(content="mine"),
+        TokenUsage(),
+    ):
+        assert wire.user_content(unsaid) is None
+
+
+def test_image_url_is_a_data_url_of_the_image_shrunk_to_the_limits() -> None:
+    small = _png(4, 2)
+    url = wire.image_url(
+        Attachment(mime_descriptor="image/png", data=small),
+        limits=ModelLimits(),
+    )
+    assert url == f"data:image/png;base64,{base64.b64encode(small).decode()}"
+    shrunk = wire.image_url(
+        Attachment(mime_descriptor="image/png", data=_png(40, 20)),
+        limits=ModelLimits(max_image_edge_px=10),
+    )
+    assert shrunk is not None
+    head, _, data = shrunk.partition(",")
+    assert head == "data:image/webp;base64"
+    assert Image.open(io.BytesIO(base64.b64decode(data))).size == (10, 5)
+    pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF")
+    assert wire.image_url(pdf, limits=ModelLimits()) is None
+
+
+def test_cache_key_is_one_uuid_per_conversation() -> None:
+    opening = Request(system=("Be terse.",), records=(UserMessage(content="fix it"),))
+    later = Request(
+        system=("Be terse.",),
+        records=(
+            SessionContext(cwd=Path("/w")),
+            UserMessage(content="fix it"),
+            AssistantMessage(content="done"),
+            UserMessage(content="again"),
+        ),
+    )
+    key = wire.cache_key(opening)
+    assert uuid.UUID(key).version == 4
+    # The first user-side record opens the conversation, a reminder included.
+    assert wire.cache_key(later) != key
+    assert (
+        wire.cache_key(
+            Request(system=("Be terse.",), records=(*opening.records, *later.records)),
+        )
+        == key
+    )
+    assert (
+        wire.cache_key(Request(system=("Be brief.",), records=opening.records)) != key
+    )
+
+
+def test_a_cache_key_stays_what_servers_already_cached_under() -> None:
+    """A changed derivation would miss every cache warmed before it."""
+    opening = Request(system=("Be terse.",), records=(UserMessage(content="fix it"),))
+    assert wire.cache_key(opening) == "f5f0d197-6e7e-4635-8212-2bf150e8ee15"
+    unsaid = Request(system=("Be terse.", "Be kind."), records=())
+    assert wire.cache_key(unsaid) == "6d37463b-2987-499a-9561-9cd41b761bf5"
+
+
+def _error(message: str, *, code: str = "", kind: str = "") -> dict[str, object]:
+    return {"error": {"message": message, "code": code, "type": kind}}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (413, "Payload Too Large", RequestTooLargeError),
+        # The status alone says it, whatever the text.
+        (413, "nope", RequestTooLargeError),
+        (400, _error("Request exceeds the maximum request size"), RequestTooLargeError),
+        # Some servers send 413 for the token window, which compaction relieves.
+        (413, _error("maximum context length is 8192 tokens"), ContextOverflowError),
+        (400, _error("x", code="context_length_exceeded"), ContextOverflowError),
+        (400, _error("x", code="string_above_max_length"), ContextOverflowError),
+        (400, _error("Input exceeds the maximum context"), ContextOverflowError),
+        (400, _error("The context window was exceeded"), ContextOverflowError),
+        (400, _error("Model context exceeded"), ContextOverflowError),
+        (400, _error("x", code="content_policy_violation"), RefusedError),
+        (400, _error("x", code="content_filter"), RefusedError),
+        (
+            400,
+            _error("Your prompt was flagged as violating", code="invalid_prompt"),
+            RefusedError,
+        ),
+        (400, _error("Against usage policy", code="invalid_prompt"), RefusedError),
+        # An invalid prompt is refused only when it says why.
+        (400, _error("Malformed", code="invalid_prompt"), RuntimeError),
+        (0, _error("flagged", code="other"), RuntimeError),
+        (429, _error("Quota", code="insufficient_quota"), BillingError),
+        (400, _error("x", code="billing_hard_limit_reached"), BillingError),
+        (400, _error("Plan", kind="usage_not_included"), BillingError),
+        (401, _error("Incorrect API key"), AuthError),
+        (403, _error("Forbidden"), AuthError),
+        (400, _error("x", code="invalid_api_key"), AuthError),
+        (0, _error("x", kind="authentication_error"), AuthError),
+        (0, _error("x", kind="permission_error"), AuthError),
+        (429, _error("Slow down"), RateLimitedError),
+        (0, {"type": "error", "code": "rate_limit_exceeded"}, RateLimitedError),
+        (0, _error("x", code="rate_limit"), RateLimitedError),
+        (0, _error("x", kind="rate_limit_error"), RateLimitedError),
+        (0, _error("Plan spent", kind="usage_limit_reached"), RateLimitedError),
+        (500, _error("Oops"), OverloadedError),
+        (408, "timeout", OverloadedError),
+        (409, "conflict", OverloadedError),
+        (410, "gone", RuntimeError),
+        (0, _error("x", code="server_error"), OverloadedError),
+        (0, _error("x", kind="api_error"), OverloadedError),
+        (0, _error("x", kind="overloaded_error"), OverloadedError),
+        (0, _error("x", code="server_is_overloaded"), OverloadedError),
+        (0, _error("Something broke. You can retry."), OverloadedError),
+    ],
+)
+def test_an_error_is_the_most_specific_exception_that_fits(
+    status: int,
+    body: object,
+    expected: type[Exception],
+) -> None:
+    assert type(wire.to_exception(status, body=body)) is expected
+
+
+# Each server's own spelling; one missing reached the runtime raw, retried each time.
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("REQUEST_TOO_LARGE", RequestTooLargeError),
+        ("Above the maximum request size", RequestTooLargeError),
+        ("Too large a number of bytes", RequestTooLargeError),
+        ("Payload too large", RequestTooLargeError),
+        ("Request entity too large", RequestTooLargeError),
+        ("context_length_exceeded", ContextOverflowError),
+        ("This model's maximum context length is 8192", ContextOverflowError),
+        ("Input too large for the model", ContextOverflowError),
+        ("Input too long", ContextOverflowError),
+        ("string_above_max_length", ContextOverflowError),
+        ("Prompt is too long", ContextOverflowError),
+        ("Prompt too long", ContextOverflowError),
+        ("input_too_long", ContextOverflowError),
+        ("The context window overflowed", ContextOverflowError),
+        ("Past the context window maximum", ContextOverflowError),
+        ("Model context exceeded", ContextOverflowError),
+    ],
+)
+def test_every_spelling_of_a_limit_names_its_kind(
+    message: str,
+    expected: type[Exception],
+) -> None:
+    assert type(wire.to_exception(400, body=_error(message))) is expected
+
+
+@pytest.mark.parametrize("tokens", [33_551, 36_121, 32_886])
+@pytest.mark.parametrize("structured", [True, False])
+def test_llama_context_rejections_keep_the_overflow_recovery_path(
+    tokens: int,
+    structured: bool,
+) -> None:
+    message = (
+        f"request ({tokens} tokens) exceeds the available context size"
+        " (32768 tokens), try increasing it"
+    )
+    body = _error(message, code="400") if structured else message
+
+    error = wire.to_exception(400, body=body)
+
+    assert type(error) is ContextOverflowError
+    assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The available context size field is unknown",
+        "The available context size exceeds the schema's maximum",
+        (
+            "Invalid tool name: request (33551 tokens) exceeds the available"
+            " context size (32768 tokens)"
+        ),
+    ],
+)
+def test_schema_errors_mentioning_context_size_are_not_overflows(message: str) -> None:
+    assert type(wire.to_exception(400, body=_error(message))) is RuntimeError
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Context input rejected",
+        (
+            "input (33551 tokens) is larger than the max context size (32768 tokens)."
+            " skipping"
+        ),
+    ],
+)
+def test_llama_structured_overflow_kind_does_not_depend_on_its_message(
+    message: str,
+) -> None:
+    body = {
+        "error": {
+            "code": 400,
+            "type": "exceed_context_size_error",
+            "message": message,
+        },
+    }
+
+    error = wire.to_exception(400, body=body)
+
+    assert type(error) is ContextOverflowError
+    assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "code"),
+    [
+        (413, "request entity too large", ""),
+        (400, "context window was exceeded", ""),
+        (400, "flagged", "content_filter"),
+        (400, "quota", "insufficient_quota"),
+        (401, "bad key", ""),
+        (429, "slow down", ""),
+        (503, "busy", ""),
+    ],
+)
+def test_an_error_carries_the_server_s_message(
+    status: int,
+    message: str,
+    code: str,
+) -> None:
+    error = wire.to_exception(status, body=_error(message, code=code))
+    assert str(error) == message
+
+
+def test_an_unrecognized_error_names_the_status_code_and_message() -> None:
+    error = wire.to_exception(400, body=_error("Bad schema", code="invalid_value"))
+    assert type(error) is RuntimeError
+    assert str(error) == "The server replied 400 invalid_value: Bad schema"
+    assert (
+        str(wire.to_exception(404, body="<html>")) == "The server replied 404 : <html>"
+    )
+    # ``context window`` alone is a schema complaint, not an overflow.
+    error = wire.to_exception(400, body=_error("'context window' field is unknown"))
+    assert type(error) is RuntimeError
+
+
+@pytest.mark.parametrize(
+    ("headers", "fields", "wait_sec"),
+    [
+        ({"retry-after-ms": "1500"}, {}, 1.5),
+        ({"Retry-After": "7"}, {}, 7.0),
+        ({"retry-after": "Thu, 01 Jan 1970 00:16:50 GMT"}, {}, 10.0),
+        ({"retry-after": "soon"}, {}, 0.0),
+        ({}, {"resets_in_seconds": 90}, 90.0),
+        ({}, {"resets_at": 1_060}, 60.0),
+        (
+            {"x-ratelimit-reset-requests": "1s", "x-ratelimit-reset-tokens": "6m0s"},
+            {},
+            360.0,
+        ),
+        ({"x-ratelimit-reset-requests": "2s"}, {}, 2.0),
+        ({"retry-after": "999999"}, {}, 691_200.0),
+        ({}, {"resets_in_seconds": 259_200}, 259_200.0),
+        ({}, {"resets_at": 10}, 0.0),
+        ({}, {}, 0.0),
+        # Neither is a wait: the first is no number, the second no finite one.
+        ({}, {"resets_in_seconds": None}, 0.0),
+        ({}, {"resets_in_seconds": True}, 0.0),
+        ({}, {"resets_in_seconds": False, "resets_at": True}, 0.0),
+        ({"retry-after": "inf"}, {}, 0.0),
+        ({}, {"resets_in_seconds": "nan", "resets_at": 1_030}, 30.0),
+        ({"x-ratelimit-reset-tokens": "0.5"}, {}, 0.5),
+        ({"x-ratelimit-reset-tokens": "-3"}, {}, 0.0),
+    ],
+)
+def test_a_rate_limit_carries_the_advised_wait(
+    now: float,
+    headers: dict[str, str],
+    fields: dict[str, object],
+    wait_sec: float,
+) -> None:
+    del now
+    body = {"error": {"message": "slow", "type": "usage_limit_reached", **fields}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == wait_sec
+
+
+@pytest.mark.parametrize(
+    ("minutes", "limit"),
+    [("1440", "daily"), ("2880", "2-day"), ("90", "90-minute"), ("120", "2-hour")],
+)
+def test_a_spent_window_of_any_span_is_named(minutes: str, limit: str) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": minutes,
+        "x-codex-primary-used-percent": "100",
+    }
+    error = wire.to_exception(429, body="limit", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == limit
+
+
+def test_a_ramp_too_fast_is_a_short_hold_not_a_spent_window() -> None:
+    # ``slow_down`` comes inside the per-minute limits; read as a spent window it
+    # would move the agent off an account that is fine in seconds.
+    body = {
+        "error": {
+            "message": "Your request rate increased too quickly.",
+            "type": "rate_limit_error",
+            "code": "slow_down",
+        },
+    }
+    error = wire.to_exception(429, body=body, headers={"retry-after": "3"})
+    assert isinstance(error, RateLimitedError)
+    assert (error.retry_after_sec, error.limit) == (3.0, "")
+
+
+def test_a_model_overload_is_no_rate_limit() -> None:
+    body = {
+        "error": {
+            "message": "The model is overloaded.",
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+        },
+    }
+    error = wire.to_exception(503, body=body, headers={"retry-after": "2"})
+    assert isinstance(error, OverloadedError)
+
+
+@pytest.mark.parametrize("resource", ["requests", "tokens"])
+def test_an_api_keys_spent_window_names_no_login_limit(resource: str) -> None:
+    """Only a ChatGPT login's windows have a span to name."""
+    headers = {f"x-ratelimit-remaining-{resource}": "0"}
+    error = wire.to_exception(429, body="slow", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert (error.limit, error.retry_after_sec) == ("", 0.0)
+
+
+def test_a_spent_window_without_a_reset_counts_as_resetting_first() -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-at": "0.5",
+    }
+    error = wire.to_exception(429, body="limit", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == "weekly"
+
+
+@pytest.mark.parametrize(
+    ("used", "limit"),
+    [
+        ({"primary": "100", "secondary": "12.5"}, "5-hour"),
+        ({"primary": "40", "secondary": "100"}, "weekly"),
+        ({"primary": "40", "secondary": "60"}, ""),
+    ],
+)
+def test_a_chatgpt_logins_spent_window_is_named(
+    used: dict[str, str],
+    limit: str,
+) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": used["primary"],
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": used["secondary"],
+    }
+    body = {"error": {"message": "limit", "type": "usage_limit_reached"}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == limit
+
+
+def test_of_two_spent_windows_the_one_reset_last_is_named(now: float) -> None:
+    """Its reset is the wait: the other window refills first."""
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-after-seconds": "600",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-at": str(now + 86_400),
+    }
+    body = {"error": {"message": "limit", "type": "usage_limit_reached"}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == "weekly"
+    assert error.retry_after_sec == 86_400.0
+
+
+def test_a_spent_window_with_no_advice_waits_to_its_reset(now: float) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-after-seconds": "600",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "40",
+        "x-codex-secondary-reset-at": str(now + 86_400),
+    }
+    body = {"error": {"message": "limit", "type": "usage_limit_reached"}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert (error.limit, error.retry_after_sec) == ("5-hour", 600.0)
+
+
+def test_an_overload_carries_the_advised_wait() -> None:
+    error = wire.to_exception(503, body="busy", headers={"retry-after": "3"})
+    assert isinstance(error, OverloadedError)
+    assert error.retry_after_sec == 3.0
+
+
+def test_rate_limits_are_an_api_keys_request_and_token_windows(now: float) -> None:
+    headers = {
+        "x-ratelimit-limit-requests": "100",
+        "x-ratelimit-remaining-requests": "25",
+        "x-ratelimit-reset-requests": "1m30s",
+        "X-RateLimit-Limit-Tokens": "1000",
+        "X-RateLimit-Remaining-Tokens": "0",
+        "X-RateLimit-Reset-Tokens": "500ms",
+    }
+    assert wire.rate_limits(headers) == (
+        UsageWindow(label="requests", utilization=0.75, resets_at=now + 90.0),
+        UsageWindow(label="tokens", utilization=1.0, resets_at=now + 0.5, blocked=True),
+    )
+    # A window reported without a limit has no utilization to compute.
+    assert wire.rate_limits({"x-ratelimit-reset-tokens": "2"}) == (
+        UsageWindow(label="tokens", resets_at=now + 2.0),
+    )
+    assert wire.rate_limits({"x-ratelimit-reset-tokens": "1h1d"}) == (
+        UsageWindow(label="tokens", resets_at=now + 90_000.0),
+    )
+    assert wire.rate_limits({"x-ratelimit-reset-tokens": "never"}) == ()
+    assert wire.rate_limits({}) == ()
+
+
+@pytest.mark.parametrize(
+    ("limit", "remaining", "expected"),
+    [
+        (None, "5", UsageWindow(label="tokens")),
+        (None, "0", UsageWindow(label="tokens", blocked=True)),
+        ("0", "0", UsageWindow(label="tokens", blocked=True)),
+        ("1", "0", UsageWindow(label="tokens", utilization=1.0, blocked=True)),
+        ("2", "1", UsageWindow(label="tokens", utilization=0.5)),
+        ("100", "-50", UsageWindow(label="tokens", utilization=1.0, blocked=True)),
+        ("100", "150", UsageWindow(label="tokens", utilization=0.0)),
+    ],
+    ids=["no-limit", "no-limit-spent", "zero", "one", "one-left", "over", "under"],
+)
+def test_an_api_keys_window_is_read_from_what_it_reports(
+    limit: str | None,
+    remaining: str,
+    expected: UsageWindow,
+) -> None:
+    """A window without a reset has none; utilization is clamped to [0, 1]."""
+    headers = {"x-ratelimit-remaining-tokens": remaining}
+    if limit is not None:
+        headers["x-ratelimit-limit-tokens"] = limit
+    assert wire.rate_limits(headers) == (expected,)
+
+
+def test_rate_limits_are_a_chatgpt_logins_windows_by_span(now: float) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "10080",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-at": "5000",
+        "x-codex-secondary-window-minutes": "300",
+        "x-codex-secondary-used-percent": "12.5",
+        "x-codex-secondary-reset-after-seconds": "60",
+    }
+    assert wire.rate_limits(headers) == (
+        UsageWindow(label="7d", utilization=1.0, resets_at=5000.0, blocked=True),
+        UsageWindow(label="5h", utilization=0.125, resets_at=now + 60.0),
+    )
+    odd = {
+        "x-codex-primary-window-minutes": "90",
+        "x-codex-secondary-window-minutes": "0",
+    }
+    assert wire.rate_limits(odd) == (UsageWindow(label="90m"),)
+    # A window with no span is skipped, not the end of the windows.
+    later = {
+        "x-codex-primary-window-minutes": "0",
+        "x-codex-secondary-window-minutes": "1",
+        "x-codex-secondary-used-percent": "150",
+    }
+    assert wire.rate_limits(later) == (
+        UsageWindow(label="1m", utilization=1.0, blocked=True),
+    )
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

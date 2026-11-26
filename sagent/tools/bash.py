@@ -1,549 +1,658 @@
-"""Bash tool.
+"""Bash: run a command in the agent's working directory.
 
-Parsing, matcher helpers, and the read-only command classifier all
-live in :mod:`sagent.tools.lib.bash`.
+A ``cd`` in the command moves the agent's ``cwd`` for later tools. A command
+that times out, or whose call is cancelled, is stopped with its process group.
+Each line the command prints is written to its stream as it arrives, so the
+record keeps every line. A long output is cut in the middle for the model,
+which then reads the call's ``shown``: known only when the command ends.
+
+Typical usage example:
+
+  streaming_result = Bash().call(
+      context,
+      {"command": "pytest -q", "description": "Run the tests", "timeout": 60_000},
+  )
+  result = await settled(streaming_result)
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
+from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Self
 
 import asyncio
-import atexit
+import collections
 import contextlib
-import functools
 import io
 import logging
 import os
 import secrets
 import signal
-import subprocess
 import time
 
-from treekle import from_plain, immutable
-
-from sagent.agent.runtime import EXCLUSIVE_KEY
-from sagent.agent.state import (
-    ToolState,
-    approx_tokens,
-    get_tool_state,
+from sagent.journal.types import BashResult
+from sagent.lib.posix.child import Child, finish
+from sagent.tools.command_analyzer import (
+    ReadOnly,
+    Rewrite,
+    ShellTool,
+    moves,
+    rewrite,
 )
-from sagent.lib import debug_log
-from sagent.tools.core import (
-    bound_by_tokens,
-    load_tool_description,
-    result_token_budget,
+from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import (
+    Arg,
+    Stream,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
 )
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import (
-    BashMatcher,
-    cached_parse_bash,
-    is_read_only,
-)
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from bashlex.ast import (
-        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
-    )
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-logger = logging.getLogger(__name__)
-
-BASH_DEFAULT_TIMEOUT_MS = 120_000  # house-ignore[globals] -- Default timeout dial.
-BASH_MAX_TIMEOUT_MS = 600_000  # house-ignore[globals] -- Max timeout dial.
-
-# Behind a wrapper this process cannot tell whether the shell's directory exists, so
-# the shell's own script enters it: ``$2`` is the tool's directory, ``$3`` where the
-# tool started.
-_ENTER_CWD: Final = 'cd -- "$2" 2>/dev/null || cd -- "$3" 2>/dev/null || cd /\n'
-
-# Kept-alive references to background subprocesses so their Popen
-# objects don't get garbage-collected mid-run.
-_BACKGROUND_PROCESSES: list[subprocess.Popen[bytes]] = []
-
-
-def reap_background_processes() -> None:
-    """Reap completed detached Bash children retained for lifetime tracking.
-
-    For each retained child, ``poll()`` collects its exit status if it has
-    finished. Finished children are then dropped from the retention list;
-    crucially the ``poll()`` itself reaps the OS child, so the ``Popen``
-    object is never garbage-collected with an unreaped process -- the
-    condition that makes ``Popen.__del__`` emit a ``ResourceWarning``.
-    Still-running children stay retained.
-    """
-    _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
-
-
-def _render_bash_description(text: str) -> str:
-    """Substitute Sagent's static bash timeout values into prompt text."""
-    return (
-        text.replace(
-            "${GET_MAX_TIMEOUT_MS()/60000}",
-            str(BASH_MAX_TIMEOUT_MS // 60_000),
-        )
-        .replace(
-            "${GET_DEFAULT_TIMEOUT_MS()/60000}",
-            str(BASH_DEFAULT_TIMEOUT_MS // 60_000),
-        )
-        .replace("${GET_MAX_TIMEOUT_MS()}", str(BASH_MAX_TIMEOUT_MS))
-        .replace("${GET_DEFAULT_TIMEOUT_MS()}", str(BASH_DEFAULT_TIMEOUT_MS))
-    )
+__all__ = [
+    "Bash",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Bash:
-    """Execute shell commands.
+    """Run a shell command."""
 
-    The ``Tool`` protocol's fields are ``ClassVar`` so they stay off
-    ``__init__``: a display knob sharing a name with ``description``
-    would otherwise shadow the model-facing prompt on every instance and
-    ship its own value to the provider.
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
 
-    Attributes:
-      peers: Sibling tools supplying ``bash_match`` lint hooks. Any peer
-          whose class defines ``bash_match(self, trees) -> str | None``
-          is registered as a lint source; its output is surfaced on the
-          result's ``hint`` field, and the same nudges are prepended to
-          ``content`` as a ``<system-reminder>`` so the model sees them.
-      exec_prefix: Words placed before ``/bin/bash``, so a wrapper command can run
-          the shell somewhere else, such as under another user or in a container.
-          Empty runs the shell directly. The wrapper must run its arguments with
-          its standard streams and exit status unchanged. Not a command-line
-          setting.
-      env: Environment of the spawned process; ``None`` inherits this process's.
-          With a wrapper it is the wrapper's environment, so the shell sees what
-          the wrapper carries across. Never shown in ``repr``. Not a command-line
-          setting.
-      drain_sec: Seconds a stopped call waits for the output of a process that
-          outlives the stop, before it gives up on that output. Not a command-line
-          setting.
-      command_head_rows: Leading command rows kept. The first line of a
-          shell command identifies it.
-      command_tail_rows: Trailing command rows kept. The last line
-          usually carries the pipe or redirect that says what comes back.
-      command_lang: Pygments lexer for the command row.
-      output: Whether the result body renders in the pane.
-      output_head_rows: Leading body rows kept.
-      output_tail_rows: Trailing body rows kept, after a ``⋯ N lines ⋯``
-          marker. Head and tail together bound what the terminal prints.
-      output_max_width: Cell width cap; ``0`` uses the pane width.
-      output_wrap: ``wrap`` continues an over-wide line on the next row,
-          ``chop`` keeps its head and marks the cut.
+        command: Annotated[str, "The command to execute."]
+        description: Annotated[str, "What this command does, in active voice."]
+        timeout: Annotated[
+            float | None,
+            "Kill the command after this many milliseconds; omit to let it run.",
+            Arg(minimum=1),
+        ] = None
 
-    """
-
-    # Unannotated on purpose: an annotated name becomes a dataclass
-    # FIELD, which puts it on ``__init__`` -- and a display knob sharing
-    # a name would then shadow the model-facing prompt on every instance.
-    # Without the annotation these stay plain class attributes, excluded
-    # from the constructor and unshadowable.
     name = "Bash"
-    tool_id = "application/x-tool-bash"
-    description = _render_bash_description(load_tool_description("Bash"))
-    clearable_results = True
-    max_result_chars = 30_000
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The command to execute",
-                },
-                "timeout": {
-                    "type": "number",
-                    "minimum": 1,
-                    "maximum": BASH_MAX_TIMEOUT_MS,
-                    "description": (
-                        "Optional timeout in milliseconds. Must be between"
-                        f" 1 and {BASH_MAX_TIMEOUT_MS}."
-                    ),
-                },
-                "description": {
-                    "type": "string",
-                    "description": (
-                        "Clear, concise description of what this command does"
-                        " in active voice."
-                    ),
-                },
-            },
-            "required": ["command"],
-            # ``run_as_fully_detached`` is a deliberate Python-only escape
-            # hatch (orphan subprocesses); strict additionalProperties keeps
-            # the LLM from invoking it via tool calls.
-            "additionalProperties": False,
-        },
+    description = (files(__package__) / "assets" / "bash.md").read_text(
+        encoding="utf-8",
+    )
+    schema = json_schema(Arguments)
+
+    display: ToolDisplay = field(
+        default=ToolDisplay(
+            command=DisplaySpec(lines=(3, 1)),
+            output=DisplaySpec(),
+            command_language="bash",
+        ),
     )
 
-    peers: Sequence[object] = ()
     exec_prefix: Sequence[str] = ()
-    # Left out of ``repr``: the environment may hold secrets, and a tool's repr ends
-    # up in logs and tracebacks.
+    """A wrapper before ``/bin/bash``, such as ``sudo -u agent``; it must pass streams through."""
+
     env: Mapping[str, str] | None = field(default=None, repr=False)
+    """The environment, or ``None`` to inherit; kept out of ``repr`` for secrets. A
+    ``COLUMNS`` here wins over the context's."""
+
     drain_sec: float = 1.0
-    command_head_rows: Annotated[int, CLI_SETTABLE] = 3
-    command_tail_rows: Annotated[int, CLI_SETTABLE] = 1
-    command_lang: Annotated[str, CLI_SETTABLE] = "bash"
-    output: Annotated[Toggle, CLI_SETTABLE] = "on"
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """How long to wait for a stopped command's output."""
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return the header and input rows for this invocation.
+    grace_sec: float = 0.5
+    """How long an unwrapped command has, after TERM, to close its output."""
 
-        Line 0 is the header -- the model's own ``description`` argument,
-        present on 96% of real calls. The rest is the command verbatim,
-        which the renderer marks with ``⎿`` as the call's input.
+    read_only: ReadOnly = field(default_factory=ReadOnly.default)
+    """The commands that only read; ``rewrite`` may turn a line of them into ``peers``' calls."""
 
-        Newlines are preserved rather than folded to ``⏎``: a heredoc
-        rendered as one long line is unreadable, and the renderer bounds
-        the rows so a long script cannot flood the pane.
+    peers: Sequence[ShellTool] = ()
+    """Tools that ``rewrite`` may hand a command to, such as Read for ``cat``."""
 
-        Args:
-          args: Parsed tool directive mapping.
+    max_result_chars: int = 30_000
+    """How much text one result may hold, if below the context's."""
 
-        Returns:
-          label: Header line, then the command lines.
+    max_record_chars: int = 4_000_000
+    """How much of each stream the record keeps; past it, output goes to the spill
+    file alone, so a command that prints without end holds no more in memory. At
+    least ``max_result_chars``: a view of a record cut below it would join its
+    start and end as if nothing lay between."""
 
-        """
-        cmd = str(args.get("command", "")).replace("\r\n", "\n").replace("\r", "\n")
-        cmd = cmd.replace("\t", "    ").strip("\n")
-        desc = str(args.get("description", "")).strip()
-        header = f"Bash {desc}".rstrip()
-        return f"{header}\n{cmd}" if cmd else header
+    nice: int | None = 10
+    """How far below this program's CPU priority commands run, so a build defers to
+    the desktop; ``None`` runs them at its own."""
 
-    # Recomputed rather than cached: ``functools.cached_property`` needs a ``__dict__``,
-    # which ``slots=True`` removes.
-    @property
-    def _peer_matchers(self) -> tuple[Callable[[Sequence[Node]], str | None], ...]:
-        """Lint hooks contributed by sibling tools."""
-        return tuple(
-            peer.bash_match for peer in self.peers if isinstance(peer, BashMatcher)
-        )
+    def __post_init__(self) -> None:
+        if self.max_record_chars < self.max_result_chars:
+            raise ValueError(
+                f"max_record_chars ({self.max_record_chars}) must be at least"
+                f" max_result_chars ({self.max_result_chars}).",
+            )
 
-    def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Bash <description>``, then the command's lines."""
+        header = f"Bash {str(arguments.get('description', '')).strip()}".rstrip()
+        command = str(arguments.get("command", ""))
+        command = command.replace("\r\n", "\n").strip("\n")
+        return f"{header}\n{command}" if command else header
 
-        Returns:
-          text: Supplemental prompt text; empty for Bash.
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``"*"`` for a command that may move the shell, else ``None``.
 
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize writers against every keyed call; run reads in parallel.
-
-        Bash has no static path to key on, so the key is the command's
-        EFFECT: anything that cannot mutate state runs concurrently, and
-        everything else queues behind every keyed call in its cohort --
-        other writers and same-file Read/Edit/Write alike, since a ``sed
-        -i`` may touch any file. Two concurrent writers race and the
-        loser's edit is silently lost.
-
-        Biased hard toward serializing. An unparseable command, an
-        unrecognized utility, any redirect or control-flow construct all
-        read as a writer -- a false positive costs sequential dispatch,
-        a false negative costs data.
+        Commands run side by side, and beside every other call, as a shell's
+        jobs do; only Read, Write, and Edit keep an order, by file. Every call
+        made after a command that may move the shell waits for it, since those
+        calls start in the directory where it ends.
 
         Args:
-          args: Parsed tool directive mapping.
+          context: The calling agent's state; unused.
+          arguments: What the model passed to Bash.
 
         Returns:
-          key: ``None`` for a read-only command, else ``EXCLUSIVE_KEY``.
+          key: ``"*"`` or ``None``.
 
         """
-        trees = cached_parse_bash(
-            str(args.get("command", "")),
-            get_tool_state().bash_parse_cache,
-        )
-        if trees is not None and is_read_only(trees):
+        del context
+        command = arguments.get("command")
+        return "*" if not isinstance(command, str) or moves(command) else None
+
+    def rewrite(
+        self,
+        arguments: Mapping[str, PlainTree],
+    ) -> Rewrite | tuple[Rewrite, ...] | str | None:
+        """Return the calls peers make instead of this one, if the command is theirs.
+
+        The agent applies this before recording the call, so the model's
+        history shows ``Read`` where it wrote ``cat``, and a Read and a Grep
+        where it wrote ``sed -n 1,9p a.py; grep -n x b.py``.
+
+        Args:
+          arguments: What the model passed to Bash.
+
+        Returns:
+          result: A peer's call to make instead; several, for a line that only
+            reads; a message refusing a command that is other tools' work but
+            not as calls made apart; or ``None`` to run it.
+
+        """
+        command = arguments.get("command")
+        if not isinstance(command, str):
             return None
-        return EXCLUSIVE_KEY
+        return rewrite(
+            command,
+            peers=self.peers,
+            reads=self.read_only.reads(command),
+        )
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the command and return the result.
-
-        Cancellation propagates natively: ``asyncio.create_subprocess_exec``
-        starts the bash process in its own session group, and on
-        ``CancelledError`` we ``SIGTERM`` (then ``SIGKILL``) the whole
-        group before re-raising. Behind an ``exec_prefix`` the group may be
-        out of this process's reach, so the shell's own guard ends it instead
-        (see :func:`_guard`).
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[BashResult, str, str]:
+        """Run ``command`` in ``context.cwd``, and move it where the shell ends.
 
         Args:
-          args: Parsed tool directive mapping.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``Bash.Arguments``.
 
         Returns:
-          result: ``ToolResult`` carrying stdout/stderr, the exit code,
-            and any bash-lint nudges. Output is already bounded by the
-            producers (``_process_output`` / ``_kill_and_drain``), which
-            truncate the body before appending trailing diagnostics.
+          streaming_result: Each line on its stream as it is printed, a
+            ``BashResult`` with the exit code, ``None`` when the shell did not
+            stop, and, when the output had to be cut, what the model reads as
+            its ``shown``.
 
         """
-        _register_exit_reaper()
-        command = str(args.get("command", ""))
-        # ``float``: the schema says ``number``, so ``1.5`` is a valid timeout.
-        timeout = from_plain(
-            args.get("timeout"),
-            float,
-            default=BASH_DEFAULT_TIMEOUT_MS,
+        stdout, stderr = Stream[str](), Stream[str]()
+        return whole_output(
+            self._run(context, arguments, stdout, stderr),
+            stdout=stdout,
+            stderr=stderr,
         )
-        run_as_fully_detached = from_plain(
-            args.get("run_as_fully_detached"),
-            bool,
-            default=False,
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
+        stderr: Stream[str],
+    ) -> ToolOutput[BashResult, str, str]:
+        """Run the command; its result, and when the output was cut, its view."""
+        a = parse(arguments, Bash.Arguments)
+        code, shown = await self._run_command(context, a, stdout, stderr)
+        return ToolOutput(
+            result=BashResult(command=("bash", "-c", a.command), exit_code=code),
+            shown=shown,
         )
-        state = get_tool_state()
-        # A wrapped shell may sit where this process cannot look, so its script
-        # judges the directory instead.
+
+    async def _run_command(
+        self,
+        context: ToolContext,
+        a: Bash.Arguments,
+        stdout: Stream[str],
+        stderr: Stream[str],
+    ) -> tuple[int | None, str | None]:
+        """Run ``a.command``, writing each line as printed; return its code and view."""
+        cwd = context.cwd
+        # A wrapped shell's directory may be invisible here; ``_guard`` falls back.
         if not self.exec_prefix:
-            _ensure_valid_cwd(state)
-        if run_as_fully_detached:
-            text = _run_as_fully_detached(
-                command,
-                state=state,
-                exec_prefix=self.exec_prefix,
-                env=self.env,
-            )
-        else:
-            text = await _run_foreground(
-                command,
-                state=state,
-                timeout_s=_timeout_seconds(timeout),
-                exec_prefix=self.exec_prefix,
-                env=self.env,
-                drain_sec=self.drain_sec,
-            )
-        body = text
-        if not self._peer_matchers:
-            return ToolResult(call_id="", content=body)
-        nudges = self._collect_nudges(command)
-        if not nudges:
-            return ToolResult(call_id="", content=body)
-        # Bake the banner into ``content`` so the model sees it, and
-        # surface the same nudges on ``hint`` for the renderer.
-        banner_body = "\n".join(f"[bash-lint] {h}" for h in nudges)
-        banner = f"<system-reminder>\n{banner_body}\n</system-reminder>"
-        return ToolResult(
-            call_id="",
-            content=f"{banner}\n\n{body}",
-            hint="\n".join(nudges),
-        )
-
-    # Every Bash call is traced, nudged or not. Whether the banner changes behaviour is
-    # unmeasurable from the matchers alone -- replaying them over old sessions counts
-    # shapes, not deliveries -- so the delivered rate and what follows it have to be
-    # recorded as they happen.
-    def _collect_nudges(self, command: str) -> list[str]:
-        """Run peer ``bash_match`` matchers and return any nudges."""
-        trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
-        if trees is None:
-            return []
-        nudges = [
-            n for matcher in self._peer_matchers if (n := matcher(trees)) is not None
-        ]
-        debug_log.trace("bash_nudge", nudged=bool(nudges), count=len(nudges))
-        return nudges
-
-
-def _ensure_valid_cwd(state: ToolState) -> None:
-    """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``/``) if it's gone."""
-    if not Path(state.bash_cwd).is_dir():
-        state.bash_cwd = state.start_cwd if Path(state.start_cwd).is_dir() else "/"
-
-
-def _run_as_fully_detached(
-    command: str,
-    *,
-    state: ToolState,
-    exec_prefix: Sequence[str] = (),
-    env: Mapping[str, str] | None = None,
-) -> str:
-    """Spawn an unmanaged detached background process."""
-    # Behind a wrapper the shell enters its directory itself, as the foreground
-    # path does. No guard: nothing waits on a detached process, so nothing could
-    # tell it to stop.
-    argv = (
-        [
-            *exec_prefix,
-            "/bin/bash",
-            "-c",
-            f'{_ENTER_CWD}eval "$1"',
-            "bash",
-            command,
-            state.bash_cwd,
-            state.start_cwd,
-        ]
-        if exec_prefix
-        else ["/bin/bash", "-c", command]
-    )
-    proc = subprocess.Popen(  # noqa: S603 -- The agent's own command runs through a fixed bash argv; that is this tool's purpose.
-        argv,
-        cwd="/" if exec_prefix else state.bash_cwd,
-        env=env,
-        # Bash must not share the REPL terminal; interactive children
-        # otherwise steal prompt-toolkit keystrokes from the user.
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    reap_background_processes()
-    _BACKGROUND_PROCESSES.append(proc)
-    logger.info("Fully detached process started: pid=%d", proc.pid)
-    return f"(running in background, pid={proc.pid})"
-
-
-# Float, not floor division: ``// 1000`` mapped 1999ms to 1s -- half the requested
-# budget -- and anything under 1000ms to 0, which the old ``max(1, ...)`` then raised to
-# a full second, 1000x the request. The schema's ``minimum: 1`` makes a 1ms timeout
-# legal, so it must survive.
-def _timeout_seconds(timeout_ms: float) -> float:
-    """Convert the directive's millisecond timeout to wait_for seconds."""
-    return min(max(timeout_ms, 1), BASH_MAX_TIMEOUT_MS) / 1000
-
-
-async def _run_foreground(
-    command: str,
-    *,
-    state: ToolState,
-    timeout_s: float,
-    exec_prefix: Sequence[str] = (),
-    env: Mapping[str, str] | None = None,
-    drain_sec: float = 1.0,
-) -> str:
-    """Run a foreground bash command via :mod:`asyncio.subprocess`."""
-    sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
-    # ``printf`` with a LEADING newline, not ``echo``: a command whose
-    # stdout lacks a trailing newline otherwise fuses with the sentinel
-    # on one line, which fails the prefix test below -- cwd tracking
-    # silently stops and the raw token is shown to the model.
-    report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
-    # The trap is what survives an early ``exit``; the trailing statement is
-    # what survives the command installing its own trap -- ``trap - EXIT``
-    # silently disabled tracking outright, so the tool kept a stale cwd and
-    # every later relative path resolved against the wrong directory. Two
-    # identical sentinel lines are harmless: the reader applies each and they
-    # agree.
-    #
-    # ``__rc`` then ``exit`` restores the command's own status: a bare
-    # trailing statement made every run exit with printf's 0, so ``false``
-    # and a failing build both reported success.
-    #
-    # ``eval "$1"`` with the command passed as an ARGUMENT, not spliced
-    # into this text: bash reads a script line-wise, so a command ending
-    # in a continuation (``echo hi \``) consumed the very next line and
-    # printed ``__rc=0`` as its own output.
-    tracked_cmd = f"trap '{report}' EXIT\neval \"$1\"\n__rc=$?\n{report}\nexit $__rc"
-    # Behind a wrapper this process may be unable to signal the shell, so the wrapper
-    # starts from ``/``, the shell's script enters its directory itself, and the shell
-    # takes a pipe held here as its stdin. That pipe closing is how it hears that it
-    # must stop.
-    held = _HeldPipe() if exec_prefix else None
-    try:
-        # ``$0``: names the shell in ``$0`` and in its error prefixes, so a
-        # syntax error still reads ``bash: ...`` as it did when the command was
-        # the ``-c`` string itself.
-        if held is None:
-            argv = ["/bin/bash", "-c", tracked_cmd, "bash", command]
-        else:
-            argv = [
-                *exec_prefix,
+            cwd = await asyncio.to_thread(_existing, cwd)
+            if cwd != context.cwd:
+                context.cwd = cwd
+        sentinel = f"__SAGENT_CWD_{secrets.token_hex()}__"
+        script = _script(sentinel)
+        held = _HeldPipe() if self.exec_prefix else None
+        argv = (
+            ["/bin/bash", "-c", script, "bash", a.command]
+            if held is None
+            else [
+                *self.exec_prefix,
                 "/bin/bash",
                 "-c",
-                _guard() + tracked_cmd,
+                _guard() + script,
                 "bash",
-                command,
-                state.bash_cwd,
-                state.start_cwd,
+                a.command,
+                str(cwd),
             ]
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=state.bash_cwd if held is None else "/",
-            env=env,
-            start_new_session=True,
         )
-        start = time.monotonic()
-        # ``communicate()`` is driven by a task we own, so a timeout cancels
-        # the WAIT and not the read: the partial stdout/stderr collected
-        # before the kill stays reachable. Re-awaiting a cancelled
-        # ``communicate()`` instead returns only what buffered afterwards,
-        # dropping the very output the drain exists to recover.
-        comm = asyncio.ensure_future(proc.communicate())
+        cap = min(self.max_result_chars, context.max_result_chars)
+        spill = (
+            context.spill_dir / f"bash-{secrets.token_hex(4)}.txt"
+            if context.spill_dir is not None
+            else None
+        )
+        # Stderr gets its own quarter, so floods of stdout cannot hide the error.
+        stderr_cap = cap // 4
+        stdout_lines = _StdoutLines(
+            printed=_Printed(
+                stream=stdout,
+                limit=self.max_record_chars,
+                tail_chars=cap,
+                spill=spill,
+            ),
+            report_prefix=f"{sentinel}=",
+        )
+        stderr_printed = _Printed(
+            stream=stderr,
+            limit=self.max_record_chars,
+            tail_chars=stderr_cap,
+        )
+        started = time.monotonic()
+        reason: str | None = None
+        pipes: list[_OutputPipe] = []
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                asyncio.shield(comm),
-                timeout=timeout_s,
+            pipes.append(await _OutputPipe.open())
+            pipes.append(await _OutputPipe.open())
+            child = await Child.start(
+                *argv,
+                group=True,
+                grace_sec=self.grace_sec,
+                nice=self.nice,
+                stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
+                stdout=pipes[0].writer,
+                stderr=pipes[1].writer,
+                cwd=cwd if held is None else "/",
+                env=_environment(self.env, columns=context.columns),
             )
-        except TimeoutError:
-            await _kill_process_group(proc, held=held)
-            drained = await _drain(proc, comm, grace_sec=drain_sec)
-            stdout_bytes, stderr_bytes = drained or (b"", b"")
-            reason = f"timeout after {time.monotonic() - start:.1f}s"
-            if drained is None:
-                reason += "; the shell did not stop and its output is lost"
-        except asyncio.CancelledError:
-            _ = comm.cancel()
-            await _kill_process_group(proc, held=held)
-            raise
-        else:
-            reason = ""
+            # The shell has its own copies: one held here would keep each pipe
+            # from ever reaching its end.
+            for pipe in pipes:
+                pipe.writer.close()
+            # Shielded, so a timeout cancels the wait, not the read of what was written.
+            read_task = asyncio.ensure_future(
+                _read_output(
+                    child,
+                    (pipes[0].reader, stdout_lines.add_line),
+                    (pipes[1].reader, stderr_printed.add_line),
+                ),
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(read_task),
+                    timeout=None
+                    if a.timeout is None
+                    else timedelta(milliseconds=a.timeout).total_seconds(),
+                )
+            except TimeoutError:
+                await finish(_stop(child, held=held, output=read_task))
+                reason = f"timeout after {time.monotonic() - started:.1f}s"
+                if not await _drain(pipes, read_task, grace_sec=self.drain_sec):
+                    reason += (
+                        "; the shell did not stop, and the rest of its output is lost"
+                    )
+            except asyncio.CancelledError:
+                try:
+                    await finish(_stop(child, held=held, output=read_task))
+                finally:
+                    _ = read_task.cancel()
+                raise
+            else:
+                if held is not None:
+                    held.release()
+        finally:
+            for pipe in pipes:
+                pipe.close()
             if held is not None:
-                held.release()
-    finally:
-        if held is not None:
-            held.close()
-    return _process_output(
-        proc,
-        stdout_bytes.decode("utf-8", errors="replace"),
-        stderr_bytes.decode("utf-8", errors="replace"),
-        sentinel=sentinel,
-        state=state,
-        reason=reason,
-        check_cwd=held is None,
-    )
+                held.close()
+            stdout_lines.printed.close()
+        stdout_lines.finish()
+        # The script reports the directory before the command, then after it. Commands
+        # run side by side, so one that stayed put must not undo another's ``cd``.
+        # A wrapped shell is compared with the directory asked for instead, since
+        # ``_guard`` starts it in ``/`` when that directory is gone.
+        reported_dirs = stdout_lines.reported_dirs
+        start_dirs = [str(cwd)] if held is not None else reported_dirs[:1]
+        for reported_dir in reported_dirs:
+            end_cwd = Path(reported_dir)
+            if (
+                reported_dir not in start_dirs
+                and end_cwd.is_absolute()
+                and (held is not None or await asyncio.to_thread(end_cwd.is_dir))
+            ):
+                context.cwd = end_cwd
+        # Cut as stdout is, to its ends: a failing command's error is often last.
+        error_lines, errors_unheld = stderr_printed.ends()
+        errors = [f"{line}\n" for line in "".join(error_lines).strip().split("\n")]
+        diagnostics, _ = context.view(
+            errors,
+            cap=stderr_cap,
+            note=f", {errors_unheld:,} not recorded" if errors_unheld else "",
+        )
+        diagnostics = diagnostics.strip()
+        if reason is not None:
+            diagnostics += f"\n[{reason}]"
+            stderr_printed.note(f"[{reason}]")
+        printed = stdout_lines.printed
+        lines, unheld = printed.ends()
+        # Written before the view names it, so a spill that fails is never named.
+        if (
+            printed.spill is not None
+            and not printed.spilled
+            and context.view(lines, reserve=len(diagnostics), cap=cap)[1]
+            and not await asyncio.to_thread(_spill, printed.spill, lines)
+        ):
+            printed.spill = None
+        note = f"; full output: {printed.spill}" if printed.spill is not None else ""
+        final_text, _ = context.view(
+            lines,
+            reserve=len(diagnostics),
+            cap=cap,
+            note=(f", {unheld:,} not recorded" if unheld else "") + note,
+        )
+        code = child.process.returncode
+        # The record keeps every line up to its cap; only what the model reads is
+        # cut, and then it reads the view, which says the exit code as ``text``
+        # would. A view that differs only in the blank lines around it is no view.
+        view = final_text + diagnostics.strip()
+        if (
+            not printed.unrecorded
+            and not stderr_printed.unrecorded
+            and view.strip()
+            == "".join(
+                (*lines, *stderr_printed.lines),
+            ).strip()
+        ):
+            return code, None
+        return code, view + (f"\n[exit {code}]" if code not in (None, 0) else "")
 
 
-# The shell runs where this process may have no power to signal it -- ``killpg``
-# answers EPERM across users -- so the only thing that reaches it is what it can see:
-# its stdin, a pipe this process holds the write end of (see :class:`_HeldPipe`). A
-# watcher inside the shell reads that pipe. One line means the call ended normally
-# and it leaves; end-of-file with no line means the call timed out, was cancelled, or
-# this process died, and it ends the process group: TERM, then KILL after
-# ``kill_after_sec``. A killed caller therefore leaves no shell behind.
-#
-# The watcher is started from a second subshell so it is no child of the shell: a bare
-# ``wait`` in the command would otherwise wait on it until the call timed out. It
-# ignores TERM because it sits in the group it signals, and dying of its own TERM
-# would skip the KILL that a command trapping TERM needs. It keeps the pipe on fd 9
-# and the command gets /dev/null, as it does without a wrapper.
-def _guard(*, kill_after_sec: float = 2.0) -> str:
-    """Return the script prologue that lets the shell be stopped from outside."""
-    return (
-        f"{_ENTER_CWD}exec 9<&0 </dev/null\n"
-        "( ( trap '' TERM; read -r _ <&9 ||"
-        f" {{ kill -TERM 0; sleep {kill_after_sec:g}; kill -KILL 0; }} )"
-        " >/dev/null 2>&1 & )\n"
-        "exec 9<&-\n"
+@dataclass(slots=True, kw_only=True)
+class _Printed:
+    """One stream's lines, each written to its stream as it comes and kept.
+
+    A command with no timeout may print without end, so past ``limit`` chars a
+    line is no longer written or kept: it goes to ``spill`` alone, and the last
+    ``tail_chars`` of them are held for the model's view of the end.
+    """
+
+    stream: Stream[str]
+    limit: int
+    tail_chars: int
+    spill: Path | None = None
+    lines: list[str] = field(default_factory=list[str])
+    """Every line written, each with its newline."""
+
+    tail: collections.deque[str] = field(default_factory=collections.deque[str])
+    """The last lines past ``limit``, at most ``tail_chars`` of them."""
+
+    unrecorded: int = 0
+    """How many lines came past ``limit``."""
+
+    _chars: int = 0
+    _tail_held: int = 0
+    _spilled: io.TextIOWrapper | None = None
+    _done: bool = False
+
+    def add_line(self, line: str) -> None:
+        """Write the next line and keep it; past ``limit``, spill and hold its end.
+
+        Args:
+          line: The line, without its newline.
+
+        """
+        text = f"{line}\n"
+        if not self.unrecorded and self._chars + len(text) <= self.limit:
+            self._chars += len(text)
+            self.lines.append(text)
+            self.stream.write(text)
+            return
+        if not self.unrecorded:
+            self._overflow()
+        self.unrecorded += 1
+        if self._spilled is not None:
+            try:
+                _ = self._spilled.write(text)
+            except OSError as error:
+                self._give_up(error)
+        self.tail.append(text)
+        self._tail_held += len(text)
+        while (
+            len(self.tail) > 1
+            and self._tail_held - len(self.tail[0]) >= self.tail_chars
+        ):
+            self._tail_held -= len(self.tail.popleft())
+
+    def note(self, text: str) -> None:
+        """Write and keep the harness's own line, such as a timeout's, past any cap."""
+        self.lines.append(f"{text}\n")
+        self.stream.write(f"{text}\n")
+
+    def _overflow(self) -> None:
+        """Say the rest goes unrecorded, and start the spill with what was kept."""
+        where = ""
+        if self.spill is not None:
+            # A spill that cannot be written, as on a full disk, is given up: the
+            # command runs on, and the model still reads the output's ends.
+            try:
+                self.spill.parent.mkdir(parents=True, exist_ok=True)
+                self._spilled = self.spill.open("w", encoding="utf-8")
+                _ = self._spilled.write("".join(self.lines))
+            except OSError as error:
+                self._give_up(error)
+            else:
+                where = f"; all of it is in {self.spill}"
+        self.stream.write(
+            f"[output past {self.limit:,} chars is not recorded{where}]\n",
+        )
+
+    def close(self) -> None:
+        """Finish the spill, if one was started; one that fails to flush is given up."""
+        spilled, self._spilled = self._spilled, None
+        if spilled is None:
+            return
+        try:
+            spilled.close()
+        except OSError as error:
+            self._give_up(error)
+        else:
+            self._done = True
+
+    def _give_up(self, error: OSError) -> None:
+        """Drop a spill that could not be written; the model is told of none."""
+        logging.getLogger(__name__).warning(
+            "bash spill not written: %s",
+            self.spill,
+            exc_info=error,
+        )
+        spilled, self._spilled, self.spill = self._spilled, None, None
+        if spilled is not None:
+            with contextlib.suppress(OSError):
+                spilled.close()
+
+    @property
+    def spilled(self) -> bool:
+        """Whether the spill holds every line already."""
+        return self._done
+
+    def ends(self) -> tuple[list[str], int]:
+        """Return the lines kept for the model's view, and how many lie unheld between."""
+        return [*self.lines, *self.tail], self.unrecorded - len(self.tail)
+
+
+@dataclass(slots=True, kw_only=True)
+class _StdoutLines:
+    """Separates the command's output lines from the script's directory reports."""
+
+    printed: _Printed
+    report_prefix: str
+    """What a report line starts with: the sentinel and ``=``."""
+
+    reported_dirs: list[str] = field(default_factory=list[str])
+    """Each directory the script reported; the last is where the shell ended."""
+
+    _blank_held: bool = False
+
+    # The report's leading newline and the stream's final newline each read as an
+    # empty line the command never printed, so an empty line waits for the next:
+    # only then is it known to be the command's. Any other line is said at once.
+    def add_line(self, line: str) -> None:
+        """Add the next line of standard output.
+
+        Args:
+          line: The line, without its newline.
+
+        """
+        if line.startswith(self.report_prefix):
+            self._blank_held = False
+            self.reported_dirs.append(line.removeprefix(self.report_prefix))
+            return
+        if self._blank_held:
+            self.printed.add_line("")
+        self._blank_held = not line
+        if line:
+            self.printed.add_line(line)
+
+    def finish(self) -> None:
+        """Drop an empty line still held: the stream's final newline."""
+        self._blank_held = False
+
+
+# By chunk, not ``readline``: a line longer than the reader's limit raises there.
+async def _read_lines(
+    reader: asyncio.StreamReader,
+    add_line: Callable[[str], None],
+) -> None:
+    """Call ``add_line`` with each line of ``reader``, without its newline."""
+    partial = b""
+    while chunk := await reader.read(1 << 16):
+        *complete, partial = (partial + chunk).split(b"\n")
+        for line in complete:
+            add_line(line.decode(errors="replace"))
+    # After a final newline nothing is left: no line was printed there.
+    if partial:
+        add_line(partial.decode(errors="replace"))
+
+
+async def _read_output(
+    child: Child,
+    *readers: tuple[asyncio.StreamReader, Callable[[str], None]],
+) -> None:
+    """Read each stream to its end, line by line, then wait for the shell to exit."""
+    _ = await asyncio.gather(
+        *(_read_lines(reader, add_line) for reader, add_line in readers),
     )
+    _ = await child.exited()
+
+
+# A child that ran ``setsid`` survives the group kill and can hold the pipes open.
+async def _drain[T](
+    pipes: Sequence[_OutputPipe],
+    read_task: asyncio.Future[T],
+    *,
+    grace_sec: float,
+) -> bool:
+    """Return whether the stopped command's output was read to its end."""
+    try:
+        await asyncio.wait_for(asyncio.shield(read_task), timeout=grace_sec)
+    except TimeoutError:
+        # Closing a pipe here ends its read, with what was read already kept.
+        for pipe in pipes:
+            pipe.close()
+    else:
+        return True
+    try:
+        await asyncio.wait_for(read_task, timeout=grace_sec)
+    except TimeoutError:
+        logging.getLogger(__name__).warning("Shell outlived its stop; output lost")
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _OutputPipe:
+    """A pipe the shell writes to, whose read end this process closes itself.
+
+    asyncio closes a subprocess pipe of its own only at the pipe's end, or when
+    the process object is collected. A job that left the shell's group keeps
+    the pipe from ending, so its descriptor would stay open here until then.
+    """
+
+    reader: asyncio.StreamReader
+    transport: asyncio.ReadTransport
+    writer: io.FileIO
+    """The end the shell inherits."""
+
+    @classmethod
+    async def open(cls) -> Self:
+        """Open a pipe whose read end the running loop reads.
+
+        Returns:
+          pipe: The pipe, both ends open.
+
+        """
+        read_fd, write_fd = os.pipe()
+        read_end, writer = io.FileIO(read_fd), io.FileIO(write_fd, "w")
+        reader = asyncio.StreamReader()
+        try:
+            transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader),
+                read_end,
+            )
+        except BaseException:
+            read_end.close()
+            writer.close()
+            raise
+        return cls(reader=reader, transport=transport, writer=writer)
+
+    def close(self) -> None:
+        """Close both ends; the reader then ends after what it has read."""
+        self.writer.close()
+        self.transport.close()
 
 
 class _HeldPipe:
-    """A shell's stdin, whose write end this process keeps while the shell runs."""
+    """A wrapped shell's stdin, whose write end is held while the shell runs."""
 
     def __init__(self) -> None:
         reader, writer = os.pipe()
@@ -551,150 +660,121 @@ class _HeldPipe:
         self._writer = io.FileIO(writer, "w")
 
     def release(self) -> None:
-        """End the call normally: the one line that tells the guard to stand down."""
-        _ = self._writer.write(b"\n")
+        """Tell the guard the call ended normally."""
+        self._writer.write(b"\n")
         self._writer.close()
 
     def close(self) -> None:
-        """Close both ends; with no line written first, the guard ends the group."""
+        """Close both ends; without ``release`` first, the guard ends the group."""
         self._writer.close()
         self.reader.close()
 
 
-# Keyed on the GROUP, never the leader: ``start_new_session`` makes the group id the
-# leader's pid, and that group outlives the leader. Skipping the kill once the leader
-# exited, or asking ``getpgid`` of a reaped leader, left a backgrounded descendant
-# running with the pipe open, so the drain below never saw EOF.
-#
-# With ``held`` the group may be out of reach, so closing the pipe is the stop and this
-# process waits at most ``wait_sec`` for the wrapper to end: longer than the guard's
-# grace, and never forever.
-async def _kill_process_group(
-    proc: asyncio.subprocess.Process,
+# The report runs on every way out: the EXIT trap after an early ``exit`` or a
+# failure under ``set -e``, and the last line after a normal end. A command's own
+# ``trap ... EXIT`` replaces the trap, so ``trap`` is wrapped to put the report
+# back in front of the command's handler; ``$?`` passes through to it unchanged.
+# Only the shell's own trap: a subshell's ``cd`` never moved the shell.
+# ``eval "$1"`` stops a trailing ``\\`` from joining the next line, and
+# ``exit $__rc`` keeps the command's status.
+def _script(sentinel: str) -> str:
+    """Return the script that runs the command ``$1`` and reports where it ended."""
+    # The leading newline keeps output without a final one off the report.
+    report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
+    return (
+        f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
+        "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
+        "trap() {\n"
+        '  builtin trap "$@" || return\n'
+        '  [ "$BASH_SUBSHELL" = 0 ] || return 0\n'
+        "  local line\n"
+        "  line=$(builtin trap -p EXIT)\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
+        '  case "$line" in *__sagent_report*) return 0 ;; esac\n'
+        '  eval "set -- $line"\n'
+        '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'  # pragma: no mutate -- bash reads trap signal names case-insensitively.
+        "}\n"
+        "__sagent_report\n"
+        'eval "$1"\n'
+        "__rc=$?\n"
+        "__sagent_report\n"
+        "exit $__rc"
+    )
+
+
+def _spill(path: Path, stdout: Sequence[str]) -> bool:
+    """Write the whole of ``stdout`` to ``path``; return whether it could be."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes("".join(stdout).encode())
+    except OSError as error:
+        logging.getLogger(__name__).warning(
+            "bash spill not written: %s",
+            path,
+            exc_info=error,
+        )
+        return False
+    return True
+
+
+def _environment(
+    env: Mapping[str, str] | None,
     *,
-    held: _HeldPipe | None = None,
+    columns: int | Callable[[], int],
+) -> dict[str, str]:
+    """Return ``env``, or this process's, with ``COLUMNS`` unless ``env`` sets it."""
+    shown = {"COLUMNS": str(columns() if callable(columns) else columns)}
+    # An inherited COLUMNS is the terminal's, not where the output is shown.
+    return {**os.environ, **shown} if env is None else {**shown, **env}
+
+
+def _existing(path: Path) -> Path:
+    """Return ``path``, or its nearest ancestor that still exists."""
+    return next(p for p in (path, *path.parents) if p.is_dir())
+
+
+# ``killpg`` cannot reach a wrapped shell run as another user, so a watcher in
+# it reads stdin, a pipe held here: a line means done; end of file without one
+# (timeout, cancel, or this process dying) means TERM then KILL the group. It
+# starts from a second subshell so the command's ``wait`` skips it, and ignores
+# TERM so it lives to send the KILL.
+def _guard(*, kill_after_sec: float = 2.0) -> str:
+    """Return the prologue that enters the directory and lets the shell be stopped."""
+    return (
+        'cd -- "$2" 2>/dev/null || cd /\n'
+        "exec 9<&0 </dev/null\n"
+        "( ( trap '' TERM; read -r _ <&9 ||"
+        f" {{ kill -TERM 0; sleep {kill_after_sec:g}; kill -KILL 0; }} )"
+        " >/dev/null 2>&1 & )\n"
+        "exec 9<&-\n"
+    )
+
+
+# The group, not the leader: a backgrounded child outlives the leader and would
+# hold the pipe open.
+async def _stop[T](
+    child: Child,
+    *,
+    held: _HeldPipe | None,
+    output: asyncio.Future[T],
     wait_sec: float = 5.0,
 ) -> None:
-    """SIGTERM then SIGKILL the process group; await the leader's reaping."""
+    """End the shell's process group: TERM, a grace for ``output`` to end, then KILL."""
+    proc = child.process
     if held is not None:
         held.close()
         try:
-            _ = await asyncio.wait_for(proc.wait(), timeout=wait_sec)
+            await asyncio.wait_for(child.exited(), timeout=wait_sec)
         except TimeoutError:
-            # Without this the drain would wait on the wrapper as long as it lives.
-            logger.warning("Shell outlived its stop; killing wrapper pid=%d", proc.pid)
-            with _suppress_oserror():
+            logging.getLogger(__name__).warning("Killing wrapper pid=%d", proc.pid)
+            with contextlib.suppress(OSError):
                 proc.kill()
         return
-    with _suppress_oserror():
+    with contextlib.suppress(OSError):
         os.killpg(proc.pid, signal.SIGTERM)
+    # Waited on the output, not the shell: a shell in ``wait`` ends at the TERM,
+    # and a KILL then would cut short its jobs' own handlers for it.
     with contextlib.suppress(TimeoutError):
-        _ = await asyncio.wait_for(proc.wait(), timeout=0.5)
-    with _suppress_oserror():
+        await asyncio.wait_for(asyncio.shield(output), timeout=child.grace_sec)
+    with contextlib.suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
-    _ = await proc.wait()
-
-
-# A descendant that left the group (its own ``setsid``) survives the group kill and
-# can hold the pipe open forever, so the drain is bounded and then the pipes closed.
-# ``communicate`` ends in a wait for the process, so with the pipes closed the only
-# thing left to wait for is a process that may be out of reach (see :func:`_guard`),
-# and that wait is bounded too. Its output is lost with it, because
-# ``communicate`` returns the output only together with the exit.
-async def _drain(
-    proc: asyncio.subprocess.Process,
-    comm: asyncio.Future[tuple[bytes, bytes]],
-    *,
-    grace_sec: float = 1.0,
-) -> tuple[bytes, bytes] | None:
-    """Collect what the killed command wrote; None if its process would not end."""
-    try:
-        return await asyncio.wait_for(asyncio.shield(comm), timeout=grace_sec)
-    except TimeoutError:
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.feed_eof()
-    try:
-        return await asyncio.wait_for(comm, timeout=grace_sec)
-    except TimeoutError:
-        logger.warning("Shell outlived its stop; giving up on its output")
-        return None
-
-
-# The single exit path for every outcome -- clean, failed, timed out -- so the sentinel
-# is stripped and the bound applied exactly once.
-def _process_output(
-    proc: asyncio.subprocess.Process,
-    stdout: str,
-    stderr: str,
-    *,
-    sentinel: str,
-    state: ToolState,
-    reason: str = "",
-    check_cwd: bool = True,
-) -> str:
-    """Extract the cwd sentinel, bound the output, append diagnostics."""
-    body_lines: list[str] = []
-    for line in stdout.split("\n"):
-        if line.startswith(f"{sentinel}="):
-            new_cwd = line[len(f"{sentinel}=") :]
-            if new_cwd and (not check_cwd or Path(new_cwd).is_dir()):
-                state.bash_cwd = new_cwd
-        else:
-            body_lines.append(line)
-    # Diagnostics are what says the command FAILED, so they are bounded
-    # and appended separately: ``truncate`` keeps the head, so folding
-    # them into the body first drops them on exactly the runs that
-    # overflow, and a broken build then reads as a clean one. Each half
-    # gets its own share of the cap, so neither can crowd out the other
-    # and the total stays bounded however noisy one of them is.
-    budget = result_token_budget()
-    diagnostics, _ = bound_by_tokens(
-        (f"{line}\n" for line in stderr.strip().split("\n")),
-        budget=budget // 4,
-    )
-    diagnostics = diagnostics.strip()
-    body, kept = bound_by_tokens(
-        (f"{line}\n" for line in body_lines),
-        budget=max(1, budget - approx_tokens(diagnostics)),
-    )
-    out = body.strip()
-    if kept < len(body_lines):
-        out += f"\n... ({len(body_lines) - kept} more lines omitted; budget reached)"
-    if diagnostics:
-        out = f"{out}\n{diagnostics}" if out else diagnostics
-    if reason:
-        out += f"\n[{reason}]"
-    elif proc.returncode != 0:
-        out += f"\n[exit code: {proc.returncode}]"
-    return out.strip() or "(no output)"
-
-
-def _suppress_oserror() -> contextlib.suppress:
-    """OSError handler for process-group signals (race: proc may have exited)."""
-    return contextlib.suppress(OSError)
-
-
-# A child that finished after the last :func:`reap_background_processes` call is
-# otherwise garbage-collected by ``Popen.__del__`` while still unwaited, emitting a
-# spurious ``ResourceWarning`` at exit -- seen under ``pytest -n`` worker teardown. A
-# final ``poll()`` of each handle reaps every finished child (setting its
-# ``returncode``), which is exactly the condition ``Popen.__del__`` checks, so no
-# finished child warns.
-#
-# A child still genuinely running at exit is a different case: clearing the list drops
-# the last reference, so ``Popen.__del__`` runs and emits ``ResourceWarning`` for it.
-# That warning is accurate -- a ``start_new_session`` child is being left running past
-# this process -- and is not suppressed here.
-def _reap_at_exit() -> None:
-    """Reap retained detached children at interpreter shutdown."""
-    for proc in _BACKGROUND_PROCESSES:
-        with contextlib.suppress(Exception):
-            proc.poll()
-    _BACKGROUND_PROCESSES.clear()
-
-
-@functools.cache
-def _register_exit_reaper() -> None:
-    """Register detached-child cleanup when Bash is first used."""
-    atexit.register(_reap_at_exit)
+    await child.exited()

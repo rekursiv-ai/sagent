@@ -1,0 +1,2048 @@
+"""Tests for a provider's model table: lookup by name, and reading a catalog."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import date
+from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING, ClassVar, override
+
+import itertools
+import math
+import re
+
+import pytest
+import yaml
+
+from sagent.lib.userdirs import config_dir
+from sagent.model.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettingName,
+    ModelSettings,
+    model_setting_names,
+)
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
+from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
+from sagent.providers import (
+    anthropic,
+    table as provider_table,
+)
+from sagent.providers.table import (
+    HasModels,
+    ModelTable,
+    ModelTags,
+    models,
+    tag_words,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from importlib.resources.abc import Traversable
+    from pathlib import Path
+
+
+_FREE = {
+    "request": 0.0,
+    "response": 0.0,
+    "cache_write": 0.0,
+    "cache_write_1h": 0.0,
+    "cache_read": 0.0,
+}
+_THINKING = {"effort": ["none"], "budget": ["none"], "output": ["none"]}
+_EVERY = {
+    "effort": ["none", "low", "high"],
+    "budget": ["none", "auto", "fixed"],
+    "output": ["none"],
+}
+_WHOLE = "A catalog's thinking must state effort, budget, and output."
+
+
+def _in(path: Path, *, line: int, message: str) -> str:
+    """Match ``message`` as the strict loader reports it for ``path`` at ``line``."""
+    return f"^{re.escape(f'{path}, line {line}: {message}')}$"
+
+
+def _exactly(message: str) -> str:
+    return f"^{re.escape(message)}$"
+
+
+def _row(
+    model_id: str = "opus-4.8",
+    *,
+    wire_model_id: str | None = None,
+    window: int = 1_000_000,
+    bands: tuple[int, ...] = (),
+) -> ModelCapability:
+    edges: tuple[int | float, ...] = (0, *(band + 1 for band in bands), math.inf)
+    prices = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(int(lo), hi)): TokenPrice()
+            for lo, hi in itertools.pairwise(edges)
+        },
+        window=window,
+    )
+    return ModelCapability(
+        model_id=model_id,
+        wire_model_id=(
+            "claude-" + model_id.replace(".", "-")
+            if wire_model_id is None
+            else wire_model_id
+        ),
+        limits=ModelLimits(max_request_tokens=window),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+
+
+def _table() -> ModelTable:
+    """Newest first within each family, as every vendor's catalog orders them."""
+    return ModelTable(
+        rows=(
+            _row("opus-5.5"),
+            _row("opus-5.0"),
+            _row("opus-4.8"),
+            _row("sonnet-5.5"),
+            _row("sonnet-5.0"),
+            _row("sonnet-4.6"),
+        ),
+        roles={"default": "opus", "utility": "sonnet-4.6"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "model_id"),
+    [
+        ("sonnet", "sonnet-5.5"),
+        ("sonnet-5", "sonnet-5.5"),
+        ("sonnet-5.5", "sonnet-5.5"),
+        ("sonnet-5.0", "sonnet-5.0"),
+        ("sonnet-4", "sonnet-4.6"),
+        ("claude-opus-4-8", "opus-4.8"),
+        ("default", "opus-5.5"),
+        ("utility", "sonnet-4.6"),
+    ],
+)
+def test_a_key_is_an_exact_name_a_vendor_id_a_role_or_a_family(
+    key: str,
+    model_id: str,
+) -> None:
+    assert _table()[key].model_id == model_id
+    assert key in _table()
+
+
+def test_an_exact_name_outranks_a_role_of_the_same_spelling() -> None:
+    table = ModelTable(rows=(_row("a-1.0"), _row("b-1.0")), roles={"a-1.0": "b-1.0"})
+    assert table["a-1.0"] is table.rows[0]
+
+
+def test_a_vendor_id_outranks_a_family_of_the_same_spelling() -> None:
+    """A server reporting ``flash`` means that model, not the family's newest."""
+    table = ModelTable(
+        rows=(_row("flash-2.0"), _row("flash-1.0", wire_model_id="flash")),
+    )
+    assert table["flash"].model_id == "flash-1.0"
+    assert table["flash-2"].model_id == "flash-2.0"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["opu", "sonnet-5.5x", "sonnet-5.5.1", "sonnet-", "haiku"],
+)
+def test_a_family_name_stops_at_a_separator(key: str) -> None:
+    table = _table()
+    assert key not in table
+    assert table.get(key) is None
+    with pytest.raises(KeyError):
+        table[key]
+
+
+def test_a_family_never_reaches_a_longer_family_that_starts_with_it() -> None:
+    table = ModelTable(
+        rows=(_row("flash-lite-3.5"), _row("flash-3.8"), _row("flash-2.5")),
+    )
+    assert table["flash"].model_id == "flash-3.8"
+    assert table["flash-2"].model_id == "flash-2.5"
+    assert table["flash-lite"].model_id == "flash-lite-3.5"
+    assert "flash-lite-2" not in table
+
+
+def test_iterating_lists_exact_names_only() -> None:
+    table = _table()
+    assert list(table) == [
+        "opus-5.5",
+        "opus-5.0",
+        "opus-4.8",
+        "sonnet-5.5",
+        "sonnet-5.0",
+        "sonnet-4.6",
+    ]
+    assert len(table) == 6
+    assert 5 not in table
+
+
+@pytest.mark.parametrize(
+    ("name", "model_id"),
+    [
+        ("sonnet-5.0", "sonnet-5.0"),
+        ("claude-opus-4-8", "opus-4.8"),
+        ("sonnet", None),
+        ("sonnet-5", None),
+        ("default", None),
+    ],
+)
+def test_exact_answers_only_to_an_exact_name_or_a_vendor_id(
+    name: str,
+    model_id: str | None,
+) -> None:
+    """Billing an id a server reports at a family's newest would misprice it."""
+    row = _table().exact(name)
+    assert (None if row is None else row.model_id) == model_id
+
+
+def test_an_unversioned_id_is_an_exact_name_only() -> None:
+    """A local endpoint's ``local-model`` has no family to order or match."""
+    table = ModelTable(rows=(_row("local-model"), _row("local-model-b")))
+    assert table["local-model"].model_id == "local-model"
+    assert table["local-model-b"].model_id == "local-model-b"
+    assert "local" not in table
+    # ``neon-preview`` spells the family but no version: ``neon`` is Neon 4.0.
+    named = ModelTable(rows=(_row("neon-preview"), _row("neon-4.0")))
+    assert named["neon"].model_id == "neon-4.0"
+
+
+def test_tag_words_are_each_word_a_model_line_reads_as_its_kind() -> None:
+    """Every word parses back to its kind; the old spellings are left out."""
+    words = tag_words()
+    assert set(words) == {"size", "effort", "tier"}
+    assert "fast" in words["tier"]
+    assert "large" not in words["size"]
+    assert "high" not in words["effort"]
+    for word in words["size"]:
+        assert ModelTags.parse(f"opus+{word}").context == word
+    for word in words["effort"]:
+        assert ModelTags.parse(f"opus+{word}").effort is not None
+    for word in words["tier"]:
+        assert ModelTags.parse(f"opus+{word}").service_tier is not None
+
+
+def test_best_and_everyday_fall_back_to_the_default() -> None:
+    table = _table()
+    assert table.roles["best"] == table.roles["everyday"] == "opus"
+    declared = ModelTable(
+        rows=(_row("opus-5.5"), _row("sonnet-5.5")),
+        roles={"best": "opus", "default": "opus", "everyday": "sonnet"},
+    )
+    assert declared["everyday"].model_id == "sonnet-5.5"
+    bare = ModelTable(rows=(_row(),))
+    assert dict(bare.roles) == {}
+
+
+def test_roles_are_a_frozen_copy() -> None:
+    roles = {"default": "opus"}
+    table = ModelTable(rows=(_row(),), roles=roles)
+    roles["default"] = "nope"
+    assert table.roles["default"] == "opus"
+    assert isinstance(table.roles, MappingProxyType)
+
+
+def test_a_role_naming_no_model_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Role 'default' names no model: 'haiku'"):
+        ModelTable(rows=(_row(),), roles={"default": "haiku"})
+
+
+def test_a_model_listed_twice_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"Model 'opus-4\.8' is listed twice"):
+        ModelTable(rows=(_row(), _row()))
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        ("opus-4.8", "opus-5.0"),
+        ("opus-5.0", "sonnet-5.5", "opus-5.5"),
+        ("opus-5.9", "opus-5.10"),
+    ],
+)
+def test_rows_listed_oldest_first_are_rejected(ids: tuple[str, ...]) -> None:
+    """``opus`` would otherwise name the older row and misprice every request."""
+    with pytest.raises(ValueError, match="newest first"):
+        ModelTable(rows=tuple(_row(i) for i in ids))
+
+
+def test_families_may_interleave() -> None:
+    table = ModelTable(rows=(_row("a-2.0"), _row("b-1.0"), _row("a-1.0")))
+    assert table["a"].model_id == "a-2.0"
+
+
+def test_resolve_returns_the_row_and_settings_for_its_size() -> None:
+    capability, settings = _table().resolve("opus-4.8+258k")
+    assert capability.model_id == "opus-4.8"
+    assert settings.context_size.tokens == 258_000
+    _, untagged = _table().resolve("opus-4.8")
+    assert untagged == capability.default
+
+
+@pytest.mark.parametrize("model_id", ["opus-5+258K", "opus-5+258k", "utility+258k"])
+def test_resolve_follows_roles_families_and_tags_in_any_case(model_id: str) -> None:
+    table = ModelTable(
+        rows=(_row("opus-5.5"), _row("sonnet-4.6")),
+        roles={"utility": "sonnet"},
+    )
+    capability, settings = table.resolve(model_id)
+    assert settings.context_size.tokens == 258_000
+    assert capability.model_id == (
+        "sonnet-4.6" if "utility" in model_id else "opus-5.5"
+    )
+
+
+def test_a_repeated_tag_is_one_tag() -> None:
+    _, settings = _table().resolve("opus+1m+1M")
+    assert settings.context_size.tokens == 1_000_000
+
+
+@pytest.mark.parametrize(
+    ("tag", "bands", "context"),
+    [
+        ("+smallcontext", (32_000, 256_000), 32_000),
+        ("+midcontext", (32_000, 256_000), 256_000),
+        ("+fullcontext", (32_000, 256_000), 1_000_000),
+        ("+smallcontext", (272_000,), 272_000),
+        ("+midcontext", (272_000,), 1_000_000),
+        ("+smallcontext", (), 1_000_000),
+        ("+SmallContext", (32_000, 256_000), 32_000),
+        # A journal's model line from before the rename.
+        ("+large", (32_000, 256_000), 1_000_000),
+    ],
+)
+def test_the_size_names_read_the_price_bands(
+    tag: str,
+    bands: tuple[int, ...],
+    context: int,
+) -> None:
+    row = _row(bands=bands)
+    _, settings = ModelTable(rows=(row,)).resolve(f"opus-4.8{tag}")
+    assert settings.context_size.tokens == context
+
+
+@pytest.mark.parametrize(
+    ("tag", "tokens"),
+    [
+        ("+200k", 200_000),
+        ("+272k", 272_000),
+        ("+1m", 1_000_000),
+        ("+2m", 1_000_000),
+        ("+258123", 258_123),
+    ],
+)
+def test_a_size_tag_is_that_many_tokens_within_the_window(
+    tag: str,
+    tokens: int,
+) -> None:
+    _, settings = _table().resolve(f"opus-4.8{tag}")
+    assert settings.context_size.tokens == tokens
+
+
+@pytest.mark.parametrize(
+    ("suffix", "named"),
+    [
+        ("+fullcontext+smallcontext", "+fullcontext, +smallcontext"),
+        ("+fullcontext+1m", "+1m, +fullcontext"),
+        ("+200k+smallcontext", "+200k, +smallcontext"),
+        ("+1m+200k", "+1m, +200k"),
+    ],
+)
+def test_conflicting_tags_are_rejected(suffix: str, named: str) -> None:
+    message = f"Model 'opus-4.8{suffix}' selects conflicting contexts: {named}."
+    with pytest.raises(UnsupportedTagError, match=_exactly(message)):
+        _table().resolve(f"opus-4.8{suffix}")
+    with pytest.raises(UnsupportedTagError, match=_exactly(message)):
+        ModelTags.parse(f"opus-4.8{suffix}")
+
+
+@pytest.mark.parametrize("tag", ["+high", "+fast", " budget=auto"])
+def test_resolve_takes_a_name_and_its_size_alone(tag: str) -> None:
+    """The effort, tier, and choices are the caller's to apply; dropped, they vanish."""
+    with pytest.raises(UnknownModelError):
+        _table().resolve(f"opus{tag}")
+
+
+@pytest.mark.parametrize(
+    ("line", "tags"),
+    [
+        ("opus", ModelTags(model="opus")),
+        ("opus+1m+high", ModelTags(model="opus", context=1_000_000, effort="high")),
+        ("opus+HIGH+1M", ModelTags(model="opus", context=1_000_000, effort="high")),
+        ("opus+high+258k", ModelTags(model="opus", context=258_000, effort="high")),
+        ("opus+medthink", ModelTags(model="opus", effort="medium")),
+        ("opus+MediumThink", ModelTags(model="opus", effort="medium")),
+        ("opus+fullcontext", ModelTags(model="opus", context="fullcontext")),
+        ("opus+SmallContext", ModelTags(model="opus", context="smallcontext")),
+        # Journals keep model lines written before the tags were renamed.
+        (
+            "opus+large+max",
+            ModelTags(model="opus", context="fullcontext", effort="max"),
+        ),
+        (
+            "opus+small+none",
+            ModelTags(model="opus", context="smallcontext", effort="none"),
+        ),
+        (
+            "opus+mid+medium",
+            ModelTags(model="opus", context="midcontext", effort="medium"),
+        ),
+        ("opus+1m+1M", ModelTags(model="opus", context=1_000_000)),
+        ("opus+high+HighThink", ModelTags(model="opus", effort="high")),
+        ("opus+fast+priority", ModelTags(model="opus", service_tier="priority")),
+        (
+            "/m/My Model+cuda budget=auto",
+            ModelTags(model="/m/My Model+cuda", choices={"thinking_budget": "auto"}),
+        ),
+        (
+            "opus+fast+1m+high",
+            ModelTags(
+                model="opus",
+                context=1_000_000,
+                effort="high",
+                service_tier="priority",
+            ),
+        ),
+        ("opus+flex", ModelTags(model="opus", service_tier="flex")),
+        ("Org/M+cuda+medium", ModelTags(model="Org/M+cuda", effort="medium")),
+        ("Org/M+medium+cuda", ModelTags(model="Org/M+cuda", effort="medium")),
+        (
+            "work@vendor/opus-5.5+fullcontext",
+            ModelTags(model="work@vendor/opus-5.5", context="fullcontext"),
+        ),
+        (
+            "opus+high budget=auto  output=text",
+            ModelTags(
+                model="opus",
+                effort="high",
+                choices={"thinking_budget": "auto", "thinking_output": "text"},
+            ),
+        ),
+    ],
+)
+def test_parse_lifts_every_tag_from_anywhere(line: str, tags: ModelTags) -> None:
+    assert ModelTags.parse(line) == tags
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["fullctx", "context", "think", "0", "1.5m", "nothing"],
+)
+def test_a_word_of_no_kind_stays_in_the_name(word: str) -> None:
+    assert ModelTags.parse(f"opus+{word}") == ModelTags(model=f"opus+{word}")
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ModelTags(model="opus"),
+        *(
+            ModelTags(model="opus", context=context)
+            for context in ("smallcontext", "midcontext", "fullcontext", 258_000)
+        ),
+        *(
+            ModelTags(model="opus", effort=effort)
+            for effort in ("none", "min", "low", "medium", "high", "xhigh", "max")
+        ),
+        *(
+            ModelTags(model="opus", service_tier=tier)
+            for tier in ("auto", "default", "flex", "priority", "ultrafast")
+        ),
+        ModelTags(
+            model="work@vendor/opus-5.5",
+            context=1_000_000,
+            effort="low",
+            service_tier="flex",
+            choices={"thinking_budget": "auto", "cache_ttl_sec": "3600"},
+        ),
+    ],
+    ids=str,
+)
+def test_a_line_parses_back_to_its_tags(tags: ModelTags) -> None:
+    assert ModelTags.parse(str(tags)) == tags
+
+
+@pytest.mark.parametrize(
+    ("tags", "line"),
+    [
+        (
+            ModelTags(
+                model="anthropic/opus-5.5",
+                context="fullcontext",
+                effort="medium",
+            ),
+            "anthropic/opus-5.5+fullcontext+medthink",
+        ),
+        (
+            ModelTags(model="opus", effort="none"),
+            "opus+nothink",  # codespell:ignore nothink
+        ),
+        (
+            ModelTags(model="opus", context=258_000, service_tier="priority"),
+            "opus+258k+priority",
+        ),
+        (ModelTags(model="opus", context=258_123), "opus+258123"),
+        (
+            ModelTags(
+                model="opus",
+                choices={"thinking_budget": "auto", "thinking_output": "text"},
+            ),
+            "opus budget=auto output=text",
+        ),
+    ],
+)
+def test_a_line_spells_each_tag_its_one_way(tags: ModelTags, line: str) -> None:
+    assert str(tags) == line
+
+
+def test_a_choice_s_value_keeps_any_equals_sign_after_the_first() -> None:
+    tags = ModelTags.parse("opus+high+high budget=a=b")
+    assert (tags.effort, dict(tags.choices)) == ("high", {"thinking_budget": "a=b"})
+
+
+def test_the_name_is_the_model_and_its_size() -> None:
+    """What a provider looks a model up by: the effort and tier are not its to read."""
+    tags = ModelTags.parse("work@vendor/opus+258k+high+fast budget=auto")
+    assert tags.name == "work@vendor/opus+258k"
+    assert ModelTags(model="opus").name == "opus"
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("opus+high+low", "'opus+high+low' names two efforts: high, low"),
+        ("opus+flex+fast", "'opus+flex+fast' names two service tiers: flex, priority"),
+        (
+            "opus budget=auto auto",
+            "'opus budget=auto auto' names 'auto', not a CHOICE=VALUE",
+        ),
+        (
+            "opus budget=auto budget=none",
+            "'opus budget=auto budget=none' names 'budget' twice",
+        ),
+        (
+            "opus speed=1",
+            (
+                "speed is no choice; give budget, output, cache_ttl_sec,"
+                " manage_context_server_side, compaction"
+            ),
+        ),
+    ],
+)
+def test_parse_refuses_two_of_one_kind_and_unknown_choices(
+    line: str,
+    message: str,
+) -> None:
+    with pytest.raises(UnsupportedTagError, match=_exactly(message)):
+        ModelTags.parse(line)
+
+
+def test_settings_name_their_size_their_effort_and_only_choices_made() -> None:
+    row = _row(bands=(272_000,))
+    small = replace(row.default, context_size=row.prices["smallcontext"])
+    counted = replace(row.default, context_size=row.prices[100_000])
+    lines = [
+        str(ModelTags.from_settings(row, row.default)),
+        str(ModelTags.from_settings(row, small, provider="vendor")),
+        str(ModelTags.from_settings(row, counted, provider="vendor", account="work")),
+    ]
+    assert lines == [
+        "opus-4.8+fullcontext+nothink",  # codespell:ignore nothink
+        "vendor/opus-4.8+smallcontext+nothink",  # codespell:ignore nothink
+        "work@vendor/opus-4.8+100k+nothink",  # codespell:ignore nothink
+    ]
+
+
+def test_an_unknown_model_names_the_known_models_and_roles() -> None:
+    with pytest.raises(UnknownModelError) as raised:
+        _table().resolve("nope+1m")
+    assert str(raised.value) == (
+        "Unknown model 'nope+1m'; known models: opus-5.5, opus-5.0, opus-4.8,"
+        " sonnet-5.5, sonnet-5.0, sonnet-4.6, default, utility, best, everyday."
+    )
+
+
+def _write(
+    path: Path,
+    *models: dict[str, object],
+    vendor: Mapping[str, object] = MappingProxyType({}),
+    extra: Mapping[str, object] = MappingProxyType({}),
+) -> Path:
+    """Write a catalog whose reference supplies one window and every axis."""
+    reference = {
+        "limits": {"max_request_tokens": 1000},
+        "thinking": _THINKING,
+    }
+    served = {"sends": list(model_setting_names()), **vendor}
+    document = {
+        "reference": reference,
+        "models": list(models),
+        "providers": {"vendor": served},
+        **extra,
+    }
+    path.write_text(yaml.dump(document, Dumper=_Plain))
+    return path
+
+
+def _model(model_id: str = "example-1.0", **fields: object) -> dict[str, object]:
+    return {"model_id": model_id, "prices": [dict(_FREE)]} | fields
+
+
+def _load(path: Path) -> ModelTable:
+    return ModelTable.from_yaml(path, section="vendor")
+
+
+@pytest.mark.parametrize("tokenizer", [None, "declared-tokenizer"])
+def test_catalog_tokenizer_is_optional_and_never_invented(
+    tmp_path: Path,
+    tokenizer: str | None,
+) -> None:
+    fields: dict[str, object] = {} if tokenizer is None else {"tokenizer": tokenizer}
+    path = _write(tmp_path / "x.yaml", _model() | fields)
+    assert _load(path)["example"].tokenizer == tokenizer
+
+
+def test_tokenizer_inherits_profile_and_model_override(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("base-1.0", profile="shared"),
+        _model("override-1.0", profile="shared", tokenizer="own"),
+        extra={"profiles": {"shared": {"tokenizer": "common"}}},
+    )
+    table = _load(path)
+    assert table["base"].tokenizer == "common"
+    assert table["override"].tokenizer == "own"
+
+
+def test_a_section_s_tiers_are_offered_where_each_model_prices_them(
+    tmp_path: Path,
+) -> None:
+    """The section's tiers are what its provider sends; a model prices its own."""
+    priority = dict(_FREE) | {"service_tier": "priority"}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("both-1.0", prices=[dict(_FREE), priority]),
+        _model("auto-1.0"),
+        vendor={"service_tier": ["auto", "priority"]},
+    )
+    table = _load(path)
+    assert table["both-1.0"].service_tier == {"auto", "priority"}
+    assert table["auto-1.0"].service_tier == {"auto"}
+
+
+def test_a_section_s_tiers_a_model_prices_none_of_refuse_it(tmp_path: Path) -> None:
+    flex = dict(_FREE) | {"service_tier": "flex"}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=[flex]),
+        vendor={"service_tier": ["auto", "priority"]},
+    )
+    with pytest.raises(
+        ValueError,
+        match=_exactly(
+            "Model 'example-1.0' offers none of the service_tier section"
+            " 'vendor' allows: ['auto', 'priority'].",
+        ),
+    ):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("offers", "allows", "name", "offered"),
+    [
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"output": ["none", "text"]}},
+            "thinking_output",
+            {"none"},
+        ),
+        (
+            {"manage_context_server_side": [False]},
+            {"manage_context_server_side": [False, True]},
+            "manage_context_server_side",
+            {False},
+        ),
+        (
+            {"compaction": ["bespoke"]},
+            {"compaction": ["bespoke", "provider"]},
+            "compaction",
+            {"bespoke"},
+        ),
+    ],
+    ids=["thinking", "manage_context_server_side", "compaction"],
+)
+def test_a_model_offers_what_it_has_of_what_its_section_allows(
+    tmp_path: Path,
+    offers: dict[str, object],
+    allows: dict[str, object],
+    name: ModelSettingName,
+    offered: set[object],
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | offers, vendor=allows)
+    assert set(_load(path)["example"].values(name)) == offered
+
+
+@pytest.mark.parametrize(
+    ("offers", "allows", "message"),
+    [
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"effort": ["low"]}},
+            "the thinking effort section 'vendor' allows: ['low']",
+        ),
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"budget": ["auto"]}},
+            "the thinking budget section 'vendor' allows: ['auto']",
+        ),
+        (
+            {"thinking": _THINKING},
+            {"thinking": {"output": ["text"]}},
+            "the thinking output section 'vendor' allows: ['text']",
+        ),
+        (
+            {"manage_context_server_side": [False]},
+            {"manage_context_server_side": [True]},
+            "the manage_context_server_side section 'vendor' allows: [True]",
+        ),
+        (
+            {"compaction": ["bespoke"]},
+            {"compaction": ["provider"]},
+            "the compaction section 'vendor' allows: ['provider']",
+        ),
+    ],
+    ids=["effort", "budget", "output", "manage_context_server_side", "compaction"],
+)
+def test_a_section_allowing_none_of_what_a_model_offers_refuses_it(
+    tmp_path: Path,
+    offers: dict[str, object],
+    allows: dict[str, object],
+    message: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | offers, vendor=allows)
+    with pytest.raises(
+        ValueError,
+        match=_exactly(f"Model 'example-1.0' offers none of {message}."),
+    ):
+        _load(path)
+
+
+def test_a_section_s_cache_lifetime_replaces_the_model_s(tmp_path: Path) -> None:
+    """A cache lasts as long as its provider keeps it, which no model offers."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(cache_ttl_sec=[300.0]),
+        vendor={"cache_ttl_sec": [600.0]},
+    )
+    assert _load(path)["example"].cache_ttl_sec == {600.0}
+
+
+def test_a_setting_the_provider_does_not_send_offers_only_its_default(
+    tmp_path: Path,
+) -> None:
+    """Choosing another would change the label, not what is sent."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(
+            thinking={
+                "effort": ["low", "high"],
+                "budget": ["none", "auto"],
+                "output": ["none", "text"],
+            },
+            thinking_effort_default="high",
+            thinking_budget_default="auto",
+            thinking_output_default="text",
+        ),
+        vendor={"sends": ["thinking_budget"]},
+    )
+    row = _load(path)["example"]
+    assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
+        {"high"},
+        {"none", "auto"},
+        {"text"},
+    )
+    assert (row.service_tier, row.manage_context_server_side) == ({"auto"}, {False})
+
+
+def test_from_yaml_layers_reference_profile_model_section_and_entry(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "vendor.yaml"
+    path.write_text("""
+roles: {default: example}
+reference:
+  approx_chars_per_token: 3.5
+  limits: {max_request_tokens: 1_000}
+  thinking: {effort: [none], budget: [none], output: [none]}
+profiles:
+  base:
+    knowledge_cutoff: '2025-05-01'
+    thinking: {effort: [none, high], budget: [none, auto], output: [none, text]}
+models:
+  - model_id: example-1.0
+    wire_model_id: vendor-example
+    profile: base
+    effort_as_level: true
+    thinking_off_max_effort: low
+    thinking: {effort: [none, low, high], budget: [none, auto], output: [none, text]}
+    prices:
+      - {request: 1.0, response: 2.0, cache_write: 0.0, cache_write_1h: 0.0,
+         cache_read: 0.1, tokens_per_unit: 1000}
+      - {service_tier: priority, request: 2.0, response: 4.0, cache_write: 0.0,
+         cache_write_1h: 0.0, cache_read: 0.2}
+      - {service_tier: priority, effective_prompt_tokens: 100,
+         effective_date: '2026-10-07', request: 3.0, response: 6.0,
+         cache_write: 0.0, cache_write_1h: 0.0, cache_read: 0.3}
+  - model_id: unserved-1.0
+    prices:
+      - {request: 0.0, response: 0.0, cache_write: 0.0, cache_write_1h: 0.0,
+         cache_read: 0.0}
+providers:
+  vendor:
+    sends: [thinking_effort, thinking_budget, thinking_output, service_tier,
+            cache_ttl_sec, manage_context_server_side]
+    retries_internally: true
+    keeps_user_turns_apart: true
+    thinking: {effort: [none, low]}
+    models:
+      example-1.0: {account_auth: true}
+""")
+    table = _load(path)
+    assert list(table) == ["example-1.0", "unserved-1.0"]
+    row = table["default"]
+    assert row.wire_model_id == "vendor-example"
+    assert row.approx_chars_per_token == 3.5
+    assert row.knowledge_cutoff == "2025-05-01"
+    assert row.limits.max_request_tokens == 1000
+    # The section's ``thinking`` narrows only the axes it names.
+    assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
+        {"none", "low"},
+        {"none", "auto"},
+        {"none", "text"},
+    )
+    assert row.effort_as_level
+    assert row.thinking_off_max_effort == "low"
+    assert row.retries_internally
+    assert row.account_auth
+    assert row.keeps_user_turns_apart
+    assert row.service_tier == {"auto", "default", "priority"}
+    assert row.prices.window == 1000
+    # A card applies to prompts past its threshold, up to the next card's.
+    assert dict(row.prices.prices) == {
+        PriceCondition(): TokenPrice(
+            request=1.0,
+            response=2.0,
+            cache_read=0.1,
+            tokens_per_unit=1000,
+        ),
+        PriceCondition(
+            service_tier="priority",
+            token_size_range=(0, 101),
+        ): TokenPrice(request=2.0, response=4.0, cache_read=0.2),
+        PriceCondition(
+            service_tier="priority",
+            token_size_range=(101, math.inf),
+            effective_date=date(2026, 10, 7),
+        ): TokenPrice(request=3.0, response=6.0, cache_read=0.3),
+    }
+
+
+@pytest.mark.parametrize(
+    ("layers", "effort"),
+    [
+        ({}, "none"),
+        ({"reference": "high"}, "high"),
+        ({"reference": "high", "vendor": "low"}, "low"),
+        ({"reference": "high", "model": "low"}, "low"),
+        ({"reference": "high", "vendor": "high", "model": "low"}, "high"),
+        ({"vendor": "high", "model": "high", "entry": "low"}, "low"),
+    ],
+    ids=["unset", "reference", "provider", "model", "provider-over-model", "entry"],
+)
+def test_the_default_effort_layers_like_any_field(
+    tmp_path: Path,
+    layers: dict[str, str],
+    effort: str,
+) -> None:
+    def given(layer: str) -> dict[str, object]:
+        return {"thinking_effort_default": layers[layer]} if layer in layers else {}
+
+    entry = {"models": {"example-1.0": given("entry")}} if "entry" in layers else {}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model() | given("model"),
+        vendor=given("vendor") | entry,
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _EVERY,
+                **given("reference"),
+            },
+        },
+    )
+    assert _load(path)["example"].default.thinking_effort == effort
+
+
+def test_a_default_effort_a_row_lacks_falls_to_none_last(tmp_path: Path) -> None:
+    """Every level below and above the default is tried before ``none``."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model() | {"thinking_effort_default": "high"},
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _THINKING,
+            },
+        },
+    )
+    assert _load(path)["example"].default.thinking_effort == "none"
+
+
+def test_a_limit_a_profile_adds_must_be_restated_by_the_model(tmp_path: Path) -> None:
+    """Each layer is checked against every layer below it, not the reference alone."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(profile="p", limits={"max_request_tokens": 500}),
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _THINKING,
+            },
+            "profiles": {
+                "p": {"limits": {"max_request_tokens": 800, "max_image_edge_px": 2048}},
+            },
+        },
+    )
+    message = (
+        "model 'example-1.0' restates no max_image_edge_px of the limits below it;"
+        " state it, 0 for none."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_cutoff_is_an_iso_date(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": "2026-05-18"})
+    assert _load(path)["example"].knowledge_cutoff == "2026-05-18"
+
+
+@pytest.mark.parametrize(
+    "cutoff",
+    ["May 2025", "2025-05", "2025-13-01", "2026-02-30", "2025"],
+)
+def test_a_cutoff_in_any_other_form_is_refused(tmp_path: Path, cutoff: str) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | {"knowledge_cutoff": cutoff})
+    message = (
+        f"Model 'example-1.0' has knowledge_cutoff {cutoff!r}; write it as YYYY-MM-DD."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("layer", "where"),
+    [
+        ("profile", "profile 'p'"),
+        ("model", "model 'example-1.0'"),
+        ("section", "section 'vendor'"),
+        ("entry", "section 'vendor'"),
+    ],
+)
+def test_a_limits_override_must_restate_each_limit_below_it(
+    tmp_path: Path,
+    layer: str,
+    where: str,
+) -> None:
+    """``limits`` replaces whole, so a limit left out would silently become 0."""
+    short = {"max_request_tokens": 500}
+    whole = {"max_request_tokens": 500, "max_image_edge_px": 2048}
+    reference = {
+        "limits": {"max_request_tokens": 1000, "max_image_edge_px": 2048},
+        "thinking": _THINKING,
+    }
+
+    def written(limits: dict[str, int]) -> Path:
+        given = {"limits": limits}
+        return _write(
+            tmp_path / f"{layer}.yaml",
+            _model(profile="p") | (given if layer == "model" else {}),
+            vendor=(given if layer == "section" else {})
+            | ({"models": {"example-1.0": given}} if layer == "entry" else {}),
+            extra={
+                "reference": reference,
+                "profiles": {"p": given if layer == "profile" else {}},
+            },
+        )
+
+    message = (
+        f"{where} restates no max_image_edge_px of the limits below it;"
+        " state it, 0 for none."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(written(short))
+    row = _load(written(whole))["example"]
+    assert (row.limits.max_request_tokens, row.limits.max_image_edge_px) == (500, 2048)
+
+
+def test_a_row_starting_with_thinking_off_above_its_cap_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model()
+        | {
+            "thinking_off_max_effort": "low",
+            "thinking_effort_default": "high",
+            "thinking_budget_default": "none",
+        },
+        extra={
+            "reference": {"limits": {"max_request_tokens": 1000}, "thinking": _EVERY},
+        },
+    )
+    message = (
+        "thinking_budget='none' is not offered by example-1.0 at thinking_effort='high'"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _load(path)
+
+
+def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model() | {"thinking_budget_default": "fixed"},
+        vendor={"models": {"example-1.0": {"thinking_budget_default": "auto"}}},
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _EVERY,
+                "thinking_budget_default": "none",
+            },
+        },
+    )
+    assert _load(path)["example"].default.thinking_budget == "auto"
+
+
+@pytest.mark.parametrize(
+    ("default", "ttl"),
+    [(None, 300.0), (3600.0, 3600.0), (60.0, 300.0)],
+    ids=["unset", "offered", "unoffered"],
+)
+def test_a_default_cache_lifetime_is_what_a_bare_id_starts_at(
+    tmp_path: Path,
+    default: float | None,
+    ttl: float,
+) -> None:
+    given = {} if default is None else {"cache_ttl_sec_default": default}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"cache_ttl_sec": [300.0, 3600.0], **given},
+    )
+    assert _load(path)["example"].default.cache_ttl_sec == ttl
+
+
+@pytest.mark.parametrize(
+    ("offered", "default", "starts"),
+    [
+        (None, None, "bespoke"),
+        (["bespoke", "provider"], None, "bespoke"),
+        (["bespoke", "provider"], "provider", "provider"),
+        (["provider"], None, "provider"),
+    ],
+    ids=["unstated", "both-unset", "both-provider", "provider-only"],
+)
+def test_a_section_says_how_it_compacts_and_how_a_bare_id_starts(
+    tmp_path: Path,
+    offered: list[str] | None,
+    default: str | None,
+    starts: str,
+) -> None:
+    given: dict[str, object] = {} if offered is None else {"compaction": offered}
+    if default is not None:
+        given["compaction_default"] = default
+    both = ["bespoke", "provider"]
+    path = _write(tmp_path / "x.yaml", _model(compaction=both), vendor=given)
+    row = _load(path)["example"]
+    assert row.compaction == frozenset(offered or both)
+    assert row.default.compaction == starts
+
+
+def test_a_compaction_choice_reads_back_from_a_model_line() -> None:
+    row = replace(_row(), compaction=frozenset({"bespoke", "provider"}))
+    chosen = replace(row.default, compaction="provider")
+    tags = ModelTags.from_settings(row, chosen)
+    assert dict(tags.choices) == {"compaction": "provider"}
+    assert ModelTags.parse(str(tags)).choices == tags.choices
+
+
+@pytest.mark.parametrize(
+    ("output", "default"),
+    [
+        (["none", "text", "redacted"], "text"),
+        (["none", "text"], "text"),
+        (["none", "redacted"], "none"),
+        (["none"], "none"),
+    ],
+    ids=["every", "text", "redacted-only", "none-only"],
+)
+def test_a_row_asks_for_thinking_text_wherever_it_offers_it(
+    tmp_path: Path,
+    output: list[str],
+    default: str,
+) -> None:
+    """A session keeps every summary a model returns; the TUI hides it instead."""
+    path = _write(tmp_path / "x.yaml", _model(thinking=_EVERY | {"output": output}))
+    assert _load(path)["example"].default.thinking_output == default
+
+
+@pytest.mark.parametrize(
+    ("default", "effort"),
+    [("medium", "low"), ("max", "high"), ("min", "low")],
+    ids=["nearest-below", "nearest-below-top", "nearest-above"],
+)
+def test_a_default_effort_the_row_lacks_falls_to_its_nearest_level(
+    tmp_path: Path,
+    default: str,
+    effort: str,
+) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=_EVERY, thinking_effort_default=default),
+    )
+    assert _load(path)["example"].default.thinking_effort == effort
+
+
+@pytest.mark.parametrize(
+    ("default", "context"),
+    [(None, 1000), ("fullcontext", 1000), ("smallcontext", 400), (700, 700)],
+    ids=["unset", "fullcontext", "smallcontext", "count"],
+)
+def test_a_row_names_the_size_a_bare_id_starts_at(
+    tmp_path: Path,
+    default: str | int | None,
+    context: int,
+) -> None:
+    banded = [dict(_FREE), _FREE | {"effective_prompt_tokens": 400}]
+    given: dict[str, object] = (
+        {} if default is None else {"context_size_default": default}
+    )
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=banded) | given,
+        extra={
+            "reference": {
+                "limits": {"max_request_tokens": 1000},
+                "thinking": _THINKING,
+            },
+        },
+    )
+    _, settings = _load(path).resolve("example-1.0")
+    assert settings.context_size.tokens == context
+    _, tagged = _load(path).resolve("example-1.0+300")
+    assert tagged.context_size.tokens == 300
+
+
+def test_a_section_may_narrow_the_tiers_offered(tmp_path: Path) -> None:
+    cards = [dict(_FREE), _FREE | {"service_tier": "priority"}]
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+    assert _load(path)["example"].service_tier == {"auto", "default", "priority"}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=cards),
+        vendor={"service_tier": ["auto"]},
+    )
+    assert _load(path)["example"].service_tier == {"auto"}
+
+
+@pytest.mark.parametrize("quoted", [True, False])
+def test_a_card_starts_on_its_effective_date(tmp_path: Path, quoted: bool) -> None:
+    stamp = "'2026-10-07'" if quoted else "2026-10-07"
+    path = tmp_path / "x.yaml"
+    _write(path, _model())
+    text = path.read_text().replace(
+        "  prices:\n",
+        f"  prices:\n  - {{effective_date: {stamp}, request: 1.0, response: 0.0,"
+        " cache_write: 0.0, cache_write_1h: 0.0, cache_read: 0.0}\n",
+        1,
+    )
+    path.write_text(text)
+    prices = _load(path)["example"].prices
+    assert prices["auto", 1, date(2026, 10, 6)].request == 0.0
+    assert prices["auto", 1, date(2026, 10, 7)].request == 1.0
+
+
+@pytest.mark.parametrize(
+    ("models", "sections", "message"),
+    [
+        ([_model(profile="missing")], {}, "no profile 'missing'"),
+        ([_model(typo=1)], {}, "typo"),
+        ([_model("opus-5")], {}, "is not family-major.minor"),
+        ([_model("Opus-5.0")], {}, "is not family-major.minor"),
+        ([_model("opus-5.0.1")], {}, "is not family-major.minor"),
+        ([_model(prices=[])], {}, "missing a price or setting"),
+        (
+            [_model(thinking=_THINKING | {"effort": []})],
+            {},
+            "^thinking_effort offers nothing selectable",
+        ),
+        (
+            [_model(thinking=_THINKING | {"budget": []})],
+            {},
+            "^thinking_budget offers nothing selectable",
+        ),
+        (
+            [_model(thinking=_THINKING | {"output": []})],
+            {},
+            "^thinking_output offers nothing selectable",
+        ),
+        ([_model(approx_chars_per_token=0.0)], {}, "missing a price"),
+        ([_model(approx_chars_per_token=float("nan"))], {}, "missing a price"),
+        ([_model(approx_chars_per_token=float("inf"))], {}, "missing a price"),
+        ([_model(thinking={"effort": ["none"]})], {}, _exactly(_WHOLE)),
+        (
+            [_model()],
+            {"profiles": {"p": {"thinking": {"effort": []}}}},
+            _exactly(_WHOLE),
+        ),
+        ([_model()], {"profiles": {"p": {"typo": True}}}, "typo"),
+        ([_model(context={"large": {}})], {}, "context"),
+        ([_model(context_size_default="huge")], {}, "context_size_default"),
+        ([_model(context_size_default=0)], {}, "context_size_default"),
+        ([_model(cache_ttl_sec=[])], {}, "^cache_ttl_sec offers nothing selectable"),
+        (
+            [_model(service_tier=["auto", "priority"])],
+            {},
+            "^Model 'example-1.0' offers service_tier 'priority' with no price",
+        ),
+        (
+            [
+                _model(
+                    prices=[
+                        _FREE,
+                        _FREE | {"effective_prompt_tokens": 200_000},
+                        _FREE | {"service_tier": "flex"},
+                        _FREE
+                        | {"service_tier": "flex", "effective_prompt_tokens": 272_000},
+                    ],
+                ),
+            ],
+            {},
+            "^Model 'example-1.0' bands its tiers at different sizes",
+        ),
+        (
+            [
+                _model(
+                    prices=[
+                        _FREE,
+                        _FREE | {"effective_prompt_tokens": 200_000},
+                        _FREE | {"effective_date": "2026-11-01"},
+                        _FREE
+                        | {
+                            "effective_date": "2026-11-01",
+                            "effective_prompt_tokens": 272_000,
+                        },
+                    ],
+                ),
+            ],
+            {},
+            "^Model 'example-1.0' bands its tiers at different sizes",
+        ),
+        ([_model()], {"unknown": True}, "unknown"),
+    ],
+)
+def test_a_catalog_that_breaks_a_rule_is_rejected(
+    tmp_path: Path,
+    models: list[dict[str, object]],
+    sections: dict[str, object],
+    message: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", *models, extra=sections)
+    with pytest.raises(ValueError, match=message):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "max_request_tokens",
+        "max_response_tokens",
+        "max_context_tokens",
+        "max_request_bytes",
+        "max_image_edge_px",
+        "max_image_bytes",
+    ],
+)
+def test_a_negative_limit_is_rejected(tmp_path: Path, limit: str) -> None:
+    restated = {"max_request_tokens": 1000, limit: -1}
+    path = _write(tmp_path / "x.yaml", _model(limits=restated))
+    with pytest.raises(ValueError, match="negative limit"):
+        _load(path)
+
+
+def test_a_window_states_its_input_output_and_shared_ceilings(tmp_path: Path) -> None:
+    window = {
+        "max_request_tokens": 272_000,
+        "max_response_tokens": 128_000,
+        "max_context_tokens": 400_000,
+        "truncates_at_context": False,
+    }
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+    assert _load(path)["example"].limits == ModelLimits(
+        max_request_tokens=272_000,
+        max_response_tokens=128_000,
+        max_context_tokens=400_000,
+        truncates_at_context=False,
+    )
+
+
+def test_an_unstated_window_behavior_stays_unknown(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model())
+    limits = _load(path)["example"].limits
+    assert limits.max_context_tokens == 0
+    assert limits.truncates_at_context is None
+
+
+def test_a_shared_window_smaller_than_its_input_is_rejected(tmp_path: Path) -> None:
+    window = {"max_request_tokens": 272_000, "max_context_tokens": 200_000}
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+    with pytest.raises(ValueError, match="context smaller than its request"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tokens_per_unit", 0),
+        ("effective_prompt_tokens", -1),
+        ("request", -1.0),
+        ("response", float("nan")),
+        ("cache_write", float("inf")),
+        ("cache_write_1h", -float("inf")),
+        ("cache_read", -1.0),
+        ("service_tier", "default"),
+    ],
+)
+def test_an_invalid_price_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model(prices=[_FREE | {field: value}]))
+    with pytest.raises(ValueError, match="invalid price"):
+        _load(path)
+
+
+def test_a_price_dated_to_the_second_is_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model())
+    path.write_text(
+        path.read_text().replace(
+            "cache_read: 0.0\n",
+            "cache_read: 0.0\n    effective_date: 2026-10-07T00:00:00Z\n",
+            1,
+        ),
+    )
+    with pytest.raises(ValueError, match="invalid price"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [
+        [
+            dict(_FREE),
+            _FREE | {"service_tier": "priority", "effective_prompt_tokens": 1},
+        ],
+        [
+            dict(_FREE),
+            _FREE | {"service_tier": "priority", "effective_date": "2027-01-01"},
+        ],
+        [_FREE | {"effective_prompt_tokens": 100}],
+    ],
+)
+def test_every_priced_tier_needs_a_base_card(
+    tmp_path: Path,
+    cards: list[dict[str, object]],
+) -> None:
+    """A tier priced only above a band or after a date leaves requests unpriceable."""
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+    message = (
+        f"Model 'example-1.0' has no base card for tier '{cards[-1].get('service_tier', 'auto')}'"
+        " (no prompt band, no effective date)."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_card_given_twice_is_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model(prices=[dict(_FREE), dict(_FREE)]))
+    with pytest.raises(ValueError, match="prices PriceCondition"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("text", "line", "message"),
+    [
+        ("models: []\nmodels: []", 2, "the key 'models' is given twice."),
+        ("models: []\n1: bad", 2, "YAML mapping keys must be strings."),
+    ],
+)
+def test_a_document_the_strict_loader_refuses_names_file_and_line(
+    tmp_path: Path,
+    text: str,
+    line: int,
+    message: str,
+) -> None:
+    path = tmp_path / "x.yaml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match=_in(path, line=line, message=message)):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("", "CatalogDocument"),
+        ("models: []", "no section 'vendor'"),
+        ("models: []\nproviders: {vendor: {}}", "does not say what it sends"),
+        (
+            "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: {}}}}",
+            r"overrides unknown models: \['ghost-1.0'\]",
+        ),
+    ],
+)
+def test_an_ill_formed_document_is_rejected(
+    tmp_path: Path,
+    text: str,
+    message: str,
+) -> None:
+    path = tmp_path / "x.yaml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match=message):
+        _load(path)
+
+
+def test_a_section_naming_an_unknown_thinking_axis_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"thinking": {"speed": ["fast"]}},
+    )
+    with pytest.raises(ValueError, match=r"Unknown thinking axes: \['speed'\]"):
+        _load(path)
+
+
+def test_every_section_serves_every_model(tmp_path: Path) -> None:
+    """One list: a model added to the document reaches every section unasked."""
+    path = tmp_path / "x.yaml"
+    row = (
+        "prices: [{request: 0, response: 0, cache_write: 0, cache_write_1h: 0,"
+        " cache_read: 0}]"
+    )
+    path.write_text(
+        "reference: {thinking: {effort: [none], budget: [none], output: [none]}}\n"
+        f"models:\n- {{model_id: a-1.0, {row}}}\n- {{model_id: b-1.0, {row}}}\n"
+        "providers:\n"
+        "  api: {sends: []}\n"
+        "  sub: {sends: [], account_auth: true}\n",
+    )
+    assert list(ModelTable.from_yaml(path, section="api")) == ["a-1.0", "b-1.0"]
+    assert list(ModelTable.from_yaml(path, section="sub")) == ["a-1.0", "b-1.0"]
+
+
+def test_a_section_listing_its_models_says_how_catalogs_name_them_now(
+    tmp_path: Path,
+) -> None:
+    """A user's catalog from before lists bare names; say what replaced them."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("deployment-1.0"),
+        _model("other-1.0"),
+        vendor={"models": {"deployment-1.0": None, "other-1.0": {"tokenizer": "t"}}},
+    )
+    message = (
+        "Section 'vendor' lists models by bare name: ['deployment-1.0']. A section"
+        " now serves every model in the document; delete the bare names. A model"
+        " an account is not served fails with the vendor's own error."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_section_that_omits_models_says_every_model_is_served_now(
+    tmp_path: Path,
+) -> None:
+    """A user's catalog from before keeps ``omits``; say what replaced it."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(),
+        vendor={"omits": {"example-1.0": "the plan lacks it"}},
+    )
+    message = (
+        "Section 'vendor' omits models: ['example-1.0']. A section now serves every"
+        " model in the document; delete its omits. A model an account is not served"
+        " fails with the vendor's own error."
+    )
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_a_document_with_no_models_serves_none(tmp_path: Path) -> None:
+    path = tmp_path / "x.yaml"
+    path.write_text("models: []\nproviders: {vendor: {sends: []}}")
+    assert len(_load(path)) == 0
+
+
+def test_a_catalog_without_thinking_offers_none(tmp_path: Path) -> None:
+    path = tmp_path / "x.yaml"
+    path.write_text(
+        "models:\n- {model_id: a-1.0, limits: {}, prices: [{request: 0,"
+        " response: 0, cache_write: 0, cache_write_1h: 0, cache_read: 0}]}\n"
+        "providers: {vendor: {sends: []}}\n",
+    )
+    row = _load(path)["a"]
+    assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
+        {"none"},
+        {"none"},
+        {"none"},
+    )
+
+
+def test_a_section_narrows_each_thinking_axis_and_states_transport_facts(
+    tmp_path: Path,
+) -> None:
+    thinking = {
+        "effort": ["none", "high"],
+        "budget": ["none", "auto"],
+        "output": ["none", "text"],
+    }
+    vendor = {
+        "thinking": {"budget": ["none"], "output": ["text"]},
+        "cache_ttl_sec": [300.0, 3600.0],
+        "manage_context_server_side": [True],
+    }
+    path = _write(tmp_path / "x.yaml", _model(thinking=thinking), vendor=vendor)
+    row = _load(path)["example"]
+    assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
+        {"none", "high"},
+        {"none"},
+        {"text"},
+    )
+    assert row.cache_ttl_sec == {300.0, 3600.0}
+    assert row.manage_context_server_side == {True}
+
+
+@pytest.mark.parametrize(("estimate", "unit"), [(0.5, 1), (1.0, 1)])
+def test_small_positive_estimates_and_units_are_valid(
+    tmp_path: Path,
+    estimate: float,
+    unit: int,
+) -> None:
+    card = _FREE | {"tokens_per_unit": unit}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(approx_chars_per_token=estimate, prices=[card]),
+    )
+    row = _load(path)["example"]
+    assert row.approx_chars_per_token == estimate
+    assert row.prices["auto", 1, date.min].tokens_per_unit == unit
+
+
+def test_smallcontext_is_the_top_of_the_cheapest_price_band(tmp_path: Path) -> None:
+    """GPT's 1.05M window bills double past 272k: ``+smallcontext`` stays below that."""
+    cheap, dear = (
+        dict(_FREE),
+        _FREE | {"request": 1.0, "effective_prompt_tokens": 272_000},
+    )
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(limits={"max_request_tokens": 1_050_000}, prices=[cheap, dear]),
+    )
+    capability, settings = _load(path).resolve("example+smallcontext")
+    assert settings.context_size.tokens == 272_000
+    assert capability.limits.max_request_tokens == 1_050_000
+    # Vendors publish "prompts > 272k": exactly 272k is still the base band.
+    assert capability.prices["auto", 272_000, date.min].request == 0.0
+    assert capability.prices["auto", 272_001, date.min].request == 1.0
+
+
+@pytest.mark.parametrize("model_id", ["opus-x.5", "opus-5.x", "opus-5.", "opus-55"])
+def test_a_version_must_be_major_dot_minor_digits(
+    tmp_path: Path,
+    model_id: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model(model_id))
+    message = f"Model id {model_id!r} is not family-major.minor."
+    with pytest.raises(ValueError, match=_exactly(message)):
+        _load(path)
+
+
+def test_two_spellings_of_one_version_are_out_of_order() -> None:
+    with pytest.raises(ValueError, match="newest first"):
+        ModelTable(rows=(_row("a-1.0"), _row("a-1.00")))
+
+
+def test_a_family_with_a_major_reaches_a_hyphenated_family() -> None:
+    table = ModelTable(rows=(_row("flash-lite-3.5"), _row("flash-3.8")))
+    assert table["flash-lite-3"].model_id == "flash-lite-3.5"
+
+
+def test_a_family_is_named_by_its_last_words_too() -> None:
+    """``neon`` names ``gemini-neon``: the vendor's prefix is no part of the name."""
+    table = ModelTable(
+        rows=(
+            _row("gemini-neon-4.0"),
+            _row("gemini-flash-lite-3.5"),
+            _row("gemini-flash-3.8"),
+        ),
+    )
+    assert table["neon"].model_id == "gemini-neon-4.0"
+    assert table["neon-4"].model_id == "gemini-neon-4.0"
+    assert table["flash"].model_id == "gemini-flash-3.8"
+    assert table["lite"].model_id == "gemini-flash-lite-3.5"
+    assert table["flash-lite"].model_id == "gemini-flash-lite-3.5"
+    assert "eon" not in table
+    assert "gemini" not in table
+
+
+@pytest.mark.parametrize("name", ["pro", "pro-5", "pro-3"])
+def test_a_word_two_families_end_in_names_neither(name: str) -> None:
+    """``pro`` ends ``gpt-pro`` and ``o-pro``: row order must not pick between them."""
+    table = ModelTable(rows=(_row("gpt-pro-5.5"), _row("o-pro-3.0")))
+    assert name not in table
+    with pytest.raises(
+        UnknownModelError,
+        match=r"names more than one family: gpt-pro, o-pro",
+    ):
+        table.resolve(name)
+    assert table["gpt-pro"].model_id == "gpt-pro-5.5"
+    assert table["o-pro-3"].model_id == "o-pro-3.0"
+
+
+def test_a_line_with_an_effort_is_unknown_not_ambiguous() -> None:
+    """A line naming an effort is the caller's to apply, never read as a family.
+
+    A role is read as its target, here a tail two families share.
+    """
+    table = ModelTable(
+        rows=(_row("gpt-pro-5.5"), _row("o-pro-3.0")),
+        roles={"pro": "gpt-pro-5.5"},
+    )
+    for line in ("pro+highthink", "o-pro+highthink"):
+        with pytest.raises(
+            UnknownModelError,
+            match=f"^{re.escape(f'Unknown model {line!r};')}",
+        ):
+            table.resolve(line)
+
+
+def test_a_document_read_from_text_names_no_source_in_its_errors() -> None:
+    with pytest.raises(ValueError, match=r"^line 2: the key 'a' is given twice\.$"):
+        ModelTable.from_text("a: 1\na: 2\n", section="x")
+
+
+def test_a_family_named_whole_outranks_one_named_by_its_last_word() -> None:
+    table = ModelTable(rows=(_row("gpt-pro-5.5"), _row("pro-1.0")))
+    assert table["pro"].model_id == "pro-1.0"
+
+
+def test_a_section_s_roles_replace_the_document_s_it_names(tmp_path: Path) -> None:
+    """A provider that serves no ``pro`` defaults to what it does serve."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("pro-1.0"),
+        _model("flash-1.0"),
+        vendor={"roles": {"default": "flash"}},
+        extra={"roles": {"default": "pro", "utility": "flash"}},
+    )
+    table = _load(path)
+    assert (table["default"].model_id, table["utility"].model_id) == (
+        "flash-1.0",
+        "flash-1.0",
+    )
+    assert table["best"].model_id == "flash-1.0"
+
+
+@pytest.mark.parametrize("target", ["local-model", "claude-opus-4-8"])
+def test_a_role_may_name_an_unversioned_id_or_a_vendor_id(target: str) -> None:
+    table = ModelTable(rows=(_row(), _row("local-model")), roles={"default": target})
+    assert table["default"] is table.exact(target)
+
+
+@pytest.mark.parametrize(
+    ("fields", "name"),
+    [
+        ({"manage_context_server_side": []}, "manage_context_server_side"),
+        ({"compaction": []}, "compaction"),
+        ({"service_tier": []}, "service_tier"),
+    ],
+)
+def test_a_setting_offering_nothing_selectable_is_named(
+    tmp_path: Path,
+    fields: dict[str, object],
+    name: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | fields)
+    with pytest.raises(ValueError, match=f"^{name} offers nothing selectable"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    "unsent",
+    [
+        "thinking_effort",
+        "thinking_budget",
+        "thinking_output",
+        "service_tier",
+        "cache_ttl_sec",
+        "manage_context_server_side",
+        "compaction",
+    ],
+)
+def test_each_setting_unsent_offers_only_its_default(
+    tmp_path: Path,
+    unsent: ModelSettingName,
+) -> None:
+    every = {
+        "thinking": {
+            "effort": ["none", "high"],
+            "budget": ["none", "auto"],
+            "output": ["none", "text"],
+        },
+        "prices": [dict(_FREE), _FREE | {"service_tier": "priority"}],
+        "cache_ttl_sec": [300.0, 3600.0],
+        "manage_context_server_side": [False, True],
+        "compaction": ["bespoke", "provider"],
+    }
+    sends = [name for name in model_setting_names() if name != unsent]
+    path = _write(tmp_path / "x.yaml", _model() | every, vendor={"sends": sends})
+    row = _load(path)["example"]
+
+    for name in model_setting_names():
+        offered = row.values(name)
+        if name == unsent:
+            assert offered == (row.default.value(name),)
+        else:
+            assert len(offered) > 1, name
+
+
+def test_a_shared_window_as_large_as_its_input_is_accepted(tmp_path: Path) -> None:
+    window = {"max_request_tokens": 1_000, "max_context_tokens": 1_000}
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+
+    assert _load(path)["example"].limits.max_context_tokens == 1_000
+
+
+def test_a_shared_window_of_one_token_is_still_checked(tmp_path: Path) -> None:
+    window = {"max_request_tokens": 2, "max_context_tokens": 1}
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+    with pytest.raises(ValueError, match="context smaller than its request"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("default", "effort"),
+    [("medium", "low"), ("max", "high"), ("high", "high"), ("none", "none")],
+)
+def test_a_default_effort_tries_down_then_up_then_none(
+    tmp_path: Path,
+    default: str,
+    effort: str,
+) -> None:
+    offered = {
+        "effort": ["none", "low", "high"],
+        "budget": ["none"],
+        "output": ["none"],
+    }
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default=default),
+    )
+    assert _load(path)["example"].default.thinking_effort == effort
+
+
+def test_a_default_effort_falls_as_far_as_the_lowest_level_above_none(
+    tmp_path: Path,
+) -> None:
+    offered = {
+        "effort": ["none", "min", "high"],
+        "budget": ["none"],
+        "output": ["none"],
+    }
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default="medium"),
+    )
+    assert _load(path)["example"].default.thinking_effort == "min"
+
+
+def test_a_budget_with_no_default_is_the_least_committing_offered(
+    tmp_path: Path,
+) -> None:
+    # Alphabetically ``fixed`` comes before ``none``; the ladder says otherwise.
+    offered = {"effort": ["none"], "budget": ["fixed", "none"], "output": ["none"]}
+    path = _write(tmp_path / "x.yaml", _model(thinking=offered))
+
+    assert _load(path)["example"].default.thinking_budget == "none"
+
+
+def test_a_row_offering_one_paid_tier_starts_on_it(tmp_path: Path) -> None:
+    cards = [dict(_FREE), _FREE | {"service_tier": "priority"}]
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=cards),
+        vendor={"service_tier": ["priority"]},
+    )
+    assert _load(path)["example"].default.service_tier == "priority"
+
+
+def test_tiers_banding_at_different_sizes_are_rejected_whatever_a_third_does(
+    tmp_path: Path,
+) -> None:
+    cards = [
+        dict(_FREE),
+        _FREE | {"effective_prompt_tokens": 100},
+        _FREE | {"service_tier": "priority"},
+        _FREE | {"service_tier": "priority", "effective_prompt_tokens": 200},
+        _FREE | {"service_tier": "flex"},
+        _FREE | {"service_tier": "flex", "effective_prompt_tokens": 100},
+        _FREE | {"service_tier": "flex", "effective_prompt_tokens": 200},
+    ]
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+    with pytest.raises(ValueError, match="bands its tiers at different sizes"):
+        _load(path)
+
+
+def test_a_default_effort_above_every_level_falls_to_the_lowest_level(
+    tmp_path: Path,
+) -> None:
+    offered = {"effort": ["none", "high"], "budget": ["none"], "output": ["none"]}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default="min"),
+    )
+    assert _load(path)["example"].default.thinking_effort == "high"
+
+
+def test_a_size_of_one_token_is_a_size(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model(context_size_default=1))
+    _, settings = _load(path).resolve("example-1.0")
+
+    assert settings.context_size.tokens == 1
+
+
+def test_a_card_keeps_every_rate(tmp_path: Path) -> None:
+    price = TokenPrice(
+        request=1.0,
+        response=2.0,
+        cache_write=3.0,
+        cache_write_1h=4.0,
+        cache_read=5.0,
+        tokens_per_unit=1000,
+    )
+    card = {
+        "request": price.request,
+        "response": price.response,
+        "cache_write": price.cache_write,
+        "cache_write_1h": price.cache_write_1h,
+        "cache_read": price.cache_read,
+        "tokens_per_unit": price.tokens_per_unit,
+    }
+    path = _write(tmp_path / "x.yaml", _model(prices=[card]))
+
+    assert _load(path)["example"].prices["auto", 1, date(2026, 1, 1)] == price
+
+
+def test_a_tier_banded_alone_on_one_date_is_one_banding(tmp_path: Path) -> None:
+    """A card of another tier or date, priced flat, does not band apart."""
+    cards = [
+        dict(_FREE),
+        _FREE | {"effective_prompt_tokens": 200},
+        _FREE | {"service_tier": "priority"},
+        _FREE | {"service_tier": "priority", "effective_prompt_tokens": 200},
+        _FREE | {"effective_date": "2027-01-01"},
+    ]
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+
+    assert _load(path)["example"].prices["smallcontext"].tokens == 200
+
+
+def test_a_line_names_a_tier_and_choices_only_where_they_differ() -> None:
+    row = replace(
+        _row(),
+        service_tier=frozenset({"auto", "priority"}),
+        cache_ttl_sec=frozenset({0.0, 300.0}),
+    )
+    chosen = replace(row.default, service_tier="priority", cache_ttl_sec=300.0)
+
+    tags = ModelTags.from_settings(row, chosen)
+
+    assert (tags.service_tier, dict(tags.choices)) == (
+        "priority",
+        {"cache_ttl_sec": "300"},
+    )
+    assert ModelTags.from_settings(row, row.default).service_tier is None
+
+
+def test_a_catalog_naming_a_model_twice_with_one_listed_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model(), _model())
+    with pytest.raises(ValueError, match="twice"):
+        _load(path)
+
+
+class _Plain(yaml.SafeDumper):
+    """Writes a value shared between two places twice, never as an alias."""
+
+    @override
+    def ignore_aliases(self, data: object) -> bool:
+        del data
+        return True
+
+
+def test_models_reads_a_packages_own_catalog_once() -> None:
+    table = models(anthropic, section="anthropic-cli")
+    assert table is models(anthropic, section="anthropic-cli")
+    assert table["default"].model_id in table
+
+
+def test_every_config_dir_without_a_catalog_shares_immutable_shipped_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = models(anthropic, section="anthropic-cli")
+    monkeypatch.setattr(provider_table, "config_dir", lambda: tmp_path / "elsewhere")
+    other = models(anthropic, section="anthropic-cli")
+    assert other == table
+    assert other.rows[0].limits is table.rows[0].limits
+    assert other.rows[0].prices.prices is not table.rows[0].prices.prices
+
+
+def test_models_refuses_a_section_the_catalog_lacks() -> None:
+    with pytest.raises(ValueError, match="no section 'nowhere'"):
+        models(anthropic, section="nowhere")
+
+
+def test_absent_user_catalogs_reuse_the_shipped_parse_without_sharing_prices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded: list[str] = []
+    original = ModelTable.from_yaml
+
+    def counted(path: Traversable, *, section: str) -> ModelTable:
+        loaded.append(str(path))
+        return original(path, section=section)
+
+    monkeypatch.setattr(ModelTable, "from_yaml", counted)
+    first = models(anthropic, section="anthropic-cli")
+    before = list(loaded)
+    monkeypatch.setattr(provider_table, "config_dir", lambda: tmp_path)
+    second = models(anthropic, section="anthropic-cli")
+    assert loaded == before
+    assert first == second
+    assert second is models(anthropic, section="anthropic-cli")
+    prices = first.rows[0].prices.prices
+    assert isinstance(prices, dict)
+    condition = next(iter(prices))
+    original_price = prices[condition]
+    try:
+        prices[condition] = replace(original_price, request=original_price.request + 1)
+        assert second.rows[0].prices.prices[condition] == original_price
+    finally:
+        prices[condition] = original_price
+
+
+def test_a_catalog_added_after_the_first_lookup_waits_for_restart() -> None:
+    table = models(anthropic, section="anthropic-cli")
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / "anthropic-cli.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("invalid after the catalog was first read")
+    assert models(anthropic, section="anthropic-cli") is table
+
+
+class _Served(HasModels):
+    """A provider class that names its catalog and section, and nothing else."""
+
+    package: ClassVar[ModuleType] = anthropic
+    section: ClassVar[str] = "anthropic-cli"
+
+
+def test_a_catalogued_class_serves_its_sections_models() -> None:
+    assert _Served.models() is models(anthropic, section="anthropic-cli")
+
+
+@pytest.mark.parametrize("section", ["anthropic", "anthropic-cli"])
+@pytest.mark.parametrize("model_id", ["deployment-1.0", "deployment-2.0"])
+def test_user_catalog_replaces_models_prices_and_settings(
+    section: str,
+    model_id: str,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / f"{section}.yaml"
+    path.parent.mkdir(parents=True)
+    _write(
+        path,
+        _model(
+            model_id,
+            wire_model_id="caller/deployment",
+            prices=[_FREE | {"request": 2.0, "response": 8.0}],
+            thinking=_EVERY,
+            thinking_effort_default="high",
+        ),
+        extra={
+            "providers": {
+                section: {
+                    "sends": ["thinking_effort"],
+                    "roles": {"default": model_id},
+                },
+                "unused": {"sends": []},
+            },
+        },
+    )
+
+    table = models(anthropic, section=section)
+
+    assert list(table) == [model_id]
+    row = table["default"]
+    assert row.wire_model_id == "caller/deployment"
+    assert row.prices["auto", 1, date.min] == TokenPrice(request=2.0, response=8.0)
+    assert row.thinking_effort == {"none", "low", "high"}
+    assert row.default.thinking_effort == "high"
+    assert row.thinking_budget == {"none"}
+    assert table is models(anthropic, section=section)
+    if section == _Served.section:
+        assert _Served.models() is table
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("models: []\nmodels: []", "given twice"),
+        ("models: []\nproviders: {other: {sends: []}}", "no section 'anthropic-cli'"),
+        (
+            "models: []\nproviders: {anthropic-cli: {}}",
+            "does not say what it sends",
+        ),
+    ],
+)
+def test_invalid_user_catalog_raises_instead_of_using_shipped_models(
+    text: str,
+    message: str,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / "anthropic-cli.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+
+    with pytest.raises(ValueError, match=message):
+        _Served.models()
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)
