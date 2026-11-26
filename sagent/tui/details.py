@@ -58,7 +58,7 @@ def entries(agent: Agent) -> list[tuple[str, str]]:
                 tool = agent.tools.get("Write")
                 if tool and tool.display.output.lines != (0, 0):
                     items.append(
-                        (f"Write {result.path or ''}", write_diff(result.content))
+                        (f"Write {result.path or ''}", write_diff(result.content)),
                     )
     return items
 
@@ -106,10 +106,12 @@ async def inspect(items: list[tuple[str, str]], number: int) -> None:
             body,
             search,
             Label("Ctrl+P/N previous/next   Ctrl+F search   Esc close"),
-        ]
+        ],
     )
     app: Application[None] = Application(
-        layout=Layout(layout, focused_element=body), key_bindings=keys, full_screen=True
+        layout=Layout(layout, focused_element=body),
+        key_bindings=keys,
+        full_screen=True,
     )
     await app.run_async()
 
@@ -118,6 +120,7 @@ def _display(body: TextArea, items: list[tuple[str, str]], position: int) -> int
     """Replace the read-only document and return the cursor to its start."""
     index = max(0, min(position, len(items) - 1))
     body.buffer.set_document(
-        Document(items[index][1], cursor_position=0), bypass_readonly=True
+        Document(items[index][1], cursor_position=0),
+        bypass_readonly=True,
     )
     return index
