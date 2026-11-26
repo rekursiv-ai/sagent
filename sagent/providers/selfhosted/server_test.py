@@ -1077,47 +1077,30 @@ async def test_the_reply_is_the_tokens_after_the_prompt(
     assert response.tokens == TokenCount(request=5, response=4)
 
 
-@pytest.mark.parametrize(
-    "where",
-    [
-        # No storage, so no kernel: only where the prompt was moved is read.
-        "meta",
-        pytest.param(
-            "cuda:0",
-            marks=[
-                pytest.mark.gpu_torch_cuda,
-                pytest.mark.skipif(
-                    not torch.cuda.is_available(),
-                    reason="requires CUDA",
-                ),
-            ],
-        ),
-    ],
-)
 @pytest.mark.asyncio
 async def test_the_prompt_is_moved_to_the_models_device(
     monkeypatch: pytest.MonkeyPatch,
-    where: str,
 ) -> None:
-    device = torch.device(where)
-    seen: list[torch.device] = []
+    # Only the device asked for is read: a real move would need that device, and a
+    # meta tensor loads torch's meta kernels, 0.2 s.
+    device = torch.device("cuda", 7)
+    sent: list[object] = []
+
+    def to(self: Tensor, where: object) -> Tensor:
+        sent.append(where)
+        return self
 
     @dataclass(slots=True, kw_only=True)
     class _On(_Generator):
         @override
-        def generate(self, inputs: Tensor, **kwargs: object) -> Tensor:
-            seen.append(inputs.device)
-            prompt = torch.zeros(inputs.shape, dtype=inputs.dtype)
-            return _Generator.generate(self, prompt, **kwargs)
-
-        @override
         def parameters(self) -> Iterator[nn.Parameter]:
-            yield nn.Parameter(torch.zeros(1, device=device))
+            yield cast("nn.Parameter", SimpleNamespace(device=device))
 
+    monkeypatch.setattr(Tensor, "to", to)
     model = _served(monkeypatch, model=_On())
     _ = await _reply(model)
 
-    assert seen == [device]
+    assert sent == [device]
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,6 @@ import time
 
 from hypothesis import (
     given,
-    settings,
     strategies as st,
 )
 from treekle import PlainTree
@@ -2362,7 +2361,6 @@ def _records(entry: ModelContextEvent) -> tuple[SessionRecord, ...]:
     return entry.records if isinstance(entry, Response) else ()
 
 
-@settings(max_examples=60, deadline=None)
 @given(
     st.lists(_LAW_ACTIONS, max_size=14),
     st.lists(st.lists(st.integers(0, 5), max_size=2), max_size=10),
@@ -2375,7 +2373,6 @@ def test_every_request_any_inputs_lead_to_is_sendable_and_every_one_ends(
     asyncio.run(_laws_hold(actions, replies))
 
 
-@settings(max_examples=25, deadline=None)
 @given(st.lists(st.sampled_from([*_HALTED_VERBS, "release"]), max_size=5))
 def test_a_halt_waits_for_the_user_whatever_else_arrives(actions: list[str]) -> None:
     """Verbs act at once; only the user's next message calls the model again."""
@@ -9227,7 +9224,6 @@ def _user_side(
 # The request (old: _label_agent_sends, materialize_messages).
 
 
-@settings(max_examples=50, deadline=None)
 @given(_message_history())
 def test_the_request_carries_each_entry_as_taped(
     history: list[ModelContextEvent],
@@ -9248,7 +9244,6 @@ def test_the_request_carries_each_entry_as_taped(
             assert labeled_text(record) == f"{prefix}{record.content}"
 
 
-@settings(max_examples=50, deadline=None)
 @given(_message_history())
 def test_the_request_keeps_every_model_turn_text(
     history: list[ModelContextEvent],
@@ -9265,7 +9260,6 @@ def test_the_request_keeps_every_model_turn_text(
     assert sent == model_texts
 
 
-@settings(max_examples=100, deadline=None)
 @given(
     _SENDERS,
     st.one_of(
@@ -9291,7 +9285,6 @@ def test_labeling_is_idempotent(sender: str, text: str) -> None:
 # The request's merge of user-side turns.
 
 
-@settings(max_examples=50, deadline=None)
 @given(st.lists(_ENTRY, max_size=10))
 def test_coalescing_keeps_every_sender(entries: list[ModelContextEvent]) -> None:
     """Each peer is still named, as the sender of a turn or as a label in one.
@@ -9313,7 +9306,6 @@ def test_coalescing_keeps_every_sender(entries: list[ModelContextEvent]) -> None
     assert not missing, f"senders lost: {missing!r}; context={out!r}"
 
 
-@settings(max_examples=50, deadline=None)
 @given(st.lists(_ENTRY, max_size=10))
 def test_coalescing_loses_no_user_side_text(entries: list[ModelContextEvent]) -> None:
     r"""Every message's text survives a merge; merges only add ``\n\n`` and labels."""
@@ -9323,7 +9315,6 @@ def test_coalescing_loses_no_user_side_text(entries: list[ModelContextEvent]) ->
     assert all(any(text in merged for merged in out) for text in given_texts)
 
 
-@settings(max_examples=50, deadline=None)
 @given(st.lists(_ENTRY, max_size=10))
 def test_coalescing_keeps_the_order_of_everything_else(
     entries: list[ModelContextEvent],
@@ -9344,7 +9335,6 @@ def test_coalescing_keeps_the_order_of_everything_else(
 # The rescue path (old: _sanitize_for_send, splice_safe_repair).
 
 
-@settings(max_examples=60, deadline=None)
 @given(_unique_id_history())
 def test_sanitizing_answers_every_call_exactly_once(
     history: list[ModelContextEvent],
@@ -9355,7 +9345,6 @@ def test_sanitizing_answers_every_call_exactly_once(
     assert violation is None, f"{violation}: {out!r}"
 
 
-@settings(max_examples=45, deadline=None)
 @given(_message_history())
 def test_the_rescue_barrier_always_builds(history: list[ModelContextEvent]) -> None:
     """The rescue splice constructs for ANY tape, ids colliding across turns.
@@ -9376,7 +9365,6 @@ def test_the_rescue_barrier_always_builds(history: list[ModelContextEvent]) -> N
     assert rt.tape.context().messages == list(splice_safe_repair(history))
 
 
-@settings(max_examples=60, deadline=None)
 @given(_unique_id_history(notes=False))
 def test_sanitizing_is_idempotent(history: list[ModelContextEvent]) -> None:
     """A repair that is not a fixed point rewrites a valid context every pass.
@@ -9389,7 +9377,6 @@ def test_sanitizing_is_idempotent(history: list[ModelContextEvent]) -> None:
     assert splice_safe_repair(once) == once
 
 
-@settings(max_examples=60, deadline=None)
 @given(_unique_id_history())
 def test_sanitizing_answers_only_calls_that_were_made(
     history: list[ModelContextEvent],
@@ -9409,7 +9396,6 @@ def test_sanitizing_answers_only_calls_that_were_made(
     assert answered <= made
 
 
-@settings(max_examples=40, deadline=None)
 @given(_alternating_history())
 def test_sanitizing_an_alternating_history_gives_a_valid_context(
     history: list[ModelContextEvent],
