@@ -11,7 +11,6 @@ import re
 
 from hypothesis import (
     given,
-    settings,
     strategies as st,
 )
 
@@ -1262,7 +1261,6 @@ def _user_side(
     return [e for e in entries if isinstance(e, (UserMessage, AgentMessage))]
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_coalescing_still_names_every_peer(history: list[ModelContextEvent]) -> None:
     """A merge across senders demotes to a user turn; each part keeps its label."""
@@ -1274,7 +1272,6 @@ def test_coalescing_still_names_every_peer(history: list[ModelContextEvent]) -> 
             assert entry.sender in senders or f"[from {entry.sender}]: " in labeled
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_coalescing_loses_no_user_side_text(history: list[ModelContextEvent]) -> None:
     out = [e.content or "" for e in _user_side(coalesce_roles(history))]
@@ -1283,7 +1280,6 @@ def test_coalescing_loses_no_user_side_text(history: list[ModelContextEvent]) ->
     assert sum(map(len, out)) >= sum(map(len, given_texts))
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_coalescing_keeps_the_order_of_results_notes_and_model_text(
     history: list[ModelContextEvent],
@@ -1293,14 +1289,12 @@ def test_coalescing_keeps_the_order_of_results_notes_and_model_text(
     assert _model_said(out) == _model_said(history)
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_coalescing_is_idempotent(history: list[ModelContextEvent]) -> None:
     once = coalesce_roles(history)
     assert coalesce_roles(once) == once
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_repair_answers_every_call_exactly_once(
     history: list[ModelContextEvent],
@@ -1309,7 +1303,6 @@ def test_repair_answers_every_call_exactly_once(
     assert _pairing_violation(tape._pair_and_dedup_tool_calls(history)) is None
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_splice_safe_repair_always_builds_a_splice(
     history: list[ModelContextEvent],
@@ -1320,7 +1313,6 @@ def test_splice_safe_repair_always_builds_a_splice(
     assert _splice(replacement=replacement).replacement == replacement
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_splice_safe_repair_is_idempotent(history: list[ModelContextEvent]) -> None:
     """A repair that is not a fixed point rewrites a valid context on every pass."""
@@ -1359,7 +1351,6 @@ def test_a_repair_that_never_settles_stops_after_a_pass_per_entry(
     assert len(passes) == len(history)
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_splice_safe_repair_answers_only_calls_that_were_made(
     history: list[ModelContextEvent],
@@ -1376,7 +1367,6 @@ def test_splice_safe_repair_answers_only_calls_that_were_made(
     assert answered <= made
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories())
 def test_splice_safe_repair_output_is_a_valid_context(
     history: list[ModelContextEvent],
@@ -1457,7 +1447,6 @@ def test_repair_drops_a_result_here_of_an_id_answered_elsewhere_and_called_here(
     )
 
 
-@settings(max_examples=60, deadline=None)
 @given(_histories(), st.frozensets(_call_ids()))
 def test_repair_leaves_external_calls_open_and_declares_only_them(
     history: list[ModelContextEvent],
