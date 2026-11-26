@@ -524,7 +524,7 @@ def test_where_recall_searches_is_exported_only_with_recall_among_the_tools() ->
 
 def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> None:
     names = _names(_Desk())
-    assert names[:14] == [
+    assert names[:15] == [
         "quit",
         "exit",
         "help",
@@ -536,11 +536,12 @@ def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> Non
         "send",
         "focus",
         "defer",
+        "pending",
         "tasks",
         "login",
         "login.precedence",
     ]
-    assert names[14:16] == ["model", "model.provider"]
+    assert names[15:17] == ["model", "model.provider"]
     assert names.index("tool.Echo.display.command.lines") < names.index(
         "tool.Plain.display.command.lines",
     )
@@ -578,6 +579,7 @@ def test_each_action_says_how_it_is_typed_and_what_it_does() -> None:
         (("send",), "AGENTS TEXT", "message agents, or run a /COMMAND on them"),
         (("focus",), "LABEL", "show another agent; what you type goes to it"),
         (("defer",), "TEXT", "send once the agent idles (Tab)"),
+        (("pending",), "", "show reported progress, pending work and user actions"),
         (("tasks",), "", "list running tool calls"),
         (
             ("login",),
@@ -590,6 +592,24 @@ def test_each_action_says_how_it_is_typed_and_what_it_does() -> None:
             "the order a provider's logins take the model, as quotas run out",
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_pending_reads_locally_without_starting_a_turn() -> None:
+    desk = _Desk()
+    await desk.commands("/pending")
+    assert any("No pending work reported." in text for _, text in desk.printer.printed)
+    assert desk.pushed() == []
+
+
+@pytest.mark.asyncio
+async def test_pending_from_a_worker_reads_the_root_and_rejects_extra_args() -> None:
+    desk, _ = _teamed("kid")
+    assert desk.team is not None
+    commands = await desk.commands.child_commands(desk.team, "kid")
+    assert await commands._pending("") == "No pending work reported."
+    with pytest.raises(SettingError, match="takes no arguments"):
+        await commands._pending("typo")
 
 
 def test_the_actions_that_say_more_say_it() -> None:

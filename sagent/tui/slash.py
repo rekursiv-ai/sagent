@@ -54,6 +54,7 @@ import logging
 import os
 import re
 
+from sagent.agent.checkpoints import pending_text
 from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
 from sagent.journal.types import (
@@ -334,6 +335,11 @@ class Commands:
                 help_short="send once the agent idles (Tab)",
                 usage="TEXT",
                 run=Commands._defer,
+            ),
+            Action(
+                name=("pending",),
+                help_short="show reported progress, pending work and user actions",
+                run=Commands._pending,
             ),
             Action(
                 name=("tasks",),
@@ -653,6 +659,20 @@ class Commands:
             known = ", ".join(sorted(labels)) or "none"
             raise SettingError(f"no agent {pattern!r}; agents: {known}")
         return [(label, team[label]) for label in matched]
+
+    async def _pending(self, args: str) -> str:
+        if args:
+            raise SettingError("/pending takes no arguments")
+        agent = self.agent
+        if self.team is not None:
+            label = agent.runtime.tool_context.label
+            while (
+                label in self.team and (parent := self.team.parent(label)) is not None
+            ):
+                label = parent
+            if label in self.team:
+                agent = self.team[label]
+        return pending_text(agent.session) or "No pending work reported."
 
     async def _kill(self, args: str) -> str:
         jobs = self.agent.runtime.jobs

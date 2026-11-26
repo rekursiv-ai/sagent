@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, override
 import asyncio
 import logging
 
+from sagent.agent.checkpoints import pending_text
 from sagent.agent.types import Agent
 from sagent.tui.console import Title
 from sagent.tui.prompt import (
@@ -137,8 +138,21 @@ class Views:
         )
 
     def toolbar(self) -> str:
-        """Return the shown agent's status line."""
-        return self.current.status.frame()
+        """Return the status and highest-priority reported handoff.
+
+        Returns:
+          toolbar: The lines beneath the prompt.
+
+        """
+        return "\n".join(
+            filter(
+                None,
+                (
+                    self.current.status.frame(),
+                    pending_text(self._root.session, brief=True),
+                ),
+            ),
+        )
 
     def screen(self, label: str) -> ThinkingView:
         """Return ``label``'s screen settings; the printer follows the shown agent's.

@@ -554,7 +554,7 @@ async def run(
                     lambda: Frame(
                         deferred=views.current.deferred.frame(),
                         input=entry.frame(),
-                        status=views.current.status.frame(),
+                        status=views.toolbar(),
                     ),
                 ),
             ),

@@ -238,3 +238,5 @@ Weekly limit reached. Resumes Sat Oct 31 06:00:00 (1d 22h 3m 5s).
 
 The `stream-json` output channel forwards the same text as a
 `text/x-notice` record.
+
+Workers can report progress, a wait, or a requested user action with AgentSelf. The toolbar shows one reported item, with user actions first. Use `/pending` to see all reports. These are the last reports saved by the workers and can be read after restarting the session.

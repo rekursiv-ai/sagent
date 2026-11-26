@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, ca
 
 from treekle import PlainTree, from_plain
 
+from sagent.agent.checkpoints import Checkpoint, report
 from sagent.agent.team import Team
 from sagent.journal.types import AgentSelfResult
 from sagent.model.capability import (
@@ -73,6 +74,10 @@ class AgentSelf:
         status: Annotated[str | None, "3-7 words naming what the session is about."] = (
             None
         )
+        checkpoint: Annotated[
+            Checkpoint | None,
+            "Report progress, pending work and user_action; null clears the report.",
+        ] = None
         peer_messaging: Annotated[
             bool | None,
             "Participate in cross-session discovery and messaging; on by default.",
@@ -173,6 +178,8 @@ class AgentSelf:
             agent=a.agent,
         )
         label = agent.runtime.tool_context.label
+        if a.checkpoint is not None and not a.checkpoint.progress.strip():
+            raise ValueError("checkpoint progress must contain text")
         model = await self._model(agent, a)
         target = model if model is not None else agent.model
         settings = target.settings
@@ -222,6 +229,14 @@ class AgentSelf:
         if a.status is not None:
             agent.runtime.publish(types.SessionTitleChanged(title=a.status))
             lines.append(f"status: {a.status}")
+        if "checkpoint" in arguments:
+            root = label
+            while (parent := self.team.parent(root)) is not None:
+                root = parent
+            report(self.team[root].session, label, a.checkpoint)
+            lines.append(
+                "checkpoint cleared" if a.checkpoint is None else "checkpoint recorded",
+            )
         if a.diagnostics:
             lines.extend(_diagnostics(agent, label=label))
         if a.catalog == "providers":

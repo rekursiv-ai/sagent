@@ -15,7 +15,9 @@ import runpy
 import pytest
 
 from sagent.agent.agent import Agent
+from sagent.agent.checkpoints import pending_text
 from sagent.agent.team import Team
+from sagent.journal.jsonl import JsonlJournal
 from sagent.journal.types import AgentSelfResult
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
@@ -753,6 +755,67 @@ class _Asked:
         del errors, newline
         self.encodings[path.name] = encoding
         return path.read_bytes().decode()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_survives_resume_and_clears(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    catalog = ModelCatalog(factories={"scripted": ScriptedProvider})
+    data: dict[str, PlainTree] = {
+        "progress": "Fetched files",
+        "pending": "Review",
+        "user_action": "Choose version",
+    }
+    async with (
+        JsonlJournal(path) as journal,
+        Team(catalog=catalog) as team,
+        Agent(model=catalog["scripted"]["scripted"], journal=journal) as root,
+    ):
+        team.join(root)
+        worker = Agent(model=catalog["scripted"]["scripted"])
+        team.join(worker, label="worker", parent="Agent")
+        tool = AgentSelf(team=team)
+        await _patch(tool, tmp_path, {"checkpoint": data}, label="worker")
+        count = len(list(root.session.history()))
+        await _patch(tool, tmp_path, {"checkpoint": data}, label="worker")
+        assert len(list(root.session.history())) == count
+    async with (
+        JsonlJournal(path) as journal,
+        Team(catalog=catalog) as team,
+        Agent(model=catalog["scripted"]["scripted"], journal=journal) as root,
+    ):
+        team.join(root)
+        assert (
+            pending_text(root.session, brief=True)
+            == "worker: Action needed: Choose version"
+        )
+        assert "Waiting: Review" in pending_text(root.session)
+        worker = Agent(model=catalog["scripted"]["scripted"])
+        team.join(worker, label="worker", parent="Agent")
+        await _patch(
+            AgentSelf(team=team),
+            tmp_path,
+            {"checkpoint": None},
+            label="worker",
+        )
+        assert pending_text(root.session) == ""
+
+
+@pytest.mark.asyncio
+async def test_invalid_checkpoint_rejects_the_whole_patch(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+    seen: list[RuntimeEvent] = []
+    agent.runtime.observers.append(seen.append)
+    with pytest.raises(ValueError, match="progress must contain text"):
+        await _patch(
+            tool,
+            tmp_path,
+            {
+                "status": "New title",
+                "checkpoint": {"progress": " ", "pending": "", "user_action": ""},
+            },
+        )
+    assert seen == []
 
 
 if __name__ == "__main__":
