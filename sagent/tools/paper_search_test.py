@@ -157,7 +157,7 @@ async def test_partial_empty_results_do_not_diagnose_the_query(
 ) -> None:
     _searches(monkeypatch, SearchResult(records=[], total=0, complete=False))
     output = await settled(
-        _tool().call(ToolContext(cwd=tmp_path), {"query": "rare topic"})
+        _tool().call(ToolContext(cwd=tmp_path), {"query": "rare topic"}),
     )
     assert "no results in the retrieved portion" in output.text()
     assert "drop the most specific term" not in output.text()
