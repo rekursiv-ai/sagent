@@ -1,1 +1,1 @@
-"""Moonshot provider family: transport modules and the model catalog."""
+"""Kimi through Moonshot AI, over Chat Completions."""

@@ -1,0 +1,1 @@
+Resume work immediately without preamble. Do not reference or acknowledge this summary, do not recap prior work, and do not use transition phrases ("I'll continue", "picking up where we left off", etc.). Proceed as though no interruption occurred.

@@ -1,2644 +1,2608 @@
-"""Tests for ``tools.agent_spawn``: child-agent factory & dispatch."""
+"""Tests for AgentSpawn: children that run a task, or stay, and come back on resume."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final, override
-from typing_extensions import TypedDict
-from unittest.mock import MagicMock, patch
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
+from datetime import UTC, datetime
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, override
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import asyncio
-import itertools
-import json
 import logging
-import time
+import os
+import runpy
+import uuid
+
+from treekle import PlainTree
 
 import pytest
 
-from sagent.agent.agent import Agent
-from sagent.agent.state import (
-    agent_counter_var,
-    agent_label_var,
-    agent_path_var,
-    agent_registry,
-    current_agent_var,
-    max_depth_var,
-    tool_state_var,
-)
-from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.tool_validation import validate_tool_input
-from sagent.providers import PROVIDER_NAMES
-from sagent.testing import MockModelCaps
-from sagent.tools import agent_spawn
-from sagent.tools.agent_self import plan_model_options
-from sagent.tools.agent_spawn import (
-    AgentSpawn,
-    ChildStats,
-    _ChildForwarder,
-    _last_agent_send_content,
-    _last_assistant_result,
-    _persistent_tasks,
-    _pick_field,
-)
-from sagent.tools.background_task import BackgroundTask
-from sagent.types.capability import ModelCapability, ThinkingEffort
-from sagent.types.cost import TokenCost
-from sagent.types.model import (
-    Model,
-    ModelRecipe,
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
+from sagent.agent.agent import Agent, NoShrinker, RuntimeSession, spent
+from sagent.agent.agents_md import AgentsMdConfig
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
+from sagent.agent.team import ChildSpec, MessageKind, Team
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.types import (
     AgentIdle,
-    AgentSendMessage,
+    AgentMessage,
+    AgentSpawnResult,
     AssistantMessage,
-    ChildDoneEvent,
-    ChildEvent,
-    ModelIdle,
-    ModelResponseCancelled,
-    ModelResponseComplete,
-    ModelResponsePartial,
-    ModelServiceSuspended,
-    NoticeMessage,
-    RuntimeEvent,
-    ServiceErrorSnapshot,
-    ToolCall,
-    ToolResult,
+    Cancelled,
+    ContextClear,
+    Failed,
+    Outcome,
+    Succeeded,
+    SystemMessage,
+    ToolMessage,
+    UncategorizedRecord,
+    UncategorizedToolResult,
     UserMessage,
 )
-from sagent.types.tools import ToolResultPolicy
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
+from sagent.model.exceptions import OverloadedError, RateLimitedError
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
+)
+from sagent.model.types import Response
+from sagent.providers.catalog import CachedModel, ModelCatalog
+from sagent.providers.table import ModelTable
+from sagent.runtime import types
+from sagent.runtime.exceptions import BudgetExhaustedError
+from sagent.runtime.types import RuntimeEvent, ToolWakeSchedules
+from sagent.tools import agent_spawn
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.display import ToolDisplay
+from sagent.tools.skill import Skill
+from sagent.tools.types import (
+    Stream,
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    settled,
+    whole_output,
+)
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
-    from pathlib import Path
-
-    from sagent.types.providers import Provider
-    from sagent.types.tools import Tool
+    from sagent.agent.types import Factory, Journal, Shrinker
+    from sagent.model.types import Request
+    from sagent.providers.types import ProviderFactory, ProviderResources
 
 
-_AGENT_SPAWN_LOGGER = agent_spawn.__name__
+@pytest.fixture(autouse=True)
+def isolate_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the children's git probe and default directory inside ``tmp_path``."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
 
 
-class _SpawnScope(TypedDict, closed=True):
-    child_path: str
-    eff_max_depth: int | None
-
-
-# Spawn-tree position of a root agent's first child, uncapped.
-_ROOT_SCOPE: Final[_SpawnScope] = {"child_path": "0", "eff_max_depth": None}
+def _capability(model_id: str) -> ModelCapability:
+    prices = PriceCatalog(window=200_000)
+    return ModelCapability(
+        model_id=model_id,
+        limits=ModelLimits(max_request_tokens=200_000, max_response_tokens=8_000),
+        prices=prices,
+        thinking_effort=frozenset({"none", "low", "high"}),
+        thinking_budget=frozenset({"none", "auto"}),
+        thinking_output=frozenset({"none", "text"}),
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
 
 
 @dataclass(slots=True, kw_only=True)
-class StubProviderModel(MockModelCaps):
-    """Scripted provider model. Always returns one response then `done`."""
+class _Tool:
+    """A tool for the parent to hand down."""
 
-    model_id: str = "stub"
-    max_request_tokens: int = 100_000
-    responses: list[AssistantMessage] = field(default_factory=list)
-    _idx: int = field(default=0, init=False)
+    name: str
+    description: str = "A tool."
+    schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": dict[str, PlainTree](),
+        },
+    )
+    display: ToolDisplay = field(default_factory=ToolDisplay)
 
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
 
-    async def stream(
+    def serialize_key(
         self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        idx = self._idx
-        self._idx += 1
-        msg = (
-            self.responses[idx]
-            if idx < len(self.responses)
-            else AssistantMessage(text="ok")
-        )
-        return ModelResponse(message=msg)
-
-
-def _make_parent(model: StubProviderModel | None = None) -> Agent:
-    """Build a minimal parent ``Agent`` with no tools."""
-    m = model or StubProviderModel(responses=[AssistantMessage(text="root")])
-    return Agent(model=m, tools=[])
-
-
-def _stub_provider_model(model_id: str) -> StubProviderModel:
-    """``provider.model`` side_effect: a stub model for any requested id."""
-    del model_id
-    return StubProviderModel(model_id="stub")
-
-
-def test_pick_field_priority() -> None:
-    assert _pick_field("a", "b", "c") == "a"
-    assert _pick_field(None, "b", "c") == "b"
-    assert _pick_field(None, None, "c") == "c"
-    assert _pick_field(None, None, None) is None
-
-
-def test_last_assistant_result_finds_last() -> None:
-    history = [
-        AssistantMessage(text="first"),
-        AssistantMessage(text="second"),
-    ]
-    r = _last_assistant_result(list(history))
-    assert r.content == "second"
-
-
-def test_last_assistant_result_empty_history() -> None:
-    r = _last_assistant_result([])
-    assert r.content == ""
-
-
-def test_last_assistant_result_two_agent_sends_returns_last() -> None:
-    """Two AgentSends in the same turn -- return the most recent one.
-
-    The child emitted two sends in parallel; the last one in tool-call
-    order is the most recent message the child wanted to deliver.
-    Returning the first one buries the more current content.
-    """
-    history = [
-        UserMessage(text="kick"),
-        AssistantMessage(
-            tool_calls=(
-                ToolCall(
-                    id="t1",
-                    name="AgentSend",
-                    args={"to": "parent", "content": "first send"},
-                ),
-                ToolCall(
-                    id="t2",
-                    name="AgentSend",
-                    args={"to": "parent", "content": "second send"},
-                ),
-            ),
-        ),
-        ToolResult(call_id="t1", content="ok"),
-        ToolResult(call_id="t2", content="ok"),
-        AssistantMessage(text="Done."),
-    ]
-    r = _last_assistant_result(list(history))
-    assert r.content == "second send", (
-        f"two-AgentSends-in-one-turn must return the last send (most"
-        f" recent intent), not the first; got {r.content!r}"
-    )
-
-
-def test_last_assistant_result_does_not_return_stale_agent_send() -> None:
-    """An ancient ``AgentSend`` content must NOT shadow a newer text turn.
-
-    The child made an AgentSend in turn 1, then moved on and produced
-    a new text-only assistant reply in turn N. The "most recent reply"
-    is turn N, not turn 1's AgentSend. The walk must stop at the most
-    recent assistant turn, not scan the whole history for any
-    AgentSend ever.
-    """
-    history = [
-        UserMessage(text="kick"),
-        AssistantMessage(
-            tool_calls=(
-                ToolCall(
-                    id="t1",
-                    name="AgentSend",
-                    args={"to": "parent", "content": "OLD AGENTSEND"},
-                ),
-            ),
-        ),
-        ToolResult(call_id="t1", content="ok"),
-        AssistantMessage(text="Done."),
-        UserMessage(text="another kick"),
-        AssistantMessage(text="real recent reply"),
-    ]
-    r = _last_assistant_result(list(history))
-    assert r.content == "real recent reply", (
-        f"stale AgentSend shadowed the actual most recent reply; got {r.content!r}"
-    )
-
-
-def test_last_assistant_result_returns_empty_for_empty_last_text() -> None:
-    """If the most recent assistant turn has empty text, return empty --
-    don't skip back to an older non-empty turn.
-
-    The blocking-spawn caller uses this as the child's reply. If the
-    child finished with an empty turn (e.g. only thinking blocks or
-    only non-AgentSend tool calls), the right return is empty -- not
-    ancient content from a much earlier turn that the child has since
-    moved past.
-    """
-    history = [
-        AssistantMessage(text="old answer the user has since moved past"),
-        UserMessage(text="follow-up"),
-        AssistantMessage(text=""),
-    ]
-    r = _last_assistant_result(list(history))
-    assert r.content == "", (
-        "fallback must respect the actual most-recent assistant turn;"
-        f" returning {r.content!r} surfaces stale content"
-    )
-
-
-def test_metadata_basics() -> None:
-    t = AgentSpawn()
-    assert t.name == "AgentSpawn"
-    assert t.tool_id == "application/x-tool-agentspawn"
-
-
-def test_summary_short_and_long() -> None:
-    t = AgentSpawn()
-    assert t.summary({"prompt": "go"}) == "AgentSpawn go"
-    long = "x" * 100
-    assert t.summary({"prompt": long}) == f"AgentSpawn {long}"
-    assert t.summary({"prompt": "go", "model_id": "m1"}) == "AgentSpawn go [m1]"
-    assert t.summary({}) == "AgentSpawn"
-
-
-def test_prompt_no_cap() -> None:
-    t = AgentSpawn()
-    token = max_depth_var.set(None)
-    try:
-        assert t.prompt() == ""
-    finally:
-        max_depth_var.reset(token)
-
-
-def test_prompt_with_remaining_budget() -> None:
-    t = AgentSpawn()
-    token = max_depth_var.set(3)
-    try:
-        p = t.prompt()
-    finally:
-        max_depth_var.reset(token)
-    assert "depth 0/3" in p
-    # 3 generations -> plural "generations".
-    assert "3 generations" in p
-
-
-def test_prompt_leaf_at_cap() -> None:
-    t = AgentSpawn()
-    token = max_depth_var.set(0)
-    try:
-        p = t.prompt()
-    finally:
-        max_depth_var.reset(token)
-    assert "leaf agent" in p
-
-
-@contextmanager
-def _parent_context(parent: Agent, *, label: str = "Agent") -> Generator[None]:
-    """Install minimal parent contextvars for the block."""
-    agent_t = current_agent_var.set(parent)
-    path_t = agent_path_var.set("")
-    label_t = agent_label_var.set(label)
-    counter_t = agent_counter_var.set(itertools.count())
-    state_t = tool_state_var.set(parent.tool_state)
-    try:
-        yield
-    finally:
-        tool_state_var.reset(state_t)
-        agent_counter_var.reset(counter_t)
-        agent_label_var.reset(label_t)
-        agent_path_var.reset(path_t)
-        current_agent_var.reset(agent_t)
-
-
-@pytest.mark.asyncio
-async def test_run_depth_cap_exceeded() -> None:
-    parent = _make_parent()
-    parent.tool_state.depth = 5
-    token = max_depth_var.set(2)
-    try:
-        with _parent_context(parent):
-            t = AgentSpawn()
-            result = await t.run({"prompt": "task"})
-    finally:
-        max_depth_var.reset(token)
-    assert result.is_error
-    assert "max_depth" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_without_current_agent_returns_error() -> None:
-    """Root use (no ``current_agent_var``) must not assertion-crash.
-
-    ``AgentSpawn._run_oneshot_child`` later asserts ``parent_agent is not
-    None``; if the run path admits a ``None`` parent we hit a bare
-    ``AssertionError`` that escapes the tool envelope. Reject early
-    with a clean ``ToolResult(is_error=True)`` so a tool-call from a
-    root context surfaces a structured message instead of an unhandled
-    exception.
-    """
-    parent = _make_parent()
-    # Install the minimal contextvars so the depth-cap check passes,
-    # but explicitly clear ``current_agent_var`` (root use) to model
-    # the "tool fired without an active agent" path.
-    path_t = agent_path_var.set("")
-    label_t = agent_label_var.set("Agent")
-    counter_t = agent_counter_var.set(itertools.count())
-    state_t = tool_state_var.set(parent.tool_state)
-    agent_t = current_agent_var.set(None)
-    try:
-        t = AgentSpawn()
-        result = await t.run({"prompt": "task"})
-    finally:
-        current_agent_var.reset(agent_t)
-        tool_state_var.reset(state_t)
-        agent_counter_var.reset(counter_t)
-        agent_label_var.reset(label_t)
-        agent_path_var.reset(path_t)
-    assert result.is_error
-    assert "no active agent" in result.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_run_basic_child_returns_last_assistant() -> None:
-    """Default-everything spawn inherits parent's model + tools."""
-    # StubProviderModel always returns "child-said" so when the child
-    # is run it will record "child-said" as its last assistant message.
-    parent_model = StubProviderModel(responses=[AssistantMessage(text="child-said")])
-    parent = _make_parent(parent_model)
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "do it"})
-    assert not result.is_error
-    assert result.content == "child-said"
-
-
-@pytest.mark.asyncio
-async def test_non_persistent_child_has_single_registry_label() -> None:
-    """Non-persistent AgentSpawn leaves registry ownership to Agent.run."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _RegistryInspectingModel(StubProviderModel):
-        label_count: int | None = None
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            child = current_agent_var.get()
-            self.label_count = sum(
-                1 for agent in agent_registry.values() if agent is child
-            )
-            return await StubProviderModel.stream(self, request, publish)
-
-    parent_model = _RegistryInspectingModel(
-        responses=[AssistantMessage(text="child-said")],
-    )
-    parent = _make_parent(parent_model)
-    with _parent_context(parent):
-        result = await AgentSpawn().run({"prompt": "do it"})
-
-    assert not result.is_error
-    assert parent_model.label_count == 1
-
-
-@pytest.mark.asyncio
-async def test_oneshot_child_stays_registered_until_explicit_stop() -> None:
-    """T1: a oneshot child's registry entry survives its first result.
-
-    ``drive_until_first_idle`` returns the first reply but leaves the
-    serve loop live -- so the label is still addressable in
-    ``agent_registry`` (by ``/send`` / AgentSend) until an explicit
-    shutdown. The prior bug popped the entry the instant the driver task's
-    contextvar CM unwound.
-    """
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="answer")]),
-        tools=[],
-    )
-    child.name = "oneshot-child"
-    try:
-        result = await child.drive_until_first_idle(UserMessage(text="go"))
-        assert result.content == "answer"
-        assert "oneshot-child" in agent_registry, (
-            "oneshot child must remain registered until explicit stop"
-        )
-        assert agent_registry["oneshot-child"] is child
-    finally:
-        child.shutdown(force=True)
-        drive = child._drive_task
-        if drive is not None:
-            with suppress(asyncio.CancelledError):
-                await drive
-        agent_registry.pop("oneshot-child", None)
-    assert "oneshot-child" not in agent_registry
-
-
-@pytest.mark.asyncio
-async def test_oneshot_spawn_writes_completed_lifecycle(tmp_path: Path) -> None:
-    """T6: a finished oneshot child writes a terminal ``completed`` record.
-
-    The terminal record lets ``load_persistent_agents`` (which keeps only
-    ``running`` entries) omit the finished oneshot, so a resume never
-    resurrects it.
-    """
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=tmp_path,
-    )
-    with _parent_context(parent):
-        result = await AgentSpawn().run({"prompt": "do it", "label": "oneshot-w"})
-    assert not result.is_error
-    lifecycle = [
-        json.loads(line)
-        for line in (tmp_path / "session.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if "persistent_agent" in line
-    ]
-    assert lifecycle, "oneshot child wrote no lifecycle record"
-    assert lifecycle[-1]["label"] == "oneshot-w"
-    assert lifecycle[-1]["state"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_serviced_forwarder_delivers_first_reply_exactly_once() -> None:
-    """T4: the serviced forwarder delivers a child's first reply exactly once.
-
-    The boot idle (empty history) is suppressed; the first post-work idle
-    is pushed once.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="first reply")]),
-        tools=[],
-    )
-    forwarder = _make_forwarder(parent, "c", notify_on_asleep=True, child=child)
-    forwarder(AgentIdle())  # Boot idle, before any work.
-    assert parent.runtime.inbox.empty(), "boot idle must not be pushed"
-    child.runtime.append_history(UserMessage(text="go"))
-    child.runtime.append_history(AssistantMessage(text="first reply"))
-    forwarder(AgentIdle())
-    queue = parent.runtime.inbox._queue
-    assert queue.qsize() == 1, f"expected exactly one delivery, got {queue.qsize()}"
-    msg = queue.get_nowait()
-    assert isinstance(msg, AgentSendMessage)
-    assert msg.text == "[c is idle] first reply"
-
-
-@pytest.mark.asyncio
-async def test_run_child_model_error_returns_tool_error() -> None:
-    """One-shot child model failures must resolve the AgentSpawn call."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _FailingModel(StubProviderModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            raise RuntimeError("invalid child credentials")
-
-    parent = _make_parent(_FailingModel())
-    with _parent_context(parent):
-        result = await asyncio.wait_for(
-            AgentSpawn().run({"prompt": "do it", "label": "reviewer"}),
-            timeout=0.5,
-        )
-
-    assert result.is_error
-    assert "reviewer" in result.content
-    assert "invalid child credentials" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_unknown_tool_name_errors() -> None:
-    parent = _make_parent()
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "x", "tools": ["DoesNotExist"]})
-    assert result.is_error
-    assert "Unknown tools" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_missing_model_recipe_when_asking_for_change() -> None:
-    parent = _make_parent()
-    parent.model_recipe = None
-    with _parent_context(parent):
-        t = AgentSpawn()
-        # LLM asks for a partial model change, parent has no spec to
-        # fill in the rest.
-        result = await t.run({"prompt": "x", "model_id": "claude"})
-    assert result.is_error
-    assert "Cannot build a model" in result.content
-
-
-def test_resolve_tools_inherits_when_names_none() -> None:
-    parent = _make_parent()
-    t = AgentSpawn()
-    out = t._resolve_tools(None, parent)
-    # Parent has no tools, so child gets no tools.
-    assert out == []
-
-
-def test_resolve_tools_explicit_empty_honored() -> None:
-    parent = _make_parent()
-    t = AgentSpawn()
-    out = t._resolve_tools([], parent)
-    assert out == []
-
-
-def test_resolve_tools_auto_bundles_background_task_with_agent_spawn() -> None:
-    """Granting AgentSpawn must auto-grant BackgroundTask.
-
-    The principle: any agent that can create persistent / background
-    work must also be able to list, cancel, and foreground that work.
-    Bundling avoids the "spawned a runaway child, no way to kill it"
-    failure mode.
-    """
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[spawn, BackgroundTask()],
-    )
-    out = spawn._resolve_tools(["AgentSpawn"], parent)
-    assert isinstance(out, list)
-    assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
-
-
-def test_resolve_tools_no_bundle_when_agent_spawn_absent() -> None:
-    """Without AgentSpawn, no need to bundle BackgroundTask."""
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[spawn, BackgroundTask()],
-    )
-    out = spawn._resolve_tools(["BackgroundTask"], parent)
-    assert isinstance(out, list)
-    assert {t.name for t in out} == {"BackgroundTask"}
-
-
-def test_resolve_tools_bundle_respects_explicit_empty() -> None:
-    """``names=[]`` returns empty regardless of bundle rule."""
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[spawn, BackgroundTask()],
-    )
-    assert spawn._resolve_tools([], parent) == []
-
-
-def test_resolve_tools_bundle_when_parent_lacks_background_task() -> None:
-    """If parent has AgentSpawn but no BackgroundTask, factory adds a
-    fresh BackgroundTask -- the cancel capability is non-negotiable.
-    """
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[spawn],
-    )
-    out = spawn._resolve_tools(["AgentSpawn"], parent)
-    assert isinstance(out, list)
-    assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
-
-
-def test_build_child_hot_freezes_system_to_parent_snapshot() -> None:
-    """``hot=True`` yields a child whose rendered prompt is byte-identical to
-    the parent's -- the fix for #361.
-
-    Deliberately does NOT skip ``BackgroundTask`` auto-bundling here: a hot
-    child still gets it (same as cold), because ``frozen_system`` short-
-    circuits ``_build_system`` before it ever looks at the child's own tool
-    list (see ``Agent._build_system``). Bundling costs nothing on the cache
-    side and keeps the cancel-capability guarantee intact for a hot child
-    that itself has ``AgentSpawn``.
-    """
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        system="You are the root agent.",
-        tools=[spawn],
-    )
-    child_tools = spawn._resolve_tools(None, parent)
-    assert isinstance(child_tools, list)
-    assert {t.name for t in child_tools} == {"AgentSpawn", "BackgroundTask"}
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=child_tools,
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-        hot=True,
-    )
-    assert child.system == parent.system
-
-
-def test_build_child_cold_diverges_from_parent_via_bundled_tool() -> None:
-    """Regression pin for the DEFAULT (``hot=False``) path: a cold child still
-    gets the auto-bundled ``BackgroundTask``, so it diverges from the
-    parent's prompt right after the shared base -- the #361 failure mode,
-    kept intentionally on cold spawns for backward compatibility.
-    """
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        system="You are the root agent.",
-        tools=[spawn],
-    )
-    child_tools = spawn._resolve_tools(None, parent)
-    assert isinstance(child_tools, list)
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=child_tools,
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-        hot=False,
-    )
-    assert child.system != parent.system
-    assert child.system.startswith(parent.system)
-
-
-def test_build_child_starts_where_the_parents_shell_is() -> None:
-    """A child's shell begins in the directory its parent's does, not the host's."""
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        system="You are the root agent.",
-        tools=[spawn],
-    )
-    parent.tool_state.start_cwd = "/srv/work"
-    parent.tool_state.bash_cwd = "/srv/work/sub"
-    child_tools = spawn._resolve_tools(None, parent)
-    assert isinstance(child_tools, list)
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=child_tools,
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-    )
-    assert child.tool_state.start_cwd == "/srv/work"
-    assert child.tool_state.bash_cwd == "/srv/work/sub"
-
-
-def test_the_last_agent_send_content_skips_calls_without_text() -> None:
-    message = AssistantMessage(
-        tool_calls=(
-            ToolCall(id="t1", name="AgentSend", args={"content": "kept"}),
-            ToolCall(id="t2", name="AgentSend", args={"content": {"not": "text"}}),
-            ToolCall(id="t3", name="AgentSend", args={"to": "parent"}),
-            ToolCall(id="t4", name="AgentSend", args={"content": ""}),
-        ),
-    )
-    assert _last_agent_send_content(message) == "kept"
-    assert (
-        _last_agent_send_content(AssistantMessage(tool_calls=message.tool_calls[1:]))
-        is None
-    )
-
-
-def test_a_child_inherits_the_factory_compactor_then_the_parents_then_none() -> None:
-    factory, inherited = SummaryCompactor(), SummaryCompactor()
-    parent = Agent(model=StubProviderModel(), tools=[], compactor=inherited)
-    assert AgentSpawn(compactor=factory)._inherit_compactor(parent) is factory
-    assert AgentSpawn()._inherit_compactor(parent) is inherited
-    assert AgentSpawn()._inherit_compactor(None) is None
-
-
-def test_build_child_hot_materializes_callable_factory_system_once() -> None:
-    """Hot mode commits a callable factory ``system`` to ONE evaluation.
-
-    Re-invoking it per request (the normal, live behavior) would reopen
-    the exact drift hot mode exists to close -- e.g. a factory reading
-    mutable cwd/env state would render differently each time.
-    """
-    calls = 0
-
-    def factory() -> str:
-        nonlocal calls
-        calls += 1
-        return f"call-{calls}"
-
-    spawn = AgentSpawn(system=factory)
-    parent = _make_parent()
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-        hot=True,
-    )
-    assert calls == 1
-    assert child.system == "call-1"
-    assert child.system_prompt() == "call-1"
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_run_threads_hot_flag_into_build_child() -> None:
-    """The ``hot`` directive field parses and reaches ``_build_child``."""
-    parent = _make_parent()
-    original = AgentSpawn._build_child
-    captured: dict[str, object] = {}
-
-    def spy(
-        self: AgentSpawn,
-        *,
-        system: str | None,
-        child_model: Model,
-        child_spec: ModelRecipe | None,
-        owned_provider: Provider | None = None,
-        child_tools: list[Tool],
-        max_rounds: int | None,
-        model_options: Mapping[str, object],
-        parent_agent: Agent | None,
-        hot: bool = False,
-    ) -> Agent:
-        captured["hot"] = hot
-        return original(
-            self,
-            system=system,
-            child_model=child_model,
-            child_spec=child_spec,
-            owned_provider=owned_provider,
-            child_tools=child_tools,
-            max_rounds=max_rounds,
-            model_options=model_options,
-            parent_agent=parent_agent,
-            hot=hot,
-        )
-
-    with (
-        _parent_context(parent),
-        patch.object(AgentSpawn, "_build_child", spy),
-    ):
-        result = await AgentSpawn().run({"prompt": "p", "hot": True})
-    assert captured.get("hot") is True
-    assert not result.is_error
-
-
-def test_resolve_system_llm_wins() -> None:
-    parent = _make_parent()
-    t = AgentSpawn(system="factory-default")
-    assert t._resolve_system("llm-arg", parent) == "llm-arg"
-
-
-def test_resolve_system_factory_then_parent() -> None:
-    parent = _make_parent()
-    t = AgentSpawn(system="factory")
-    assert t._resolve_system(None, parent) == "factory"
-    t2 = AgentSpawn()
-    # Parent has system="" by default; fallthrough returns "".
-    assert t2._resolve_system(None, parent) == ""
-
-
-def test_resolve_system_no_parent() -> None:
-    t = AgentSpawn()
-    assert t._resolve_system(None, None) == ""
-
-
-def test_inherit_factory_wins() -> None:
-    parent = _make_parent()
-    parent.max_attempts = 7
-    t = AgentSpawn(max_attempts=3)
-    assert t._inherit_max_attempts(parent) == 3
-
-
-def test_inherit_falls_through_to_parent() -> None:
-    parent = _make_parent()
-    parent.max_attempts = 7
-    t = AgentSpawn()
-    assert t._inherit_max_attempts(parent) == 7
-
-
-def test_inherit_no_parent() -> None:
-    t = AgentSpawn()
-    assert t._inherit_max_attempts(None) is None
-
-
-def test_build_child_model_rebuilds_fresh_transport_when_spec_matches() -> None:
-    """A child inheriting the parent's spec gets its OWN transport, not an alias.
-
-    Regression guard for the shared-subprocess bug: child model construction used
-    to return ``parent.model`` verbatim when the resolved provider/auth/
-    model_id/account matched the parent. On a subprocess-backed provider
-    (AnthropicCLI/GoogleCLI) that aliased every same-model child onto the
-    parent's single ``claude`` process and pipe -- serializing (and
-    corrupting) N spawns through one transport. A spec that can be rebuilt
-    MUST rebuild via ``build_provider(...).model(...)`` so each child owns
-    an independent transport.
-    """
-    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
-    parent = Agent(
-        model=StubProviderModel(model_id="stub"),
-        tools=[],
-        model_recipe=spec,
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
-    t = AgentSpawn()
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        resolved = t._build_child_model(
-            provider="StubP",
-            auth="env",
-            model_id="stub",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    model, returned_spec = resolved.model, resolved.spec
-    assert model is not parent.model  # Fresh transport, not the shared alias.
-    assert returned_spec == spec
-    build.assert_called_once_with("StubP", "env", account=None)
-
-
-def test_build_child_model_each_child_gets_distinct_transport() -> None:
-    """N inherit-spec children resolve to N distinct model objects.
-
-    The load-bearing property for scaling: each spawn's transport must be
-    independent so N children run concurrently on N processes rather than
-    serializing through one.
-    """
-    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
-    parent = Agent(
-        model=StubProviderModel(model_id="stub"),
-        tools=[],
-        model_recipe=spec,
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
-    t = AgentSpawn()
-    models: list[object] = []
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ):
-        for _ in range(5):
-            resolved = t._build_child_model(
-                provider=None,
-                auth=None,
-                model_id=None,
-                account=None,
-                parent_agent=parent,
-            )
-            assert isinstance(resolved, agent_spawn._ChildModel)
-            models.append(resolved.model)
-    assert len({id(m) for m in models}) == 5
-    assert all(m is not parent.model for m in models)
-
-
-def test_build_child_model_no_spec_falls_back_to_parent_model() -> None:
-    """A spec-less parent (test harness / raw-Model inject) can't rebuild.
-
-    Without a ``model_recipe`` there is nothing to hand ``build_provider``,
-    so aliasing ``parent.model`` is the only option and is correct here --
-    the reuse hazard only exists when a rebuildable spec is present.
-    """
-    parent = _make_parent()  # Constructed with no model_recipe.
-    assert parent.model_recipe is None
-    t = AgentSpawn()
-    resolved = t._build_child_model(
-        provider=None,
-        auth=None,
-        model_id=None,
-        account=None,
-        parent_agent=parent,
-    )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    model = resolved.model
-    assert model is parent.model
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
+        del context, arguments
+        return ToolOutput(stdout=("ok",), result=UncategorizedToolResult())
 
 
 @dataclass(slots=True, kw_only=True)
-class _ThinkingEffortModel(StubProviderModel):
-    """Stub model advertising thinking and graded effort."""
+class _Wait(_Tool):
+    """A tool that runs until cancelled."""
 
-    supports_thinking: bool = True
-    valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    stopped: asyncio.Event = field(default_factory=asyncio.Event)
 
-
-def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
-    """``thinking``/``effort`` options land on the child model's settings."""
-    parent = _make_parent()
-    child = AgentSpawn()._build_child(
-        system=None,
-        child_model=_ThinkingEffortModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={"thinking": True, "effort": "high"},
-        parent_agent=parent,
-    )
-    assert child.model.settings.thinking_budget == "auto"
-    assert child.model.settings.thinking_effort == "high"
+    @override
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
+        del context, arguments
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.stopped.set()
+        return ToolOutput(stdout=("never",), result=UncategorizedToolResult())
 
 
 @dataclass(slots=True, kw_only=True)
-class _OptionModel(_ThinkingEffortModel):
-    """Stub model advertising cache-TTL choices."""
+class _Seen:
+    """What an agent's runtime publishes, and a way to wait for more of it."""
 
-    @property
-    @override
-    def capability(self) -> ModelCapability:
-        return replace(
-            super(_OptionModel, self).capability,
-            cache_ttl_sec=frozenset({0.0, 300.0}),
+    events: list[types.RuntimeEvent] = field(default_factory=list)
+    arrived: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        self.events.append(event)
+        self.arrived.set()
+
+    def count(self, kind: type[object]) -> int:
+        return sum(isinstance(e, kind) for e in self.events)
+
+    def answered(self) -> bool:
+        """Return whether the agent went idle after its last model reply."""
+        replies = [
+            i
+            for i, e in enumerate(self.events)
+            if isinstance(e, types.ModelResponseCompleted)
+            and isinstance(e.outcome, Succeeded)
+        ]
+        return bool(replies) and any(
+            isinstance(e, AgentIdle) for e in self.events[replies[-1] :]
         )
 
+    async def until(self, done: Callable[[], bool]) -> None:
+        """Wait, an event at a time, until ``done``."""
+        async with asyncio.timeout(5):
+            while not done():
+                self.arrived.clear()
+                await self.arrived.wait()
 
-def test_build_child_applies_normalized_option_clears() -> None:
-    parent = _make_parent(_OptionModel())
-    parent.model.settings.thinking_effort = "high"
-    parent.model.settings.cache_ttl_sec = 300.0
-    model = _OptionModel()
-    options = plan_model_options(
-        model,
-        {"model_options": {"effort": None, "cache_ttl": None}},
+    async def idle(self) -> None:
+        """Wait until the agent goes idle once more."""
+        idles = self.count(AgentIdle)
+        await self.until(lambda: self.count(AgentIdle) > idles)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Setup:
+    """A team whose root may spawn, and the script its children answer from."""
+
+    team: Team
+    parent: Agent
+    children: ScriptedProvider
+    spawn: AgentSpawn
+    seen: list[RuntimeEvent]
+
+
+def _this_process() -> str:
+    """Return how a refusal names this process as a lock's holder; only Linux knows."""
+    return f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
+
+
+def _setup(
+    tmp_path: Path,
+    *replies: Reply,
+    journal: Journal | None = None,
+    compactor: Factory[Shrinker] = NoShrinker,
+    pruner: Factory[Shrinker] = NoShrinker,
+    tools: Sequence[_Tool] = (),
+    other: Sequence[Reply] = (),
+    send: bool = False,
+    capability: Callable[[str], ModelCapability] = _capability,
+) -> _Setup:
+    catalog = ModelCatalog(
+        factories={
+            "scripted": partial(
+                ScriptedProvider,
+                replies=replies,
+                capability=capability("scripted"),
+            ),
+            "other": partial(
+                ScriptedProvider,
+                replies=other,
+                capability=capability("other"),
+            ),
+        },
     )
-    assert isinstance(options, dict)
-    child = AgentSpawn()._build_child(
-        system=None,
-        child_model=model,
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options=options,
-        parent_agent=parent,
+    team = Team(catalog=catalog)
+    parent = Agent(
+        model=ScriptedProvider(capability=capability("scripted"))["scripted"],
+        tools=[
+            _Tool(name="Read"),
+            _Tool(name="Grep"),
+            *tools,
+            *([AgentSend(team=team)] if send else []),
+        ],
+        system_prompt="the parent's prompt",
+        journal=journal,
+        compactor=compactor,
+        pruner=pruner,
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=AgentsMdConfig(system_dir=tmp_path / "s", user_dir=tmp_path / "u"),
     )
-    assert child.model.settings.thinking_effort == "none"
-    assert child.model.settings.cache_ttl_sec == 0.0
-
-
-def test_build_child_takes_the_factorys_tool_result_policy() -> None:
-    """A child bounds its tool results as its host chose, not by its own window."""
-    parent = _make_parent()
-    policy = ToolResultPolicy(persist_tokens=10_000)
-    capped = AgentSpawn(tool_results=policy)._build_child(
-        system=None,
-        child_model=_ThinkingEffortModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-    )
-    default = AgentSpawn()._build_child(
-        system=None,
-        child_model=_ThinkingEffortModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
+    _ = team.join(parent)
+    seen: list[RuntimeEvent] = []
+    parent.runtime.observers.append(seen.append)
+    children = catalog["scripted"]
+    assert isinstance(children, ScriptedProvider)
+    return _Setup(
+        team=team,
+        parent=parent,
+        children=children,
+        spawn=AgentSpawn(team=team),
+        seen=seen,
     )
 
-    assert capped.tool_results == policy
-    assert default.tool_results.persist_tokens != 10_000
 
-
-def test_build_child_inherits_the_parents_selection() -> None:
-    """A spawn keeps what the parent chose, so the child runs the same way."""
-    parent = _make_parent(_ThinkingEffortModel())
-    parent.model.settings.thinking_effort = "high"
-    child = AgentSpawn()._build_child(
-        system=None,
-        child_model=_ThinkingEffortModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
+async def _spawn(
+    setup: _Setup,
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    *,
+    label: str = "Agent",
+) -> ToolMessage:
+    streaming_result = setup.spawn.call(
+        ToolContext(cwd=tmp_path, label=label),
+        arguments,
     )
-    assert child.model.settings.thinking_effort == "high"
+    result = await settled(streaming_result)
+    if result.state == "failed":
+        _ = streaming_result.result.result()
+    return result
 
 
-def test_build_child_drops_an_inherited_knob_the_child_model_rejects() -> None:
-    """A spawn onto a narrower model must not fail on the parent's choice."""
-    parent = _make_parent(_ThinkingEffortModel())
-    parent.model.settings.thinking_effort = "high"
-    child = AgentSpawn()._build_child(
-        system=None,
-        child_model=StubProviderModel(),  # Offers only the ``none`` effort.
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-    )
-    assert child.model.settings.thinking_effort == "none"
+def _spawn_result(result: ToolMessage) -> AgentSpawnResult:
+    """Return the ``AgentSpawnResult`` of a spawn's record."""
+    spawn_result = result.result
+    assert isinstance(spawn_result, AgentSpawnResult)
+    return spawn_result
 
 
-@pytest.mark.asyncio
-async def test_run_rejects_non_mapping_model_options() -> None:
-    parent = _make_parent()
-    with _parent_context(parent):
-        result = await AgentSpawn().run(
-            {"prompt": "p", "model_options": "not-an-object"},
-        )
-    assert result.is_error
-    assert result.content == "model_options must be an object."
+def _kept(journal: Path) -> str:
+    """Return what ``journal`` holds, off the event loop's checks."""
+    return journal.read_text()
 
 
-@pytest.mark.asyncio
-async def test_run_redirects_latency_option_to_service_tier() -> None:
-    """``model_options.latency`` is gone; the error names its replacement."""
-    parent = _make_parent()
-    with _parent_context(parent):
-        result = await AgentSpawn().run(
-            {"prompt": "p", "model_options": {"latency": "fast"}},
-        )
-    assert result.is_error
-    assert "service_tier" in result.content
+def _session(agent: Agent) -> RuntimeSession:
+    session = agent.session
+    assert isinstance(session, RuntimeSession)
+    return session
 
 
-def test_build_child_model_provider_change_without_auth_uses_target_default() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="gpt-5.5",
-        account="work",
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        resolved = AgentSpawn()._build_child_model(
-            provider="Google",
-            auth=None,
-            model_id="gemini-3-pro",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    spec = resolved.spec
-    assert spec == ModelRecipe(
-        provider="Google",
-        auth="env",
-        model_id="gemini-3-pro",
-        account="work",
-    )
-    build.assert_called_once_with("Google", "env", account="work")
+async def _messages(agent: Agent, count: int) -> list[AgentMessage]:
+    """Wait, a turn of the loop at a time, until ``count`` messages reach ``agent``."""
+    got: list[AgentMessage] = []
+    async with asyncio.timeout(5):
+        while len(got) < count:
+            got.extend(
+                e
+                for e in agent.runtime.inbox.drain_nowait()
+                if isinstance(e, AgentMessage)
+            )
+            await asyncio.sleep(0)
+    return got
 
 
-def test_build_child_model_missing_inherited_account_falls_back() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="StubSource",
-        auth="credentials",
-        model_id="source-model",
-        account="work",
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="target-model")
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=[FileNotFoundError("missing"), fake_provider],
-        ) as build,
-        patch(
-            "sagent.tools.agent_spawn.default_auth_for_provider",
-            return_value="credentials",
+@pytest.mark.parametrize(
+    ("arguments", "summary"),
+    [
+        ({"prompt": "list   the\nTODOs"}, "AgentSpawn: list the TODOs"),
+        (
+            {"prompt": "go", "label": "r"},
+            "AgentSpawn r: go",
         ),
-    ):
-        resolved = AgentSpawn(allow_providers=("StubTarget",))._build_child_model(
-            provider="StubTarget",
-            auth=None,
-            model_id="target-model",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    spec = resolved.spec
-    assert spec is not None
-    assert spec.account is None
-    assert build.call_args_list == [
-        (("StubTarget", "credentials"), {"account": "work"}),
-        (("StubTarget", "credentials"), {"account": None}),
-    ]
+        ({}, "AgentSpawn"),
+    ],
+)
+def test_the_summary_says_what_kind_of_child_and_its_task(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    summary: str,
+) -> None:
+    spawn = AgentSpawn(team=Mock(spec=Team))
+
+    assert spawn.summary(arguments) == summary
+    assert spawn.serialize_key(ToolContext(cwd=tmp_path), arguments) is None
 
 
-def test_build_child_model_explicit_missing_account_does_not_fallback() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="StubSource",
-        auth="credentials",
-        model_id="source-model",
-        account="source-work",
-    )
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=FileNotFoundError("missing target-work"),
-        ) as build,
-        patch(
-            "sagent.tools.agent_spawn.default_auth_for_provider",
-            return_value="credentials",
-        ),
-    ):
-        result = AgentSpawn(allow_providers=("StubTarget",))._build_child_model(
-            provider="StubTarget",
-            auth=None,
-            model_id="target-model",
-            account="target-work",
-            parent_agent=parent,
-        )
-    assert isinstance(result, ToolResult)
-    assert result.is_error
-    assert "missing target-work" in result.content
-    build.assert_called_once_with(
-        "StubTarget",
-        "credentials",
-        account="target-work",
-    )
-
-
-def test_build_child_model_infers_provider_from_bare_model_id() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="Anthropic",
-        auth="env",
-        model_id="opus-4.8",
-        account=None,
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        resolved = AgentSpawn()._build_child_model(
-            provider=None,
-            auth=None,
-            model_id="luna-6.0",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    spec = resolved.spec
-    assert spec == ModelRecipe(
-        provider="OpenAI",
-        auth="env",
-        model_id="luna-6.0",
-        account=None,
-    )
-    build.assert_called_once_with("OpenAI", "env", account=None)
-
-
-def test_build_child_model_inference_preserves_explicit_auth() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="Anthropic",
-        auth="env",
-        model_id="opus-4.8",
-        account=None,
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        resolved = AgentSpawn()._build_child_model(
-            provider=None,
-            auth="credentials",
-            model_id="luna-6.0",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    build.assert_called_once_with("OpenAI", "credentials", account=None)
-
-
-def test_factory_rejects_empty_account() -> None:
-    """A factory ``account=""`` is a construction error, not a per-call one."""
-    with pytest.raises(ValueError, match="account cannot be empty"):
-        _ = AgentSpawn(account="")
-
-
-def test_schema_rejects_empty_account() -> None:
-    """The schema gate, which runs before ``run``, owns ``account=""``."""
-    t = AgentSpawn()
-    error = validate_tool_input(
-        t.name,
-        t.directive_schema,
-        {"prompt": "p", "account": ""},
-    )
-    assert error is not None
-
-
-@pytest.mark.asyncio
-async def test_run_custom_label_used() -> None:
-    """Caller-provided label flows through to the run path without errors."""
-    parent = _make_parent(StubProviderModel(responses=[AssistantMessage(text="x")]))
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "p", "label": "Sub_007"})
-    assert not result.is_error
-
-
-class _BoomAgent(Agent):
-    """Agent whose ``serve_forever`` raises immediately.
-
-    Models a child that fails at startup (e.g. its provider rejects
-    the very first model call). Subclassing keeps the override
-    type-safe versus monkey-patching an instance attribute.
-    """
-
-    @override
-    async def serve_forever(self) -> None:
-        raise RuntimeError("simulated crash")
-
-
-@pytest.mark.asyncio
-async def test_persistent_run_writes_failed_lifecycle_record(
+def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
     tmp_path: Path,
 ) -> None:
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=tmp_path,
+    debts: dict[str, dict[str, str]] = {
+        "Agent": {"asker": "may I?"},
+        "asked": {"Agent": "how goes it?"},
+        "asker": {},
+        "leaf": {},
+        "kid": {},
+    }
+    children: dict[str, list[str]] = {
+        "Agent": ["leaf", "asked", "asker"],
+        "leaf": ["kid"],
+        "kid": [],
+    }
+    spawning = {"Agent": True, "leaf": False, "kid": False}
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(side_effect=debts.__contains__),
+        owes=Mock(side_effect=debts.__getitem__),
+        children=Mock(side_effect=children.__getitem__),
+        can_spawn=Mock(side_effect=spawning.__getitem__),
     )
-    child = _BoomAgent(
-        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-        tools=[],
-    )
+    spawn = AgentSpawn(team=team)
 
-    t = AgentSpawn()
-    with _parent_context(parent):
-        result = t._spawn_serviced(child, "doomed", "p", **_ROOT_SCOPE)
-        assert not result.is_error
-        task = _persistent_tasks.get("doomed")
-        assert task is not None
-        await task
-
-    lifecycle = [
-        json.loads(line)
-        for line in (tmp_path / "session.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if "persistent_agent" in line
+    assert [
+        spawn.reminder(ToolContext(cwd=tmp_path, label=label))
+        for label in ("Agent", "stranger", "leaf", "kid")
+    ] == [
+        "Your children: leaf, asked (owes you a reply), asker (you owe it a reply).",
+        "",
+        "Your children: kid. Spawn budget: you are a leaf agent; AgentSpawn will refuse.",
+        "Spawn budget: you are a leaf agent; AgentSpawn will refuse.",
     ]
-    assert lifecycle[-1]["label"] == "doomed"
-    assert lifecycle[-1]["state"] == "failed"
 
 
 @pytest.mark.asyncio
-async def test_persistent_run_logs_unhandled_exception(
+async def test_a_child_spends_from_its_parents_budget_which_halts_past_it(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(
+            tmp_path,
+            reply("looking", calls=[call("Read", "c1")], spend=TokenCost(response=1.2)),
+            reply("never asked"),
+            journal=journal,
+        )
+        _session(setup.parent).resume()
+        setup.parent.max_spend_usd = 1.0
+
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "spend"})
+
+            assert (result.is_error, result.text()) == (
+                True,
+                "BudgetExhaustedError: Budget exhausted: $1.20 >= $1.00",
+            )
+            assert setup.parent.spend_usd == pytest.approx(1.2)
+            assert spent(journal) == pytest.approx(1.2)
+            with pytest.raises(BudgetExhaustedError):
+                _ = await setup.parent.send("more")
+
+
+@pytest.mark.asyncio
+async def test_a_grandchild_spends_from_each_agent_above_once(tmp_path: Path) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply("done", spend=TokenCost(response=0.25)),
+    )
+    setup.parent.max_spend_usd = 1.0
+    setup.parent.charge(TokenCost(request=0.4), label="Agent")
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "mid"})
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "label": "grand"},
+            label="mid",
+        )
+        grand, mid = setup.team["grand"], setup.team["mid"]
+
+        assert grand.max_spend_usd == pytest.approx(0.6)
+        assert mid.spend_usd == pytest.approx(0.25)
+        assert setup.parent.spend_usd == pytest.approx(0.65)
+    assert [
+        (e.spend.total, e.label)
+        for e in setup.seen
+        if isinstance(e, types.SessionSpendCharged)
+    ] == [
+        (0.4, "Agent"),
+        (0.25, "grand"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_childs_compaction_spends_from_its_parent(tmp_path: Path) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply("<summary>gist</summary>", spend=TokenCost(response=2.0)),
+        compactor=SummaryCompactor,
+    )
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait"},
+        )
+        child = setup.team["Agent_0"]
+        await child.session.compactor.run()
+
+    assert child.spend_usd == pytest.approx(2.0)
+    assert setup.parent.spend_usd == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_a_child_tells_its_parent_when_it_stops_but_not_after_its_spawn(
+    tmp_path: Path,
+) -> None:
+    """The spawn's result is the parent's news of the first run."""
+    setup = _setup(tmp_path, reply("ready"), reply("did more"))
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "helper"})
+        after_spawn = setup.parent.runtime.inbox.drain_nowait()
+        child = setup.team["helper"]
+        child.runtime.push(UserMessage(content="more"))
+
+        (told,) = await _messages(setup.parent, 1)
+
+    assert after_spawn == []
+    assert told == AgentMessage(
+        sender="helper",
+        recipient="Agent",
+        content="[helper is idle] did more",
+    )
+    assert setup.team.awaited == set()
+    # The spawn's count of its run, and its watch for a wait, stop with the run.
+    assert not any(
+        isinstance(o, agent_spawn._Tally | agent_spawn._DetachOnWait)
+        for o in child.runtime.observers
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_detaches_at_its_childs_first_quota_wait() -> None:
+    """Blocked in the call, the parent would read none of a week's wait."""
+    detached: list[asyncio.Future[object] | None] = []
+    parent = Mock(spec=Agent, runtime=Mock(detach=detached.append))
+    task = asyncio.Future[object]()
+    waits = agent_spawn._DetachOnWait(parent=parent, task=task)
+    for exception, attempt in (
+        (OverloadedError("busy"), 1),
+        (RateLimitedError("spent"), 1),
+        (RateLimitedError("spent"), 2),
+    ):
+        waits(
+            types.ModelResponseSuspended(
+                exception=exception,
+                retry_at=datetime.fromtimestamp(0.0, UTC),
+                failures_in_a_row=attempt,
+            ),
+        )
+
+    assert detached == [task]
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_in_flight_detaches_its_own_call_when_its_child_waits_on_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply(calls=[call("Wait")]), tools=[wait])
+    detached: list[object] = []
+    monkeypatch.setattr(setup.parent.runtime, "detach", detached.append)
+    async with setup.team:
+        streaming_result = setup.spawn.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"prompt": "go"},
+        )
+        await wait.started.wait()
+        setup.team["Agent_0"].runtime.publish(
+            types.ModelResponseSuspended(
+                exception=RateLimitedError("spent"),
+                retry_at=datetime.fromtimestamp(0.0, UTC),
+                failures_in_a_row=1,
+            ),
+        )
+
+        # ``result`` is the task the spawn runs in, which the parent's runtime tracks.
+        assert detached == [streaming_result.result]
+        _ = streaming_result.result.cancel()
+        assert (await settled(streaming_result)).state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
+    setup = _setup(
+        tmp_path,
+        reply(
+            "looking",
+            calls=[call("Read", "c1")],
+            tokens=TokenCount(request=10),
+            spend=TokenCost(response=0.5),
+        ),
+        reply("three TODOs", tokens=TokenCount(request=5)),
+    )
+    setup.parent.runtime.turns = 2
+
+    result = await _spawn(setup, tmp_path, {"prompt": "count the TODOs"})
+
+    spawn_result = _spawn_result(result)
+    assert result == ToolMessage(
+        call_id="",
+        state="done",
+        stdout=("looking\n", "Read\n", "three TODOs\n"),
+        shown="three TODOs",
+        result=AgentSpawnResult(
+            agent_id="Agent_0",
+            agent_kind="persistent",
+            prompt="count the TODOs",
+            model="scripted",
+            state="completed",
+            tokens=15,
+            spend=spawn_result.spend,
+            duration_sec=spawn_result.duration_sec,
+            tool_calls=1,
+        ),
+    )
+    assert spawn_result.spend is not None
+    assert spawn_result.spend.total == 0.5
+    assert spawn_result.duration_sec is not None
+    assert 0.0 <= spawn_result.duration_sec < 60.0
+    assert list(setup.team) == ["Agent", "Agent_0"]
+    forwarded = [e for e in setup.seen if isinstance(e, types.ChildEvent)]
+    assert {e.label for e in forwarded} == {"Agent_0"}
+    assert [type(e.event) for e in forwarded] == [
+        types.ModelResponseTextStreamed,
+        types.ModelResponseCompleted,
+        ToolMessage,
+        types.ModelResponseTextStreamed,
+        types.ModelResponseCompleted,
+    ]
+    # A child's move to another login is the parent's to show too.
+    child = setup.team["Agent_0"].runtime
+    switched = types.LoginSwitched(
+        provider="scripted",
+        from_login="default",
+        to_login="work",
+    )
+    child.publish(switched)
+    assert [e.event for e in setup.seen if isinstance(e, types.ChildEvent)][-1:] == [
+        switched,
+    ]
+    first = setup.children.requests[0]
+    # One conversation to vendors, the child a named agent within it.
+    mine = setup.parent.runtime.request()
+    assert (mine.session, mine.agent, mine.parent) == (mine.session, mine.session, "")
+    assert first.session == mine.session
+    assert first.agent not in ("", mine.session)
+    assert (first.parent, first.parent_turn) == (mine.session, mine.turn)
+    assert first.root_prompt == mine.prompt_id
+    assert (mine.name, first.name) == ("/root", "/root/Agent_0")
+    # Offered no ``BackgroundTask``, the child is not told how deliveries arrive.
+    assert first.system[-1] == "the parent's prompt"
+    assert first.records[0] == UserMessage(content="count the TODOs")
+    # Messaging is present even when the parent did not carry it.
+    assert [t.name for t in first.tools] == ["AgentSend", "Grep", "Read"]
+    assert first.allowed is None
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_says_what_its_child_says_and_calls_as_it_works(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("looking", calls=[call("Read", "c1")]),
+        reply("three TODOs"),
+    )
+    seen: list[object] = []
+    async with setup.team:
+        result = await settled(
+            setup.spawn.call(
+                ToolContext(cwd=tmp_path, label="Agent"),
+                {"prompt": "count the TODOs"},
+            ),
+            on_item=lambda _stream, item: seen.append(item),
+        )
+
+    # The reply the child said last is written once, as it said it.
+    assert result.stdout == ("looking\n", "Read\n", "three TODOs\n")
+    assert seen == list(result.stdout)
+    assert result.text() == "three TODOs"
+
+
+@dataclass(slots=True, kw_only=True)
+class _Summed(_Tool):
+    """A tool whose summary names its argument, over two lines."""
+
+    @override
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        return f"{self.name} {arguments['x']}\nand more"
+
+
+def test_a_call_is_written_as_the_first_line_of_its_tool_s_summary() -> None:
+    """An unknown tool by its name; an empty text not at all."""
+    written: list[str] = []
+
+    class _Written(Stream[str]):
+        @override
+        def write(self, item: str) -> None:
+            written.append(item)
+
+    reply_writer = agent_spawn._ReplyWriter(
+        stdout=_Written(),
+        tools={"Sum": _Summed(name="Sum")},
+    )
+    response = Response(
+        records=(
+            AssistantMessage(content=""),
+            call("Sum", "c1", x="7"),
+            call("Gone", "c2"),
+        ),
+        stop_reason="tool_use",
+    )
+
+    reply_writer(types.ModelResponseCompleted(outcome=Succeeded(value=response)))
+
+    assert written == ["Sum 7\n", "Gone\n"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [Cancelled(), Failed(exception=RuntimeError("down"))],
+    ids=["cancelled", "failed"],
+)
+def test_a_call_that_brought_no_reply_is_neither_said_nor_counted(
+    outcome: Outcome[Response],
+) -> None:
+    reply_writer = agent_spawn._ReplyWriter(stdout=Stream[str](), tools={})
+    tally = agent_spawn._Tally()
+    ended = types.ModelResponseCompleted(outcome=outcome)
+
+    reply_writer(ended)
+    tally(ended)
+
+    assert reply_writer.last == ""
+    assert tally == agent_spawn._Tally()
+
+
+@pytest.mark.asyncio
+async def test_a_child_keeps_its_parent_s_own_agent_send(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"), send=True)
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go"})
+        child = setup.team["Agent_0"]
+
+    assert child.tools["AgentSend"] is setup.parent.tools["AgentSend"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_fails_says_why_and_stays(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, ValueError("model down"))
+
+    result = await _spawn(setup, tmp_path, {"prompt": "go", "label": "worker"})
+
+    assert result.is_error is True
+    assert (_spawn_result(result).state, result.text()) == (
+        "failed",
+        "ValueError: model down",
+    )
+    # The child never said why, so the record keeps it as the spawn's own output.
+    assert result.stdout[-1] == "ValueError: model down"
+    assert _spawn_result(result).exit_code == 1
+    assert list(setup.team) == ["Agent", "worker"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_held_to_its_round_cap_fails_with_the_cap(tmp_path: Path) -> None:
+    setup = _setup(
+        tmp_path,
+        reply(calls=[call("Read", "a")]),
+        reply(calls=[call("Read", "b")]),
+        reply("never"),
+    )
+
+    result = await _spawn(setup, tmp_path, {"prompt": "go", "max_tool_call_rounds": 1})
+
+    assert result.is_error is True
+    assert result.text().startswith("RoundLimitError")
+    assert len(setup.children.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_child_at_its_round_cap_answers_with_what_it_has(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply(calls=[call("Read")]), reply("found it"))
+
+    result = await _spawn(setup, tmp_path, {"prompt": "go", "max_tool_call_rounds": 1})
+
+    assert (result.is_error, result.text()) == (False, "found it")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [None, ["Read"], ["Grep"], []])
+@pytest.mark.parametrize("restricted", [False, True])
+@pytest.mark.parametrize("background", [False, True])
+async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
+    tmp_path: Path,
+    tools: list[str] | None,
+    restricted: bool,
+    background: bool,
+) -> None:
+    setup = _setup(tmp_path, reply(calls=[call("Read", "read")]), reply("read it"))
+    parent = setup.parent
+    parent.runtime.tools["AgentSpawn"] = setup.spawn
+    parent.max_rounds = 1
+    parent.allowed = frozenset({"AgentSpawn", "Read"}) if restricted else None
+    provider = parent.model.provider
+    assert isinstance(provider, ScriptedProvider)
+    arguments: dict[str, PlainTree] = {
+        "prompt": "read",
+        "label": "kid",
+        "background": background,
+    }
+    if tools is not None:
+        arguments["tools"] = tools
+    provider.replies.extend(
+        [reply(calls=[call("AgentSpawn", "spawn", **arguments)]), *[reply("done")] * 3],
+    )
+    async with setup.team, parent:
+        assert await asyncio.wait_for(parent.send("spawn"), timeout=5) == "done"
+        arrived = (
+            await asyncio.wait_for(parent.runtime.foreground("spawn"), timeout=5)
+            if background
+            else None
+        )
+        results = [
+            r
+            for r in parent.session
+            if isinstance(r, ToolMessage) and r.call_id == "spawn"
+        ]
+        result = arrived if arrived is not None else results[-1]
+        if restricted and tools == ["Grep"]:
+            assert result.is_error is True
+            assert "Unknown tools Grep; yours: AgentSpawn, Read" in result.text()
+            assert "kid" not in setup.team
+            return
+        assert result.is_error is False, result.text()
+        child = setup.team["kid"]
+        expected = (
+            frozenset({*tools, "AgentSend"})
+            if tools is not None
+            else frozenset({"AgentSpawn", "Read", "AgentSend"})
+            if restricted
+            else None
+        )
+        assert child.allowed == expected
+        (read,) = (r for r in child.session if isinstance(r, ToolMessage))
+        assert read.is_error is (tools in (["Grep"], []))
+        assert read.text() == (
+            "Read is not available to this agent." if tools in (["Grep"], []) else "ok"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_final_round_watchers_inherit_configured_permissions(
+    tmp_path: Path,
+    implicit: bool,
+    restricted: bool,
+) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply(calls=[call("Wait")]), tools=[wait], send=True)
+    parent = setup.parent
+    parent.runtime.tools["AgentSpawn"] = setup.spawn
+    parent.max_rounds = 1
+    allowed = (
+        frozenset({"Read", "Wait", "AgentSpawn", "AgentSend"}) if restricted else None
+    )
+    parent.allowed = allowed
+    provider = parent.model.provider
+    assert isinstance(provider, ScriptedProvider)
+    calls = (
+        [call("Read"), call("AgentSend", "watch", to="parent", content="watch me")]
+        if implicit
+        else [call("AgentSpawn", "watch", prompt="watch me", watch=True)]
+    )
+    provider.replies.extend([reply(calls=calls), *[reply("done")] * 3])
+    async with setup.team, parent:
+        assert await asyncio.wait_for(parent.send("watch"), timeout=5) == "done"
+        (result,) = (
+            r
+            for r in parent.session
+            if isinstance(r, ToolMessage) and r.call_id == "watch"
+        )
+        assert result.is_error is False, result.text()
+        watcher = setup.team["watcher"]
+        assert watcher.allowed == allowed
+        await asyncio.wait_for(wait.started.wait(), timeout=5)
+        assert setup.children.requests[0].allowed == allowed
+    await asyncio.wait_for(wait.stopped.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply(calls=[call("Wait")]), tools=[wait])
+    async with setup.team:
+        task = asyncio.ensure_future(_spawn(setup, tmp_path, {"prompt": "go"}))
+        await wait.started.wait()
+        seen: list[RuntimeEvent] = []
+        setup.team["Agent_0"].runtime.observers.append(seen.append)
+        _ = task.cancel()
+
+        assert (await task).state == "cancelled"
+        await asyncio.wait_for(wait.stopped.wait(), timeout=5)
+        assert list(setup.team) == ["Agent", "Agent_0"]
+        assert [e.sender for e in seen if isinstance(e, types.ModelHalt)] == ["Agent"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_told_an_effort_too_high_for_thinking_off_thinks(
+    tmp_path: Path,
+) -> None:
+    """The effort asked for stands; the budget carried from the parent yields."""
+
+    def capped(model_id: str) -> ModelCapability:
+        return replace(_capability(model_id), thinking_off_max_effort="low")
+
+    setup = _setup(tmp_path, reply("ready"), capability=capped)
+    setup.parent.model.settings = replace(
+        setup.parent.model.settings,
+        thinking_effort="low",
+    )
+    async with setup.team:
+        result = await _spawn(setup, tmp_path, {"prompt": "go", "effort": "high"})
+        child = setup.team["Agent_0"].model.settings
+
+    assert result.is_error is False
+    assert (child.thinking_effort, child.thinking_budget) == ("high", "auto")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "match"),
+    [
+        (
+            {"prompt": "go", "tools": ["Edit", "Write"]},
+            "^Unknown tools Edit, Write; yours: Grep, Read$",
+        ),
+        ({"prompt": "go", "provider": "nope"}, "unknown provider .nope.; known: "),
+        ({"prompt": "go", "effort": "max"}, "not offered"),
+        ({"prompt": "go", "label": "Agent"}, "already labelled 'Agent'"),
+        ({"prompt": "go", "label": "parent"}, "'parent' is reserved: all, ancestors"),
+        ({"prompt": "go", "label": "model"}, "'model' is reserved"),
+    ],
+)
+async def test_a_spawn_that_cannot_be_built_is_refused(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    match: str,
+) -> None:
+    setup = _setup(tmp_path)
+
+    with pytest.raises(ValueError, match=match):
+        _ = await _spawn(setup, tmp_path, arguments)
+    assert list(setup.team) == ["Agent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "match"),
+    [
+        ("stranger", r"^AgentSpawn needs a calling agent in the team\.$"),
+        ("leaf", r"^Your depth cap is reached: you are a leaf and cannot spawn\.$"),
+    ],
+)
+async def test_a_caller_that_may_not_spawn_is_refused(
+    tmp_path: Path,
+    label: str,
+    match: str,
+) -> None:
+    setup = _setup(tmp_path)
+    _ = setup.team.join(
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
+        label="leaf",
+        parent="Agent",
+        max_depth=0,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        _ = await _spawn(setup, tmp_path, {"prompt": "go"}, label=label)
+
+
+@pytest.mark.asyncio
+async def test_a_child_compacts_as_its_parent_does(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"), compactor=SummaryCompactor)
+    setup.parent.model.settings = replace(
+        setup.parent.model.settings,
+        context_size=setup.parent.model.capability.prices[1_000],
+    )
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        mine, theirs = (
+            setup.parent.session.compactor,
+            setup.team["Agent_0"].session.compactor,
+        )
+
+        assert isinstance(mine, SummaryCompactor)
+        assert isinstance(theirs, SummaryCompactor)
+        assert theirs is not mine
+        assert theirs.trigger_tokens() == mine.trigger_tokens() < 1_000
+
+
+@pytest.mark.asyncio
+async def test_a_child_prunes_as_its_parent_does(tmp_path: Path) -> None:
+    """Its own pruner, so its queue and notes are its own."""
+    setup = _setup(tmp_path, reply("ready"), pruner=Pruner)
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        mine, theirs = (
+            setup.parent.session.pruner,
+            setup.team["Agent_0"].session.pruner,
+        )
+
+        assert isinstance(mine, Pruner)
+        assert isinstance(theirs, Pruner)
+        assert theirs is not mine
+
+
+@pytest.mark.asyncio
+async def test_a_persistent_child_inherits_from_its_parent_unless_told(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        compactor=SummaryCompactor,
+        other=[reply("ready")],
+    )
+    setup.parent.model.settings = replace(
+        setup.parent.model.settings,
+        thinking_effort="low",
+    )
+    setup.parent.runtime.tool_context.max_result_chars = 4321
+    setup.parent.environment = False
+    async with setup.team:
+        inherited = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait"},
+        )
+        told = await _spawn(
+            setup,
+            tmp_path,
+            {
+                "prompt": "wait",
+                "label": "told",
+                "tools": ["Grep"],
+                "system": "the child's prompt",
+                "provider": "other",
+                "model": "other",
+                "budget": "auto",
+                "output": "text",
+                "effort": "high",
+                "max_depth": 0,
+            },
+        )
+        heir, own = setup.team["Agent_0"], setup.team["told"]
+
+        assert inherited.is_error is told.is_error is False
+        assert list(heir.tools) == list(own.tools) == ["Read", "Grep", "AgentSend"]
+        assert (heir.allowed, own.allowed) == (None, frozenset({"Grep", "AgentSend"}))
+        assert (heir.system_prompt, own.system_prompt) == (
+            "the parent's prompt",
+            "the child's prompt",
+        )
+        assert heir.runtime.tool_context.cwd == tmp_path
+        assert heir.runtime.tool_context.max_result_chars == 4321
+        assert heir.environment is False
+        assert heir.agents_md is setup.parent.agents_md
+        assert isinstance(heir.session.compactor, SummaryCompactor)
+        assert heir.model is not setup.parent.model
+        assert heir.model.settings.thinking_effort == "low"
+        assert own.model.capability.model_id == "other"
+        assert (
+            own.model.settings.thinking_budget,
+            own.model.settings.thinking_output,
+            own.model.settings.thinking_effort,
+        ) == ("auto", "text", "high")
+        assert not setup.team.can_spawn("told")
+        assert setup.team.persistent() == ["Agent_0", "told"]
+    assert list(setup.team) == ["Agent"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_and_a_watcher_inherit_every_setting_alike(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        compactor=SummaryCompactor,
+        other=[reply("ready")],
+    )
+    parent = setup.parent
+
+    def width() -> int:
+        return 61
+
+    mine = parent.runtime.tool_context
+    mine.columns = width
+    mine.max_result_chars = 4321
+    mine.cwd = tmp_path / "moved"
+    read = tmp_path / "read.txt"
+    _ = read.write_text("x")
+    mine.files.saw(read)
+    parent.runtime.persistent_retry = True
+    parent.runtime.wake_schedules = ToolWakeSchedules(per_tool={"Bash": None})
+    parent.environment = False
+    parent.allowed = frozenset({"Grep"})
+    parent.account = "work"
+    parent.user = "ann"
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        assert await setup.spawn.watch("Agent") == "watcher"
+        watcher = setup.team["watcher"]
+        assert (watcher.allowed, watcher.account) == (
+            frozenset({"Grep", "AgentSend"}),
+            "work",
+        )
+        # A root with no journal keeps no watcher to start again.
+        assert [r for r in parent.session.standing() if r.kind == "watcher"] == []
+        for label in ("Agent_0", "watcher"):
+            heir = setup.team[label]
+            context = heir.runtime.tool_context
+            assert {f.name: getattr(context, f.name) for f in _INHERITED} == {
+                f.name: getattr(mine, f.name) for f in _INHERITED
+            }
+            assert (context.cwd, heir.root) == (tmp_path / "moved", tmp_path)
+            assert context.files is not mine.files
+            assert not context.files.recent()
+            assert context.label == label
+            assert heir.runtime.persistent_retry is True
+            assert heir.runtime.wake_schedules == ToolWakeSchedules(
+                per_tool={"Bash": None},
+            )
+            assert heir.environment is False
+            assert heir.agents_md is parent.agents_md
+            # Whose session it is: a person's message is told apart in each of them.
+            assert heir.user == "ann"
+            assert isinstance(heir.session.compactor, SummaryCompactor)
+
+
+# What a child's tool context takes from its parent's; the rest are its own.
+_INHERITED = [
+    f
+    for f in fields(ToolContext)
+    if f.name in {"cwd", "root", "max_result_chars", "columns", "fetch_session"}
+]
+_OWN = {"files", "label", "spill_dir"}
+
+
+def test_every_tool_context_field_is_inherited_or_a_child_s_own() -> None:
+    """A new field fails here until it is said which a child gets."""
+    assert sorted(f.name for f in fields(ToolContext)) == sorted(
+        {f.name for f in _INHERITED} | _OWN,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_child_waits_out_rate_limits_when_its_parent_does(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"), reply("ready"))
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        setup.parent.runtime.persistent_retry = True
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "patient"})
+
+        assert setup.team["Agent_0"].runtime.persistent_retry is False
+        assert setup.team["patient"].runtime.persistent_retry is True
+
+
+@pytest.mark.asyncio
+async def test_a_child_given_no_work_tools_can_only_message(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "tools": []},
+        )
+        child = setup.team["Agent_0"]
+
+        assert list(child.tools) == ["Read", "Grep", "AgentSend"]
+        assert child.allowed == frozenset({"AgentSend"})
+
+
+@pytest.mark.asyncio
+async def test_a_child_given_every_tool_is_ungated(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go", "tools": ["Grep", "Read"]})
+
+        assert setup.team["Agent_0"].allowed is None
+
+
+@pytest.mark.asyncio
+async def test_a_child_told_only_a_model_takes_what_its_name_spells(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "model": "scripted+highthink"},
+        )
+
+        assert setup.team["Agent_0"].model.settings.thinking_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_a_child_may_call_only_what_its_gated_parent_may(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"), reply("ready"))
+    setup.parent.allowed = frozenset({"Grep"})
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go"})
+        with pytest.raises(ValueError, match="Unknown tools Read; yours: Grep"):
+            _ = await _spawn(
+                setup,
+                tmp_path,
+                {"prompt": "go", "tools": ["Read"]},
+            )
+
+        assert setup.team["Agent_0"].allowed == frozenset({"Grep", "AgentSend"})
+
+
+@pytest.mark.asyncio
+async def test_a_child_asked_again_is_nudged_until_it_replies_by_agentsend(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("first answer"),
+        reply("second answer"),
+        reply(""),
+        reply(calls=[call("AgentSend", "s1", to="Agent", content="done")]),
+        reply("sent it"),
+        send=True,
+    )
+    async with setup.team:
+        result = await _spawn(setup, tmp_path, {"prompt": "work", "label": "helper"})
+        helper = setup.team["helper"]
+        seen = _Seen()
+        helper.runtime.observers.append(seen)
+        setup.team.send("Agent", "helper", "and then?")
+        assert setup.team.owes("helper") == {"Agent": "and then?"}
+
+        (told,) = await _messages(setup.parent, 1)
+        await seen.idle()
+
+    assert result.text() == "first answer"
+    assert told == AgentMessage(
+        sender="helper",
+        recipient="Agent",
+        content="done",
+    )
+    records = setup.children.requests[-1].records
+    nudged = [
+        r for r in records if isinstance(r, SystemMessage) and r.subtype == "nudge"
+    ]
+    assert len(nudged) == 2
+    assert (nudged[0].content or "").startswith(
+        "You owe a reply to: Agent ('and then?')",
+    )
+    assert setup.team.owes("helper") == {}
+    del helper
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_replies_by_agentsend_is_not_nudged(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply(calls=[call("AgentSend", "s1", to="Agent", content="done")]),
+        reply("sent it"),
+        send=True,
+    )
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "work", "label": "helper"})
+        seen = _Seen()
+        setup.team["helper"].runtime.observers.append(seen)
+        setup.team.send("Agent", "helper", "and then?")
+
+        (told,) = await _messages(setup.parent, 1)
+        await seen.idle()
+
+    assert told.content == "done"
+    assert setup.team.owes("helper") == {}
+    assert len(setup.children.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_child_of_a_journaled_parent_keeps_its_own_journal(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("done"), journal=journal)
+
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "go"})
+
+    (spec,) = setup.team.standing("Agent")
+    path = Path(spec.journal)
+    assert _spawn_result(result).output_file == str(path)
+    assert path.parent.parent == tmp_path / "parent"
+    assert "done" in _kept(path)
+    assert spec.label == "Agent_0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label",
+    [
+        "/etc/cron.d/x",
+        "../other/session",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "a.b",
+        "a b",
+        "a\x00b",
+        "é",
+        "x" * 65,
+    ],
+)
+async def test_a_label_of_anything_but_plain_characters_starts_no_child(
+    tmp_path: Path,
+    label: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = Mock(spec=Agent)
+    members = {"Agent": parent}
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(side_effect=members.__contains__),
+        __getitem__=Mock(side_effect=members.__getitem__),
+        can_spawn=Mock(return_value=True),
+    )
+    model, start = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(AgentSpawn, "_model", model)
+    monkeypatch.setattr(AgentSpawn, "_start", start)
+
+    with pytest.raises(ValueError, match=r"^A label is 1 to 64 letters, digits"):
+        _ = (
+            await AgentSpawn(team=team)
+            .call(
+                ToolContext(cwd=tmp_path, label="Agent"),
+                {"prompt": "go", "label": label},
+            )
+            .result
+        )
+
+    model.assert_not_awaited()
+    start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["reviewer", "Agent_12", "re-view", "x" * 64])
+async def test_a_plain_label_names_the_child_and_never_its_folder(
+    tmp_path: Path,
+    label: str,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("done"), journal=journal)
+
+        async with setup.team:
+            result = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
+
+    assert _spawn_result(result).agent_id == label
+    (spec,) = setup.team.standing("Agent")
+    assert spec.label == label
+    folder = Path(spec.journal).parent.name
+    assert str(uuid.UUID(folder)) == folder
+
+
+@pytest.mark.asyncio
+async def test_a_label_used_again_keeps_a_journal_of_its_own(tmp_path: Path) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("first"), reply("second"), journal=journal)
+        async with setup.team:
+            spawned = {"prompt": "go", "label": "helper"}
+            _ = await _spawn(setup, tmp_path, dict(spawned))
+            (first,) = setup.team.standing("Agent")
+            await setup.team.stop("helper")
+            _ = await _spawn(setup, tmp_path, dict(spawned))
+            (second,) = setup.team.standing("Agent")
+
+    assert first.journal != second.journal
+    assert "first" not in _kept(Path(second.journal))
+
+
+@pytest.mark.asyncio
+async def test_a_persistent_child_stands_in_its_parents_journal_until_stopped(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("ready"), journal=journal)
+        async with setup.team:
+            _ = await _spawn(
+                setup,
+                tmp_path,
+                {
+                    "prompt": "wait",
+                    "label": "helper",
+                    "tools": ["Grep"],
+                    "effort": "high",
+                    "budget": "auto",
+                    "max_tool_call_rounds": 3,
+                    "max_depth": 1,
+                },
+            )
+            (spec,) = setup.team.standing("Agent")
+            # A spawn stands its own record and withdraws none.
+            assert not any(
+                isinstance(r, UncategorizedRecord) and r.kind == "withdrawn"
+                for r in journal
+            )
+
+            await setup.team.stop("helper")
+
+            assert setup.team.standing("Agent") == []
+    assert spec == ChildSpec(
+        label="helper",
+        journal=spec.journal,
+        tools=("Grep",),
+        max_rounds=3,
+        max_depth=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_child_keeps_its_parent_s_window_and_stands_with_it(
+    tmp_path: Path,
+) -> None:
+    wide = ModelCapability(
+        model_id="wide-1.0",
+        limits=ModelLimits(max_request_tokens=1_000_000),
+    )
+    catalog = ModelCatalog(
+        factories={
+            "wide": partial(
+                ScriptedProvider,
+                models=ModelTable(rows=(wide,)),
+                replies=[reply("ready")],
+            ),
+        },
+    )
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.team.catalog = catalog
+        setup.parent.model = catalog["wide"]["wide+200k"]
+        async with setup.team:
+            _ = await _spawn(
+                setup,
+                tmp_path,
+                {"prompt": "wait", "label": "helper"},
+            )
+            (spec,) = setup.team.standing("Agent")
+
+            assert setup.team["helper"].model.settings.context_size.tokens == 200_000
+    async with JsonlJournal(Path(spec.journal)) as kept:
+        stood = [
+            r.payload["model"]
+            for r in kept
+            if isinstance(r, UncategorizedRecord) and r.kind == "model"
+        ]
+    assert stood == ["wide/wide-1.0+200k+nothink"]  # codespell:ignore nothink
+
+
+@pytest.mark.asyncio
+async def test_a_child_on_a_provider_without_the_model_gets_the_one_in_its_role(
+    tmp_path: Path,
+) -> None:
+    def tiered(model_id: str, family: str, *replies: Reply) -> ProviderFactory:
+        return partial(
+            ScriptedProvider,
+            models=ModelTable(
+                rows=(_capability(model_id),),
+                roles={"default": family},
+            ),
+            replies=replies,
+        )
+
+    catalog = ModelCatalog(
+        factories={
+            "anthropic": tiered("opus-5.5", "opus"),
+            "openai": tiered("sol-6.2", "sol", reply("ready")),
+        },
+    )
+    setup = _setup(tmp_path)
+    setup.team.catalog = catalog
+    setup.parent.model = catalog["anthropic"]["opus"]
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait", "label": "helper", "provider": "openai"},
+        )
+        assert setup.team["helper"].model.capability.model_id == "sol-6.2"
+
+
+@pytest.mark.asyncio
+async def test_a_persistent_child_of_a_parent_in_memory_does_not_stand(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        result = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait"},
+        )
+
+        assert setup.team.standing("Agent") == []
+    assert result.is_error is False
+
+
+async def _first_session(tmp_path: Path, *specs: dict[str, PlainTree]) -> None:
+    """Spawn persistent children of a journaled root, then end the session."""
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(
+            tmp_path,
+            *[reply("noted")] * len(specs),
+            journal=journal,
+            other=[reply("noted")],
+        )
+        async with setup.team:
+            for spec in specs:
+                _ = await _spawn(setup, tmp_path, spec)
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_parent_starts_its_running_children_again(
+    tmp_path: Path,
+) -> None:
+    await _first_session(
+        tmp_path,
+        {
+            "prompt": "remember 7",
+            "label": "helper",
+            "system": "the helper's prompt",
+            "tools": ["Grep"],
+            "max_tool_call_rounds": 3,
+            "max_depth": 0,
+        },
+    )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("7"), journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            helper = setup.team["helper"]
+            kept = helper.session.journal.path
+            assert kept is not None
+            assert (helper.allowed, helper.max_rounds) == (
+                frozenset({"Grep", "AgentSend"}),
+                3,
+            )
+            assert not setup.team.can_spawn("helper")
+
+            assert await helper.send("which number?") == "7"
+            assert setup.team.persistent() == ["helper"]
+            assert helper.system_prompt == "the helper's prompt"
+            assert [s.label for s in setup.team.standing("Agent")] == ["helper"]
+    sent = setup.children.requests[0].records
+    assert UserMessage(content="remember 7") in sent
+    assert any(isinstance(e, types.ChildEvent) for e in setup.seen)
+    # The ids come from the journals, so the resumed child is the same agent.
+    assert setup.children.requests[0].agent == str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            kept.resolve().as_uri(),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_parent_starts_its_childrens_children_again(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("noted"), reply("noted"), journal=journal)
+        async with setup.team:
+            for spawner, label in (("Agent", "helper"), ("helper", "grand")):
+                _ = await _spawn(
+                    setup,
+                    tmp_path,
+                    {
+                        "prompt": "wait",
+                        "label": label,
+                    },
+                    label=spawner,
+                )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper", "grand"]
+
+            assert setup.team.parent("grand") == "helper"
+            assert setup.team.persistent() == ["helper", "grand"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["other", "org/other"], ids=["name", "repo-id"])
+async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    """Its spec named the model then; its journal names none."""
+    child = tmp_path / "parent" / "helper" / "session.jsonl"
+    child.parent.mkdir(parents=True)
+    async with JsonlJournal(child) as journal:
+        journal.append(UserMessage(content="remember 7"))
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal, other=[reply("7")])
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "agent:helper",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={
+                    "label": "helper",
+                    "journal": str(child),
+                    "tools": [],
+                    "provider": "other",
+                    "model": model,
+                },
+            ),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            helper = setup.team["helper"]
+            assert helper.model.provider.name == "other"
+            assert helper.allowed == frozenset({"AgentSend"})
+            assert isinstance(helper.tools["AgentSend"], AgentSend)
+            assert await helper.send("which number?") == "7"
+
+
+@pytest.mark.asyncio
+async def test_a_child_stood_on_a_provider_no_longer_offered_asks_its_parent_s_first(
+    tmp_path: Path,
+) -> None:
+    """``gone/x`` then names no provider, so it is a model name, asked of each."""
+    child = tmp_path / "parent" / "helper" / "session.jsonl"
+    child.parent.mkdir(parents=True)
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.parent.model = setup.team.catalog["other"]["other"]
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "agent:helper",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={
+                    "label": "helper",
+                    "journal": str(child),
+                    "tools": [],
+                    "provider": "gone",
+                    "model": "x",
+                },
+            ),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            assert setup.team["helper"].model.provider.name == "other"
+
+
+@pytest.mark.asyncio
+async def test_a_child_stood_with_no_model_anywhere_resumes_on_its_parent_s(
+    tmp_path: Path,
+) -> None:
+    """With nothing stood to recall, it starts as a new child would, as the catalog signs in."""
+    child = tmp_path / "parent" / "helper" / "session.jsonl"
+    child.parent.mkdir(parents=True)
+    async with JsonlJournal(child) as journal:
+        journal.append(UserMessage(content="who are you?"))
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.team.catalog = ModelCatalog(factories=_as_account)
+        setup.team.catalog.use_account("home")
+        setup.parent.model.settings = replace(
+            setup.parent.model.settings,
+            thinking_effort="low",
+        )
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "agent:helper",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={"label": "helper", "journal": str(child), "tools": []},
+            ),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            helper = setup.team["helper"]
+            assert (helper.account, helper.model.settings.thinking_effort) == (
+                "home",
+                "low",
+            )
+            assert await helper.send("which?") == "as home"
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_onto_a_journal_kept_from_before_takes_the_model_it_is_told(
+    tmp_path: Path,
+) -> None:
+    """Only a resume takes the model a journal stood."""
+    await _first_session(
+        tmp_path,
+        {"prompt": "remember 7", "label": "helper", "provider": "other"},
+    )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("ready"), journal=journal)
+        _session(setup.parent).resume()
+        async with setup.team:
+            _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": "helper"})
+
+            assert setup.team["helper"].model.provider.name == "scripted"
+
+
+@pytest.mark.asyncio
+async def test_a_child_journaled_under_the_old_name_resumes_renamed(
+    tmp_path: Path,
+) -> None:
+    await _first_session(
+        tmp_path,
+        {"prompt": "remember 7", "label": "helper"},
+    )
+    (written,) = (tmp_path / "parent").glob("*/session.jsonl")
+    old = written.rename(written.with_name("journal.jsonl"))
+    parent = tmp_path / "parent" / "journal.jsonl"
+    parent.write_text(parent.read_text().replace(str(written), str(old)))
+
+    async with JsonlJournal(parent) as journal:
+        setup = _setup(tmp_path, reply("7"), journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            assert await setup.team["helper"].send("which number?") == "7"
+    assert (written.exists(), old.exists()) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_a_child_starts_from_its_parents_cache_and_keeps_a_copy(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, other=[reply("ready")])
+    capability = _capability("other")
+    setup.parent.model_cache["other/other"] = CachedModel(
+        capability=capability,
+        settings=replace(capability.default, thinking_effort="high"),
+    )
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "wait", "provider": "other"},
+        )
+        child = setup.team["Agent_0"]
+
+        assert child.model.settings.thinking_effort == "high"
+        assert child.model_cache == setup.parent.model_cache
+        assert child.model_cache is not setup.parent.model_cache
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_child_comes_back_on_its_own_model_and_prompt(
+    tmp_path: Path,
+) -> None:
+    await _first_session(
+        tmp_path,
+        {
+            "prompt": "remember 7",
+            "label": "helper",
+            "provider": "other",
+            "effort": "high",
+            "system": "the helper's prompt",
+        },
+    )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        _session(setup.parent).resume()
+        async with setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            helper = setup.team["helper"]
+            assert (
+                helper.model.provider.name,
+                helper.model.settings.thinking_effort,
+            ) == (
+                "other",
+                "high",
+            )
+            assert helper.system_prompt == "the helper's prompt"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_owed_at_the_end_is_still_owed_on_resume(tmp_path: Path) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("noted"), journal=journal)
+        async with setup.team:
+            _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "helper"})
+            setup.team.ask("helper", "still there?")
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        _session(setup.parent).resume()
+        async with setup.team:
+            _ = await setup.spawn.resume("Agent")
+
+            assert setup.team.owes("helper") == {"user": "still there?"}
+
+
+@pytest.mark.asyncio
+async def test_a_child_whose_label_is_taken_resumes_under_a_new_one(
+    tmp_path: Path,
+) -> None:
+    await _first_session(
+        tmp_path,
+        {
+            "prompt": "wait",
+            "label": "helper",
+        },
+    )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        _session(setup.parent).resume()
+        _ = setup.team.join(
+            Agent(
+                model=ScriptedProvider()["scripted"],
+                tool_context=ToolContext(cwd=tmp_path),
+            ),
+            label="helper",
+            parent="Agent",
+        )
+        async with setup.team:
+            assert await setup.spawn.resume("Agent") == ["Agent_0"]
+
+            assert [s.label for s in setup.team.standing("Agent")] == ["Agent_0"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_cannot_be_rebuilt_is_skipped(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A crash inside ``serve_forever`` must be logged with the agent label.
-
-    The ``_run`` wrapper around ``serve_forever`` previously had only
-    ``try/finally`` -- exceptions from the child were stored on the
-    asyncio task and silently lost. Persistent agents that crashed at
-    startup appeared "alive" in the registry but produced no work and
-    no diagnostic. This test pins the contract: any exception out of
-    ``serve_forever`` lands in the logger at ERROR or higher, with the
-    failing child's label in the message.
-    """
-    parent = _make_parent()
-    child = _BoomAgent(
-        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-        tools=[],
+    await _first_session(
+        tmp_path,
+        {
+            "prompt": "a",
+            "label": "gone",
+            "provider": "other",
+            "model": "other",
+        },
+        {
+            "prompt": "b",
+            "label": "locked",
+        },
+        {"prompt": "c", "label": "kept"},
     )
 
-    t = AgentSpawn()
-    with (
-        _parent_context(parent),
-        caplog.at_level(logging.ERROR, logger=_AGENT_SPAWN_LOGGER),
-    ):
-        result = t._spawn_serviced(child, "doomed", "p", **_ROOT_SCOPE)
-        assert not result.is_error
-        task = _persistent_tasks.get("doomed")
-        assert task is not None
-        # The whole point: ``_run`` must catch -- never re-raise -- so
-        # the task completes cleanly with the exception logged. In
-        # production, nothing awaits this task; an uncaught raise
-        # would be lost to asyncio's "exception never retrieved"
-        # GC warning.
-        await task
-
-    assert any(
-        "doomed" in record.getMessage() and record.levelno >= logging.ERROR
-        for record in caplog.records
-    ), [r.getMessage() for r in caplog.records]
-
-
-@pytest.mark.asyncio
-async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> None:
-    """A persistent child must NOT clobber ``agent_registry['Agent']``.
-
-    Repro for the AgentSend-doesn't-wake-the-parent bug: the persistent
-    child's task inherits ``agent_label_var`` from the parent task
-    (``asyncio.create_task`` copies the current context). In
-    ``Agent._install_contextvars`` the line ``base_label =
-    agent_label_var.get("") or self.name`` then returns the parent's
-    label (``"Agent"``) rather than the child's own ``self.name``
-    (``"child1"``). For persistent agents, ``label = base_label``, so
-    ``agent_registry["Agent"] = child`` silently overwrites the parent's
-    entry. After this, every ``AgentSend("Agent", ...)`` from any sub
-    (including back from this same child) routes to the child, not to
-    the running parent. The parent never wakes.
-
-    The fix: serviced agents have a definite ``self.name`` set by
-    ``_spawn_serviced``; the label must come from that, not from the
-    inherited ``agent_label_var``.
-    """
-    parent = _make_parent()
-    with _parent_context(parent):
-        # Simulate the parent having registered itself under "Agent"
-        # (which it does inside its own serve_forever's
-        # _install_contextvars). The parent context manager already
-        # sets agent_label_var="Agent" so the child task will inherit
-        # it via asyncio.create_task.
-        agent_registry["Agent"] = parent
-        child = Agent(
-            model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-            tools=[],
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        factories = {
+            "scripted": partial(ScriptedProvider, capability=_capability("scripted")),
+        }
+        setup = _setup(tmp_path, journal=journal)
+        setup.team.catalog = ModelCatalog(factories=factories)
+        _session(setup.parent).resume()
+        held = next(
+            Path(spec.journal)
+            for spec in setup.team.standing("Agent")
+            if spec.label == "locked"
         )
-        t = AgentSpawn()
-        try:
-            result = t._spawn_serviced(child, "child1", "p", **_ROOT_SCOPE)
-            assert not result.is_error
-            # Yield to scheduler so the child's task enters
-            # serve_forever -> _install_contextvars (the bug site).
-            for _ in range(20):
-                await asyncio.sleep(0)
-                if agent_registry.get("child1") is child:
-                    break
-
-            assert agent_registry.get("Agent") is parent, (
-                "persistent child clobbered parent's 'Agent' registry"
-                f" entry; got {agent_registry.get('Agent')!r}"
-            )
-            assert agent_registry.get("child1") is child, (
-                "persistent child must remain reachable under its own"
-                f" label; got {agent_registry.get('child1')!r}"
-            )
-        finally:
-            child.shutdown(force=True)
-            task = _persistent_tasks.get("child1")
-            if task is not None:
-                try:
-                    await asyncio.wait_for(task, timeout=2.0)
-                except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-                    _ = task.cancel()
-            agent_registry.pop("Agent", None)
-            agent_registry.pop("child1", None)
+        async with JsonlJournal(held), setup.team:
+            with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
+                assert await setup.spawn.resume("Agent") == ["kept"]
+    gone, locked = (
+        r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
+    )
+    assert gone.startswith("not resuming agent 'gone': unknown provider 'other'")
+    assert locked == (
+        f"not resuming agent 'locked': Journal {held} is open in {_this_process()}."
+    )
 
 
 @pytest.mark.asyncio
-async def test_spawn_persistent_rejects_job_prefix_label() -> None:
-    parent = _make_parent()
-    child = _BoomAgent(
-        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-        tools=[],
-    )
-
-    t = AgentSpawn()
-    with _parent_context(parent):
-        result = t._spawn_serviced(child, "job-helper", "prompt", **_ROOT_SCOPE)
-    assert result.is_error
-    assert "reserved" in result.content
-
-
-@pytest.mark.asyncio
-async def test_spawn_persistent_rejects_duplicate_label() -> None:
-    """Duplicate label must error -- silent overwrite orphans the prior agent.
-
-    A persistent agent's label is its addressable identity for AgentSend.
-    Silently doing ``agent_registry[label] = child`` over an existing
-    entry orphans the prior agent (its background task keeps running but
-    is unreachable) and routes every subsequent ``AgentSend`` to the new
-    instance only. Worse, when the prior agent eventually terminates,
-    its ``finally`` block does ``agent_registry.pop(label, None)`` --
-    popping the NEW entry, leaving the new agent unreachable too.
-
-    Reject the duplicate spawn so the user kills the prior agent first.
-    """
-    parent = _make_parent()
-    child1 = _BoomAgent(
-        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-        tools=[],
-    )
-    child2 = _BoomAgent(
-        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
-        tools=[],
-    )
-
-    t = AgentSpawn()
-    with _parent_context(parent):
-        first = t._spawn_serviced(child1, "dup-label", "p1", **_ROOT_SCOPE)
-        assert not first.is_error
-        second = t._spawn_serviced(child2, "dup-label", "p2", **_ROOT_SCOPE)
-        assert second.is_error, f"second spawn must error, got {second.content!r}"
-        assert "dup-label" in second.content
-        # The first agent's task is still scheduled; let it run to
-        # completion so cleanup pops its own registry entry rather than
-        # leaving litter for the next test.
-        task1 = _persistent_tasks.get("dup-label")
-        assert task1 is not None
-        await task1
-
-
-# -- notify_on_asleep --------------------------------------------------------
-#
-# AgentSpawn(persistent=True, notify_on_asleep=True) installs a forwarder
-# that pushes a UserMessage("[<label> is idle]") into the parent's inbox
-# every time the child's runtime publishes AgentIdle (edge-triggered: one
-# per idle transition, suppressed until the next drain returns work).
-#
-# Two layers tested:
-#   1. Forwarder unit: AgentIdle in -> inbox push out (or no push when
-#      notify_on_asleep=False).
-#   2. End-to-end: _spawn_serviced(..., notify_on_asleep=True) wires
-#      the child's serve_forever such that the parent inbox observes
-#      the notification after the child finishes its seeded prompt.
-
-
-def _make_forwarder(
-    parent: Agent,
-    label: str,
-    *,
-    notify_on_asleep: bool,
-    child: Agent | None = None,
-) -> _ChildForwarder:
-    """Construct a _ChildForwarder bound to ``parent``, no verbosity gating."""
-    return _ChildForwarder(
-        parent_agent=parent,
-        child=child or _make_parent(),
-        forward_set=frozenset(),
-        stats=ChildStats(label=label, start=time.monotonic()),
-        label=label,
-        notify_on_asleep=notify_on_asleep,
-    )
-
-
-@pytest.mark.parametrize("verbosity", [0, 1, 2, 99])
-def test_forwarder_sends_response_boundaries_with_visible_text(verbosity: int) -> None:
-    """Completion and cancellation reach the display without inbox delivery."""
-    parent = _make_parent()
-    events: list[RuntimeEvent] = []
-    parent.runtime.observers.append(events.append)
-    forwarder = agent_spawn._build_forwarder(
-        "reader",
-        verbosity,
-        parent,
-        child=_make_parent(),
-    )
-    assert forwarder is not None
-    partial = ModelResponsePartial(text="Reply.")
-    complete = ModelResponseComplete(message=AssistantMessage(text="Reply."))
-    cancelled = ModelResponseCancelled()
-    for event in [partial, complete, cancelled]:
-        forwarder(event)
-    expected: list[RuntimeEvent] = (
-        [] if verbosity == 0 else [partial, complete, cancelled]
-    )
-    assert [
-        event.inner for event in events if isinstance(event, ChildEvent)
-    ] == expected
-    assert parent.runtime.inbox.empty()
-
-
-def test_forwarder_notify_on_asleep_false_skips_inbox_push() -> None:
-    """Default: AgentIdle never reaches the parent inbox."""
-    parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
-
-    fwd(AgentIdle())
-
-    assert parent.runtime.inbox.empty(), (
-        "AgentIdle leaked into parent inbox with notify_on_asleep=False"
-    )
-
-
-def test_forwarder_notify_on_asleep_true_suppresses_boot_idle() -> None:
-    """AgentIdle on a child with EMPTY history is the boot state, not a
-    busy→idle transition. The forwarder must NOT push a notification
-    until the child has done at least one turn -- otherwise every
-    freshly-spawned persistent child spams the parent with a useless
-    "[child is idle]" the moment it starts.
-    """
-    parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
-
-    fwd(AgentIdle())
-
-    assert parent.runtime.inbox.empty(), (
-        "boot AgentIdle (empty child history) leaked into parent inbox"
-    )
-
-
-def test_forwarder_notify_on_asleep_true_pushes_after_first_turn() -> None:
-    """notify_on_asleep=True: AgentIdle AFTER the child has produced
-    history pushes an AgentSendMessage attributed to the child. This is
-    the real busy→idle edge.
-
-    Attribution: source must be the child's label so the renderer's
-    AgentSendMessage bar surfaces the right "from" header and the
-    parent's model context disambiguates the idle ping from anonymous
-    human input.
-    """
-    parent = _make_parent()
-    child = _make_parent()
-    child.runtime.append_history(UserMessage(text="kick off"))
-    child.runtime.append_history(AssistantMessage(text="reply"))
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
-
-    fwd(AgentIdle())
-
-    queue = parent.runtime.inbox._queue
-    assert queue.qsize() == 1
-    msg = queue.get_nowait()
-    assert isinstance(msg, AgentSendMessage)
-    assert msg.source == "child"
-    assert msg.text == "[child is idle] reply"
-
-
-def test_forwarder_notify_on_asleep_includes_last_assistant_text() -> None:
-    """When the child has assistant history, the idle payload carries it.
-
-    This is the safety net for a persistent child that replies with
-    plain assistant text instead of calling ``AgentSend`` back -- the
-    forwarder ferries the last text into the parent's inbox so the
-    parent's model still sees the content.
-    """
-    parent = _make_parent()
-    child = _make_parent()
-    child.runtime.append_history(AssistantMessage(text="hello parent"))
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
-
-    fwd(AgentIdle())
-
-    queue = parent.runtime.inbox._queue
-    assert queue.qsize() == 1
-    msg = queue.get_nowait()
-    assert isinstance(msg, AgentSendMessage)
-    assert msg.source == "child"
-    assert msg.text == "[child is idle] hello parent"
-
-
-def test_forwarder_notify_on_asleep_prefers_agent_send_content() -> None:
-    """When child's last reply was an ``AgentSend`` to the parent, the
-    idle payload carries that content -- not the subsequent ack/"Done."
-    assistant turn that fires after the mandatory follow-up round.
-
-    Mechanism: ``AgentSend`` is a tool call. After the child's tool
-    dispatches it, a ``ToolResult`` sits at history tail and triggers
-    a second model call (per ``_should_call_model``); the child's
-    answering text ("Done.") becomes the most recent assistant message.
-    The idle payload's old behavior was to ferry that ack into the
-    parent's inbox, dropping the actual report carried in
-    ``AgentSend.args["content"]``.
-    """
-    parent = _make_parent()
-    child = _make_parent()
-    child.runtime.append_history(UserMessage(text="user kicked off"))
-    child.runtime.append_history(
-        AssistantMessage(
-            tool_calls=(
-                ToolCall(
-                    id="t1",
-                    name="AgentSend",
-                    args={"to": "parent", "content": "report body"},
-                ),
-            ),
-        ),
-    )
-    child.runtime.append_history(ToolResult(call_id="t1", content="Delivered"))
-    child.runtime.append_history(AssistantMessage(text="Done."))
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
-
-    fwd(AgentIdle())
-
-    queue = parent.runtime.inbox._queue
-    assert queue.qsize() == 1
-    msg = queue.get_nowait()
-    assert isinstance(msg, AgentSendMessage)
-    assert msg.source == "child"
-    assert msg.text == "[child is idle] report body", (
-        f"forwarder must surface AgentSend content, not the ack 'Done.'; got {msg.text!r}"
-    )
-
-
-def test_forwarder_notify_on_asleep_one_push_per_event_after_first_turn() -> None:
-    """Each AgentIdle after the child has history is independently
-    translated; edge-trigger lives in the runtime, not the forwarder.
-
-    The forwarder is stateless w.r.t. AgentIdle ONCE the boot
-    suppression has passed (child history non-empty). Each runtime-
-    delivered AgentIdle then produces one inbox push.
-    """
-    parent = _make_parent()
-    child = _make_parent()
-    child.runtime.append_history(AssistantMessage(text="real reply"))
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
-
-    fwd(AgentIdle())
-    fwd(AgentIdle())
-    fwd(AgentIdle())
-
-    assert parent.runtime.inbox._queue.qsize() == 3
-
-
-def test_forwarder_notify_on_asleep_ignores_other_events() -> None:
-    """ModelIdle and other non-AgentIdle events do not push to the inbox
-    even when notify_on_asleep=True.
-    """
-    parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
-
-    fwd(ModelIdle())
-
-    assert parent.runtime.inbox.empty()
-
-
-def test_forwarder_always_forwards_model_service_suspended() -> None:
-    parent = _make_parent()
-    seen: list[ChildEvent] = []
-    parent.runtime.observers.append(
-        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None,
-    )
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
-    suspended = ModelServiceSuspended(
-        provider="OpenAISubscription",
-        auth="credentials",
-        account="default",
-        model_id="gpt-5.5",
-        retry_at=1_800_000_000.0,
-        delay_sec=120.0,
-        server_supplied=True,
-        error=ServiceErrorSnapshot(
-            type_name="RateLimitError",
-            message="limited",
-            status=429,
-        ),
-    )
-
-    fwd(suspended)
-
-    assert len(seen) == 1
-    assert seen[0].label == "child"
-    assert seen[0].inner is suspended
-
-
-def test_forwarder_always_forwards_usage_notice() -> None:
-    # A child burns the same provider quota as the root; its near-limit usage
-    # advisory must reach the parent even at verbosity 0 (empty forward_set).
-    parent = _make_parent()
-    seen: list[ChildEvent] = []
-    parent.runtime.observers.append(
-        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None,
-    )
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
-    notice = NoticeMessage(text="[usage: 7d window 89% used]", tier="advisory")
-
-    fwd(notice)
-
-    assert len(seen) == 1
-    assert seen[0].label == "child"
-    assert seen[0].inner is notice
-
-
-@dataclass(slots=True, kw_only=True)
-class _RatioStubModel(StubProviderModel):
-    """Stub whose token estimator is ``len(text) // ratio_divisor``.
-
-    Distinguishes a model-derived child response-token count from the
-    forwarder's old hardcoded ``chars // 4``.
-    """
-
-    ratio_divisor: int = 2
-
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        return len(text) // self.ratio_divisor
-
-
-def _child_done_tokens(parent: Agent, fwd: _ChildForwarder) -> int:
-    """Run ``emit_done`` and return the published ``ChildDoneEvent.tokens``."""
-    seen: list[ChildDoneEvent] = []
-    parent.runtime.observers.append(
-        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None,
-    )
-    fwd.emit_done()
-    assert len(seen) == 1
-    return seen[0].tokens
-
-
-def test_forwarder_response_tokens_use_child_model_estimator_not_chars4() -> None:
-    """``ChildDoneEvent.tokens`` must use the child model's tokenizer over
-    the whole streamed text, not a hardcoded ``chars // 4``.
-
-    A child model at 2 chars/token over 800 streamed chars is 400 tokens;
-    ``// 4`` would report 200.
-    """
-    child = _make_parent(_RatioStubModel(ratio_divisor=2))
-    parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=False, child=child)
-
-    fwd(ModelResponsePartial(text="x" * 500))
-    fwd(ModelResponsePartial(text="y" * 300))
-
-    assert _child_done_tokens(parent, fwd) == child.model.approx_text_tokens("z" * 800)
-
-
-def test_forwarder_response_tokens_tokenize_whole_not_per_chunk() -> None:
-    """Tiny chunks must not floor to zero.
-
-    A truncating estimator (``int(len/3)``) over nine 1-char chunks reads
-    0 per chunk but 3 for the joined text; the forwarder must tokenize the
-    accumulated whole.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _Floor3Model(StubProviderModel):
-        model_id: str = "floor3"
-
-        @override
-        def approx_text_tokens(self, text: str) -> int:
-            return int(len(text) / 3)
-
-    child = _make_parent(_Floor3Model())
-    parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=False, child=child)
-    for _ in range(9):
-        fwd(ModelResponsePartial(text="x"))
-    assert _child_done_tokens(parent, fwd) == 3
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_persists_base_system_without_ipc_rule(
+async def test_a_child_owing_a_reply_whose_model_fails_says_so(
     tmp_path: Path,
 ) -> None:
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=tmp_path,
-    )
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-        system="base system prompt",
-    )
-    spawn = AgentSpawn()
+    setup = _setup(tmp_path, reply("ready"), RuntimeError("model gone"))
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "work", "label": "helper"})
+        setup.team.send("Agent", "helper", "more")
 
-    with _parent_context(parent, label="parent-label"):
-        result = spawn._spawn_serviced(child, "fix-tools", "do work", **_ROOT_SCOPE)
+        (told,) = await _messages(setup.parent, 1)
 
-    task = _persistent_tasks.get("fix-tools")
-    try:
-        assert not result.is_error
-        lifecycle = [
-            json.loads(line)
-            for line in (tmp_path / "session.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if "persistent_agent" in line
-        ]
-        assert lifecycle[-1]["system"] == "base system prompt"
-        assert "persistent agent" not in lifecycle[-1]["system"]
-    finally:
-        child.shutdown(force=True)
-        if task is not None:
-            _ = task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        agent_registry.pop("fix-tools", None)
+    assert (told.sender, told.recipient, told.content) == (
+        "helper",
+        "Agent",
+        "[helper failed] RuntimeError: model gone",
+    )
 
 
 @pytest.mark.asyncio
-async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -> None:
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=tmp_path,
-    )
-    child = Agent(
-        model=StubProviderModel(
-            model_id="gpt-5.5",
-            responses=[AssistantMessage(text="done")],
-        ),
-        model_recipe=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="gpt-5.5",
-            account="default",
-        ),
-        tools=[],
-        system="child system",
-    )
-    spawn = AgentSpawn()
+async def test_parallel_spawns_each_get_a_label_of_their_own(tmp_path: Path) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("one"), reply("two"), journal=journal)
 
-    with _parent_context(parent):
-        result = spawn._spawn_serviced(
-            child,
-            "fix-tools",
-            "do work",
-            notify_on_asleep=False,
-            **_ROOT_SCOPE,
-        )
-
-    task = _persistent_tasks.get("fix-tools")
-    try:
-        assert not result.is_error
-        lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
-        lifecycle = [json.loads(line) for line in lines if "persistent_agent" in line]
-        assert len(lifecycle) == 1
-        record = lifecycle[0]
-        assert record["label"] == "fix-tools"
-        assert record["state"] == "running"
-        assert record["provider"] == "OpenAISubscription"
-        assert record["auth"] == "credentials"
-        assert record["account"] == "default"
-        assert record["model_id"] == "gpt-5.5"
-        assert record["tools"] == []
-        assert record["system"] == child.base_system_spec
-        assert record["notify_on_asleep"] is False
-        assert record["session_dir"] == str(child.session_dir or "")
-    finally:
-        child.shutdown(force=True)
-        if task is not None:
-            _ = task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
-    """A serviced child whose model call fails must reach the parent's inbox.
-
-    A model-level failure (bad model id, revoked creds) leaves the child
-    parked on ``AWAIT_RECOVERY`` -- it never publishes ``AgentIdle`` and its
-    ``serve_forever`` does not crash -- so the ``notify_on_asleep`` idle ping
-    never fires. Without a dedicated error edge the parent's model never learns
-    the child died: the forwarder renders ``ModelResponseError`` to the pane
-    only. This asserts the child-fatal error is delivered to the parent's inbox
-    (its decision layer), the only channel the parent's model reads.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _FailingModel(StubProviderModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            raise RuntimeError("unsupported model for this account")
-
-    parent = _make_parent()
-    child = Agent(model=_FailingModel(), tools=[])
-    t = AgentSpawn()
-
-    with _parent_context(parent):
-        result = t._spawn_serviced(
-            child,
-            "doomed-child",
-            "do work",
-            notify_on_asleep=True,
-            **_ROOT_SCOPE,
-        )
-        assert not result.is_error
-        task = _persistent_tasks.get("doomed-child")
-        assert task is not None
-
-        deadline = asyncio.get_running_loop().time() + 2.0
-        while parent.runtime.inbox.empty():
-            if asyncio.get_running_loop().time() >= deadline:
-                pytest.fail(
-                    "parent inbox never received the child's model-error notification",
-                )
-            await asyncio.sleep(0.01)
-
-        first = parent.runtime.inbox._queue.get_nowait()
-        assert isinstance(first, AgentSendMessage)
-        assert first.source == "doomed-child"
-        assert "unsupported model for this account" in first.text, (
-            f"unexpected payload: {first.text!r}"
-        )
-
-        child.shutdown(force=True)
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() -> None:
-    """Persistent spawn (no ``session_root_dir``) mutates ``_system_spec``
-    directly to add the serviced-agent IPC rule. A hot child's frozen
-    prompt must end up as parent-prefix + IPC rule, not silently un-frozen
-    or dropped -- this path is separate from ``_build_child`` and wasn't
-    exercised by the hot/cold tests there.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        name="child",
-        system="You are the root agent.",
-        tools=[],
-        frozen_system=True,
-    )
-    t = AgentSpawn()
-    with _parent_context(parent, label="Root"):
-        result = t._spawn_serviced(
-            child,
-            "hot-persist-1",
-            "do work",
-            notify_on_asleep=False,
-            **_ROOT_SCOPE,
-        )
-    assert not result.is_error
-    assert child._frozen_system is True
-    assert child.system_prompt() == (
-        "You are the root agent.\n\n"
-        "You are a persistent agent whose output is only known to your"
-        " creator via AgentSend(to='Root', ...). Any other output is"
-        " invisible to the parent and unless you AgentSend them, they will"
-        " be stuck indefinitely."
-    )
-    task = _persistent_tasks.get("hot-persist-1")
-    child.shutdown(force=True)
-    if task is not None:
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
-    """End-to-end: a persistent child seeded with a prompt completes one
-    round, becomes idle, and the parent inbox receives the notification
-    with the child's last assistant text embedded.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-    )
-    t = AgentSpawn()
-
-    with _parent_context(parent):
-        result = t._spawn_serviced(
-            child,
-            "watcher-child",
-            "do work",
-            notify_on_asleep=True,
-            **_ROOT_SCOPE,
-        )
-        assert not result.is_error
-        task = _persistent_tasks.get("watcher-child")
-        assert task is not None
-
-        # Wait until the parent inbox has at least one notification.
-        deadline = asyncio.get_running_loop().time() + 2.0
-        while parent.runtime.inbox.empty():
-            if asyncio.get_running_loop().time() >= deadline:
-                pytest.fail("parent inbox never received the AgentIdle notification")
-            await asyncio.sleep(0.01)
-
-        # First message is the idle ping carrying the child's last
-        # assistant text; subsequent pings are possible if the agent
-        # cycles, but at least one must be present.
-        first = parent.runtime.inbox._queue.get_nowait()
-        assert isinstance(first, AgentSendMessage)
-        assert first.source == "watcher-child"
-        assert first.text == "[watcher-child is idle] done", (
-            f"unexpected payload: {first.text!r}"
-        )
-
-        # Tear down: child has no further work, but the persistent loop
-        # keeps running. Force shutdown so the task drains.
-        child.shutdown(force=True)
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
-    """Explicit ``notify_on_asleep=False`` suppresses idle pings.
-
-    The default is now True (so a parent that forgets the flag still
-    hears from its child); this test pins the opt-out path.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-    )
-    t = AgentSpawn()
-
-    with _parent_context(parent):
-        result = t._spawn_serviced(
-            child,
-            "quiet-child",
-            "do work",
-            notify_on_asleep=False,
-            **_ROOT_SCOPE,
-        )
-        assert not result.is_error
-        task = _persistent_tasks.get("quiet-child")
-        assert task is not None
-
-        # Let the child run to idle. We can't easily detect idleness
-        # from outside without an observer, so let the task complete
-        # its initial prompt and then wait a small real period for any
-        # spurious inbox push to surface.
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-            if not child.runtime.inbox.empty():
-                continue
-            # Heuristic: model_call drained and inbox empty -> idle
-            # transition almost certainly fired by now.
-            if child.runtime.model_call is None and child.history != []:
-                break
-
-        assert parent.runtime.inbox.empty(), (
-            "parent inbox received an unexpected push with notify_on_asleep=False"
-        )
-
-        child.shutdown(force=True)
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_augments_child_system_prompt() -> None:
-    """Persistent children get an IPC rule appended to their system prompt
-    so the child's LLM knows raw assistant text is invisible to the parent
-    and that ``AgentSend(to=<parent>)`` is the only reliable reply path.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-        system="base system prompt",
-    )
-    t = AgentSpawn()
-
-    with _parent_context(parent, label="parent-label"):
-        result = t._spawn_serviced(child, "augmented-child", "do work", **_ROOT_SCOPE)
-        assert not result.is_error
-        task = _persistent_tasks.get("augmented-child")
-        assert task is not None
-
-        prompt = child.system
-        assert "base system prompt" in prompt
-        assert "persistent agent" in prompt
-        assert "AgentSend(to='parent-label'" in prompt
-        assert "invisible" in prompt
-
-        child.shutdown(force=True)
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_persistent_spawn_return_value_names_reply_channel() -> None:
-    """The tool result must tell the parent's LLM how replies arrive,
-    so it doesn't assume the next assistant message will surface
-    automatically.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-    )
-    t = AgentSpawn()
-
-    with _parent_context(parent):
-        result = t._spawn_serviced(child, "channel-child", "do work", **_ROOT_SCOPE)
-        assert not result.is_error
-        assert "AgentSend" in result.content
-        assert "channel-child" in result.content
-        assert "is idle" in result.content
-
-        child.shutdown(force=True)
-        task = _persistent_tasks.get("channel-child")
-        if task is not None:
-            try:
-                await asyncio.wait_for(task, timeout=2.0)
-            except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-                _ = task.cancel()
-
-
-def test_directive_schema_documents_notify_on_asleep() -> None:
-    """The directive schema must advertise the parameter so the LLM
-    can discover and emit it. We verify via string-level inspection
-    because the schema's nested JSON value type (recursive union) makes
-    structural narrowing fragile across type checkers.
-    """
-    rendered = repr(AgentSpawn().directive_schema)
-    assert "'notify_on_asleep'" in rendered
-    # Assert the actual description text, not a bare keyword: the param is
-    # documented as persistent-only and as defaulting to true.
-    lowered = rendered.lower()
-    assert "persistent only" in lowered
-    assert "the default" in lowered
-
-
-def test_directive_schema_prefers_subscription_providers() -> None:
-    """The provider/auth descriptions must steer the LLM toward
-    subscription providers so it doesn't default to env-API-key auth
-    on hosts where only a CLI subscription is configured. Regression
-    guard: session b0e1ced6 spawned ``provider="OpenAI", auth="env"``
-    on a host with no API key set, when a subscription variant was
-    available in the schema enumeration.
-    """
-    rendered = repr(AgentSpawn().directive_schema)
-    assert "Subscription" in rendered
-    assert "credentials" in rendered
-
-
-def test_allow_providers_filters_schema_enumeration() -> None:
-    """Restricting ``allow_providers`` narrows the provider enum
-    rendered in the schema description, hiding providers the host has
-    no credentials for. Companion to ``--allow-providers`` CLI flag.
-    """
-    spawn = AgentSpawn(allow_providers=("OpenAISubscription",))
-    rendered = repr(spawn.directive_schema)
-    assert "``OpenAISubscription``" in rendered
-    assert "DashScope" not in rendered
-    assert "MiniMax" not in rendered
-    assert "Moonshot" not in rendered
-
-
-def test_allow_providers_default_includes_all() -> None:
-    """Default construction (no ``allow_providers``) enumerates every
-    provider known to ``sagent.providers``.
-    """
-    spawn = AgentSpawn()
-    rendered = repr(spawn.directive_schema)
-    for name in PROVIDER_NAMES:
-        assert f"``{name}``" in rendered, f"missing {name}"
-
-
-def test_build_child_model_rejects_provider_outside_allow_list() -> None:
-    """An explicit ``provider`` not in the allow list is rejected with
-    a ``ToolResult`` error rather than reaching ``build_provider``.
-    """
-    parent = _make_parent()
-    t = AgentSpawn(allow_providers=("OpenAISubscription",))
-    result = t._build_child_model(
-        provider="Anthropic",
-        auth="env",
-        model_id="gpt-5.5",
-        account=None,
-        parent_agent=parent,
-    )
-    assert isinstance(result, ToolResult)
-    assert result.is_error
-    assert "not in the allowed list" in result.content
-    assert "Anthropic" in result.content
-
-
-def test_build_child_model_parent_provider_always_allowed() -> None:
-    """The parent's own provider is always accepted, even when not
-    in the allow list -- inheritance must keep working. The child gets a
-    FRESH transport built from the inherited spec, never the parent's alias.
-    """
-    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
-    parent_model = StubProviderModel(model_id="stub")
-    parent = Agent(
-        model=parent_model,
-        tools=[],
-        model_recipe=spec,
-    )
-    fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
-    t = AgentSpawn(allow_providers=("OpenAISubscription",))
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        resolved = t._build_child_model(
-            provider="StubP",
-            auth="env",
-            model_id="stub",
-            account=None,
-            parent_agent=parent,
-        )
-    assert isinstance(resolved, agent_spawn._ChildModel)
-    model, returned_spec = resolved.model, resolved.spec
-    assert model is not parent_model  # Fresh transport, parent provider allowed.
-    assert returned_spec == spec
-    build.assert_called_once_with("StubP", "env", account=None)
-
-
-@pytest.mark.asyncio
-async def test_spawned_child_writes_own_session_jsonl(tmp_path: Path) -> None:
-    """Child agents persist their own ``session.jsonl`` under the parent's dir.
-
-    Regression test for session 8588644a: subagents did all the real work
-    (Read/Edit/Write) but their tape was never written to disk because the
-    persistence observer was only installed by the CLI for the root agent.
-    With ``Agent.__init__`` auto-installing the observer when ``session_dir``
-    is set, every child constructed by ``AgentSpawn`` -- which already
-    threads a derived ``session_dir`` through ``_child_session_dir`` --
-    self-persists. This test proves the chain works end-to-end.
-    """
-    parent_model = StubProviderModel(responses=[AssistantMessage(text="child-said")])
-    parent = Agent(model=parent_model, tools=[], session_dir=tmp_path)
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "do it"})
-    assert not result.is_error
-    # Inherited layout: ``<parent_session_dir>/<child_uuid>/session.jsonl``.
-    # The parent's session_dir already encodes its identity, so no
-    # redundant parent_id prepend.
-    child_files = list(tmp_path.glob("*/session.jsonl"))  # noqa: ASYNC240 -- The spawn has completed, so no other coroutine is starved by this blocking read.
-    assert child_files, (
-        f"expected at least one child session.jsonl directly under"
-        f" {tmp_path}; found nothing"
-    )
-    # The child's session.jsonl must carry real records, not be empty.
-    content = child_files[0].read_text(encoding="utf-8")
-    assert content.strip(), "child session.jsonl is empty"
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_malformed_tools_string() -> None:
-    """``tools="Read"`` is malformed -- not an array. Fail closed.
-
-    Pre-fix this silently became ``tools=None`` → inherit the
-    parent's full toolset. The LLM asked to restrict tools but got
-    the unrestricted set: a permission gap.
-    """
-    parent = _make_parent()
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "p", "tools": "Read"})
-    assert result.is_error
-    assert "tools" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_max_tool_call_rounds_zero() -> None:
-    """Schema declares ``minimum: 1``; runtime must enforce.
-
-    Pre-fix ``max_tool_call_rounds=0`` slipped through and produced
-    an agent that immediately hit its cap before any model round.
-    """
-    parent = _make_parent()
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "p", "max_tool_call_rounds": 0})
-    assert result.is_error
-    assert "max_tool_call_rounds" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_negative_max_depth() -> None:
-    """Schema declares ``minimum: 0``; runtime must enforce."""
-    parent = _make_parent()
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run({"prompt": "p", "max_depth": -1})
-    assert result.is_error
-    assert "max_depth" in result.content
-
-
-@pytest.mark.asyncio
-async def test_resumed_serviced_child_shares_spawn_lifecycle(tmp_path: Path) -> None:
-    """Resume re-hosts on the spawn lifecycle: terminal record, IPC rule, cleanup."""
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=tmp_path,
-        name="boss",
-    )
-    child = Agent(model=StubProviderModel(), tools=[], system="base")
-    agent_spawn.resume_serviced_child(
-        parent,
-        child,
-        label="resumed",
-        run_id="run-7",
-        notify_on_asleep=False,
-    )
-    assert agent_registry["resumed"] is child
-    assert child.is_serviced
-    assert child.is_subagent
-    assert "AgentSend(to='boss'" in child.system
-    job = parent.background["persistent:resumed"]
-    assert job.persistent_run_id == "run-7"
-    child.shutdown(force=True)
-    await job.task
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "session.jsonl").read_text().splitlines()
-        if "persistent_agent" in line
-    ]
-    assert [(r["run_id"], r["state"]) for r in records] == [("run-7", "completed")]
-    assert records[0]["system"] == "base"
-    assert "resumed" not in agent_registry
-    assert "persistent:resumed" not in parent.background
-
-
-def test_resume_serviced_child_rejects_taken_label() -> None:
-    parent = _make_parent()
-    agent_registry["taken"] = parent
-    try:
-        with pytest.raises(ValueError, match="already running"):
-            agent_spawn.resume_serviced_child(
-                parent,
-                _make_parent(),
-                label="taken",
-                run_id="r",
-                notify_on_asleep=False,
+        async with setup.team:
+            results = await asyncio.gather(
+                _spawn(setup, tmp_path, {"prompt": "a"}),
+                _spawn(setup, tmp_path, {"prompt": "b"}),
             )
-    finally:
-        agent_registry.pop("taken", None)
+
+    assert sorted(_spawn_result(r).agent_id or "" for r in results) == [
+        "Agent_0",
+        "Agent_1",
+    ]
+    assert all(_spawn_result(r).state == "completed" for r in results)
 
 
-@pytest.mark.parametrize(("depth", "cap"), [(0, 0), (2, 2), (3, 2)])
 @pytest.mark.asyncio
-async def test_prompt_and_run_agree_on_leaf(depth: int, cap: int) -> None:
-    """An agent ``prompt()`` calls a leaf is refused by ``run()``."""
-    parent = _make_parent()
-    parent.tool_state.depth = depth
-    token = max_depth_var.set(cap)
-    try:
-        with _parent_context(parent):
-            t = AgentSpawn()
-            text = t.prompt()
-            result = await t.run({"prompt": "task"})
-    finally:
-        max_depth_var.reset(token)
-    assert "leaf agent" in text
-    assert result.is_error
-    assert "max_depth" in result.content
+async def test_stopping_a_parent_mid_spawn_ends_the_spawn(
+    tmp_path: Path,
+) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply("ready"), reply(calls=[call("Wait")]), tools=[wait])
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {
+                "prompt": "wait",
+                "label": "p",
+            },
+        )
+        task = asyncio.ensure_future(
+            _spawn(setup, tmp_path, {"prompt": "go"}, label="p"),
+        )
+        await wait.started.wait()
+
+        await setup.team.stop("p")
+
+        result = await asyncio.wait_for(task, timeout=5)
+        assert result.is_error is True
+        assert "p" not in setup.team
 
 
-@dataclass(slots=True, kw_only=True)
-class _ScopeProbeModel(StubProviderModel):
-    """Record the spawn-tree position each model call runs under."""
+@pytest.mark.asyncio
+async def test_a_child_closes_the_model_it_ran_on(tmp_path: Path) -> None:
+    setup = _setup(tmp_path)
+    models: list[_CountingModel] = []
+    setup.team.catalog = ModelCatalog(
+        factories={
+            "scripted": partial(_Counting, replies=[reply("done")], models=models),
+        },
+    )
 
-    seen: list[tuple[str, int | None]] = field(default_factory=list)
-    called: asyncio.Event = field(default_factory=asyncio.Event)
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go"})
+        assert [m.closed for m in models] == [0]
+
+    assert [m.closed for m in models] == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models: list[_CountingModel] = []
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.team.catalog = ModelCatalog(
+            factories={"scripted": partial(_Counting, models=models)},
+        )
+
+        def held(journal: Path) -> Path:
+            return journal.parent / "held" / "session.jsonl"
+
+        monkeypatch.setattr(agent_spawn, "child_journal", held)
+        async with JsonlJournal(held(tmp_path / "parent" / "journal.jsonl")):
+            with pytest.raises(RuntimeError, match="is open in"):
+                _ = await _spawn(setup, tmp_path, {"prompt": "go"})
+
+        assert list(setup.team) == ["Agent"]
+        assert setup.team.standing("Agent") == []
+    assert [m.closed for m in models] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected_text"),
+    [
+        ({"account": "work"}, "as work"),
+        ({"account": "work", "provider": "scripted"}, "as work"),
+        ({}, "as None"),
+    ],
+    ids=["account", "account-and-provider", "inherited"],
+)
+async def test_a_child_told_an_account_signs_in_as_it(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    expected_text: str,
+) -> None:
+    setup = _setup(tmp_path)
+    setup.team.catalog = ModelCatalog(factories=_as_account)
+
+    result = await _spawn(setup, tmp_path, {"prompt": "who?", **arguments})
+
+    assert (result.is_error, result.text()) == (False, expected_text)
+    assert setup.team.catalog.account is None
+
+
+@pytest.mark.asyncio
+async def test_a_refused_spawn_closes_the_model_it_built(tmp_path: Path) -> None:
+    setup = _setup(tmp_path)
+    models: list[_CountingModel] = []
+    setup.team.catalog = ModelCatalog(
+        factories={"scripted": partial(_Counting, models=models)},
+    )
+
+    with pytest.raises(ValueError, match="not offered"):
+        _ = await _spawn(setup, tmp_path, {"prompt": "go", "budget": "fixed"})
+
+    assert [m.closed for m in models] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("told", "catalogs", "account"),
+    [
+        ("work", None, "work"),
+        (None, "home", "home"),
+        (None, None, None),
+        ("default", "home", None),
+        ("", "home", None),
+    ],
+    ids=["told", "the-catalogs", "default", "told-default", "told-empty"],
+)
+async def test_a_child_knows_the_account_it_signed_in_as(
+    tmp_path: Path,
+    told: str | None,
+    catalogs: str | None,
+    account: str | None,
+) -> None:
+    """So its journal stands its model with the account, and a resume signs in so."""
+    setup = _setup(tmp_path)
+    setup.team.catalog = ModelCatalog(factories=_as_account)
+    setup.team.catalog.use_account(catalogs)
+    arguments: dict[str, PlainTree] = {"prompt": "who?"}
+    if told is not None:
+        arguments["account"] = told
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, arguments)
+        assert setup.team["Agent_0"].account == account
+
+
+@pytest.mark.asyncio
+async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    (skills / "watch").mkdir(parents=True)
+    (skills / "watch" / "SKILL.md").write_text(
+        "---\nname: watch\ndescription: Watch.\n---\nThis root's own way to watch.\n",
+        encoding="utf-8",
+    )
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    spawn = AgentSpawn(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn, Skill(builtin_dir=skills)],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(root)
+    async with team:
+        assert await spawn.start_watcher("Agent") == "watcher"
+        told = [
+            m.content or ""
+            for m in team["watcher"].runtime.inbox.drain_nowait()
+            if isinstance(m, AgentMessage)
+        ]
+        assert "This root's own way to watch." in told[0]
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_of_an_agent_with_no_skill_tool_reads_its_tiers_alone(
+    tmp_path: Path,
+) -> None:
+    """A ``watch`` skill planted in its folder is not read by one told to read none."""
+    planted = tmp_path / ".sagent" / "skills" / "watch"
+    planted.mkdir(parents=True)
+    (planted / "SKILL.md").write_text(
+        "---\nname: watch\ndescription: Watch.\n---\nPlanted.\n",
+        encoding="utf-8",
+    )
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    spawn = AgentSpawn(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn],
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=AgentsMdConfig(tiers=frozenset({"Managed"})),
+    )
+    _ = team.join(root)
+    async with team:
+        assert await spawn.start_watcher("Agent") == "watcher"
+        told = [
+            m.content or ""
+            for m in team["watcher"].runtime.inbox.drain_nowait()
+            if isinstance(m, AgentMessage)
+        ]
+        assert "Planted." not in told[0]
+        assert "source='builtin'" in told[0]
+
+
+@pytest.mark.asyncio
+async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
+    tmp_path: Path,
+) -> None:
+    owed: list[dict[str, str]] = []
+
+    def answer(request: Request) -> Response:
+        del request
+        owed.append(dict(team.owes("watcher")))
+        return reply("watching")
+
+    team = Team(
+        catalog=ModelCatalog(
+            factories={"scripted": partial(ScriptedProvider, replies=[answer])},
+        ),
+    )
+    spawn = AgentSpawn(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(root)
+    context = root.runtime.tool_context
+    async with team:
+        with pytest.raises(
+            ValueError,
+            match=r"^A watcher needs a policy in prompt\.$",
+        ):
+            _ = await spawn.call(context, {"prompt": " ", "watch": True}).result
+        started = await settled(
+            spawn.call(context, {"prompt": "keep me honest", "watch": True}),
+        )
+
+        assert started == ToolMessage(
+            call_id="",
+            state="done",
+            stdout=("Started your watcher, watcher; it owes you a reply.",),
+            result=AgentSpawnResult(
+                agent_id="watcher",
+                agent_kind="watcher",
+                state="running",
+            ),
+        )
+        assert team.resolve("parent", by="Agent") == ["watcher"]
+        told: list[str] = []
+        async with asyncio.timeout(5):
+            while not owed or len(told) < 2:
+                await asyncio.sleep(0)
+                told = [
+                    r.content or ""
+                    for r in team["watcher"].session
+                    if isinstance(r, AgentMessage)
+                ]
+        assert owed[0] == {"Agent": "keep me honest"}
+        assert told[0].startswith("<skill name='watch' source='builtin'>")
+        assert told[1] == "keep me honest"
+        assert spawn.serialize_key(context, {"watch": True}) == "parent"
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            other = Agent(
+                model=ScriptedProvider()["scripted"],
+                tool_context=ToolContext(cwd=tmp_path),
+            )
+            _ = setup.team.join(other, label="other")
+            setup.parent.runtime.persistent_retry = True
+            setup.parent.session.append(UserMessage(content="hi"))
+
+            assert await setup.spawn.watch("Agent", before="how") == "watcher"
+            # Taken before the next start yields, or the watcher reads it first.
+            (first,) = setup.team["watcher"].runtime.inbox.drain_nowait()
+            assert await setup.spawn.watch("other") == "watcher_0"
+            with pytest.raises(ValueError, match="'Agent' is no unwatched root"):
+                _ = await setup.spawn.watch("Agent")
+            watcher = setup.team["watcher"]
+            assert watcher.runtime.persistent_retry is True
+            assert setup.team["watcher_0"].runtime.persistent_retry is False
+
+            kept = watcher.session.journal.path
+            assert kept is not None
+            assert kept.parent.parent == tmp_path / "parent"
+            assert setup.team.resolve("parent", by="Agent") == ["watcher"]
+            assert watcher.system_prompt == "the parent's prompt"
+            assert isinstance(first, AgentMessage)
+            assert first.content == "how\n\n[watch]\n> user: hi"
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_comes_back_on_resume_and_is_sent_only_what_is_new(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            setup.parent.session.append(UserMessage(content="before"))
+            _ = await setup.spawn.watch("Agent")
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["watcher"]
+            watcher = setup.team["watcher"]
+            # It saw "before" already: nothing is new until "after".
+            assert not any(
+                isinstance(m, AgentMessage)
+                for m in watcher.runtime.inbox.drain_nowait()
+            )
+            setup.parent.session.append(UserMessage(content="after"))
+            setup.parent.runtime.publish(AgentIdle())
+
+            (told,) = watcher.runtime.inbox.drain_nowait()
+            assert isinstance(told, AgentMessage)
+            assert told.content == "[watch]\n> user: after"
+
+            await setup.team.stop("watcher")
+            assert await setup.spawn.resume("Agent") == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_watcher_is_sent_the_window_its_root_sees_not_earlier_ones(
+    tmp_path: Path,
+) -> None:
+    """A long session's earlier windows would not fit one message; Session reads them."""
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        journal.append(
+            ContextClear(system_prompt="S"),
+            UserMessage(content="old"),
+            ContextClear(system_prompt="S", summary="gist"),
+            UserMessage(content="new"),
+        )
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = await setup.spawn.watch("Agent", before="how")
+
+            (first,) = setup.team["watcher"].runtime.inbox.drain_nowait()
+            assert isinstance(first, AgentMessage)
+            assert first.content is not None
+            assert "> user: new" in first.content
+            assert "old" not in first.content
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_stopped_and_started_again_is_sent_each_update_once(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = await setup.spawn.watch("Agent")
+            await setup.team.stop("watcher")
+            assert await setup.spawn.watch("Agent") == "watcher"
+            watcher = setup.team["watcher"]
+            _ = watcher.runtime.inbox.drain_nowait()
+
+            setup.parent.session.append(UserMessage(content="after"))
+            setup.parent.runtime.publish(AgentIdle())
+
+            told = [
+                m.content
+                for m in watcher.runtime.inbox.drain_nowait()
+                if isinstance(m, AgentMessage)
+            ]
+            assert told == ["[watch]\n> user: after"]
+
+
+async def _watched_once(tmp_path: Path, *, second: bool) -> Path:
+    """Watch a journaled root, after another root when ``second``; return its journal."""
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            if second:
+                other = Agent(
+                    model=ScriptedProvider()["scripted"],
+                    tool_context=ToolContext(cwd=tmp_path),
+                )
+                _ = setup.team.join(other, label="other")
+                _ = await setup.spawn.watch("other")
+            _ = await setup.spawn.watch("Agent")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_stood_without_a_journal_resumes_on_one_beside_its_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "watcher:watcher",
+            UncategorizedRecord(kind="watcher", payload={"label": "watcher"}),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["watcher"]
+
+            kept = setup.team["watcher"].session.journal.path
+            assert kept is not None
+            assert kept.parent.parent == root.parent
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_resumes_under_the_label_it_stood_with(tmp_path: Path) -> None:
+    root = await _watched_once(tmp_path, second=True)
+
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["watcher_0"]
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_whose_label_is_taken_resumes_its_own_journal(
+    tmp_path: Path,
+) -> None:
+    root = await _watched_once(tmp_path, second=False)
+    (held,) = root.parent.glob("*/session.jsonl")
+
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = setup.team.join(
+                Agent(
+                    model=ScriptedProvider()["scripted"],
+                    tool_context=ToolContext(cwd=tmp_path),
+                ),
+                label="watcher",
+            )
+            assert await setup.spawn.resume("Agent") == ["watcher_0"]
+
+            assert setup.team["watcher_0"].session.journal.path == held
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = await setup.spawn.watch("Agent")
+            held = setup.team["watcher"].session.journal.path
+            assert held is not None
+            setup.parent.session.stand(
+                "watcher:odd",
+                UncategorizedRecord(kind="watcher", payload={"label": 7}),
+            )
+
+    async with (
+        JsonlJournal(root) as journal,
+        JsonlJournal(held),
+    ):
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
+                assert await setup.spawn.resume("Agent") == []
+            assert list(setup.team) == ["Agent"]
+    (skipped,) = (
+        r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
+    )
+    assert skipped == (
+        f"not resuming watcher 'watcher': Journal {held} is open in {_this_process()}."
+    )
+
+
+def _as_account(account: str | None) -> Mapping[str, Callable[..., ScriptedProvider]]:
+    """Return a provider whose model says which account it signed in as."""
+    return {
+        "scripted": partial(
+            ScriptedProvider,
+            replies=[reply(f"as {account}")],
+            capability=_capability("scripted"),
+        ),
+    }
+
+
+class _CountingModel(ScriptedModel):
+    """A scripted model that counts its closes."""
+
+    closed: int = 0
 
     @override
-    async def stream(
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+class _Counting(ScriptedProvider):
+    """A scripted provider whose models count their closes, in ``models``."""
+
+    def __init__(
         self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        self.seen.append((agent_path_var.get(), max_depth_var.get()))
-        self.called.set()
-        return await StubProviderModel.stream(self, request, publish)
-
-
-@pytest.mark.asyncio
-async def test_oneshot_child_runs_under_its_own_path_and_cap() -> None:
-    """``max_depth`` counts generations below the child; it reaches the child."""
-    model = _ScopeProbeModel()
-    parent = _make_parent(model)
-    with _parent_context(parent):
-        result = await AgentSpawn().run({"prompt": "p", "max_depth": 0})
-    assert not result.is_error, result.content
-    assert model.seen == [("0", 1)]
-
-
-@pytest.mark.asyncio
-async def test_serviced_child_runs_under_its_own_path_and_cap() -> None:
-    """A persistent child's task sees its own path and the effective cap."""
-    model = _ScopeProbeModel()
-    parent = _make_parent(model)
-    with _parent_context(parent):
-        result = await AgentSpawn().run(
-            {"prompt": "p", "persistent": True, "max_depth": 0, "label": "svc"},
+        *,
+        models: list[_CountingModel],
+        name: str = "",
+        resources: ProviderResources | None = None,
+        replies: Sequence[Reply] = (),
+    ) -> None:
+        super().__init__(
+            name=name,
+            resources=resources,
+            replies=replies,
+            capability=_capability("scripted"),
         )
-    task = _persistent_tasks.get("svc")
-    try:
-        assert not result.is_error, result.content
-        _ = await asyncio.wait_for(model.called.wait(), timeout=2.0)
-    finally:
-        child = agent_registry.get("svc")
-        if child is not None:
-            child.shutdown(force=True)
-        if task is not None:
-            _ = task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-    assert model.seen == [("0", 1)]
+        self.built = models
 
-
-@dataclass(slots=True, kw_only=True)
-class _FailingStubModel(StubProviderModel):
     @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        raise RuntimeError("bad creds")
-
-
-@pytest.mark.asyncio
-async def test_oneshot_failure_writes_failed_lifecycle(tmp_path: Path) -> None:
-    """A oneshot child that errors records ``failed``, not ``completed``."""
-    parent = Agent(model=_FailingStubModel(), tools=[], session_dir=tmp_path)
-    with _parent_context(parent):
-        result = await AgentSpawn().run({"prompt": "p", "label": "fails"})
-    assert result.is_error
-    lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
-    lifecycle = [json.loads(line) for line in lines if "persistent_agent" in line]
-    assert lifecycle[-1]["state"] == "failed"
-
-
-@pytest.mark.parametrize("label", ["job-1", "taken"])
-@pytest.mark.asyncio
-async def test_oneshot_rejects_reserved_and_duplicate_labels(label: str) -> None:
-    parent = _make_parent()
-    agent_registry["taken"] = parent
-    try:
-        with _parent_context(parent):
-            result = await AgentSpawn().run({"prompt": "p", "label": label})
-    finally:
-        agent_registry.pop("taken", None)
-    assert result.is_error
-    assert label in result.content
-
-
-@pytest.mark.asyncio
-async def test_duplicate_tool_names_grant_one_tool() -> None:
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="ok")]),
-        tools=[BackgroundTask()],
-    )
-    with _parent_context(parent):
-        result = await AgentSpawn().run(
-            {"prompt": "p", "tools": ["BackgroundTask", "BackgroundTask"]},
+    def __getitem__(self, model: str) -> _CountingModel:
+        del model
+        built = _CountingModel(
+            provider=self,
+            capability=self.capability,
+            settings=self.capability.default,
         )
-    assert not result.is_error, result.content
+        self.built.append(built)
+        return built
 
 
-def test_child_done_reports_child_own_spend() -> None:
-    parent = _make_parent()
-    child = _make_parent()
-    child.record_side_response(
-        ModelResponse(message=AssistantMessage(text=""), spend=TokenCost(request=0.5)),
-    )
-    seen: list[ChildDoneEvent] = []
-    parent.runtime.observers.append(
-        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None,
-    )
-    _make_forwarder(parent, "c", notify_on_asleep=False, child=child).emit_done()
-    assert [e.cost for e in seen] == [pytest.approx(0.5)]
+def test_the_description_reads_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _Asked()
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", asked)
+        _ = runpy.run_path(
+            agent_spawn.__file__ or "",
+            run_name=f"{agent_spawn.__name__}_fresh",
+        )
 
-
-@pytest.mark.asyncio
-async def test_await_stopped_propagates_cancel_aimed_at_caller() -> None:
-    """Cancelling the parent while it reaps a child's loop must not be swallowed."""
-    child_loop = asyncio.create_task(_wait_forever())
-    reaper = asyncio.create_task(agent_spawn._await_stopped(child_loop))
-    await asyncio.sleep(0)
-    _ = reaper.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await reaper
-    with suppress(asyncio.CancelledError):
-        await child_loop
-
-
-@pytest.mark.asyncio
-async def test_await_stopped_absorbs_the_child_loops_own_cancel() -> None:
-    child_loop = asyncio.create_task(_wait_forever())
-    await asyncio.sleep(0)
-    _ = child_loop.cancel()
-    await agent_spawn._await_stopped(child_loop)
+    assert asked.encodings["agentspawn.md"] == "utf-8"
+    assert agent_spawn.AgentSpawn is AgentSpawn
 
 
 @dataclass(slots=True, kw_only=True)
-class _CountingProvider:
-    """Provider that builds stub models and counts ``close_sdk`` calls."""
+class _Asked:
+    """Read text as UTF-8, noting the encoding each read asked for."""
 
-    closes: int = 0
+    encodings: dict[str, str | None] = field(default_factory=dict)
 
-    def model(self, model_id: str | None = None) -> StubProviderModel:
-        del model_id
-        return StubProviderModel(responses=[AssistantMessage(text="child")])
+    def __get__(self, path: Path, owner: type[Path] | None = None) -> partial[str]:
+        """Bind to the path read, as the method it stands in for would."""
+        del owner
+        return partial(self, path)
 
-    async def close_sdk(self) -> None:
-        self.closes += 1
+    def __call__(
+        self,
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        del errors, newline
+        self.encodings[path.name] = encoding
+        return path.read_bytes().decode()
 
 
-def _recipe_parent() -> Agent:
+@dataclass(slots=True, kw_only=True)
+class _Relayed:
+    """A relay to another machine that keeps what it was given."""
+
+    sent: list[tuple[str, str, str, MessageKind]] = field(
+        default_factory=list[tuple[str, str, str, "MessageKind"]],
+    )
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        self.sent.append((sender, recipient, content, kind))
+
+
+def _here(tmp_path: Path) -> Agent:
+    """Return this machine's default agent, which a far caller's child takes after."""
     return Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        model_recipe=ModelRecipe(provider="StubP", auth="env", model_id="stub"),
+        model=ScriptedProvider(capability=_capability("scripted"))["scripted"],
+        tools=[_Tool(name="Read")],
+        system_prompt="this machine's prompt",
+        tool_context=ToolContext(cwd=tmp_path),
     )
 
 
 @pytest.mark.asyncio
-async def test_child_provider_is_closed_when_the_child_exits() -> None:
-    """The provider AgentSpawn built belongs to the child and closes with it."""
-    built = _CountingProvider()
-    parent = _recipe_parent()
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=built,
-        ),
-        _parent_context(parent),
-    ):
-        result = await AgentSpawn().run({"prompt": "p"})
-    assert not result.is_error, result.content
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert built.closes == 1
-
-
-@dataclass(slots=True, kw_only=True)
-class _OneAuthBuilder:
-    """A host's provider hook: builds ``built`` for ``auth`` and refuses any other."""
-
-    auth: str
-    built: _CountingProvider
-    asked: list[tuple[str, str, str | None]] = field(
-        default_factory=list[tuple[str, str, str | None]],
+async def test_an_agent_on_another_machine_spawns_a_child_here(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply(text="done"))
+    relay = _Relayed()
+    setup.team.reach("far", relay=relay)
+    setup.team.stand_in = partial(_here, tmp_path)
+    result = await _spawn(setup, tmp_path, {"prompt": "go"}, label="far")
+    assert (
+        _spawn_result(result).agent_id,
+        result.text(),
+        _spawn_result(result).state,
+    ) == (
+        "far_0",
+        "done",
+        "completed",
     )
-
-    def __call__(self, provider: str, auth: str, account: str | None) -> Provider:
-        self.asked.append((provider, auth, account))
-        if auth != self.auth:
-            raise ValueError(f"only {self.auth}")
-        return self.built
+    child = setup.team["far_0"]
+    assert setup.team.parent("far_0") == "far"
+    assert list(child.tools) == ["Read", "AgentSend"]
+    assert child.system_prompt == "this machine's prompt"
+    assert relay.sent == []
+    setup.team.receive(sender="far", recipient="far_0", content="more?", kind="ask")
+    await setup.team.stop("far_0")
+    assert relay.sent == [("far_0", "far", "[far_0 stopped]", "reply")]
 
 
 @pytest.mark.asyncio
-async def test_a_provider_hook_builds_each_child_or_refuses_it() -> None:
-    hook = _OneAuthBuilder(auth="plan", built=_CountingProvider())
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        model_recipe=ModelRecipe(provider="StubP", auth="plan", model_id="stub"),
-    )
-    spawn = AgentSpawn(allow_providers=(), build_provider=hook)
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=AssertionError("the registry built a child's provider"),
+@pytest.mark.parametrize(
+    ("arguments", "match"),
+    [
+        ({"prompt": "go"}, r"^AgentSpawn needs a calling agent in the team\.$"),
+        (
+            {"prompt": "watch", "watch": True},
+            r"^A watcher watches an agent of this machine\.$",
         ),
-        _parent_context(parent),
-    ):
-        ran = await spawn.run({"prompt": "p"})
-        refused = await spawn.run({"prompt": "p", "auth": "credentials"})
-    assert (ran.is_error, ran.content) == (False, "child")
-    assert (refused.is_error, refused.content) == (
-        True,
-        "Failed to build model 'stub': only plan",
-    )
-    assert hook.asked == [("StubP", "plan", None), ("StubP", "credentials", None)]
+    ],
+)
+async def test_a_far_caller_needs_this_machine_s_agent_and_no_watcher(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    match: str,
+) -> None:
+    setup = _setup(tmp_path)
+    setup.team.reach("far", relay=_Relayed())
+    if arguments.get("watch") is True:
+        setup.team.stand_in = partial(_here, tmp_path)
+    with pytest.raises(ValueError, match=match):
+        _ = await _spawn(setup, tmp_path, arguments, label="far")
+    assert list(setup.team) == ["Agent"]
 
 
 @pytest.mark.asyncio
-async def test_child_provider_is_closed_when_the_spawn_is_refused() -> None:
-    built = _CountingProvider()
-    parent = _recipe_parent()
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=built,
-        ),
-        _parent_context(parent),
-    ):
-        result = await AgentSpawn().run(
-            {"prompt": "p", "model_options": {"latency": "fast"}},
+@pytest.mark.parametrize("tools", [None, [], ["Grep"], ["AgentSend"]])
+@pytest.mark.parametrize("send", [False, True])
+async def test_every_child_can_reply_even_when_work_tools_are_restricted(
+    tmp_path: Path,
+    tools: list[str] | None,
+    send: bool,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply(calls=[call("AgentSend", to="parent", content="done")]),
+        reply("sent"),
+        send=send,
+    )
+    arguments: dict[str, PlainTree] = {"prompt": "wait", "label": "kid"}
+    if tools is not None:
+        arguments["tools"] = tools
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, arguments)
+        child = setup.team["kid"]
+        assert "AgentSend" in child.tools
+        assert child.allowed is None or "AgentSend" in child.allowed
+        if tools is not None:
+            assert child.allowed == frozenset({*tools, "AgentSend"})
+        setup.team.send("Agent", "kid", "status?")
+        (message,) = await _messages(setup.parent, 1)
+        assert message.content == "done"
+        assert setup.team.owes("kid") == {}
+
+
+@pytest.mark.asyncio
+async def test_messaging_survives_inherited_restrictions_and_grandchildren(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"), reply("ready"))
+    setup.parent.allowed = frozenset({"Grep"})
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": "kid"})
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "label": "grand"},
+            label="kid",
         )
-    assert result.is_error
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert built.closes == 1
+        for name in ("kid", "grand"):
+            assert setup.team[name].allowed == frozenset({"Grep", "AgentSend"})
+        with pytest.raises(ValueError, match="Unknown tools AgentSelf"):
+            _ = await _spawn(
+                setup,
+                tmp_path,
+                {"prompt": "go", "tools": ["AgentSelf"]},
+                label="kid",
+            )
 
 
-async def _wait_forever() -> None:
-    _ = await asyncio.Event().wait()
+@pytest.mark.asyncio
+async def test_a_restricted_watcher_can_send_without_gaining_work_tools(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path)
+    setup.parent.allowed = frozenset()
+    async with setup.team:
+        label = await setup.spawn.watch("Agent")
+        watcher = setup.team[label]
+        assert "AgentSend" in watcher.tools
+        assert watcher.allowed == frozenset({"AgentSend"})
 
 
 if __name__ == "__main__":

@@ -1,233 +1,189 @@
-"""WebSearch tool: query a pluggable search backend."""
+"""WebSearch: search the web, and return each hit's title, URL, and snippet.
+
+Typical usage example:
+
+  streaming_result = WebSearch().call(context, {"query": "python 3.14 release notes"})
+  result = await settled(streaming_result)
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, cast
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 import re
+import time
 
-from treekle import immutable
-from wesearch.fetch import FetchSession, Transport
+from wesearch.fetch import PolicyParams, Transport
 from wesearch.mcp.types import SearchParamsSchema
 from wesearch.search.render import format_result
 from wesearch.search.search import search
-from wesearch.search.types import (
-    SearchBackends,
-    SearxngCategory,
-)
+from wesearch.search.types import SearchBackends, SearxngCategory
 from wesearch.types.errors import BotDetectionError
 
-from sagent.tools.core import (
-    load_tool_description,
-    truncate_to_budget,
+from sagent.journal.types import WebSearchHit, WebSearchResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import (
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
 )
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
+
+
+__all__ = [
+    "WebSearch",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WebSearch:
-    """Search the web using a configurable backend."""
+    """Search the web."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        query: Annotated[str, SearchParamsSchema.query.description]
+        backend: Annotated[
+            SearchBackends | None,
+            SearchParamsSchema.backend.description,
+        ] = None
+        categories: Annotated[
+            SearxngCategory,
+            SearchParamsSchema.categories.description,
+        ] = "general"
+        transport: Annotated[
+            Transport | None,
+            SearchParamsSchema.transport.description,
+        ] = None
+        allowed_domains: Annotated[
+            tuple[str, ...],
+            "Only include results from these domains.",
+        ] = ()
+        blocked_domains: Annotated[
+            tuple[str, ...],
+            "Exclude results from these domains.",
+        ] = ()
 
     name = "WebSearch"
-    tool_id = "application/x-tool-websearch"
-    clearable_results = True
-
-    @property
-    def description(self) -> str:
-        """Return the tool description, re-evaluating ``{{NOW}}`` each access.
-
-        A long-running process that spans a month boundary must not freeze
-        the substitution at import time.
-        """
-        return load_tool_description("WebSearch")
-
-    # Domain filters stay local: they are a sagent query-building convenience
-    # (spliced into the query string), not a wesearch search parameter.
-    directive_schema = immutable(
-        {
-            **SearchParamsSchema.json_schema(),
-            "properties": {
-                **cast(
-                    dict[str, object],
-                    SearchParamsSchema.json_schema()["properties"],
-                ),
-                "allowed_domains": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Only include results from these domains.",
-                },
-                "blocked_domains": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Exclude results from these domains.",
-                },
-            },
-        },
+    description = (files(__package__) / "assets" / "websearch.md").read_text(
+        encoding="utf-8",
     )
+    schema = json_schema(Arguments)
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
+    policy: PolicyParams = field(default_factory=PolicyParams)
+    """How to fetch result pages when a call does not say."""
 
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``WebSearch '<query>'``."""
+        return f"WebSearch {str(arguments.get('query', ''))!r}"
 
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
-
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    session: FetchSession = field(
-        default_factory=FetchSession,
-        repr=False,
-        compare=False,
-    )
-    """Connections, Chrome, and the egress every search reuses."""
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation.
-
-        Args:
-          args: Directive carrying the ``query`` string.
-
-        Returns:
-          label: ``WebSearch '<query>'`` line shown before invocation.
-
-        """
-        return f"WebSearch {str(args.get('query', ''))!r}"
-
-    def prompt(self) -> str:
-        """Return no supplemental system-prompt text for WebSearch.
-
-        Returns:
-          contribution: Empty string.
-
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: independent network fetch, no serialization."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: searches are independent."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the web search and return formatted results.
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[WebSearchResult, WebSearchHit | str, str]:
+        """Search for ``query``, scoped to the domains given.
 
         Args:
-          args: Directive with ``query``, optional ``allowed_domains`` /
-              ``blocked_domains`` / ``backend`` / ``categories``.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``WebSearch.Arguments``.
 
         Returns:
-          result: Top results rendered per category -- a markdown link plus a
-              snippet, enriched with the structured fields a SearXNG category
-              carries -- or an error when the backend rejects the query.
+          streaming_result: The hits that fit in one result, or why there are none.
 
         """
-        try:
-            # One call replaces a per-parameter ladder that restated every
-            # name, type, and default the schema above already declares.
-            params = SearchParamsSchema.coerce(args)
-        except ValueError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-        query = str(params["query"])
-        # ``backend`` stays None when unnamed: ``search`` resolves it, and a
-        # non-general category resolves it to SearXNG. Substituting a constant
-        # here would hide that choice and reinstate the per-adapter override
-        # this tool used to carry.
-        backend = cast(SearchBackends | None, params["backend"])
-        transport = cast(Transport, params["transport"])
-        categories = cast(SearxngCategory, params["categories"])
-        try:
-            q = _build_query(
-                query,
-                args.get("allowed_domains"),
-                args.get("blocked_domains"),
-            )
-        except (TypeError, ValueError) as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-        try:
-            if transport == "auto":
-                results = await asyncio.to_thread(
-                    search,
-                    q,
-                    backend=backend,
-                    categories=categories,
-                    session=self.session,
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[WebSearchResult, WebSearchHit | str, str]:
+        a = parse(arguments, WebSearch.Arguments)
+        # Only a bare hostname is spliced in, so a filter cannot carry query
+        # syntax that widens the scope (``x.com -site:trusted.com``).
+        hostname = re.compile(r"(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?")
+        for domain in (*a.allowed_domains, *a.blocked_domains):
+            if not hostname.fullmatch(domain.strip()):
+                return ToolOutput(
+                    stderr=(f"Not a hostname: {domain!r}.",),
+                    result=WebSearchResult(exit_code=1),
                 )
-            else:
-                results = await asyncio.to_thread(
-                    search,
-                    q,
-                    backend=backend,
-                    categories=categories,
-                    transport=transport,
-                    session=self.session,
-                )
-        except BotDetectionError as err:
-            # Surface the class guidance (which captcha / IP-rotation remedy)
-            # AND the per-instance reason when it carries extra detail (e.g. the
-            # scholar cooldown's "~Nh on this IP"), so that actionable specifics
-            # are not discarded. Mirrors web_fetch's specific rendering.
-            reason = str(err)
-            content = (
-                f"{reason} {err.guidance}" if reason != err.guidance else err.guidance
-            )
-            return ToolResult(call_id="", content=content, is_error=True)
-        except (RuntimeError, ValueError) as err:
-            return ToolResult(call_id="", content=str(err), is_error=True)
-        if not results:
-            text = "(no results)"
-        else:
-            text = "\n\n".join(format_result(r) for r in results)
-        return ToolResult(call_id="", content=truncate_to_budget(text))
-
-
-# Only tokens matching a bare-hostname shape are accepted; a non-hostname value
-# (containing whitespace or query operators) is REJECTED rather than spliced in, so a
-# domain filter cannot inject extra query syntax.
-def _build_query(
-    query: str,
-    allowed_domains: object,
-    blocked_domains: object,
-) -> str:
-    """Return *query* with ``site:`` / ``-site:`` filters for valid domains."""
-    return (
-        query
-        + _site_filters(allowed_domains, name="allowed_domains", prefix="site:")
-        + _site_filters(blocked_domains, name="blocked_domains", prefix="-site:")
-    )
-
-
-def _site_filters(domains: object, *, name: str, prefix: str) -> str:
-    """Render one domain list as ``site:``/``-site:`` terms, rejecting bad input."""
-    if domains is None:
-        return ""
-    if not isinstance(domains, (list, tuple)):
-        raise TypeError(
-            f"{name!r} must be a list of hostnames, got {type(domains).__name__}.",
+        scoped = " ".join(
+            (
+                a.query,
+                *(f"site:{d.strip()}" for d in a.allowed_domains),
+                *(f"-site:{d.strip()}" for d in a.blocked_domains),
+            ),
         )
-    terms = ""
-    # Iterated as `object`, not cast to a value type: the cast asserted a
-    # member type the very next line has to check anyway, and left the sequence
-    # itself partially unknown.
-    for domain in cast(Sequence[object], domains):
-        # A bare hostname: dot-separated labels of letters/digits/hyphens, optional
-        # leading wildcard and trailing port. Anything else (whitespace, a ``site:`` or
-        # ``-site:`` operator, a query fragment) is NOT a hostname and must not be
-        # spliced into the query string, or a caller could inject/contradict the scope
-        # (e.g. ``"x.com -site:trusted.com"`` would un-scope the search).
-        if not isinstance(domain, str) or not re.match(
-            r"^(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?$",
-            domain.strip(),
-        ):
-            raise ValueError(f"{name!r} contains a non-hostname value: {domain!r}.")
-        terms += f" {prefix}{domain.strip()}"
-    return terms
+        started = time.monotonic()
+        try:
+            hits = await asyncio.to_thread(
+                search,
+                scoped,
+                backend=a.backend,
+                categories=a.categories,
+                transport=a.transport or self.policy.transport,
+                session=context.fetch_session,
+            )
+        except BotDetectionError as e:
+            # The instance may say more than its class does, such as how long
+            # a cooldown lasts on this IP.
+            reason = str(e)
+            return ToolOutput(
+                stderr=(f"{reason} {e.guidance}" if reason != e.guidance else reason,),
+                result=WebSearchResult(exit_code=1),
+            )
+        except (RuntimeError, ValueError) as e:
+            return ToolOutput(stderr=(str(e),), result=WebSearchResult(exit_code=1))
+        if not hits:
+            return ToolOutput(
+                stdout=("(no results)",),
+                result=WebSearchResult(query=a.query),
+            )
+        # Title, URL, then the snippet plus the fields its category adds: a
+        # paper's DOI, a video's duration, a package's version.
+        results = tuple(
+            WebSearchHit(
+                url=hit.url,
+                title=hit.title,
+                snippet=format_result(hit).partition("\n")[2],
+            )
+            for hit in hits
+        )
+        _, kept = context.fit(f"{r.title}\n{r.url}\n{r.snippet}\n\n" for r in results)
+        shown = results[:kept]
+        return ToolOutput(
+            stdout=(
+                "\n\n".join(f"{r.title}\n{r.url}\n{r.snippet}" for r in shown),
+                *shown,
+            ),
+            result=WebSearchResult(
+                query=a.query,
+                duration_sec=time.monotonic() - started,
+            ),
+        )

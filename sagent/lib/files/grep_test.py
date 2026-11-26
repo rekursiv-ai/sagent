@@ -2,38 +2,39 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from functools import partial
+from typing import TYPE_CHECKING, override
 
 import contextlib
+import io
 import itertools
+import os
 import pathlib
 import shutil
 import subprocess
-
-from treekle import from_plain
+import threading
 
 import pytest
 
+from sagent.lib.files import grep as files_grep
 from sagent.lib.files.grep import (
     ARGV_CHARS,
     GrepError,
     OutputMode,
     Query,
     Row,
+    _batches,
     _sort_key,
     grep,
     grep_rows,
     rg_command,
+    streamed_rows,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Generator
     from pathlib import Path
-    from typing import BinaryIO
-
-    import os
 
 
 _RG_BASE = [
@@ -41,6 +42,8 @@ _RG_BASE = [
     "--no-heading",
     "--with-filename",
     "--hidden",
+    "--no-mmap",
+    "--no-messages",
     "--field-match-separator=\x01",
     "--field-context-separator=\x02",
 ]
@@ -48,17 +51,16 @@ _RG_VCS = ["--glob", "!.git", "--glob", "!.svn", "--glob", "!.hg"]
 
 
 @pytest.fixture(autouse=True)
-def backend(rg: bool) -> Iterator[None]:
+def backend(rg: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide ``rg`` unless the test runs against it."""
     found = shutil.which("rg")
     if rg and found is None:
         pytest.skip("ripgrep is not installed")
-    # A test for the ``rg`` backend must reach it, whatever the size switch says.
-    with (
-        patch("shutil.which", return_value=found if rg else None),
-        patch("sagent.lib.files.grep.SMALL_FILES", -1),
-    ):
-        yield
+
+    def which(*_args: object, **_kwargs: object) -> object:
+        return found if rg else None
+
+    monkeypatch.setattr(shutil, "which", which)
 
 
 @pytest.fixture
@@ -68,6 +70,64 @@ def rg() -> bool:
 
 
 _BOTH = pytest.mark.parametrize("rg", [True, False], ids=["rg", "python"])
+
+
+class _Answered:
+    """A ripgrep run that prints ``out`` and ``err`` and exits ``code``."""
+
+    def __init__(self, argv: list[str], *, out: bytes, err: bytes, code: int) -> None:
+        self.args = argv
+        self.stdout = io.BytesIO(out)
+        self.stderr = io.BytesIO(err)
+        self.returncode = code
+
+    def wait(self) -> int:
+        return self.returncode
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        """Answered already: nothing runs to kill."""
+
+
+class _Runs:
+    """Records each ripgrep run and its timeout; answers it, or runs it for real."""
+
+    def __init__(
+        self,
+        patch: pytest.MonkeyPatch,
+        *,
+        answer: tuple[bytes, bytes, int] | None = None,
+    ) -> None:
+        self.argvs: list[list[str]] = []
+        self.timeouts: list[float] = []
+        self._answer = answer
+        real_timer = threading.Timer
+        real_popen = subprocess.Popen
+
+        def timer(interval: float, function: Callable[[], object]) -> object:
+            self.timeouts.append(interval)
+            return real_timer(interval, function)
+
+        def popen(argv: list[str], *, stdout: int, stderr: int) -> object:
+            self.argvs.append(argv)
+            if self._answer is None:
+                return real_popen(argv, stdout=stdout, stderr=stderr)
+            out, err, code = self._answer
+            return _Answered(argv, out=out, err=err, code=code)
+
+        patch.setattr(threading, "Timer", timer)
+        patch.setattr(subprocess, "Popen", popen)
+
+
+def _batch_paths(root: Path) -> list[Path]:
+    """Cross the real argv limit with fewer files, using long parent paths."""
+    directory = root.joinpath(*("d" * 200 for _ in range(10)))
+    directory.mkdir(parents=True)
+    names = [directory / f"{i:04}.txt" for i in range(100)]
+    assert len(" ".join(map(str, names))) > 2 * ARGV_CHARS
+    return names
 
 
 def _tree(root: Path) -> Path:
@@ -172,11 +232,12 @@ def test_rows_locate_their_first_match_in_characters(
     context = f"{f}-1-" if numbered else f"{f}-"
     prefix = f"{f}:2:" if numbered else f"{f}:"
     assert grep_rows(f, query) == [
-        Row(text=f"{context}a", prefix_end=len(context)),
+        Row(text=f"{context}a", prefix_end=len(context), file=str(f)),
         Row(
             text=f"{prefix}ééx hit hit",
             prefix_end=len(prefix),
             column=len(prefix) + 4,
+            file=str(f),
         ),
     ]
 
@@ -191,6 +252,7 @@ def test_a_path_holding_a_separator_keeps_its_prefix_whole(tmp_path: Path) -> No
             text=f"{f}:1:x:5: hit",
             prefix_end=len(f"{f}:1:"),
             column=len(f"{f}:1:") + 5,
+            file=str(f),
         ),
     ]
 
@@ -200,7 +262,40 @@ def test_a_multiline_run_is_located_on_its_first_line(tmp_path: Path) -> None:
     f = tmp_path / "f.txt"
     f.write_text("x foo\nbar\n  zz\n")
     query = Query(pattern=r"foo\nbar|zz", output_mode="content", multiline=True)
-    assert [row.column for row in grep_rows(f, query)] == [len(f"{f}:1:") + 2, -1, -1]
+    assert grep_rows(f, query) == _rows(
+        f,
+        (":1:", "x foo", 2),
+        (":2:", "bar", -1),
+        (":3:", "  zz", -1),
+    )
+
+
+@_BOTH
+def test_a_multiline_match_is_located_within_its_own_line(tmp_path: Path) -> None:
+    """Each run's first line is located from its own start, whatever line it is."""
+    f, g, h = tmp_path / "f", tmp_path / "g", tmp_path / "h"
+    f.write_text("\nx foo\n")
+    g.write_text("a\nb\n  foo\n")
+    h.write_text("foo\n  foo\nx\n foo\n")
+    query = Query(pattern="foo", output_mode="content", multiline=True)
+    assert grep_rows([f, g, h], query) == [
+        *_rows(f, (":2:", "x foo", 2)),
+        *_rows(g, (":3:", "  foo", 2)),
+        *_rows(h, (":1:", "foo", 0), (":2:", "  foo", -1), (":4:", " foo", 1)),
+    ]
+
+
+@_BOTH
+def test_a_match_after_multiline_context_starts_its_own_run(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text("a\nfoo\n")
+    query = Query(
+        pattern="foo",
+        output_mode="content",
+        multiline=True,
+        context_before=1,
+    )
+    assert grep_rows(f, query) == _rows(f, ("-1-", "a", -1), (":2:", "foo", 0))
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -210,7 +305,12 @@ def test_a_posix_class_is_located_by_ripgrep(tmp_path: Path) -> None:
     query = Query(pattern="[[:alpha:]]+[[:digit:]]+", output_mode="content")
     prefix = f"{f}:1:"
     assert grep_rows(f, query) == [
-        Row(text=f"{prefix}-- abc123", prefix_end=len(prefix), column=len(prefix) + 3),
+        Row(
+            text=f"{prefix}-- abc123",
+            prefix_end=len(prefix),
+            column=len(prefix) + 3,
+            file=str(f),
+        ),
     ]
 
 
@@ -252,8 +352,9 @@ def test_a_bad_query_fails_in_every_backend(
 def test_a_missing_path_is_an_error_not_no_matches(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(GrepError, match="no such file or directory"):
+    with pytest.raises(GrepError) as raised:
         grep(tmp_path / "nope", Query(pattern="x"))
+    assert str(raised.value) == f"no such file or directory: {tmp_path / 'nope'}"
 
 
 @_BOTH
@@ -262,6 +363,8 @@ def test_lookaround_needs_no_flag(tmp_path: Path) -> None:
     f.write_text("github.com/jv\njv\n")
     query = Query(pattern=r"(?<!com/)\bjv\b", output_mode="content")
     assert grep(f, query) == [f"{f}:2:jv"]
+    absent = Query(pattern=r"(?<!com/)\bzz\b", output_mode="content")
+    assert grep(f, absent) == []
 
 
 @_BOTH
@@ -412,6 +515,10 @@ def test_a_class_matching_a_newline_does_not_hide_a_later_line(
     f.write_text("a\nb\nazb\n")
     query = Query(pattern="a[^x]b", output_mode="content")
     assert grep(f, query) == [f"{f}:3:azb"]
+    # The false hit starts at the newline; the real one starts just past it.
+    g = tmp_path / "g.txt"
+    g.write_text("a\ny\n")
+    assert grep(g, Query(pattern=r"\s?y", output_mode="content")) == [f"{g}:2:y"]
 
 
 @_BOTH
@@ -470,122 +577,73 @@ def test_a_missing_named_file_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Thousands of named files must not overflow one command line."""
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("hit\n")
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    with monkeypatch.context() as patch:
+        runs = _Runs(patch)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
     batches = [
-        [
-            arg
-            for arg in from_plain(call.args[0], list[str])
-            if arg.startswith(str(tmp_path))
-        ]
-        for call in run.call_args_list
+        [arg for arg in argv if arg.startswith(str(tmp_path))] for argv in runs.argvs
     ]
     assert [name for batch in batches for name in batch] == list(map(str, names))
     assert len(batches) > 1
     # Every batch, not just the first, is bounded by the caller's timeout.
-    assert [call.kwargs["timeout"] for call in run.call_args_list] == [30] * len(
-        batches,
-    )
+    assert runs.timeouts == [30] * len(batches)
     for batch, after in itertools.pairwise(batches):
         assert len(" ".join(batch)) <= ARGV_CHARS
         assert len(" ".join([*batch, after[0]])) > ARGV_CHARS
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
+def test_each_rg_run_gets_the_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     f = tmp_path / "f.txt"
     f.write_text("ab\n")
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    with monkeypatch.context() as patch:
+        runs = _Runs(patch)
         assert grep(f, Query(pattern="(?<=a)b"), timeout_sec=7) == [str(f)]
-    assert [call.kwargs for call in run.call_args_list] == [
-        {"capture_output": True, "timeout": 7, "check": False},
-    ] * 2
-    assert "-P" in from_plain(run.call_args_list[1].args[0], list[str])
+    assert runs.timeouts == [7] * 2
+    assert "-P" in runs.argvs[1]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 @pytest.mark.parametrize(
-    ("files", "pattern", "sample_scan_sec", "runs_rg"),
+    "query",
     [
-        (3, "value", 0.000_5, False),
-        (65, "value", None, True),
-        (40, r"\w+\s*=\s*\d+$", None, True),
+        Query(pattern="value", output_mode="count"),
+        Query(pattern=r"async def t.*\n(.*\n){0,25}.*main\(", multiline=True),
     ],
-    ids=["few-files", "many-files", "slow-pattern-on-big-text"],
+    ids=["literal", "backtracking-multiline"],
 )
-def test_rg_starts_only_when_it_would_finish_first(
+def test_rg_answers_every_search_when_installed(
     tmp_path: Path,
-    files: int,
-    pattern: str,
-    sample_scan_sec: float | None,
-    runs_rg: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    query: Query,
 ) -> None:
-    """Python answers small searches before ``rg`` could start; big ones go to it.
+    r"""Python ``re`` backtracks without bound, and holds the GIL while it does.
 
-    The small search's sample scan is timed by a fixed clock: on a loaded runner
-    the real one projected past ``_RG_MS`` and started ``rg``. A slower host only
-    makes the slow pattern slower, so that case keeps the real clock.
+    ``async def test_.*\\n(.*\\n){0,25}.*main\\._main\\(`` with ``multiline`` ran
+    past 30 s over a 99 KB test file that ``rg`` searched in 13 ms, and froze the
+    sagent process that asked. A 16 KB sample timed beforehand missed it: the
+    blowup began after the sample ended.
     """
-    for i in range(files):
-        (tmp_path / f"{i:03}.py").write_text("value = 1\n" * 2_000)
-    clock = (
-        contextlib.nullcontext()
-        if sample_scan_sec is None
-        else patch(
-            "sagent.lib.files.grep.time.perf_counter",
-            side_effect=[0.0, sample_scan_sec],
-        )
-    )
-    with (
-        clock,
-        patch("sagent.lib.files.grep.SMALL_FILES", 64),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        found = grep(tmp_path, Query(pattern=pattern, output_mode="count"))
-    assert found == [f"{tmp_path}/{i:03}.py:2000" for i in range(files)]
-    assert run.called is runs_rg
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(
-    ("named", "runs_rg"),
-    [(3, False), (4, True)],
-    ids=["at-the-cap", "past-the-cap"],
-)
-def test_the_file_cap_counts_the_last_file_in(
-    tmp_path: Path,
-    named: int,
-    runs_rg: bool,
-) -> None:
-    """``SMALL_FILES`` files stay in-process; the next one starts ``rg``.
-
-    The names descend, so either backend answering in sorted order rather than
-    the order the caller named them would answer wrongly.
-    """
-    paths = [tmp_path / f"{i:02}.py" for i in reversed(range(named))]
-    for path in paths:
-        path.write_text("value = 1\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 3),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        assert grep(paths, Query(pattern="value")) == list(map(str, paths))
-    assert run.called is runs_rg
+    f = tmp_path / "f.py"
+    f.write_text("value = 1\n")
+    with monkeypatch.context() as patch:
+        runs = _Runs(patch)
+        grep(f, query)
+    assert runs.argvs
 
 
 def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A race must not truncate the file list the walk hands to the search.
 
@@ -606,7 +664,8 @@ def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
             raise OSError
         return real(self)
 
-    with patch("pathlib.Path.lstat", flaky):
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "lstat", flaky)
         found = grep(tmp_path, Query(pattern="hit"))
     every = {str(tmp_path / name) for name in ("a.py", "b.py", "c.py")}
     assert set(found) < every
@@ -614,88 +673,83 @@ def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_missing_named_file_still_errors_on_the_in_process_path(
+@pytest.mark.parametrize("search", [grep, grep_rows])
+def test_the_default_rg_timeout_is_thirty_seconds(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    search: Callable[[Path, Query], list[str] | list[Row]],
 ) -> None:
-    """The size probe drops what it cannot stat, so ``grep`` names the fault."""
-    (tmp_path / "f.txt").write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        pytest.raises(GrepError, match="no such file or directory"),
-    ):
-        grep([tmp_path / "f.txt", tmp_path / "nope"], Query(pattern="hit"))
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_projected_cost_equal_to_the_budget_starts_rg(tmp_path: Path) -> None:
-    """``_RG_MS`` is a ceiling, not a target: a cost equal to it still starts ``rg``."""
-    paths = [tmp_path / f"{i:02}.py" for i in range(4)]
-    for path in paths:
-        path.write_text("value = 1\n")
-    # Four files at 0.25 ms project to exactly the 1 ms budget. Both values are
-    # exact in binary, so the tie is landed on instead of stepped over, and the
-    # test keeps testing it if the real constants are ever retuned.
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 4),
-        patch("sagent.lib.files.grep._PER_FILE_MS", 0.25),
-        patch("sagent.lib.files.grep._RG_MS", 1.0),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        assert grep(paths, Query(pattern="value")) == list(map(str, paths))
-    assert run.called
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_the_default_rg_timeout_is_thirty_seconds(tmp_path: Path) -> None:
     f = tmp_path / "f.txt"
     f.write_text("x\n")
-    with (
-        patch("sagent.lib.files.grep.shutil.which", return_value="/rg") as which,
-        patch(
-            "sagent.lib.files.grep.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 1, b"", b""),
-        ) as run,
-    ):
-        assert grep(f, Query(pattern="x")) == []
-    which.assert_called_once_with("rg")
-    assert from_plain(run.call_args.args[0], list[str])[0] == "/rg"
-    assert run.call_args.kwargs["timeout"] == 30
+    looked_up: list[str] = []
+
+    def which(name: str) -> str:
+        looked_up.append(name)
+        return "/rg"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "which", which)
+        runs = _Runs(patch, answer=(b"", b"", 1))
+        assert search(f, Query(pattern="x")) == []
+    assert looked_up == ["rg"]
+    ((argv,),) = (runs.argvs,)
+    assert argv[0] == "/rg"
+    assert runs.timeouts == [30]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(
-    ("stderr", "message"),
-    [
-        (b"bad\xff\n", "ripgrep error (exit 2): bad\ufffd"),
-        (b"  \n", "ripgrep error (exit 2): unknown"),
-    ],
-)
 def test_a_rg_failure_names_its_exit_and_stderr(
     tmp_path: Path,
-    stderr: bytes,
-    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     f = tmp_path / "f.txt"
     f.write_text("x\n")
-    with (
-        patch("sagent.lib.files.grep.shutil.which", return_value="/rg"),
-        patch(
-            "sagent.lib.files.grep.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 2, b"", stderr),
-        ),
-        pytest.raises(GrepError) as raised,
-    ):
-        grep(f, Query(pattern="x"))
-    assert str(raised.value) == message
+    with monkeypatch.context() as patch:
+
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+
+        _ = _Runs(patch, answer=(b"", b"bad\xff\n", 2))
+        with pytest.raises(GrepError) as raised:
+            grep(f, Query(pattern="x"))
+    assert str(raised.value) == "ripgrep error (exit 2): bad\ufffd"
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_rg_exit_without_a_message_keeps_what_it_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-messages`` silences per-file failures; their exit 2 is no error."""
+    f = tmp_path / "f.txt"
+    f.write_text("x\n")
+    out = f"{f}\n".encode()
+    with monkeypatch.context() as patch:
+
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+
+        _ = _Runs(patch, answer=(out, b" \n", 2))
+        assert grep(f, Query(pattern="x")) == [str(f)]
 
 
 @_BOTH
-def test_a_nul_is_no_line_break_and_matches_only_a_dot(tmp_path: Path) -> None:
-    """A NUL at offset 0 still marks a file binary; ``.`` alone crosses it."""
+def test_a_nul_breaks_a_line_and_only_a_multiline_dot_crosses_it(
+    tmp_path: Path,
+) -> None:
+    """A NUL at offset 0 still marks a file binary; one search holds it whole."""
     f = tmp_path / "bin.dat"
     f.write_bytes(b"\0x\0y\nhit\n")
-    assert grep(f, Query(pattern="x.y", output_mode="count")) == [f"{f}:1"]
-    assert grep(f, Query(pattern="^y|xy|x$", output_mode="count")) == []
+    assert grep(f, Query(pattern="x.y", output_mode="count")) == []
+    assert grep(f, Query(pattern="^y|xy|x$", output_mode="count")) == [f"{f}:2"]
+    crossed = Query(pattern="x.y", multiline=True, output_mode="count")
+    assert grep(f, crossed) == [f"{f}:1"]
+    anchored = Query(pattern="^y|xy|x$", multiline=True, output_mode="count")
+    assert grep(f, anchored) == []
     assert grep(f, Query(pattern="hit", output_mode="content")) == [
         f'{f}: binary file matches (found "\\0" byte around offset 0)',
     ]
@@ -707,6 +761,22 @@ def test_a_big_endian_utf16_file_is_read(tmp_path: Path) -> None:
     f = tmp_path / "be.txt"
     f.write_bytes(b"\xfe\xff" + "hit\n".encode("utf-16-be"))
     assert grep(f, Query(pattern="^hit$", output_mode="content")) == [f"{f}:1:hit"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xff\xfeh\x00i\x00t\x00 \x00\x00\xd8\n\x00",
+        b"\xfe\xff\x00h\x00i\x00t\x00 \xd8\x00\x00\n",
+    ],
+    ids=["little-endian", "big-endian"],
+)
+def test_invalid_utf16_bytes_are_replaced(tmp_path: Path, raw: bytes) -> None:
+    f = tmp_path / "malformed.txt"
+    f.write_bytes(raw)
+    assert grep(f, Query(pattern="hit", output_mode="content")) == [
+        f"{f}:1:hit \ufffd",
+    ]
 
 
 @_BOTH
@@ -765,12 +835,13 @@ def test_a_bom_file_keeps_its_invalid_bytes_as_replacements(tmp_path: Path) -> N
 
 
 @_BOTH
-def test_a_named_binary_file_matches_text_that_looks_like_a_marker(
+def test_a_named_binary_file_matches_across_a_nul_only_when_multiline(
     tmp_path: Path,
 ) -> None:
     f = tmp_path / "bin.dat"
     f.write_bytes(b"XX\0XX\n")
-    assert grep(f, Query(pattern="XX.XX")) == [str(f)]
+    assert grep(f, Query(pattern="XX.XX")) == []
+    assert grep(f, Query(pattern="XX.XX", multiline=True)) == [str(f)]
 
 
 @_BOTH
@@ -831,9 +902,12 @@ def test_multiline_count_of_two_matches_on_one_line(
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
+def test_a_batch_may_fill_the_argv_limit_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Names joined by spaces may total ``ARGV_CHARS`` and still share a run."""
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     widths = [len(str(path)) + 1 for path in names]
     fit = next(k for k in range(len(names)) if sum(widths[: k + 1]) - 1 > ARGV_CHARS)
     # Lengthen the first ``fit`` names, a few characters each, until they
@@ -845,16 +919,10 @@ def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
     for path in names:
         path.write_text("hit\n")
     assert len(" ".join(map(str, names[:fit]))) == ARGV_CHARS
-    with patch(
-        "sagent.lib.files.grep.subprocess.run",
-        wraps=subprocess.run,
-    ) as run:
+    with monkeypatch.context() as patch:
+        runs = _Runs(patch)
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
-    first = [
-        arg
-        for arg in from_plain(run.call_args_list[0].args[0], list[str])
-        if arg.startswith(str(tmp_path))
-    ]
+    first = [arg for arg in runs.argvs[0] if arg.startswith(str(tmp_path))]
     assert len(first) == fit
 
 
@@ -869,7 +937,7 @@ def test_pcre_without_rg_names_the_reason_in_full(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 def test_batches_of_context_rows_are_separated_like_files(tmp_path: Path) -> None:
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("a\nhit\n")
     query = Query(pattern="hit", output_mode="content", context_before=1)
@@ -891,16 +959,59 @@ def test_pcre_without_rg_is_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_rg_timeout_is_a_grep_error(tmp_path: Path) -> None:
-    def timeout(*_args: object, **_kwargs: object) -> object:
-        raise subprocess.TimeoutExpired(cmd="rg", timeout=1)
+def test_a_rg_run_killed_at_its_timeout_is_a_grep_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timer kills the run, which then ends by a signal: a negative code."""
+    with monkeypatch.context() as patch:
 
-    with (
-        patch("shutil.which", return_value="/rg"),
-        patch("subprocess.run", timeout),
-        pytest.raises(GrepError, match=r"^ripgrep timed out after 1s"),
-    ):
-        grep(tmp_path, Query(pattern="x"), timeout_sec=1)
+        def which(*_args: object, **_kwargs: object) -> object:
+            return "/rg"
+
+        patch.setattr(shutil, "which", which)
+        _ = _Runs(patch, answer=(b"", b"", -9))
+        with pytest.raises(GrepError, match=r"^ripgrep timed out after 1s"):
+            grep(tmp_path, Query(pattern="x"), timeout_sec=1)
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_rows_come_as_ripgrep_prints_them_before_it_ends(tmp_path: Path) -> None:
+    """The first row is had while the search still runs."""
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("hit\n")
+    rows = streamed_rows(tmp_path, Query(pattern="hit"))
+    first = next(rows)
+    found = {f"{tmp_path}/{name}" for name in "ab"}
+    assert {first, *rows} == {Row(text=name, file=name) for name in found}
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_run_stopped_early_is_killed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that stops reading leaves no ripgrep behind."""
+    # More output than a pipe holds, so ripgrep is still writing when the
+    # caller stops.
+    names = [f"{i:03}{'x' * 200}" for i in range(400)]
+    for name in names:
+        (tmp_path / name).write_text("hit\n")
+    started: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(argv: list[str], *, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
+        process = real_popen(argv, stdout=stdout, stderr=stderr)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    rows = streamed_rows(tmp_path, Query(pattern="hit"))
+    assert next(rows).text.removeprefix(f"{tmp_path}/") in names
+    (process,) = started
+    assert process.poll() is None
+    rows.close()
+    assert process.poll() is not None
 
 
 def test_rg_command_with_every_knob_off(tmp_path: Path) -> None:
@@ -925,6 +1036,12 @@ def test_rg_command_with_every_knob_on(tmp_path: Path) -> None:
         multiline=True,
         pcre=True,
         text=True,
+        word=True,
+        whole_line=True,
+        fixed=True,
+        search_ignored=True,
+        follow=True,
+        max_depth=3,
     )
     assert rg_command("/rg", [tmp_path], query) == [
         *_RG_BASE,
@@ -934,7 +1051,30 @@ def test_rg_command_with_every_knob_on(tmp_path: Path) -> None:
         *("-B", "1", "-A", "2"),
         *("--type-clear", "py", "--type-add", "py:*.py", "--type", "py"),
         *("--text", "-P"),
+        *("-w", "-x", "-F", "--no-ignore", "--follow", "--max-depth", "3"),
         *("--", "pat", str(tmp_path)),
+    ]
+
+
+def test_rg_command_for_line_selection_knobs(tmp_path: Path) -> None:
+    """An inverted line has no match to locate, and ripgrep's columns then lie."""
+    query = Query(pattern="pat", output_mode="content", invert=True, max_count=2)
+    assert rg_command("/rg", [tmp_path], query) == [
+        *_RG_BASE,
+        *_RG_VCS,
+        *("-n", "-v", "--max-count", "2", "--", "pat", str(tmp_path)),
+    ]
+    only = Query(pattern="pat", output_mode="content", only_matching=True)
+    assert rg_command("/rg", [tmp_path], only) == [
+        *_RG_BASE,
+        *_RG_VCS,
+        *("-n", "--column", "-o", "--", "pat", str(tmp_path)),
+    ]
+    without = Query(pattern="pat", output_mode="files_without_match")
+    assert rg_command("/rg", [tmp_path], without) == [
+        *_RG_BASE,
+        *_RG_VCS,
+        *("-n", "--files-without-match", "--", "pat", str(tmp_path)),
     ]
 
 
@@ -969,7 +1109,10 @@ def test_file_types_use_the_declared_globs(tmp_path: Path, file_type: str) -> No
 
 
 @_BOTH
-@pytest.mark.parametrize("pattern", [r"a\nb\]", r"a\nb[xy]", r"a\nb\[\]"])
+@pytest.mark.parametrize(
+    "pattern",
+    [r"a\nb\]", r"a\nb[xy]", r"a\nb\[\]", "\nb", r"\nb", r"\.\nb", r"[a]\n"],
+)
 def test_newline_escapes_outside_classes_are_rejected(
     tmp_path: Path,
     pattern: str,
@@ -1012,7 +1155,10 @@ def test_a_raw_newline_in_the_pattern_needs_multiline(tmp_path: Path) -> None:
         grep(file, Query(pattern="a\nb"))
 
 
-def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
+def test_an_unreadable_file_is_skipped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for name in ("a.txt", "b.txt"):
         (tmp_path / name).write_text("hit\n")
     real = pathlib.Path.read_bytes
@@ -1022,72 +1168,648 @@ def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
             raise PermissionError(self)
         return real(self)
 
-    with patch("pathlib.Path.read_bytes", unreadable):
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "read_bytes", unreadable)
         assert grep(tmp_path, Query(pattern="hit")) == [str(tmp_path / "b.txt")]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(
-    ("pattern", "expected"),
-    [(r"\Ahit", ["f.txt:1:hit"])],
-    ids=["ripgrep-only-syntax"],
-)
-def test_a_pattern_python_cannot_judge_goes_to_rg(
-    tmp_path: Path,
-    pattern: str,
-    expected: list[str],
-) -> None:
-    file = tmp_path / "f.txt"
-    file.write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-        contextlib.chdir(tmp_path),
-    ):
+def test_ripgrep_only_syntax_under_a_relative_path(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("hit\n")
+    with contextlib.chdir(tmp_path):
         found = grep(
             pathlib.Path("f.txt"),
-            Query(pattern=pattern, output_mode="content"),
+            Query(pattern=r"\Ahit", output_mode="content"),
         )
-    assert run.called
-    assert found == expected
+    assert found == ["f.txt:1:hit"]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_pattern_python_rejects_gets_rgs_answer(tmp_path: Path) -> None:
+def test_an_invalid_pattern_gets_rgs_error(tmp_path: Path) -> None:
     file = tmp_path / "f.txt"
     file.write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-        pytest.raises(GrepError, match="ripgrep error"),
-    ):
+    with pytest.raises(GrepError, match="ripgrep error \\(exit 2\\)"):
         grep(file, Query(pattern="("))
-    assert run.called
+
+
+_LINES = "foo bar\nfoobar\nbaz\nfoo foo\n"
+
+
+def _rows(f: Path, *specs: tuple[str, str, int]) -> list[Row]:
+    """Build rows of ``f`` from ``(prefix after the name, text, match column)``."""
+    out: list[Row] = []
+    for head, text, column in specs:
+        prefix = f"{f}{head}"
+        out.append(
+            Row(
+                text=prefix + text,
+                prefix_end=len(prefix),
+                column=len(prefix) + column if column >= 0 else -1,
+                file=str(f),
+            ),
+        )
+    return out
+
+
+@_BOTH
+@pytest.mark.parametrize(
+    ("mode", "rows"),
+    [
+        ("content", ["{f}:3:baz", "{g}:1:nothing"]),
+        ("count", ["{f}:1", "{g}:1"]),
+        ("files_with_matches", ["{f}", "{g}"]),
+        ("files_without_match", []),
+    ],
+)
+def test_invert_selects_the_lines_that_do_not_match(
+    tmp_path: Path,
+    mode: OutputMode,
+    rows: list[str],
+) -> None:
+    f, g = tmp_path / "f", tmp_path / "g"
+    f.write_text(_LINES)
+    g.write_text("nothing\n")
+    query = Query(pattern="foo", output_mode=mode, invert=True)
+    assert grep([f, g], query) == [row.format(f=f, g=g) for row in rows]
+
+
+@_BOTH
+def test_an_inverted_line_has_no_match_to_locate(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    query = Query(pattern="foo", output_mode="content", invert=True)
+    assert grep_rows(f, query) == _rows(f, (":3:", "baz", -1))
+
+
+@_BOTH
+def test_inverted_context_is_the_matching_lines(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    query = Query(pattern="baz", output_mode="content", invert=True, context_before=1)
+    assert grep(f, query) == [
+        f"{f}:1:foo bar",
+        f"{f}:2:foobar",
+        f"{f}-3-baz",
+        f"{f}:4:foo foo",
+    ]
+
+
+@_BOTH
+def test_word_needs_no_word_character_beside_the_match(tmp_path: Path) -> None:
+    f, h = tmp_path / "f", tmp_path / "h"
+    f.write_text(_LINES)
+    h.write_text("foo\nao-x b\n")
+    word = Query(pattern="foo", output_mode="content", word=True)
+    assert grep_rows(f, word) == _rows(f, (":1:", "foo bar", 0), (":4:", "foo foo", 0))
+    assert grep(h, Query(pattern="-x", word=True)) == []
+    alternation = Query(pattern="foo|ao", output_mode="count", word=True)
+    assert grep(h, alternation) == [f"{h}:2"]
+
+
+@_BOTH
+def test_whole_line_wraps_the_whole_pattern(tmp_path: Path) -> None:
+    h, h2 = tmp_path / "h", tmp_path / "h2"
+    h.write_text("foo\nao-x b\n")
+    h2.write_text("foo foo\nfoo\n")
+    line = Query(pattern="foo|ao", output_mode="content", whole_line=True)
+    assert grep(h, line) == [f"{h}:1:foo"]
+    both = Query(pattern="foo", output_mode="content", whole_line=True, word=True)
+    assert grep(h2, both) == [f"{h2}:2:foo"]
+
+
+@_BOTH
+def test_fixed_reads_the_pattern_as_text(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text("a.b\naxb\nx\\ny (\n")
+    assert grep(f, Query(pattern="a.b", output_mode="content", fixed=True)) == [
+        f"{f}:1:a.b",
+    ]
+    assert grep(f, Query(pattern="x\\ny (", output_mode="count", fixed=True)) == [
+        f"{f}:1",
+    ]
+    folded = Query(
+        pattern="A.B",
+        output_mode="count",
+        fixed=True,
+        case_insensitive=True,
+    )
+    assert grep(f, folded) == [f"{f}:1"]
+
+
+@_BOTH
+def test_fixed_text_holding_a_newline_needs_multiline(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    with pytest.raises(GrepError, match="multiline is off"):
+        grep(f, Query(pattern="bar\nfoo", fixed=True))
+    assert grep(f, Query(pattern="bar\nfoo", fixed=True, multiline=True)) == [str(f)]
+
+
+@_BOTH
+def test_only_matching_prints_each_match_as_its_own_row(tmp_path: Path) -> None:
+    """Each row's text is its match, so the match begins where the text does."""
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    query = Query(
+        pattern="FOO",
+        output_mode="content",
+        only_matching=True,
+        case_insensitive=True,
+    )
+    assert grep_rows(f, query) == _rows(
+        f,
+        (":1:", "foo", 0),
+        (":2:", "foo", 0),
+        (":4:", "foo", 0),
+        (":4:", "foo", 0),
+    )
+    count = Query(pattern="foo", output_mode="count", only_matching=True)
+    assert grep(f, count) == [f"{f}:4"]
+
+
+@_BOTH
+def test_only_matching_skips_an_empty_match_where_one_just_ended(
+    tmp_path: Path,
+) -> None:
+    """Ripgrep's engine, unlike Python's, finds no empty match at a match's end."""
+    h = tmp_path / "h"
+    h.write_text("foo\nao-x b\n")
+    query = Query(pattern="o*", output_mode="content", only_matching=True)
+    assert grep(h, query) == [
+        f"{h}:1:",
+        f"{h}:1:oo",
+        *(f"{h}:2:{text}" for text in ("", "o", "", "", "", "")),
+    ]
+    count = Query(pattern="o*", output_mode="count", only_matching=True)
+    assert grep(h, count) == [f"{h}:8"]
+
+
+@_BOTH
+def test_only_matching_keeps_context_lines_whole(tmp_path: Path) -> None:
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    query = Query(
+        pattern="foo",
+        output_mode="content",
+        only_matching=True,
+        context_after=1,
+    )
+    assert grep(f, query) == [
+        f"{f}:1:foo",
+        f"{f}:2:foo",
+        f"{f}-3-baz",
+        f"{f}:4:foo",
+        f"{f}:4:foo",
+    ]
+
+
+@_BOTH
+def test_max_count_stops_but_shows_a_match_in_its_trailing_context(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "f"
+    f.write_text(_LINES)
+    query = Query(pattern="foo", output_mode="content", max_count=1, context_after=2)
+    assert grep_rows(f, query) == _rows(
+        f,
+        (":1:", "foo bar", 0),
+        (":2:", "foobar", 0),
+        ("-3-", "baz", -1),
+    )
+    count = Query(pattern="foo", output_mode="count", max_count=1)
+    assert grep(f, count) == [f"{f}:1"]
+    inverted = Query(
+        pattern="baz",
+        output_mode="content",
+        invert=True,
+        max_count=1,
+        context_after=2,
+    )
+    assert grep(f, inverted) == [f"{f}:1:foo bar", f"{f}:2:foobar", f"{f}-3-baz"]
+
+
+@_BOTH
+def test_max_count_counts_lines_not_matches(tmp_path: Path) -> None:
+    h2 = tmp_path / "h2"
+    h2.write_text("foo foo\nfoo\n")
+    query = Query(pattern="foo", output_mode="content", only_matching=True, max_count=1)
+    assert grep(h2, query) == [f"{h2}:1:foo", f"{h2}:1:foo"]
+    count = Query(pattern="foo", output_mode="count", only_matching=True, max_count=1)
+    assert grep(h2, count) == [f"{h2}:2"]
+
+
+@_BOTH
+def test_files_without_match_lists_what_a_walk_finds_no_match_in(
+    tmp_path: Path,
+) -> None:
+    """A walked binary file is skipped outright, so it is not listed either."""
+    (tmp_path / "bin").write_bytes(b"x\0zzz\n")
+    (tmp_path / "e").touch()
+    (tmp_path / "s").write_text("foo\n")
+    (tmp_path / "t").write_text("no\n")
+    query = Query(pattern="foo", output_mode="files_without_match")
+    assert grep(tmp_path, query) == [str(tmp_path / "e"), str(tmp_path / "t")]
+
+
+@_BOTH
+def test_search_ignored_walks_what_gitignore_names(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    query = Query(pattern="hit", search_ignored=True)
+    expected = [".hidden.py", "a.py", "b.txt", "build/gen.py"]
+    assert grep(root, query) == [str(root / name) for name in expected]
+
+
+@_BOTH
+def test_follow_walks_through_symlinks_and_past_broken_ones(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "x.txt").write_text("hit\n")
+    (tmp_path / "dir").symlink_to(tmp_path / "real")
+    (tmp_path / "file.txt").symlink_to(tmp_path / "real" / "x.txt")
+    (tmp_path / "broken").symlink_to(tmp_path / "nowhere")
+    (tmp_path / "real" / "up").symlink_to(tmp_path)
+    assert grep(tmp_path, Query(pattern="hit")) == [str(tmp_path / "real" / "x.txt")]
+    assert grep(tmp_path, Query(pattern="hit", follow=True)) == [
+        str(tmp_path / "dir" / "x.txt"),
+        str(tmp_path / "file.txt"),
+        str(tmp_path / "real" / "x.txt"),
+    ]
+
+
+@_BOTH
+def test_max_depth_bounds_the_walk(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    shallow = Query(pattern="hit", case_insensitive=True, max_depth=1)
+    assert grep(root, shallow) == [
+        str(root / n) for n in (".hidden.py", "a.py", "b.txt")
+    ]
+    deep = Query(pattern="hit", case_insensitive=True, max_depth=2)
+    assert grep(root, deep)[-1] == str(root / "sub" / "c.py")
+
+
+@_BOTH
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        (
+            Query(pattern="x", multiline=True, invert=True),
+            "invert cannot combine with multiline.",
+        ),
+        (
+            Query(pattern="x", multiline=True, only_matching=True),
+            "only_matching cannot combine with multiline.",
+        ),
+        (
+            Query(pattern="x", multiline=True, max_count=1),
+            "max_count cannot combine with multiline.",
+        ),
+        (
+            Query(pattern="x", invert=True, only_matching=True),
+            "only_matching cannot combine with invert.",
+        ),
+    ],
+    ids=["multiline-invert", "multiline-only", "multiline-max", "invert-only"],
+)
+def test_combinations_ripgrep_answers_inconsistently_are_refused(
+    tmp_path: Path,
+    query: Query,
+    message: str,
+) -> None:
+    (tmp_path / "f").write_text("x\n")
+    with pytest.raises(GrepError) as raised:
+        grep(tmp_path, query)
+    assert str(raised.value) == message
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Generator[None]:
+    """Make ``path`` unreadable for the block; skip under root, which reads all."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    mode = path.stat().st_mode
+    path.chmod(0)
+    try:
+        yield
+    finally:
+        path.chmod(mode)
+
+
+@_BOTH
+def test_an_unreadable_walked_file_is_skipped_in_every_backend(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("hit\n")
+    (tmp_path / "b.txt").write_text("hit\n")
+    with _locked(tmp_path / "a.txt"):
+        found = grep(tmp_path, Query(pattern="hit"))
+    assert found == [str(tmp_path / "b.txt")]
+
+
+@_BOTH
+@pytest.mark.parametrize("follow", [False, True])
+def test_an_unreadable_walked_directory_is_skipped_in_every_backend(
+    tmp_path: Path,
+    follow: bool,
+) -> None:
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked" / "a.txt").write_text("hit\n")
+    (tmp_path / "z.txt").write_text("hit\n")
+    with _locked(tmp_path / "locked"):
+        found = grep(tmp_path, Query(pattern="hit", follow=follow))
+    assert found == [str(tmp_path / "z.txt")]
+
+
+@_BOTH
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_an_unreadable_named_path_is_an_error_not_no_matches(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """A walk skips what it cannot read; a path the caller named is not skipped."""
+    named = tmp_path / "named"
+    if kind == "file":
+        named.write_text("hit\n")
+    else:
+        named.mkdir()
+        (named / "a.txt").write_text("hit\n")
+    with _locked(named), pytest.raises(GrepError) as raised:
+        grep(named, Query(pattern="hit"))
+    assert str(raised.value) == f"permission denied: {named}"
+
+
+@pytest.mark.parametrize(
+    ("field", "make"),
+    [
+        ("context_before", partial(Query, pattern="x", context_before=-1)),
+        ("context_after", partial(Query, pattern="x", context_after=-1)),
+        ("max_count", partial(Query, pattern="x", max_count=-1)),
+        ("max_depth", partial(Query, pattern="x", max_depth=-1)),
+    ],
+)
+def test_a_negative_count_is_refused_when_the_query_is_made(
+    field: str,
+    make: Callable[[], Query],
+) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be at least 0, got -1"):
+        make()
+
+
+@_BOTH
+@pytest.mark.parametrize(
+    ("pattern", "lines"),
+    [
+        ("x*", [2, 3, 4, 5, 6]),
+        ("-", []),
+        ("foo-", [3, 4]),
+        ("b c", [1]),
+        ("", [2, 3, 4, 5, 6]),
+        (r"\.", [5]),
+        ("a?", [1, 2, 3, 4, 5, 6]),
+    ],
+)
+def test_word_agrees_with_ripgrep_where_a_match_can_be_empty_or_end_in_a_symbol(
+    tmp_path: Path,
+    pattern: str,
+    lines: list[int],
+) -> None:
+    f = tmp_path / "f"
+    f.write_text("a-b c\n-x\nfoo-\nfoo- bar\n.\n\nab ab\n")
+    query = Query(pattern=pattern, output_mode="content", word=True)
+    assert [int(row.split(":")[1]) for row in grep(f, query)] == lines
+
+
+@_BOTH
+def test_an_inverted_named_binary_file_splits_at_each_nul(tmp_path: Path) -> None:
+    f = tmp_path / "nb"
+    f.write_bytes(b"x\0foo\0bar\nbaz\n")
+    assert grep(f, Query(pattern="foo", output_mode="count", invert=True)) == [
+        f"{f}:3",
+    ]
+    text = Query(pattern="foo", output_mode="count", invert=True, text=True)
+    assert grep(f, text) == [f"{f}:1"]
+    content = Query(pattern="foo", output_mode="content", invert=True)
+    assert grep(f, content) == [
+        f'{f}: binary file matches (found "\\0" byte around offset 1)',
+    ]
+
+
+@pytest.mark.parametrize(
+    ("widths", "batches"),
+    [
+        ([ARGV_CHARS + 1], [[0]]),
+        ([ARGV_CHARS - 1, 1], [[0], [1]]),
+        ([ARGV_CHARS - 2, 1], [[0, 1]]),
+        ([ARGV_CHARS, ARGV_CHARS - 1, 1], [[0], [1], [2]]),
+        ([ARGV_CHARS, ARGV_CHARS - 2, 1], [[0], [1, 2]]),
+    ],
+    ids=["overlong-alone", "one-over", "exact", "one-over-later", "exact-later"],
+)
+def test_each_batch_holds_what_fits_its_space_joined_names(
+    widths: list[int],
+    batches: list[list[int]],
+) -> None:
+    """A batch's names joined by spaces fill ``ARGV_CHARS`` and never pass it."""
+    paths = [pathlib.Path(str(i) * width) for i, width in enumerate(widths)]
+    assert list(_batches(paths)) == [[paths[i] for i in batch] for batch in batches]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_sample_file_that_will_not_open_is_left_out(tmp_path: Path) -> None:
-    paths = [tmp_path / name for name in ("a.txt", "b.txt")]
-    for path in paths:
-        path.write_text("value = 1\n" * 8)
-    real = pathlib.Path.open
-    opened: list[str] = []
+@pytest.mark.parametrize(("cpus", "ahead"), [(3, 3), (2, 2), (None, 1)])
+def test_batches_after_the_first_run_ahead_up_to_the_cpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cpus: int | None,
+    ahead: int,
+) -> None:
+    """Once the first run has a row, the next runs start, one per CPU at most."""
+    names = [tmp_path / name for name in "abcde"]
+    for path in names:
+        path.write_text("hit\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(files_grep, "ARGV_CHARS", 1)
+        patch.setattr(os, "cpu_count", lambda: cpus)
+        runs = _Runs(patch)
+        rows = streamed_rows(names, Query(pattern="hit"))
+        assert next(rows).text == str(names[0])
+        assert len(runs.argvs) == 1 + ahead
+        # Each run read in turn starts one more.
+        assert next(rows).text == str(names[1])
+        assert len(runs.argvs) == 2 + ahead
+        assert [row.text for row in rows] == list(map(str, names[2:]))
+    assert len(runs.argvs) == len(names)
 
-    def flaky(self: pathlib.Path, mode: str = "r") -> BinaryIO:
-        opened.append(self.name)
-        if self.name == "a.txt":
-            raise PermissionError(self)
-        assert mode == "rb"
-        return real(self, "rb")
 
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep._SAMPLE", 16),
-        patch("sagent.lib.files.grep._search_file", return_value=[]),
-        patch("pathlib.Path.open", flaky),
-    ):
-        assert grep(paths, Query(pattern="value")) == []
-    assert opened == ["a.txt", "b.txt"]
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_runs_with_nothing_found_are_passed_over_and_groups_split_between_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ripgrep puts ``--`` between context groups of one run; so do the runs."""
+    names = [tmp_path / name for name in "abc"]
+    for path, text in zip(names, ("x\nhit\n", "none\n", "y\nhit\n"), strict=True):
+        path.write_text(text)
+    query = Query(pattern="hit", output_mode="content", context_before=1)
+    with monkeypatch.context() as patch:
+        patch.setattr(files_grep, "ARGV_CHARS", 1)
+        rows = [row.text for row in streamed_rows(names, query)]
+    a, _, c = names
+    assert rows == [f"{a}-1-x", f"{a}:2:hit", "--", f"{c}-1-y", f"{c}:2:hit"]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_run_started_ahead_is_timed_from_when_it_is_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One waiting on a full pipe while the caller reads another is not slow itself."""
+    names = [tmp_path / name for name in "ab"]
+    for path in names:
+        path.write_text("hit\n")
+    timed: list[float] = []
+    kills: list[Callable[..., object]] = []
+    stopped: list[float] = []
+    real_timer = threading.Timer
+
+    class Timer(real_timer):
+        @override
+        def start(self) -> None:
+            timed.append(self.interval)
+            kills.append(self.function)
+            super().start()
+
+        @override
+        def cancel(self) -> None:
+            stopped.append(self.interval)
+            super().cancel()
+
+    monkeypatch.setattr(files_grep, "ARGV_CHARS", 1)
+    monkeypatch.setattr(threading, "Timer", Timer)
+    rows = streamed_rows(names, Query(pattern="hit"), timeout_sec=7)
+    assert next(rows).text == str(names[0])
+    # Both runs started; only the one being read is on the clock.
+    assert timed == [7]
+    assert [row.text for row in rows] == [str(names[1])]
+    assert timed == [7, 7]
+    # Each clock kills its own run when it runs out, and stops when the run ends.
+    assert all(getattr(kill, "__name__", "") == "kill" for kill in kills)
+    assert stopped == [7, 7]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_runs_started_ahead_are_killed_when_the_caller_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = [tmp_path / name for name in "abc"]
+    for path in names:
+        path.write_text("hit\n")
+    started: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(argv: list[str], *, stdout: int, stderr: int) -> subprocess.Popen[bytes]:
+        # Each run waits on the test, so none ends on its own.
+        process = real_popen(
+            ["sleep", "60"] if started else argv,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(files_grep, "ARGV_CHARS", 1)
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    rows = streamed_rows(names, Query(pattern="hit"))
+    assert next(rows).text == str(names[0])
+    assert len(started) == len(names)
+    rows.close()
+    assert all(process.poll() is not None for process in started)
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+@pytest.mark.parametrize(
+    ("mode", "row"),
+    [
+        ("content", "{f}:1:hit"),
+        ("files_with_matches", "{f}"),
+        ("count", "{f}:1"),
+    ],
+)
+def test_a_name_that_is_not_utf8_comes_back_with_replacements(
+    tmp_path: Path,
+    mode: OutputMode,
+    row: str,
+) -> None:
+    (tmp_path / os.fsdecode(b"\xff.txt")).write_text("hit\n")
+    query = Query(pattern="hit", output_mode=mode)
+    assert grep(tmp_path, query) == [row.format(f=f"{tmp_path}/\ufffd.txt")]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_one_letter_name_keeps_its_row_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The separator after a one-letter name sits at index 1."""
+    monkeypatch.chdir(tmp_path)
+    pathlib.Path("a").write_text("hit\n")
+    query = Query(pattern="hit", output_mode="content")
+    assert grep_rows(pathlib.Path("a"), query) == [
+        Row(text="a:1:hit", prefix_end=4, column=4, file="a"),
+    ]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_rows_ripgrep_prints_out_of_order_stream_so_and_list_sorted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ripgrep searches files in parallel, so its rows arrive in any order."""
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("hit\n")
+    out = f"{tmp_path}/b:1\n{tmp_path}/a:1\n".encode()
+    query = Query(pattern="hit", output_mode="count")
+    with monkeypatch.context() as patch:
+        _ = _Runs(patch, answer=(out, b"", 0))
+        streamed = [row.text for row in streamed_rows(tmp_path, query)]
+        listed = grep(tmp_path, query)
+    assert streamed == [f"{tmp_path}/b:1", f"{tmp_path}/a:1"]
+    assert listed == [f"{tmp_path}/a:1", f"{tmp_path}/b:1"]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_context_groups_out_of_order_regroup_by_file_when_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``--`` between files is ripgrep's; one within a file stays with it."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.touch()
+    b.touch()
+    out = b"\n".join(
+        [
+            f"{b}\x022\x02x".encode(),
+            f"{b}\x013\x011\x01hit".encode(),
+            b"--",
+            f"{a}\x011\x011\x01hit".encode(),
+            b"--",
+            f"{a}\x015\x011\x01hit".encode(),
+            b"",
+        ],
+    )
+    query = Query(pattern="hit", output_mode="content", context_before=1)
+    with monkeypatch.context() as patch:
+        _ = _Runs(patch, answer=(out, b"", 0))
+        streamed = [row.text for row in streamed_rows([a, b], query)]
+        listed = grep([a, b], query)
+    assert streamed == [
+        f"{b}-2-x",
+        f"{b}:3:hit",
+        "--",
+        f"{a}:1:hit",
+        "--",
+        f"{a}:5:hit",
+    ]
+    assert listed == [f"{a}:1:hit", "--", f"{a}:5:hit", "--", f"{b}-2-x", f"{b}:3:hit"]
 
 
 def test_a_name_outside_every_path_sorts_last() -> None:
@@ -1095,6 +1817,97 @@ def test_a_name_outside_every_path_sorts_last() -> None:
     order = {"a": 0}
     keys = [_sort_key(name, paths, order) for name in ("z", "b/c", "a")]
     assert keys == [(2, ("z",)), (1, ("c",)), (0, ())]
+
+
+def test_a_walked_name_sorts_under_the_directory_holding_it() -> None:
+    """The root's own ``/`` is no extra component, and a name keeps its letters."""
+    paths = [pathlib.Path("dX"), pathlib.Path("/")]
+    keys = [_sort_key(name, paths, {}) for name in ("dX/e", "/r/s")]
+    assert keys == [(0, ("e",)), (1, ("r", "s"))]
+
+
+@_BOTH
+def test_files_without_match_keep_a_colon_in_a_name(tmp_path: Path) -> None:
+    for name in ("a", "b:1"):
+        (tmp_path / name).write_text("no\n")
+    query = Query(pattern="hit", output_mode="files_without_match")
+    assert grep(tmp_path, query) == [str(tmp_path / "a"), str(tmp_path / "b:1")]
+
+
+@_BOTH
+def test_an_empty_file_has_no_line_to_match(tmp_path: Path) -> None:
+    f = tmp_path / "empty"
+    f.touch()
+    assert grep(f, Query(pattern="", output_mode="count")) == []
+
+
+@_BOTH
+def test_only_matching_keeps_an_empty_first_match_past_the_line_start(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "f"
+    f.write_text(" a\n")
+    query = Query(pattern=r"\b", output_mode="count", only_matching=True)
+    assert grep(f, query) == [f"{f}:2"]
+
+
+@_BOTH
+@pytest.mark.parametrize(("pattern", "count"), [(r"[]\n]", 1), (r"[^]\n]", 2)])
+def test_a_newline_escape_inside_a_class_needs_no_multiline(
+    tmp_path: Path,
+    pattern: str,
+    count: int,
+) -> None:
+    """A ``]`` first in a class, negated or not, is a member and closes nothing."""
+    f = tmp_path / "f"
+    f.write_text("a]\nb\n")
+    assert grep(f, Query(pattern=pattern, output_mode="count")) == [f"{f}:{count}"]
+
+
+@_BOTH
+@pytest.mark.parametrize("source", ["ignore", "parent-ignore", "exclude", "global"])
+def test_search_ignored_reads_no_ignore_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    """Each source hides ``x.txt`` from a walk, until ``search_ignored``."""
+    root = tmp_path / "repo"
+    (root / ".git" / "info").mkdir(parents=True)
+    (root / "sub").mkdir()
+    for directory in (root, root / "sub"):
+        (directory / "x.txt").write_text("hit\n")
+    config = tmp_path / "config"
+    (config / "git").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    named = root / "sub" if source == "parent-ignore" else root
+    ignore = {
+        "ignore": root / ".ignore",
+        "parent-ignore": root / ".ignore",
+        "exclude": root / ".git" / "info" / "exclude",
+        "global": config / "git" / "ignore",
+    }[source]
+    ignore.write_text("x.txt\n")
+    assert grep(named, Query(pattern="hit")) == []
+    walked = sorted(str(path) for path in named.rglob("x.txt"))
+    assert grep(named, Query(pattern="hit", search_ignored=True)) == walked
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root enters a mode-600 directory")
+@_BOTH
+def test_a_named_directory_that_cannot_be_entered_is_an_error(tmp_path: Path) -> None:
+    named = tmp_path / "named"
+    named.mkdir()
+    (named / "a.txt").write_text("hit\n")
+    named.chmod(0o600)
+    try:
+        with pytest.raises(GrepError) as raised:
+            grep(named, Query(pattern="hit"))
+    finally:
+        named.chmod(0o700)
+    assert str(raised.value) == f"permission denied: {named}"
 
 
 if __name__ == "__main__":

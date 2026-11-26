@@ -1,290 +1,699 @@
-"""Tests for ``tools.agent_send``: routing messages between live agents."""
+"""Tests for AgentSend: messages between the agents of a team, now or later."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
+
 import asyncio
+import logging
+import re
+import runpy
 
 import pytest
 
-from sagent.agent.state import agent_label_var, agent_registry
-from sagent.testing import FakeAgent, with_fake_agent
+from sagent.agent.agent import Agent
+from sagent.agent.team import MessageKind, Team
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AgentSendResult,
+    Succeeded,
+    SystemMessage,
+)
+from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.providers.catalog import ModelCatalog
+from sagent.runtime import types
 from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
-from sagent.types.runtime import (
-    AgentSendMessage,
+from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.types import ToolContext, settled
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from treekle import PlainTree
+
+    from sagent.runtime.types import RuntimeEvent
+
+
+def _team(tmp_path: Path, *labels: str) -> Team:
+    """Return a team of a root and a child of it per label."""
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    _ = team.join(_agent(tmp_path))
+    for label in labels:
+        _ = team.join(_agent(tmp_path), label=label, parent="Agent")
+    return team
+
+
+def _agent(tmp_path: Path) -> Agent:
+    return Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+
+
+def _context(tmp_path: Path, label: str = "Agent") -> ToolContext:
+    return ToolContext(cwd=tmp_path, label=label)
+
+
+def _inbox(team: Team, label: str) -> list[RuntimeEvent]:
+    return team[label].runtime.inbox.drain_nowait()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "summary"),
+    [
+        (
+            {"to": "Bob", "content": "look   at\na.py\n"},
+            "AgentSend →Bob\nlook   at\na.py",
+        ),
+        ({"to": "Bob"}, "AgentSend →Bob"),
+        ({"content": "hi"}, "AgentSend"),
+    ],
 )
+def test_the_summary_names_the_target_and_the_words(
+    tmp_path: Path,
+    arguments: dict[str, str],
+    summary: str,
+) -> None:
+    send = AgentSend(team=Mock(spec=Team))
+
+    assert send.summary(arguments) == summary
+    assert send.serialize_key(_context(tmp_path), arguments) is None
 
 
-def test_metadata_basics() -> None:
-    t = AgentSend()
-    assert t.name == "AgentSend"
-    assert t.tool_id == "application/x-tool-agentsend"
+def test_the_reminder_names_the_caller_and_who_it_can_reach(tmp_path: Path) -> None:
+    send = AgentSend(team=_team(tmp_path, "bob", "alice"))
+
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: alice, bob."
+    )
+    assert send.reminder(_context(tmp_path, label="")) == (
+        "Active agents you can message: Agent, alice, bob."
+    )
+    assert AgentSend(team=_team(tmp_path)).reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'."
+    )
 
 
-def test_summary_short_and_long() -> None:
-    t = AgentSend()
-    assert t.summary({"to": "Bob", "content": "hi"}) == "AgentSend → Bob: hi"
-    # Uncapped: the renderer wraps and line-caps; the label is not clipped.
-    long = "x" * 60
-    s = t.summary({"to": "Bob", "content": long})
-    assert s == f"AgentSend \u2192 Bob: {long}"
+@dataclass(slots=True, kw_only=True)
+class _Relayed:
+    """A relay to another machine that keeps what it was given."""
 
+    sent: list[tuple[str, str, str, MessageKind]] = field(
+        default_factory=list[tuple[str, str, str, "MessageKind"]],
+    )
 
-def test_summary_without_to() -> None:
-    t = AgentSend()
-    assert t.summary({}) == "AgentSend"
-
-
-def test_prompt_lists_other_agents() -> None:
-    t = AgentSend()
-    token_self = agent_label_var.set("Me")
-    agent_registry["Me"] = FakeAgent()
-    agent_registry["Bob"] = FakeAgent()
-    agent_registry["Alice"] = FakeAgent()
-    try:
-        p = t.prompt()
-    finally:
-        agent_registry.pop("Me", None)
-        agent_registry.pop("Bob", None)
-        agent_registry.pop("Alice", None)
-        agent_label_var.reset(token_self)
-    assert "Alice" in p
-    assert "Bob" in p
-    # ``Me`` surfaces as the self-identity anchor (``Your agent label is
-    # 'Me'.``) but is excluded from the addressable peers listing.
-    assert "Your agent label is 'Me'." in p
-    assert "Active agents you can message: Alice, Bob" in p
-
-
-def test_prompt_self_only_returns_identity() -> None:
-    t = AgentSend()
-    token = agent_label_var.set("Me")
-    agent_registry["Me"] = FakeAgent()
-    try:
-        p = t.prompt()
-    finally:
-        agent_registry.pop("Me", None)
-        agent_label_var.reset(token)
-    assert p == "Your agent label is 'Me'."
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        self.sent.append((sender, recipient, content, kind))
 
 
 @pytest.mark.asyncio
-async def test_run_requires_to() -> None:
-    t = AgentSend()
-    with with_fake_agent():
-        result = await t.run({"to": "", "content": "hi"})
-    assert result.is_error
-    assert "'to' is required" in result.content
+async def test_an_agent_on_another_machine_is_listed_and_sent_to(
+    tmp_path: Path,
+) -> None:
+    team, relay = _team(tmp_path, "bob"), _Relayed()
+    team.reach("worker", relay=relay)
+    send = AgentSend(team=team)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: bob, worker."
+    )
+    said = await settled(
+        send.call(_context(tmp_path), {"to": "worker", "content": "go"}),
+    )
+    assert said.text() == "Sent to worker; you are told if it does not arrive."
+    assert relay.sent == [("Agent", "worker", "go", "ask")]
 
 
-@pytest.mark.asyncio
-async def test_run_requires_content() -> None:
-    t = AgentSend()
-    with with_fake_agent():
-        result = await t.run({"to": "Bob", "content": ""})
-    assert result.is_error
-    assert "'content' is required" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_unknown_agent() -> None:
-    t = AgentSend()
-    with with_fake_agent():
-        result = await t.run({"to": "Ghost", "content": "hi"})
-    assert result.is_error
-    assert "Unknown agent" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_delivers_message() -> None:
-    t = AgentSend()
-    target = FakeAgent()
-    agent_registry["Bob"] = target
-    token = agent_label_var.set("Me")
-    try:
-        with with_fake_agent():
-            result = await t.run({"to": "Bob", "content": "hello"})
-    finally:
-        agent_registry.pop("Bob", None)
-        agent_label_var.reset(token)
-    assert not result.is_error
-    assert "Delivered to Bob" in result.content
-    # Drain the inbox -- the runtime's GatedDeque is async so use drain().
-    items = await target.runtime.inbox.drain()
-    assert any(
-        isinstance(i, AgentSendMessage) and i.source == "Me" and i.text == "hello"
-        for i in items
+def test_another_session_s_linked_agent_is_listed_with_peer_messaging_on(
+    tmp_path: Path,
+) -> None:
+    team, relay = _team(tmp_path), _Relayed()
+    team.reach("worker", relay=relay)
+    team.reach("lead#412", relay=relay)
+    send = AgentSend(team=team)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: lead#412, worker."
+    )
+    team.set_peer_messaging("Agent", False)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: worker."
     )
 
 
 @pytest.mark.asyncio
-async def test_run_delay_schedules_call_later(monkeypatch: pytest.MonkeyPatch) -> None:
-    t = AgentSend()
-    target = FakeAgent()
-    agent_registry["Bob"] = target
-    token = agent_label_var.set("Me")
+async def test_a_delayed_reply_crosses_to_another_machine_as_a_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[tuple[Callable[..., object], tuple[object, ...]]] = []
 
-    calls: list[tuple[float, object, tuple[object, ...]]] = []
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay
+        scheduled.append((callback, args))
 
-    class _FakeLoop:
-        def call_later(self, delay: float, fn: object, *args: object) -> None:
-            calls.append((delay, fn, args))
-
-    fake_loop = _FakeLoop()
-
-    def _get_loop() -> _FakeLoop:
-        return fake_loop
-
-    monkeypatch.setattr("asyncio.get_running_loop", _get_loop)
-    try:
-        with with_fake_agent():
-            result = await t.run({"to": "Bob", "content": "later", "delay": 5})
-    finally:
-        agent_registry.pop("Bob", None)
-        agent_label_var.reset(token)
-    assert not result.is_error
-    assert "Scheduled for Bob in 5s" in result.content
-    assert calls
-    assert calls[0][0] == 5
-    # ``_deliver`` is the scheduled callable.
-    assert calls[0][1] is agent_send._deliver
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team, relay = _team(tmp_path), _Relayed()
+    team.reach("worker", relay=relay)
+    team.receive(sender="worker", recipient="Agent", content="ok?", kind="ask")
+    _ = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "worker", "content": "yes", "delay": 1},
+        ),
+    )
+    ((deliver, args),) = scheduled
+    deliver(*args)
+    assert relay.sent == [("Agent", "worker", "[delayed 1s] yes", "reply")]
 
 
-def test_deliver_into_live_inbox() -> None:
-    target = FakeAgent()
-    agent_registry["DelayTarget"] = target
-    try:
-        agent_send._deliver("DelayTarget", "Me", "ping", 7)
-    finally:
-        agent_registry.pop("DelayTarget", None)
-    drained = asyncio.new_event_loop().run_until_complete(target.runtime.inbox.drain())
-    # The documentation (assets/default/tools_agentsend.md:6 and the
-    # description tooltip) claims the delivered message "automatically
-    # notes delay time". The drained payload must mention both the
-    # delay window and the original content so the recipient knows
-    # how stale a scheduled reminder is.
-    #
-    # The delivery posts an ``AgentSendMessage`` (preempting) -- the
-    # ``call_later`` delay timer alone supplies the "wait before
-    # delivery" semantic. A deferred message here would double-defer:
-    # the runtime parks deferred messages until ``AgentIdle``, masking
-    # the wake-up the delay was meant to provide.
-    matches = [
-        i for i in drained if isinstance(i, AgentSendMessage) and i.source == "Me"
+@pytest.mark.asyncio
+async def test_another_session_s_agent_is_sent_to_now_or_later_and_never_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay
+        scheduled.append((callback, args))
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team, relay = _team(tmp_path), _Relayed()
+    team.relay = relay
+    send = AgentSend(team=team)
+    now = await settled(
+        send.call(_context(tmp_path), {"to": "lead#412", "content": "status?"}),
+    )
+    team.receive(sender="worker#415", recipient="Agent", content="ok?", kind="ask")
+    _ = await settled(
+        send.call(
+            _context(tmp_path),
+            {"to": "worker#415", "content": "yes", "delay": 1},
+        ),
+    )
+    ((deliver, args),) = scheduled
+    deliver(*args)
+    assert now.text() == "Sent to lead#412; you are told if it does not arrive."
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Another session's agent is LABEL#SESSION: its"
+        " label, then its session, as Agent#412."
+    )
+    team.set_peer_messaging("Agent", False)
+    assert send.reminder(_context(tmp_path)) == "Your agent label is 'Agent'."
+    assert relay.sent == [
+        ("Agent", "lead#412", "status?", "ask"),
+        ("Agent", "worker#415", "[delayed 1s] yes", "reply"),
     ]
-    assert matches, drained
-    body = matches[0].text
-    assert "ping" in body
-    assert "7s" in body
 
 
-def test_deliver_dead_target_is_noop(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level("WARNING"):
-        # ``"Ghost"`` is not in ``agent_registry``; delivery must
-        # log a warning rather than silently push into thin air.
-        agent_send._deliver("Ghost", "Me", "x", 3)
-    assert any("Delayed message to dead agent" in rec.message for rec in caplog.records)
+def test_a_child_is_told_its_parent_and_whom_it_owes(tmp_path: Path) -> None:
+    team = _team(tmp_path, "helper")
+    send = AgentSend(team=team)
+    team.send("Agent", "helper", "check the parser please")
 
-
-def test_deliver_reresolves_target_at_delivery_time() -> None:
-    """Re-resolution beats stale-handle delivery.
-
-    Schedule against label X holding agent A; before the timer fires,
-    A dies and B is registered under the same label. The delayed
-    message must reach B (the *current* holder), not A's defunct
-    inbox.
-    """
-    original = FakeAgent()
-    replacement = FakeAgent()
-    agent_registry["Rebind"] = original
-    # Simulate the schedule→drop→rebind sequence between
-    # ``call_later`` and the timer callback.
-    agent_registry["Rebind"] = replacement
-    try:
-        agent_send._deliver("Rebind", "Me", "after-rebind", 1)
-    finally:
-        agent_registry.pop("Rebind", None)
-    # ``drain()`` blocks on an empty queue; inspect the underlying
-    # queue size directly so the assertion can verify the stale
-    # handle stayed empty without hanging.
-    assert replacement.runtime.inbox._queue.qsize() == 1, (
-        "delivery must reach the current registry holder"
+    assert send.reminder(_context(tmp_path, label="helper")) == (
+        "Your agent label is 'helper'. Your parent is 'Agent'. Active agents you"
+        " can message: Agent. You owe a reply, by AgentSend, to: Agent ('check the"
+        " parser please')."
     )
-    assert original.runtime.inbox._queue.qsize() == 0, (
-        "delivery must not land on the stale handle"
-    )
+    assert "owe" not in send.reminder(_context(tmp_path))
 
 
 @pytest.mark.asyncio
-async def test_run_negative_delay_is_error() -> None:
-    """Negative ``delay`` bypasses the ``delay > 0`` gate; reject it.
-
-    Schema declares ``minimum: 0``; runtime must enforce.
-    """
-    t = AgentSend()
-    target = FakeAgent()
-    agent_registry["Bob"] = target
-    try:
-        with with_fake_agent():
-            result = await t.run({"to": "Bob", "content": "hi", "delay": -1})
-    finally:
-        agent_registry.pop("Bob", None)
-    assert result.is_error
-    assert "delay" in result.content
-
-
-@pytest.mark.asyncio
-async def test_self_send_nudge_fires_when_to_matches_sender() -> None:
-    """Undelayed self-send surfaces the soft loop-detection nudge.
-
-    Pin the intended trigger: sender label_var is set AND ``to`` matches.
-    The nudge protects against LLM self-loop bugs (see pinger incident);
-    this test fixes the contract so the fallthrough-default fix below
-    can't accidentally suppress the legitimate case.
-    """
-    t = AgentSend()
-    me = FakeAgent()
-    agent_registry["Me"] = me
-    token = agent_label_var.set("Me")
-    try:
-        with with_fake_agent():
-            result = await t.run({"to": "Me", "content": "hello self"})
-    finally:
-        agent_registry.pop("Me", None)
-        agent_label_var.reset(token)
-    assert not result.is_error
-    assert "sending a message to yourself" in result.content
-
-
-@pytest.mark.asyncio
-async def test_no_nudge_when_sender_label_unset() -> None:
-    """No nudge when the caller's ``agent_label_var`` isn't set.
-
-    Before the guard, ``agent_label_var.get("unknown")`` produced the
-    sentinel string ``"unknown"``. A target agent registered under the
-    literal label ``"unknown"`` would falsely match the unset sender
-    and trigger the self-send nudge -- a phantom warning for a routine
-    cross-agent message. Pin the guard: nudge fires only when label_var
-    is genuinely set AND equals ``to``.
-    """
-    t = AgentSend()
-    target = FakeAgent()
-    # ``unknown`` is the literal value of the prior nudge's default
-    # sender sentinel; verify it no longer self-matches.
-    agent_registry["unknown"] = target
-    try:
-        # No ``agent_label_var.set(...)`` -- the sender label_var is
-        # at its default empty value, modelling a tool call from a
-        # context that didn't establish identity (test harnesses,
-        # FakeAgent, root before serve_forever).
-        with with_fake_agent():
-            result = await t.run({"to": "unknown", "content": "hi"})
-    finally:
-        agent_registry.pop("unknown", None)
-    assert not result.is_error
-    assert "sending a message to yourself" not in result.content, (
-        f"unset sender must not phantom-match an 'unknown' target; got {result.content!r}"
+async def test_a_reply_settles_what_was_owed_and_creates_no_debt(
+    tmp_path: Path,
+) -> None:
+    team = _team(tmp_path, "helper")
+    send = AgentSend(team=team)
+    _ = await settled(
+        send.call(_context(tmp_path), {"to": "helper", "content": "status?"}),
     )
+    assert team.owes("helper") == {"Agent": "status?"}
+
+    _ = await settled(
+        send.call(
+            _context(tmp_path, label="helper"),
+            {"to": "parent", "content": "all green"},
+        ),
+    )
+
+    assert (team.owes("helper"), team.owes("Agent")) == ({}, {})
+    assert [m for m in _inbox(team, "Agent") if isinstance(m, AgentMessage)] == [
+        AgentMessage(sender="helper", recipient="Agent", content="all green"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_blank_reply_is_refused_settles_nothing_and_is_nudged(
+    tmp_path: Path,
+) -> None:
+    team = _team(tmp_path)
+    send = AgentSend(team=team)
+    # A debtor without AgentSend is answered for, not nudged.
+    _ = team.join(
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tools=[send],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
+        label="helper",
+        parent="Agent",
+    )
+    helper = _context(tmp_path, label="helper")
+    team.send("Agent", "helper", "status?")
+    blank = {"to": "parent", "content": " "}
+
+    with pytest.raises(ValueError, match="'content' is blank"):
+        _ = await send.call(helper, blank).result
+    runtime = team["helper"].runtime
+    runtime.publish(
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=reply(calls=[call("AgentSend", **blank)])),
+        ),
+    )
+    runtime.publish(AgentIdle())
+
+    assert team.owes("helper") == {"Agent": "status?"}
+    assert _inbox(team, "Agent") == []
+    assert [
+        m.subtype for m in _inbox(team, "helper") if isinstance(m, SystemMessage)
+    ] == ["nudge"]
+    _ = await settled(send.call(helper, {"to": "parent", "content": "all green"}))
+    assert team.owes("helper") == {}
+    assert _inbox(team, "Agent") == [
+        AgentMessage(sender="helper", recipient="Agent", content="all green"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_root_has_no_parent_to_send_to(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="You have no parent"):
+        _ = (
+            await AgentSend(team=_team(tmp_path))
+            .call(
+                _context(tmp_path),
+                {"to": "parent", "content": "hi"},
+            )
+            .result
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_root_that_may_spawn_starts_its_watcher_to_reach_its_parent(
+    tmp_path: Path,
+) -> None:
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    send = AgentSend(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[send, AgentSpawn(team=team)],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(root)
+    async with team:
+        first = await settled(
+            send.call(
+                _context(tmp_path),
+                {"to": "parent", "content": "hold me to the goal"},
+            ),
+        )
+        again = await settled(
+            send.call(_context(tmp_path), {"to": "parent", "content": "and"}),
+        )
+
+        assert first.text() == (
+            "Started your watcher, watcher, now your parent. Delivered to watcher."
+        )
+        assert again.text() == "Delivered to watcher."
+        assert team.resolve("parent", by="Agent") == ["watcher"]
+        assert team.owes("watcher") == {"Agent": "and"}
+        watcher = team["watcher"]
+        told = [
+            m.content or ""
+            for m in (*watcher.session, *_inbox(team, "watcher"))
+            if isinstance(m, AgentMessage)
+        ]
+        assert told[0].startswith("<skill name='watch' source='builtin'>")
+        assert told[1:] == ["hold me to the goal", "and"]
+        assert list(team["watcher"].tools) == list(root.tools)
+
+
+@pytest.mark.asyncio
+async def test_a_root_kept_from_spawning_starts_no_watcher(tmp_path: Path) -> None:
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    send = AgentSend(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[send, AgentSpawn(team=team)],
+        allowed=["AgentSend"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(root)
+
+    with pytest.raises(ValueError, match="You have no parent"):
+        _ = await send.call(
+            _context(tmp_path),
+            {"to": "parent", "content": "hi"},
+        ).result
+    assert list(team) == ["Agent"]
+
+
+def test_sends_to_the_parent_go_one_at_a_time(tmp_path: Path) -> None:
+    # Two in one reply from a root would otherwise race to start two watchers.
+    send = AgentSend(team=Mock(spec=Team))
+    context = _context(tmp_path)
+
+    assert send.serialize_key(context, {"to": "parent", "content": "a"}) == "parent"
+    assert send.serialize_key(context, {"to": "Bob", "content": "a"}) is None
+
+
+@pytest.mark.asyncio
+async def test_user_is_told_on_the_screen_once_one_watches(tmp_path: Path) -> None:
+    team = _team(tmp_path)
+    send = AgentSend(team=team)
+    with pytest.raises(ValueError, match="No user is watching"):
+        _ = await send.call(_context(tmp_path), {"to": "user", "content": "hi"}).result
+    shown: list[tuple[str, str]] = []
+    team.to_user = lambda sender, text: shown.append((sender, text))
+    team.ask("Agent", "what broke?")
+
+    result = await settled(
+        send.call(
+            _context(tmp_path),
+            {"to": "user", "content": "the parser"},
+        ),
+    )
+
+    assert result.text() == "Delivered to user."
+    assert shown == [("Agent", "the parser")]
+    assert team.owes("Agent") == {}
+
+
+@pytest.mark.asyncio
+async def test_a_message_reaches_the_inbox_signed_by_its_sender(tmp_path: Path) -> None:
+    team = _team(tmp_path, "bob")
+
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "look at a.py"},
+        ),
+    )
+
+    assert result.text() == "Delivered to bob."
+    assert result.is_error is False
+    assert result.result == AgentSendResult(to="bob")
+    assert _inbox(team, "bob") == [
+        AgentMessage(sender="Agent", recipient="bob", content="look at a.py"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_oneself_without_a_delay_is_flagged(tmp_path: Path) -> None:
+    team = _team(tmp_path)
+
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "Agent", "content": "note to self"},
+        ),
+    )
+
+    assert result.text().startswith("Delivered to Agent. Note: you sent yourself")
+    assert len(_inbox(team, "Agent")) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_sender_signs_as_unknown_and_is_never_itself(
+    tmp_path: Path,
+) -> None:
+    team = _team(tmp_path, "unknown")
+
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path, label=""),
+            {"to": "unknown", "content": "hi"},
+        ),
+    )
+
+    assert result.text() == "Delivered to unknown."
+    (message,) = _inbox(team, "unknown")
+    assert isinstance(message, AgentMessage)
+    assert message.sender == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "match"),
+    [
+        ({"to": "", "content": "hi"}, "'to' is required"),
+        ({"to": "bob", "content": ""}, "'content' is blank"),
+        ({"to": "bob", "content": " "}, "'content' is blank"),
+        ({"to": "bob", "content": "\n\t ", "delay": 5}, "'content' is blank"),
+        (
+            {"to": "carol", "content": "hi"},
+            r"Unknown agent 'carol'. Active: \['Agent', 'bob'\]",
+        ),
+        ({"to": "bob", "content": "hi", "delay": -1}, "'delay' must be at least 0"),
+        ({"to": "bob"}, "Missing argument 'content'"),
+    ],
+)
+async def test_a_send_that_cannot_be_delivered_is_refused(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    match: str,
+) -> None:
+    team = _team(tmp_path, "bob")
+
+    with pytest.raises(ValueError, match=match):
+        _ = await AgentSend(team=team).call(_context(tmp_path), arguments).result
+    assert _inbox(team, "bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_message_reaches_whoever_holds_the_label_then(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scheduled: list[tuple[float, Callable[..., object], tuple[object, ...]]] = []
+
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        scheduled.append((delay, callback, args))
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team = _team(tmp_path, "bob")
+    old = team["bob"]
+
+    result = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "check back", "delay": 5},
+        ),
+    )
+    assert _inbox(team, "bob") == []
+    (delay, deliver, args) = scheduled[0]
+    _ = team.leave("bob")
+    new = _agent(tmp_path)
+    _ = team.join(new, label="bob", parent="Agent")
+    deliver(*args)
+    _ = team.leave("bob")
+    with caplog.at_level(logging.WARNING):
+        deliver(*args)
+
+    assert result.text() == "Scheduled for bob in 5s."
+    assert result.result == AgentSendResult(to="bob", delay_sec=5)
+    assert delay == 5
+    assert new.runtime.inbox.drain_nowait() == [
+        AgentMessage(
+            sender="Agent",
+            recipient="bob",
+            content="[delayed 5s] check back",
+        ),
+    ]
+    assert old.runtime.inbox.drain_nowait() == []
+    assert any("which has left" in m for m in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_reply_settles_the_debt_when_sent_not_when_it_lands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay
+        scheduled.append((callback, args))
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team = _team(tmp_path, "bob")
+    team.send("bob", "Agent", "status?")
+    _ = _inbox(team, "Agent")
+
+    _ = await settled(
+        AgentSend(team=team).call(
+            _context(tmp_path),
+            {"to": "bob", "content": "done", "delay": 5},
+        ),
+    )
+    assert team.owes("Agent") == {}
+    ((deliver, args),) = scheduled
+    deliver(*args)
+
+    assert _inbox(team, "bob") == [
+        AgentMessage(
+            sender="Agent",
+            recipient="bob",
+            content="[delayed 5s] done",
+        ),
+    ]
+    assert team.owes("bob") == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "arguments", "message"),
+    [
+        ("Agent", {"to": "", "content": "hi"}, "'to' is required."),
+        (
+            "Agent",
+            {"to": "user", "content": " "},
+            "'content' is blank: write the message.",
+        ),
+        ("Agent", {"to": "parent", "content": "hi"}, "You have no parent."),
+        ("stranger", {"to": "parent", "content": "hi"}, "You have no parent."),
+        (
+            "Agent",
+            {"to": "user", "content": "hi"},
+            "No user is watching; there is no one to tell.",
+        ),
+    ],
+)
+async def test_each_refusal_says_exactly_why(
+    tmp_path: Path,
+    label: str,
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        _ = (
+            await AgentSend(team=_team(tmp_path))
+            .call(
+                _context(tmp_path, label),
+                arguments,
+            )
+            .result
+        )
+
+
+@pytest.mark.asyncio
+async def test_every_result_is_for_no_call_and_a_self_send_says_why_it_is_odd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay, callback, args
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team = _team(tmp_path, "bob")
+    send = AgentSend(team=team)
+    results = [
+        await settled(send.call(_context(tmp_path), {"to": "Agent", "content": "x"})),
+        await settled(send.call(_context(tmp_path), {"to": "bob", "content": "x"})),
+        await settled(
+            send.call(_context(tmp_path), {"to": "bob", "content": "x", "delay": 1}),
+        ),
+    ]
+    assert [r.call_id for r in results] == ["", "", ""]
+    assert [r.result for r in results] == [
+        AgentSendResult(to="Agent"),
+        AgentSendResult(to="bob"),
+        AgentSendResult(to="bob", delay_sec=1),
+    ]
+    assert results[0].text() == (
+        "Delivered to Agent. Note: you sent yourself a message without a delay;"
+        " this is likely not intentional."
+    )
+
+
+def test_what_is_owed_to_two_is_listed_in_turn(tmp_path: Path) -> None:
+    team = _team(tmp_path, "a", "b")
+    team.send("Agent", "a", "one")
+    team.send("b", "a", "two")
+    assert (
+        AgentSend(team=team)
+        .reminder(_context(tmp_path, "a"))
+        .endswith(
+            "You owe a reply, by AgentSend, to: Agent ('one'), b ('two').",
+        )
+    )
+
+
+def test_a_summary_keeps_the_message_s_trailing_spaces() -> None:
+    send = AgentSend(team=Mock(spec=Team))
+    assert send.summary({"to": "b", "content": "x  \n"}) == "AgentSend →b\nx  "
+
+
+def test_a_message_for_one_who_left_is_logged_with_both_names(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    team = _team(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=agent_send.__name__):
+        AgentSend(team=team)._deliver("gone", "Agent", "hi", "ask")
+    assert caplog.messages == ["message from Agent to 'gone', which has left"]
+
+
+def test_the_description_reads_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _Asked()
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", asked)
+        _ = runpy.run_path(
+            agent_send.__file__ or "",
+            run_name=f"{agent_send.__name__}_fresh",
+        )
+
+    assert asked.encodings["agentsend.md"] == "utf-8"
+    assert agent_send.AgentSend is AgentSend
+
+
+@dataclass(slots=True, kw_only=True)
+class _Asked:
+    """Read text as UTF-8, noting the encoding each read asked for."""
+
+    encodings: dict[str, str | None] = field(default_factory=dict)
+
+    def __get__(self, path: Path, owner: type[Path] | None = None) -> partial[str]:
+        """Bind to the path read, as the method it stands in for would."""
+        del owner
+        return partial(self, path)
+
+    def __call__(
+        self,
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        del errors, newline
+        self.encodings[path.name] = encoding
+        return path.read_bytes().decode()
 
 
 if __name__ == "__main__":

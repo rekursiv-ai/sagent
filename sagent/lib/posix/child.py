@@ -1,0 +1,238 @@
+"""A started process, and the process group it leads, that no cancel strands.
+
+``asyncio.create_subprocess_exec`` cancelled while it starts leaves a process
+no caller holds, so nothing stops it or the jobs it started; and a stop
+cancelled midway leaves it half done. ``Child.start`` and ``Child.stop`` each
+finish what they began before a cancel takes effect.
+
+Typical usage example:
+
+  async with await Child.start("/bin/sh", "-c", command, group=True) as child:
+      out, err = await child.process.communicate()
+
+  server = await Child.start("llama-server", "-m", model)   # Stopped later.
+  await server.stop()
+"""
+
+from __future__ import annotations
+
+from asyncio.subprocess import Process
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, TYPE_CHECKING, Self
+
+import asyncio
+import contextlib
+import os
+import signal
+
+
+if TYPE_CHECKING:
+    from asyncio import Future
+    from collections.abc import Awaitable, Collection, Mapping
+
+
+__all__ = [
+    "Child",
+    "finish",
+]
+
+
+@dataclass(slots=True, kw_only=True)
+class Child:
+    """A process this program started, and the process group it leads if asked to.
+
+    Attributes:
+      process: The process, whose pipes the caller reads and writes.
+      group: Whether it leads a process group of its own, which ``stop`` ends
+        whole: the jobs it started too, whether or not it is still running.
+      grace_sec: How long ``stop`` gives it, after TERM, before KILL; ``0``
+        kills it outright, sending no TERM.
+
+    """
+
+    process: Process
+    group: bool
+    grace_sec: float
+    _stopped: int | None = field(default=None, init=False)
+
+    # Each option spelled out: an open ``TypedDict`` of them cannot be unpacked
+    # into ``create_subprocess_exec``, whose other keywords it would admit.
+    @classmethod
+    async def start(
+        cls,
+        *argv: str,
+        group: bool = False,
+        grace_sec: float = 1.0,
+        nice: int | None = None,
+        stdin: int | IO[bytes] | None = None,
+        stdout: int | IO[bytes] | None = None,
+        stderr: int | IO[bytes] | None = None,
+        cwd: str | Path | None = None,
+        env: Mapping[str, str] | None = None,
+        pass_fds: Collection[int] = (),
+        limit: int = 2**16,
+    ) -> Self:
+        """Start ``argv``; a cancel meanwhile stops what started, then raises.
+
+        Args:
+          argv: The program and its arguments.
+          group: Whether it leads a new session, and so a process group of its
+            own, which ``stop`` ends whole.
+          grace_sec: How long ``stop`` gives it, after TERM, before KILL.
+          nice: How far below this program's CPU priority it runs; ``None``
+            for the same. A ``group`` is lowered whole, with its autogroup.
+          stdin: As ``asyncio.create_subprocess_exec`` takes it.
+          stdout: As ``asyncio.create_subprocess_exec`` takes it.
+          stderr: As ``asyncio.create_subprocess_exec`` takes it.
+          cwd: Where it runs.
+          env: Its environment; ``None`` inherits this one.
+          pass_fds: Descriptors it inherits besides its three streams.
+          limit: The buffer limit of its stream readers.
+
+        Returns:
+          child: The started process.
+
+        """
+        starting = asyncio.ensure_future(
+            asyncio.create_subprocess_exec(
+                *argv,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                cwd=cwd,
+                env=env,
+                pass_fds=pass_fds,
+                limit=limit,
+                start_new_session=group,
+            ),
+        )
+        try:
+            process = await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            await finish(cls._abandon(starting, group=group))
+            raise
+        if nice is not None:
+            _lower(process.pid, nice, group=group)
+        return cls(process=process, group=group, grace_sec=grace_sec)
+
+    @classmethod
+    async def _abandon(cls, starting: Future[Process], *, group: bool) -> None:
+        """Kill what ``starting`` starts, which no caller will hold."""
+        # A start that failed left nothing to stop, and its error is not the
+        # caller's: the cancel is.
+        with contextlib.suppress(Exception):
+            await cls(process=await starting, group=group, grace_sec=0.0).stop()
+
+    async def __aenter__(self) -> Self:
+        """Return this child, which leaving the block stops."""
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Stop the child, however the block ended."""
+        del exc
+        await self.stop()
+
+    # Not ``Process.wait``: before 3.13 it returns only once every pipe has
+    # closed, which a job that left the group can hold open long after the
+    # process is gone. ``returncode`` is set when the process is reaped.
+    async def exited(self, *, poll_sec: float = 0.01) -> int:
+        """Return the exit status once the process has exited, its pipes open or not."""
+        while self.process.returncode is None:  # noqa: ASYNC110 -- No public event marks a reap but the pipe-bound wait.
+            await asyncio.sleep(poll_sec)  # house-ignore[sleep] -- No reap event.
+        return self.process.returncode
+
+    async def stop(self) -> int:
+        """End the process, or its whole group: TERM, then KILL after the grace.
+
+        A cancel meanwhile waits for it to end, then raises. Stopping again,
+        or stopping a process that has exited, signals nothing new.
+
+        Returns:
+          status: Its exit status; negative for the signal that ended it.
+
+        """
+        return await finish(self._stop())
+
+    # Stopped once, the group is not signalled again: its id may by then name
+    # another group.
+    async def _stop(self) -> int:
+        if self._stopped is not None:
+            return self._stopped
+        if self.grace_sec > 0 and self._reachable():
+            self._signal(signal.SIGTERM)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._ended(), timeout=self.grace_sec)
+        if self._reachable():
+            self._signal(signal.SIGKILL)
+        self._stopped = await self.exited()
+        return self._stopped
+
+    # A group outlives its leader while any job in it runs.
+    def _reachable(self) -> bool:
+        """Return whether a signal would reach the process, or a job of its group."""
+        if self.process.returncode is None:
+            return True
+        if not self.group:
+            return False
+        try:
+            os.killpg(self.process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    async def _ended(self) -> None:
+        """Return once no signal would reach anything left to stop."""
+        while self._reachable():  # noqa: ASYNC110 -- No event marks the exit of a group's last job.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- Group end: no event.
+
+    def _signal(self, sig: int) -> None:
+        """Send ``sig`` to the group, else to the process; one that has gone is fine."""
+        if self.group:
+            # Failing, the group has gone, or its jobs run as another user:
+            # signal the process alone.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, sig)
+                return
+        if self.process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                self.process.send_signal(sig)
+
+
+async def finish[T](work: Awaitable[T]) -> T:
+    """Return what ``work`` returns; a cancel meanwhile waits for it, then raises.
+
+    Args:
+      work: What must not be left half done.
+
+    Returns:
+      result: What ``work`` returned.
+
+    """
+    running = asyncio.ensure_future(work)
+    cancelled = False
+    # Each cancel is held off, however many arrive, until the work is done.
+    while not running.done():
+        try:
+            _ = await asyncio.wait((running,))
+        except asyncio.CancelledError:
+            cancelled = True
+    result = running.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+# Best-effort: a quick command may already be reaped, a ``sudo`` is root's.
+# Linux shares CPU per session autogroup, so nice alone does not yield to the desktop.
+def _lower(pid: int, nice: int, *, group: bool) -> None:
+    """Run ``pid``, and its group and session if it leads them, ``nice`` lower."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.setpriority(
+            os.PRIO_PGRP if group else os.PRIO_PROCESS,
+            pid,
+            os.getpriority(os.PRIO_PROCESS, 0) + nice,
+        )
+    if group:
+        with contextlib.suppress(OSError):
+            Path(f"/proc/{pid}/autogroup").write_bytes(b"%d\n" % nice)

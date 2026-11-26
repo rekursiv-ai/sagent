@@ -1,1616 +1,923 @@
-"""Agent factory tool: let an agent spawn a configured sub-agent.
+"""AgentSpawn: start a child agent on a task, and return what it says.
 
-This is ``tools.AgentSpawn`` (the tool), distinct from
-:class:`sagent.agent.Agent` (the runtime class).
-Python namespaces disambiguate.
+A child inherits its parent's model, settings, tools, system prompt,
+compactor, and directory, each overridable, and waits out a long rate limit
+when its parent does. It joins the team under its
+parent, so ``AgentSend`` reaches it and the depth cap holds. It runs its prompt
+to idle, whose last text is the spawn's result, then stays, its inbox open,
+until the team stops it; a message its parent sends it later is owed a reply.
 
-The factory's job is to convert an LLM-emitted tool call into a
-fresh ``Agent`` instance with the right knobs resolved, run it to
-completion, and return its final output. Every knob follows one
-rule: ``LLM arg → factory arg → parent → hard default``. ``None``
-at any layer means "fall through."
+Its events reach the parent's observers as ``ChildEvent``s, so the parent's
+screen shows its work; the call's ``AgentSpawnResult`` says what it used. What its
+model calls cost is charged to its parent and each agent above, journaled, and
+held to their spend caps; it may spend no more than the least of them has left.
 
-The factory also holds Python objects (``Model`` instances, tool
-instances) that the LLM addresses by string name - the factory
-itself *is* the registry for those objects.
+A child of a parent with a journal file stands in that journal until it is
+stopped; ``resume`` starts such children again, each from its own
+journal, when the parent's session is resumed. With ``watch``, the call starts
+the caller's watcher instead, ``prompt`` its first request.
+
+Typical usage example:
+
+  spawn = AgentSpawn(team=team)
+  result = await settled(spawn.call(context, {"prompt": "list the TODOs in src/", "tools": ["Grep"]}))
+  await spawn.resume("Agent")          # After resuming the root's session.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Literal, cast
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field, replace
+from functools import partial
+from importlib.resources import files
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
-import dataclasses
 import logging
+import re
 import time
-import uuid
 
-from treekle import PlainTree, from_plain, immutable
-
-from sagent.agent.agent import Agent, SystemPromptArg
-from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.session_io import (
-    PersistentAgentState,
-    append_persistent_agent_lifecycle,
-)
-from sagent.agent.state import (
-    agent_counter_var,
-    agent_label_var,
-    agent_path_var,
-    agent_registry,
-    current_agent_var,
-    get_tool_state,
-    max_depth_var,
-)
-from sagent.providers import PROVIDER_NAMES
-from sagent.providers.providers import (
-    build_provider_with_account_fallback,
-    default_auth_for_provider,
-    infer_provider,
-)
-from sagent.thinking import apply_thinking_command
-from sagent.tools.agent_self import (
-    discard_unadopted,
-    plan_model_options,
-)
-from sagent.tools.background_task import BackgroundTask
-from sagent.tools.core import (
-    load_tool_description,
-    opt_int,
-    opt_str,
-    provider_not_allowed_result,
-)
-from sagent.types.capability import ThinkingEffort
-from sagent.types.cost import ServiceTier
-from sagent.types.exceptions import describe
-from sagent.types.model import Model, ModelRecipe
-from sagent.types.providers import Provider
-from sagent.types.runtime import (
-    AgentIdle,
-    AgentSendMessage,
+from sagent.agent.agent import Agent
+from sagent.agent.team import RESERVED, ChildSpec, Team
+from sagent.journal.jsonl import JsonlJournal
+from sagent.journal.projects import child_journal, session_file
+from sagent.journal.types import (
+    AgentMessage,
+    AgentSpawnResult,
     AssistantMessage,
-    ChildDoneEvent,
-    ChildEvent,
-    ModelContextEvent,
-    ModelResponseCancelled,
-    ModelResponseComplete,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    ModelServiceSuspended,
-    NoticeMessage,
-    RuntimeEvent,
-    ServiceErrorSnapshot,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
+    Failed,
+    ModelIdle,
+    Succeeded,
+    ToolCall,
+    ToolMessage,
 )
+from sagent.model.capability import (
+    ModelSettingName,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
+)
+from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.types import Request
+from sagent.providers.catalog import counterpart, successor
+from sagent.runtime import types
+from sagent.runtime.exceptions import describe
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.display import ToolDisplay
+from sagent.tools.skill import Skill
+from sagent.tools.types import (
+    Arg,
+    FileTracker,
+    Stream,
+    Tool,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    settled,
+    whole_output,
+)
+from sagent.tools.watch import Feed
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
-    from pathlib import Path
+    from collections.abc import Callable, Collection
 
-    from sagent.types.compactor import Compactor
-    from sagent.types.tools import Tool, ToolResultPolicy
+    from treekle import PlainTree
+
+    from sagent.providers.types import Model, Provider
+    from sagent.tools.types import ToolContext
+
+
+__all__ = [
+    "AgentSpawn",
+]
+
+
+# The owners of slash settings: ``/<label>.<setting>`` must not read as one of them.
+_TAKEN = RESERVED | {"model", "tool", "runtime", "screen", "sagent"}
 
 
 logger = logging.getLogger(__name__)
 
-# Prevent GC of persistent agent tasks. Keyed by label; cleaned
-# up in the wrapper's ``finally`` block.
-_persistent_tasks: dict[str, asyncio.Task[None]] = {}
 
-
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSpawn:
-    """Factory tool: spawn a child agent with per-invocation knobs.
+    """Start a child agent on a task."""
 
-    Constructor args mirror :class:`sagent.agent.Agent.__init__`; any
-    arg left as ``None`` falls through to the parent (or ultimately a
-    hard default) at call time.
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
 
-    Model selection is exposed to the LLM as four independent strings
-    - ``provider``, ``auth``, ``model_id``, ``account`` - mirroring
-    ``cli.py``'s CLI flags. Each follows the standard ``LLM arg →
-    factory arg → parent.model_recipe.<field>`` fallthrough. When every
-    field matches the parent's spec, a fresh ``Model`` is built via
-    :func:`providers.build_provider_with_account_fallback`. A missing inherited
-    named account may retry the destination provider's default credentials.
+        prompt: Annotated[str, "Self-contained instruction for the child."]
+        system: Annotated[
+            str | None,
+            "System prompt for the child; omit to inherit yours.",
+        ] = None
+        provider: Annotated[
+            str | None,
+            "Catalog provider, such as openai-sub; omit to inherit yours.",
+        ] = None
+        model: Annotated[
+            str | None,
+            "Model name or role (best, default, everyday, utility), with any"
+            " +CONTEXT or +EFFORT tag; omit to inherit yours, window included.",
+        ] = None
+        account: Annotated[
+            str | None,
+            "Named sign-in account for the child's provider, such as work; omit"
+            " to inherit yours.",
+        ] = None
+        effort: Annotated[
+            ThinkingEffort | None,
+            "Reasoning effort; omit to inherit yours.",
+        ] = None
+        budget: Annotated[
+            ThinkingBudget | None,
+            "Reasoning budget: none, auto, or fixed; omit to inherit yours.",
+        ] = None
+        output: Annotated[
+            ThinkingOutput | None,
+            "What of the reasoning comes back: none, text, or redacted; omit to"
+            " inherit yours.",
+        ] = None
+        tools: Annotated[
+            tuple[str, ...] | None,
+            "Which of your work tools the child gets; omit for all, [] for none."
+            " AgentSend is always included.",
+        ] = None
+        max_tool_call_rounds: Annotated[
+            int | None,
+            "Cap on the child's tool-call rounds.",
+            Arg(minimum=1),
+        ] = None
+        max_depth: Annotated[
+            int | None,
+            "Generations the child may spawn below it; 0 makes it a leaf.",
+            Arg(minimum=0),
+        ] = None
+        label: Annotated[
+            str,
+            "Label for the child: 1 to 64 letters, digits, _ or -; omit for"
+            " <your label>_<n>.",
+        ] = ""
+        watch: Annotated[
+            bool,
+            "Start your watcher instead of a child: prompt is its policy, its"
+            " first request.",
+        ] = False
 
-    ``allow_providers`` narrows the set of providers exposed to the
-    LLM in :attr:`directive_schema` and gated in :meth:`_build_child_model`.
-    The default ``None`` means "every provider in ``sagent.providers``".
-    Restrict it at construction (typically from ``--allow-providers``)
-    on hosts that only have credentials for a subset.
+    name = "AgentSpawn"
+    description = (files(__package__) / "assets" / "agentspawn.md").read_text(
+        encoding="utf-8",
+    )
+    schema = json_schema(Arguments)
 
-    ``tool_results`` bounds each child's tool results; a child inherits its
-    compactor from the parent but not this policy, so a host that caps its own
-    results passes the same policy here.
+    team: Team = field(repr=False)
+    """Who spawns, and where the child joins."""
 
-    ``build_provider`` builds each child's provider from the resolved
-    ``(provider, auth, account)`` instead of sagent's registry; a host whose
-    children must share its own credentials passes one, and its ``ValueError``
-    refuses the spawn with the error as the result.
-    """
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    name: str = "AgentSpawn"
-    tool_id: str = "application/x-tool-agentspawn"
-    description: str = load_tool_description("agentspawn")
-    clearable_results: bool = False
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``AgentSpawn <label>: <first words>``."""
+        label = str(arguments.get("label") or "")
+        prompt = " ".join(str(arguments.get("prompt", "")).split())
+        head = f"AgentSpawn{f' {label}' if label else ''}"
+        return f"{head}: {prompt}" if prompt else head
 
-    def __init__(
+    def serialize_key(
         self,
-        *,
-        provider: str | None = None,
-        auth: str | None = None,
-        model_id: str | None = None,
-        account: str | None = None,
-        system: SystemPromptArg | None = None,
-        tools: list[Tool] | None = None,
-        max_tool_call_rounds: int | None = None,
-        max_depth: int | None = None,
-        compactor: Compactor | None = None,
-        max_attempts: int | None = None,
-        verbosity: int = 1,
-        allow_providers: tuple[str, ...] | None = None,
-        tool_results: ToolResultPolicy | None = None,
-        build_provider: Callable[[str, str, str | None], Provider] | None = None,
-    ) -> None:
-        if account == "":
-            raise ValueError("account cannot be empty; pass None to inherit.")
-        self._build_provider = build_provider
-        self._provider = provider
-        self._auth = auth
-        self._model_id = model_id
-        self._account = account
-        self._system = system
-        self._tools = tools
-        self._max_tool_call_rounds = max_tool_call_rounds
-        self._max_depth = max_depth
-        self._tool_results = tool_results
-        self._compactor = compactor
-        self._max_attempts = max_attempts
-        self._verbosity = verbosity
-        self._allow_providers: tuple[str, ...] = (
-            tuple(allow_providers)
-            if allow_providers is not None
-            else tuple(PROVIDER_NAMES)
-        )
-        self.directive_schema: Mapping[str, PlainTree] = immutable(
-            {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Task instruction for the child agent.",
-                    },
-                    "system": {
-                        "type": "string",
-                        "description": (
-                            "Override the child's system prompt. Defaults to"
-                            " inheriting the parent agent's system."
-                        ),
-                    },
-                    "provider": {
-                        "type": "string",
-                        "description": (
-                            "Provider class name from ``sagent.providers``"
-                            " (e.g. "
-                            + ", ".join(f"``{n}``" for n in self._allow_providers)
-                            + "). Prefer ``*Subscription`` variants when listed;"
-                            " they reuse the host's logged-in CLI subscription"
-                            " and don't need API-key env vars. Defaults to"
-                            " inheriting the parent's provider."
-                        ),
-                    },
-                    "auth": {
-                        "type": "string",
-                        "description": (
-                            "Auth method suffix - dispatches to"
-                            " a zero-argument ``<Provider>.from_<auth>()``"
-                            " (for example, ``env`` for API-key environment"
-                            " variables, or ``credentials`` for subscription"
-                            " providers). Prefer"
-                            " ``credentials`` over ``env`` when the chosen"
-                            " provider supports both. Defaults to inheriting"
-                            " the parent's auth."
-                        ),
-                    },
-                    "model_id": {
-                        "type": "string",
-                        "description": (
-                            "Model ID for the chosen provider (e.g."
-                            " ``sonnet-4.6``, ``gemini-pro-3.1``,"
-                            " ``sol-6.0``). Defaults to inheriting the parent's"
-                            " model id."
-                        ),
-                    },
-                    "model_options": {
-                        "type": "object",
-                        "description": (
-                            "Provider/model-specific serving knobs:"
-                            " ``thinking``, ``effort``, ``cache_ttl``,"
-                            " ``service_tier``. Request fast serving with"
-                            " ``service_tier='priority'`` on supported"
-                            " models. Defaults to inheriting"
-                            " the parent's options."
-                        ),
-                        "additionalProperties": True,
-                    },
-                    "account": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": (
-                            "Credential account name. Defaults to inheriting"
-                            " the parent's account."
-                        ),
-                    },
-                    "tools": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Tool names to grant the child. Defaults to the"
-                            " parent's full toolset. Pass [] for no tools."
-                        ),
-                    },
-                    "max_tool_call_rounds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": (
-                            "Cap on the child's tool-call rounds (model responses"
-                            " that include one or more tool calls). Must be ≥ 1."
-                        ),
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": (
-                            "Cap on the child's own sub-spawning. 0 makes"
-                            " the child a leaf; omit for unbounded."
-                        ),
-                    },
-                    "persistent": {
-                        "type": "boolean",
-                        "description": (
-                            "Run the child as a persistent agent via"
-                            " serve_forever(). Returns immediately with"
-                            " the child's label. Send messages via"
-                            " AgentSend; manage via BackgroundTask."
-                        ),
-                    },
-                    "notify_on_asleep": {
-                        "type": "boolean",
-                        "description": (
-                            "Persistent only. When true (the default),"
-                            " the parent's inbox receives an"
-                            " AgentSendMessage carrying the child's last"
-                            " assistant text"
-                            " every time the child becomes idle (drained"
-                            " inbox, no work in flight) -- shape"
-                            " '[<label> is idle] <last text>'. Pass false"
-                            " to suppress idle pings entirely. Edge-"
-                            " triggered: one notification per idle"
-                            " transition."
-                        ),
-                    },
-                    "label": {
-                        "type": "string",
-                        "description": (
-                            "Label for the child agent (used for AgentSend"
-                            " routing). Auto-generated if omitted."
-                        ),
-                    },
-                    "hot": {
-                        "type": "boolean",
-                        "description": (
-                            "Set true. Cuts cost and latency by reusing your"
-                            " cached prompt. Omit or set false only if this"
-                            " child must know its own live depth/tool state."
-                        ),
-                    },
-                },
-                "required": ["prompt"],
-            },
-        )
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``parent`` for a watcher's start, as AgentSend's; else ``None``."""
+        del context
+        return "parent" if arguments.get("watch") is True else None
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label summarizing this spawn call.
+    def reminder(self, context: ToolContext) -> str:
+        """Return the caller's children, who owes whom, and whether it is a leaf.
 
         Args:
-          args: Parsed tool directive mapping.
+          context: The calling agent's state.
 
         Returns:
-          label: Compact one-line label for renderer display.
+          text: Such as ``Your children: reviewer (owes you a reply), kid.``;
+            ``""`` outside a team, or with no children and spawning allowed.
 
         """
-        prompt_arg = args.get("prompt")
-        prompt = prompt_arg if isinstance(prompt_arg, str) else ""
-        preview = prompt.replace("\n", " ").strip()
-        model_arg = args.get("model_id")
-        suffix = f" [{model_arg}]" if isinstance(model_arg, str) and model_arg else ""
-        return f"{self.name} {preview}{suffix}" if preview else self.name
-
-    def prompt(self) -> str:
-        """Return spawn-budget info for the system prompt.
-
-        Returns:
-          text: Depth/cap reminder text, or empty when no cap is active.
-
-        """
-        depth = get_tool_state().depth
-        cap = max_depth_var.get()
-        remaining = _spawn_generations(depth, cap)
-        if remaining is None:
+        me = context.label
+        if me not in self.team:
             return ""
-        if remaining <= 0:
-            return (
-                f"Spawn budget: depth {depth}/{cap} -- you are a leaf agent. "
-                "Do not call AgentSpawn; it will fail. Do the work directly."
+        mine = self.team.owes(me)
+        kids = [
+            label
+            + (" (owes you a reply)" if me in self.team.owes(label) else "")
+            + (" (you owe it a reply)" if label in mine else "")
+            for label in self.team.children(me)
+        ]
+        return " ".join(
+            part
+            for part in (
+                f"Your children: {', '.join(kids)}." if kids else "",
+                ""
+                if self.team.can_spawn(me)
+                else "Spawn budget: you are a leaf agent; AgentSpawn will refuse.",
             )
-        s = "s" if remaining != 1 else ""
-        return (
-            f"Spawn budget: depth {depth}/{cap} -- "
-            f"{remaining} generation{s} of sub-spawning available."
+            if part
         )
 
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: child spawns are independent."""
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Spawn and run a child agent per the directive.
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[AgentSpawnResult, str, str]:
+        """Build the child, join it to the team, and run or start it.
 
         Args:
-          args: Parsed tool directive mapping.
+          context: The calling agent's state; its label names the parent.
+          arguments: What the model passed, as ``AgentSpawn.Arguments``.
 
         Returns:
-          result: Child's final assistant message wrapped as a
-            ``ToolResult``, or an error.
+          streaming_result: The child's last text, or why it failed; with ``watch``, the
+            caller's new watcher, sent ``prompt`` as a request after the
+            ``watch`` skill. What the child says, and each call it makes, is
+            written as it works; the model reads only the reply.
+
+        Raises:
+          ValueError: The caller is in no team or may not spawn, a tool or
+            model is unknown, or the label is malformed, taken or reserved;
+            with ``watch``, the prompt is empty or the caller is no unwatched
+            root.
 
         """
-        prompt = str(args.get("prompt", ""))
-        system = opt_str(args, "system")
-        provider = opt_str(args, "provider")
-        auth = opt_str(args, "auth")
-        model_id = opt_str(args, "model_id")
-        account = opt_str(args, "account")
-        tools_raw = args.get("tools")
-        tools: list[str] | None
-        if tools_raw is None:
-            tools = None
-        elif isinstance(tools_raw, (list, tuple)):
-            tools = [str(t) for t in cast(list[object] | tuple[object, ...], tools_raw)]
-        else:
-            # Schema declares ``tools`` as an array; a string (or other
-            # non-list) here previously silently became ``tools=None``
-            # → inherit parent's full toolset. That's a permission gap
-            # -- the LLM asked to restrict tools but got the unrestricted
-            # set. Fail closed.
-            return ToolResult(
-                call_id="",
-                content=(
-                    "'tools' must be an array of tool names,"
-                    f" got {type(tools_raw).__name__}."
-                ),
-                is_error=True,
-            )
-        max_rounds = opt_int(args, "max_tool_call_rounds")
-        max_depth = opt_int(args, "max_depth")
-        # Schema-vs-runtime: enforce the per-knob minima the schema
-        # declares so ``max_tool_call_rounds=0`` (schema minimum=1)
-        # can't slip through and produce an agent that never runs.
-        if max_rounds is not None and max_rounds < 1:
-            return ToolResult(
-                call_id="",
-                content=f"'max_tool_call_rounds' must be ≥ 1, got {max_rounds}.",
-                is_error=True,
-            )
-        if max_depth is not None and max_depth < 0:
-            return ToolResult(
-                call_id="",
-                content=f"'max_depth' must be ≥ 0, got {max_depth}.",
-                is_error=True,
-            )
-        persistent = from_plain(args.get("persistent"), bool, default=False)
-        notify_on_asleep = from_plain(args.get("notify_on_asleep"), bool, default=True)
-        hot = from_plain(args.get("hot"), bool, default=False)
-        custom_label = opt_str(args, "label")
-        parent_agent = _current_agent()
-        if parent_agent is None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    "AgentSpawn requires an active agent in"
-                    " ``current_agent_var``; no active agent is set."
-                ),
-                is_error=True,
-            )
-        parent_depth = get_tool_state().depth
-        ambient_cap = max_depth_var.get()
-        remaining = _spawn_generations(parent_depth, ambient_cap)
-        if remaining is not None and remaining <= 0:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"max_depth {ambient_cap} reached (current depth"
-                    f" {parent_depth}); this agent is a leaf and cannot spawn."
-                ),
-                is_error=True,
-            )
-        # The LLM's and the factory's ``max_depth`` count generations BELOW the
-        # child, so they become absolute depths here; the ambient cap is already
-        # absolute. ``min`` makes every layer tighten-only.
-        child_depth = parent_depth + 1
-        caps = [
-            c
-            for c in (
-                ambient_cap,
-                *(
-                    child_depth + g
-                    for g in (max_depth, self._max_depth)
-                    if g is not None
-                ),
-            )
-            if c is not None
-        ]
-        eff_max_depth: int | None = min(caps) if caps else None
+        stdout = Stream[str]()
+        return whole_output(self._spawn(context, arguments, stdout), stdout=stdout)
 
-        parent_path = agent_path_var.get("")
-        try:
-            child_idx = next(agent_counter_var.get())
-        except LookupError:
-            child_idx = 0
-        child_path = f"{parent_path}_{child_idx}" if parent_path else str(child_idx)
-        label = custom_label or f"Agent_{child_path}"
-        label_error = _label_error(label)
-        if label_error is not None:
-            return label_error
-
-        child_tools = self._resolve_tools(tools, parent_agent)
-        if isinstance(child_tools, ToolResult):
-            return child_tools
-        resolved = self._build_child_model(
-            provider=provider,
-            auth=auth,
-            model_id=model_id,
-            account=account,
-            parent_agent=parent_agent,
-        )
-        if isinstance(resolved, ToolResult):
-            return resolved
-        options = plan_model_options(resolved.model, args)
-        if isinstance(options, ToolResult):
-            if resolved.provider is not None:
-                discard_unadopted(resolved.model, resolved.provider)
-            return options
-
-        child = self._build_child(
-            system=system,
-            child_model=resolved.model,
-            child_spec=resolved.spec,
-            owned_provider=resolved.provider,
-            child_tools=child_tools,
-            max_rounds=max_rounds,
-            model_options=options,
-            parent_agent=parent_agent,
-            hot=hot,
-        )
-
-        return await self._spawn_child(
-            child,
-            label,
-            prompt,
-            lifecycle="serviced" if persistent else "oneshot",
-            child_path=child_path,
-            eff_max_depth=eff_max_depth,
-            notify_on_asleep=notify_on_asleep,
-        )
-
-    # Every model knob rides ``child_model.settings``, so they are applied there rather
-    # than passed to the constructor: the child adopts the parent's whole selection,
-    # then ``model_options`` (already validated against ``child_model``) overrides
-    # individual axes.
-    def _build_child(
+    async def _spawn(
         self,
-        *,
-        system: str | None,
-        child_model: Model,
-        child_spec: ModelRecipe | None,
-        owned_provider: Provider | None = None,
-        child_tools: list[Tool],
-        max_rounds: int | None,
-        model_options: Mapping[str, object],
-        parent_agent: Agent | None,
-        hot: bool = False,
-    ) -> Agent:
-        """Build a child Agent with inherited knobs and explicit options."""
-        child_system = self._resolve_system(system, parent_agent)
-        if hot and not isinstance(child_system, str):
-            child_system = child_system()
-        child_max_rounds = (
-            max_rounds if max_rounds is not None else self._max_tool_call_rounds
-        )
-        settings = child_model.settings
-        if parent_agent is not None:
-            # ``adopt`` drops what the child's model does not offer, so a
-            # spawn onto a narrower model cannot fail on an inherited knob.
-            settings.adopt(parent_agent.model.settings)
-        if "thinking" in model_options:
-            _ = apply_thinking_command(
-                "adaptive" if model_options["thinking"] else "off",
-                settings,
-                show=False,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+        stdout: Stream[str],
+    ) -> ToolOutput[AgentSpawnResult, str, str]:
+        a = parse(arguments, AgentSpawn.Arguments)
+        parent_label = context.label
+        parent = self._parent(parent_label)
+        if a.watch:
+            if parent_label not in self.team:
+                raise ValueError("A watcher watches an agent of this machine.")
+            if not a.prompt.strip():
+                raise ValueError("A watcher needs a policy in prompt.")
+            label = await self.start_watcher(parent_label)
+            self.team.send(parent_label, recipient=label, content=a.prompt)
+            return ToolOutput(
+                stdout=(f"Started your watcher, {label}; it owes you a reply.",),
+                result=AgentSpawnResult(
+                    agent_id=label,
+                    agent_kind="watcher",
+                    state="running",
+                ),
             )
-        if "effort" in model_options:
-            settings.thinking_effort = cast(ThinkingEffort, model_options["effort"])
-        if "cache_ttl_sec" in model_options:
-            settings.cache_ttl_sec = cast(float, model_options["cache_ttl_sec"])
-        if "service_tier" in model_options:
-            settings.service_tier = cast(ServiceTier, model_options["service_tier"])
-        child = Agent(
-            model=child_model,
-            model_recipe=child_spec,
-            system=child_system,
-            tools=child_tools,
-            compactor=self._inherit_compactor(parent_agent),
-            max_tool_call_rounds=child_max_rounds,
-            frozen_system=hot,
-            session_dir=self._child_session_dir(parent_agent),
-            max_attempts=self._inherit_max_attempts(parent_agent),
-            tool_results=self._tool_results,
-            owned_provider=owned_provider,
-        )
-        if parent_agent is not None:
-            # A child's state defaults to the host's cwd, which a shell behind another
-            # account cannot enter; it begins where its parent's shell is.
-            child.tool_state.start_cwd = parent_agent.tool_state.start_cwd
-            child.tool_state.bash_cwd = parent_agent.tool_state.bash_cwd
-        return child
-
-    # Both lifecycles register the child under its stable ``label`` (so ``/send`` and
-    # ``AgentSend`` can reach it) and run a live inbox-serviceable loop. ``"oneshot"``
-    # drives to the first post-work idle, returns that reply, then shuts the loop down.
-    # ``"serviced"`` keeps the loop alive; it stops only via
-    # ``cancel_persistent_subagent``.
-    async def _spawn_child(
-        self,
-        child: Agent,
-        label: str,
-        prompt: str,
-        *,
-        lifecycle: Literal["oneshot", "serviced"],
-        child_path: str = "",
-        eff_max_depth: int | None = None,
-        notify_on_asleep: bool = True,
-    ) -> ToolResult:
-        """Spawn a child on the unified ``serve_forever`` lifecycle."""
-        if lifecycle == "serviced":
-            return self._spawn_serviced(
-                child,
-                label,
-                prompt,
-                child_path=child_path,
-                eff_max_depth=eff_max_depth,
-                notify_on_asleep=notify_on_asleep,
+        if not self.team.can_spawn(parent_label):
+            raise ValueError(
+                "Your depth cap is reached: you are a leaf and cannot spawn.",
             )
-        return await self._run_oneshot_child(
-            child,
-            prompt=prompt,
+        if a.label and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.label) is None:
+            raise ValueError(
+                f"A label is 1 to 64 letters, digits, '_' or '-'; got {a.label!r}.",
+            )
+        if a.label and a.label in self.team:
+            raise ValueError(f"An agent is already labelled {a.label!r}.")
+        if a.label in _TAKEN:
+            raise ValueError(
+                f"{a.label!r} is reserved: {', '.join(sorted(_TAKEN))}.",
+            )
+        label = a.label or self.team.child_label(parent_label)
+        allowed = _allowed(parent, a.tools)
+        model = await self._model(
+            parent,
+            provider=a.provider,
+            name=a.model,
+            account=a.account,
+            effort=a.effort,
+            budget=a.budget,
+            output=a.output,
+        )
+        path = parent.session.journal.path
+        journal = child_journal(path) if path is not None else None
+        spec = (
+            ChildSpec(
+                label=label,
+                journal=str(journal),
+                tools=tuple(sorted(allowed if allowed is not None else parent.tools)),
+                max_rounds=a.max_tool_call_rounds,
+                max_depth=a.max_depth,
+            )
+            # A far caller's journal is on its own machine: nothing stands there.
+            if journal is not None and parent_label in self.team
+            else None
+        )
+        told = a.account if a.account is not None else self.team.catalog.account
+        child = await self._start(
+            parent,
             label=label,
-            child_path=child_path,
-            eff_max_depth=eff_max_depth,
+            parent_label=parent_label,
+            model=model,
+            account=None if told in ("", "default") else told,
+            allowed=allowed,
+            system=a.system,
+            journal=journal,
+            max_rounds=a.max_tool_call_rounds,
+            max_depth=a.max_depth,
+            spec=spec,
         )
+        return await self._run(child, label=label, parent=parent, a=a, stdout=stdout)
 
-    # The child runs a real ``serve_forever`` loop (registered under ``label``), so it
-    # is addressable while it works. After ``drive_until_first_idle`` returns the first
-    # reply, the child's loop is shut down and deregistered and a terminal ``completed``
-    # lifecycle record is written so a resume never resurrects it.
-    async def _run_oneshot_child(
+    async def watch(
         self,
-        child: Agent,
+        watched: str,
         *,
-        prompt: str,
-        label: str,
-        child_path: str,
-        eff_max_depth: int | None,
-    ) -> ToolResult:
-        """Drive a oneshot child to its first result, then stop it."""
-        parent_agent = _current_agent()
-        if parent_agent is None:
-            raise ValueError("run() rejects a spawn with no parent agent")
-        child._is_subagent = True  # noqa: SLF001 -- Cross-layer subagent flag.
-        child._lifecycle = "oneshot"  # noqa: SLF001 -- Cross-layer lifecycle flag.
-        child.name = label
-        run_id = uuid.uuid4().hex
-        state: PersistentAgentState = "failed"
+        label: str = "",
+        journal: Path | None = None,
+        before: str = "",
+    ) -> str:
+        """Start a watcher of the root ``watched``: its ``parent`` by name.
+
+        It runs on ``watched``'s model, settings, tools, and system prompt, so
+        its requests open with the same cached prefix, and is sent what
+        ``watched`` does: at once ``before``, then each time it idles.
+
+        Args:
+          watched: A root of the team.
+          label: The watcher's; ``""`` is ``watcher``, or ``watcher_<n>`` once taken.
+          journal: The watcher's journal to resume; ``None`` starts one beside
+            ``watched``'s, if it keeps one.
+          before: What the first message leads with, such as how to watch.
+
+        Returns:
+          label: The watcher's.
+
+        Raises:
+          ValueError: ``watched`` is no root, or is watched already.
+
+        """
+        target = self.team[watched]
+        if self.team.above(watched) is not None:
+            raise ValueError(f"{watched!r} is no unwatched root.")
+        label = label or (
+            "watcher"
+            if "watcher" not in self.team
+            else self.team.child_label("watcher")
+        )
+        resumed = journal is not None
+        path = target.session.journal.path
+        if journal is None and path is not None:
+            journal = child_journal(path)
+        model = await self._model(
+            target,
+            provider=None,
+            name=None,
+            account=None,
+            effort=None,
+            budget=None,
+            output=None,
+        )
+        stack = AsyncExitStack()
+        opened = JsonlJournal(journal) if journal is not None else None
+        agent = _agent_from_parent(
+            target,
+            team=self.team,
+            model=model,
+            journal=opened,
+            allowed=target.allowed,
+            system_prompt=target.system_prompt,
+            account=target.account,
+        )
+        self.team.join(agent, label=label, closing=stack)
         try:
-            # The scope closes BEFORE persisting so the terminal lifecycle
-            # record lands on the PARENT's session (``_persist_lifecycle``
-            # reads ``current_agent_var``), not the ephemeral child's.
-            with _child_scope(child_path=child_path, max_depth=eff_max_depth):
-                result = await self._drive_oneshot(
-                    child,
-                    parent_agent,
-                    prompt=prompt,
-                    label=label,
-                )
-            if not result.is_error:
-                state = "completed"
-        except asyncio.CancelledError:
-            state = "cancelled"
+            if opened is not None:
+                await stack.enter_async_context(opened)
+            if resumed:
+                await agent.recall(self.team.catalog)
+            await stack.enter_async_context(agent)
+        except BaseException:
+            await self.team.stop(label)
+            await model.aclose()
             raise
-        finally:
-            self._persist_lifecycle(
-                child,
-                label,
-                run_id,
-                state=state,
-                notify_on_asleep=False,
-            )
-        return result
-
-    async def _drive_oneshot(
-        self,
-        child: Agent,
-        parent_agent: Agent,
-        *,
-        prompt: str,
-        label: str,
-    ) -> ToolResult:
-        """Run ``child`` to its first idle; a terminal model error is the result."""
-        label_token = agent_label_var.set(label)
-        agent_token = current_agent_var.set(child)
-        child_errors: list[BaseException] = []
-
-        def _capture_error(event: RuntimeEvent) -> None:
-            if isinstance(event, ModelResponseError):
-                child_errors.append(event.exception)
-
-        forwarder = _build_forwarder(label, self._verbosity, parent_agent, child=child)
-        child.runtime.observers.append(_capture_error)
-        if forwarder is not None:
-            child.runtime.observers.append(forwarder)
-        try:
-            result = await child.drive_until_first_idle(
-                UserMessage(text=prompt),
-                result_of=_last_assistant_result,
-            )
-        except Exception as error:
-            # A terminal model error already reached ``_capture_error``; it is
-            # reported below as the spawn's error result. Anything else is a crash.
-            if not any(error is captured for captured in child_errors):
-                raise
-            result = _child_error_result(label, error)
-        finally:
-            if forwarder is not None and forwarder in child.runtime.observers:
-                child.runtime.observers.remove(forwarder)
-            if forwarder is not None:
-                forwarder.emit_done()
-            if _capture_error in child.runtime.observers:
-                child.runtime.observers.remove(_capture_error)
-            child.shutdown(force=True)
-            drive_task = child._drive_task  # noqa: SLF001 -- Await the loop to completion.
-            if drive_task is not None:
-                await _await_stopped(drive_task)
-            child.deregister(label)
-            current_agent_var.reset(agent_token)
-            agent_label_var.reset(label_token)
-        if child_errors:
-            return _child_error_result(label, child_errors[-1])
-        return result
-
-    # Registers the child in ``agent_registry``, attaches the parent forwarder as an
-    # observer, seeds the child's inbox with the prompt, spawns ``serve_forever`` as a
-    # visible bg job under ``parent._bg``. The loop stays live; it stops only via
-    # ``cancel_persistent_subagent``. Returns the started handle naming the reply
-    # channel.
-    #
-    # Augments the child's system prompt with the serviced-agent IPC rule so the child's
-    # LLM knows its plain assistant text is invisible to the parent and that
-    # ``AgentSend(to=<parent>)`` is the only reliable reply channel.
-    #
-    # ``child_path`` and ``eff_max_depth`` are installed around the child's own
-    # ``serve_forever`` task, so a serviced child's spawns label and cap exactly as a
-    # oneshot child's do.
-    def _spawn_serviced(
-        self,
-        child: Agent,
-        label: str,
-        prompt: str,
-        *,
-        child_path: str,
-        eff_max_depth: int | None,
-        notify_on_asleep: bool = True,
-    ) -> ToolResult:
-        """Start a serviced child agent via ``serve_forever()``."""
-        label_error = _label_error(label)
-        if label_error is not None:
-            return label_error
-        parent_agent = _current_agent()
-        run_id = uuid.uuid4().hex
-        if parent_agent is not None:
-            append_persistent_agent_lifecycle(
-                parent_agent,
-                child,
-                label,
-                run_id,
-                state="running",
-                notify_on_asleep=notify_on_asleep,
-            )
-        child.runtime.inbox.push_back(UserMessage(text=prompt))
-        _start_serviced(
-            child,
-            label=label,
-            run_id=run_id,
-            parent_agent=parent_agent,
-            parent_label=agent_label_var.get("")
-            or (parent_agent.name if parent_agent is not None else "parent"),
-            notify_on_asleep=notify_on_asleep,
-            verbosity=self._verbosity,
-            child_path=child_path,
-            eff_max_depth=eff_max_depth,
-        )
-        if notify_on_asleep:
-            reply_path = (
-                f"Replies arrive in your inbox as '[from {label}]: ...'"
-                f" via AgentSend; when the child becomes idle you also"
-                f" receive '[{label} is idle] <last assistant text>'"
-                f" automatically. Set notify_on_asleep=false to suppress"
-                f" idle pings."
-            )
-        else:
-            reply_path = (
-                f"Replies arrive in your inbox as '[from {label}]: ...'"
-                f" via AgentSend. Idle pings are suppressed; if the"
-                f" child only emits plain assistant text you will not"
-                f" hear from it."
-            )
-        return ToolResult(
-            call_id="",
-            content=f"Serviced agent started: {label}. {reply_path}",
-        )
-
-    def _persist_lifecycle(
-        self,
-        child: Agent,
-        label: str,
-        run_id: str,
-        *,
-        state: PersistentAgentState,
-        notify_on_asleep: bool,
-    ) -> None:
-        """Append a parent-side persistent-agent lifecycle record."""
-        parent_agent = _current_agent()
-        if parent_agent is None:
-            return
-        append_persistent_agent_lifecycle(
-            parent_agent,
-            child,
+        self.team.restore(label)
+        self.team.watch(
             label,
-            run_id,
-            state=state,
-            notify_on_asleep=notify_on_asleep,
+            watched,
+            journal=str(journal) if journal is not None else None,
         )
-
-    # One accessor per knob rather than a ``getattr(self, f"_{name}")`` walk: the
-    # stringly-keyed form returns ``object``, which erased the value type at the one
-    # call site that builds the child's kwargs.
-    def _inherit_compactor(self, parent_agent: Agent | None) -> Compactor | None:
-        """Inherit compactor: ``factory arg → parent → None`` fall-through."""
-        if self._compactor is not None:
-            return self._compactor
-        if parent_agent is None:
-            return None
-        return parent_agent.compactor
-
-    def _inherit_max_attempts(self, parent_agent: Agent | None) -> int | None:
-        """Inherit retry count: ``factory arg → parent → None`` fall-through."""
-        if self._max_attempts is not None:
-            return self._max_attempts
-        if parent_agent is None:
-            return None
-        return parent_agent.max_attempts
-
-    def _resolve_system(
-        self,
-        llm_arg: str | None,
-        parent_agent: Agent | None,
-    ) -> SystemPromptArg:
-        """Resolve system prompt via LLM arg → factory → parent fallthrough."""
-        if llm_arg is not None:
-            return llm_arg
-        if self._system is not None:
-            return self._system
-        if parent_agent is not None:
-            return parent_agent.system
-        return ""
-
-    # Per-field fallthrough: ``LLM arg → factory arg → parent.model_recipe.<field>``.
-    # Whenever a rebuildable spec results (provider + auth + model_id all resolved), a
-    # FRESH transport is built with inherited-account fallback -- including the common
-    # case where the child simply inherits the parent's spec. Each child must own
-    # an independent transport so N spawns run concurrently on N processes; aliasing
-    # ``parent.model`` would serialize (and, on subprocess providers, corrupt) them
-    # through one transport.
-    #
-    # The sole reuse case is a parent with **no** ``model_recipe`` (e.g. test harnesses
-    # that inject a raw ``Model``): there is nothing to rebuild from, so
-    # ``parent.model`` is inherited as-is with a ``None`` spec. If the LLM / factory
-    # asked for a switch but the resulting trio is missing fields, that's an error - we
-    # can't build a provider without all three.
-    def _build_child_model(
-        self,
-        *,
-        provider: str | None,
-        auth: str | None,
-        model_id: str | None,
-        account: str | None,
-        parent_agent: Agent | None,
-    ) -> _ChildModel | ToolResult:
-        """Resolve the child's model, its recipe, and the provider it now owns."""
-        parent_spec = parent_agent.model_recipe if parent_agent is not None else None
-        llm_asked = any(x is not None for x in (provider, auth, model_id, account))
-        factory_asked = any(
-            x is not None
-            for x in (self._provider, self._auth, self._model_id, self._account)
+        # A new watcher is sent the window its root sees: a long session's earlier
+        # windows would not fit one message, and AgentSession reads them by number.
+        kept = target.session.journal
+        feed = Feed(
+            team=self.team,
+            watched=watched,
+            watcher=label,
+            sent=len(kept) if resumed else len(kept) - len(list(kept)),
         )
+        target.runtime.observers.append(feed)
+        # The feed is the watcher's: once it stops, a watcher started under its
+        # label would be sent each update twice.
+        stack.callback(target.runtime.observers.remove, feed)
+        feed.send(before)
+        return label
 
-        p = _pick_field(
-            provider,
-            self._provider,
-            parent_spec.provider if parent_spec else None,
-        )
-        m = _pick_field(
-            model_id,
-            self._model_id,
-            parent_spec.model_id if parent_spec else None,
-        )
-        inferred_auth: str | None = None
-        if (
-            provider is None
-            and self._provider is None
-            and (model_id is not None or self._model_id is not None)
-            and p is not None
-            and m is not None
-        ):
-            inferred = infer_provider(m, p)
-            if inferred is not None:
-                p, inferred_auth = inferred
-        if auth is not None:
-            a = auth
-        elif self._auth is not None:
-            a = self._auth
-        elif inferred_auth is not None:
-            a = inferred_auth
-        elif parent_spec is not None and p == parent_spec.provider:
-            a = parent_spec.auth
-        elif p is not None:
-            a = default_auth_for_provider(p)
-        else:
-            a = None
-        ac = _pick_field(
-            account,
-            self._account,
-            parent_spec.account if parent_spec else None,
-        )
+    async def start_watcher(self, watched: str) -> str:
+        """Start the watcher of the root ``watched``, first sent the ``watch`` skill.
 
-        # Spec-less parent (test harness / raw ``Model`` inject) with NO
-        # requested change: there is nothing to hand ``build_provider``, so
-        # aliasing ``parent.model`` is the only option. This is the ONLY case
-        # that reuses the parent's model object -- a rebuildable spec always
-        # rebuilds below. When the child DID ask for a switch but the parent
-        # has no spec to fill the gaps, fall through to the missing-fields
-        # error below rather than silently ignoring the request.
-        if (
-            parent_spec is None
-            and parent_agent is not None
-            and not llm_asked
-            and not factory_asked
-        ):
-            return _ChildModel(model=parent_agent.model, spec=None, provider=None)
+        The TUI's ``/send parent`` and ``AgentSend(to="parent")`` from a root
+        both start one so.
 
-        # A matching spec used to reuse ``parent.model`` here as an
-        # optimization. That aliased every same-model child onto the parent's
-        # single transport -- harmless for stateless HTTP providers, but on a
-        # subprocess-backed provider (AnthropicCLI/GoogleCLI) it forced N
-        # children through one ``claude`` process + pipe, serializing and
-        # corrupting concurrent turns. Rebuilding a fresh transport per child
-        # (below) is the whole point of spawns running "like a tool" in
-        # parallel; the saved constructor call is not worth the lost
-        # concurrency + isolation. See
-        # ``test_build_child_model_rebuilds_fresh_transport_when_spec_matches``.
-        if p is None or a is None or m is None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    "Cannot build a model: need provider, auth, and"
-                    f" model_id; got provider={p!r}, auth={a!r},"
-                    f" model_id={m!r}. The parent agent has no model_recipe"
-                    " to inherit from."
-                ),
-                is_error=True,
+        Args:
+          watched: A root of the team.
+
+        Returns:
+          label: The watcher's.
+
+        Raises:
+          ValueError: ``watched`` is no root, or is watched already.
+
+        """
+        target = self.team[watched]
+        skill = target.tools.get("Skill")
+        # Read from the tiers the watched agent reads, its own Skill tool's or none.
+        loader = (
+            skill if isinstance(skill, Skill) else Skill(tiers=target.agents_md.tiers)
+        )
+        how = await settled(
+            loader.call(
+                target.runtime.tool_context,
+                {"skill": "watch", "args": watched},
+            ),
+        )
+        return await self.watch(watched, before=how.text())
+
+    async def resume(self, parent_label: str) -> list[str]:
+        """Start again each persistent descendant the journals hold as running.
+
+        Each resumes its own journal, on the model, settings, and prompt it
+        stood there, then its own children from that journal, and waits for a
+        message; one whose model, tools, or journal can no longer be had is
+        skipped, with its children, and a warning.
+
+        Args:
+          parent_label: The resumed agent, already in the team.
+
+        Returns:
+          labels: Each descendant started, a parent before its children, under
+            its old label, or a new one when that is taken.
+
+        """
+        parent = self.team[parent_label]
+        started: list[str] = []
+        for spec in self.team.standing(parent_label):
+            label = (
+                spec.label
+                if spec.label not in self.team
+                else self.team.child_label(parent_label)
             )
-        # ``parent_spec`` is non-None past the spec-less guard above.
-        parent_provider = parent_spec.provider if parent_spec is not None else None
-        if p != parent_provider and p not in self._allow_providers:
-            return provider_not_allowed_result(
-                p,
-                self._allow_providers,
-                parent_provider,
-            )
-        try:
-            if self._build_provider is not None:
-                built_provider = self._build_provider(p, a, ac)
-            else:
-                built_provider, ac = build_provider_with_account_fallback(
-                    p,
-                    a,
-                    account=ac,
-                    fallback_to_default=(
-                        account is None
-                        and self._account is None
-                        and parent_spec is not None
-                        and p != parent_spec.provider
+            try:
+                allowed = _allowed(parent, spec.tools)
+                model = (
+                    self.team.catalog.model(
+                        spec.model,
+                        current=parent.model.provider.name,
+                    )
+                    if spec.model
+                    else await self._model(
+                        parent,
+                        provider=None,
+                        name=None,
+                        account=None,
+                        effort=None,
+                        budget=None,
+                        output=None,
+                    )
+                )
+                await self._start(
+                    parent,
+                    label=label,
+                    parent_label=parent_label,
+                    model=model,
+                    account=self.team.catalog.account,
+                    allowed=allowed,
+                    system=None,
+                    journal=session_file(Path(spec.journal).parent),
+                    max_rounds=spec.max_rounds,
+                    max_depth=spec.max_depth,
+                    spec=spec,
+                    recall=True,
+                )
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("not resuming agent %r: %s", spec.label, e)
+                continue
+            started.append(label)
+            started.extend(await self.resume(label))
+        for record in parent.session.standing():
+            label, journal = record.payload.get("label"), record.payload.get("journal")
+            if record.kind != "watcher" or not isinstance(label, str):
+                continue
+            try:
+                started.append(
+                    await self.watch(
+                        parent_label,
+                        label=label if label not in self.team else "",
+                        journal=Path(journal) if isinstance(journal, str) else None,
                     ),
                 )
-        except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as exc:
-            return _build_failed(m, exc)
-        try:
-            new_model = built_provider.model(m)
-        except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as exc:
-            discard_unadopted(None, built_provider)
-            return _build_failed(m, exc)
-        new_spec = ModelRecipe(
-            provider=p,
-            auth=a,
-            model_id=new_model.tagged_model_id,
-            account=ac,
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("not resuming watcher %r: %s", label, e)
+        return started
+
+    # The child joins before anything is awaited, so a label chosen for it cannot be
+    # taken by a spawn running beside this one. Parent tools are retained, with
+    # mandatory messaging added when absent; ``allowed`` gates what it may call.
+    # A child given ``recall`` takes the model, settings, and prompt its journal stood,
+    # once the journal is open and before the child opens.
+    async def _start(
+        self,
+        parent: Agent,
+        *,
+        label: str,
+        parent_label: str,
+        model: Model,
+        account: str | None,
+        allowed: frozenset[str] | None,
+        system: str | None,
+        journal: Path | None,
+        max_rounds: int | None,
+        max_depth: int | None,
+        spec: ChildSpec | None,
+        # Recalling a fresh spawn's journal finds nothing: it is a new uuid path.
+        recall: bool = False,  # pragma: no mutate -- A fresh spawn's journal is empty, so recall changes nothing.
+    ) -> Agent:
+        """Join a child of ``parent`` to the team, then open it and its journal."""
+        stack = AsyncExitStack()
+        opened = JsonlJournal(journal) if journal is not None else None
+        payers = self._payers(parent_label)
+        left = [
+            payer.max_spend_usd - payer.spend_usd
+            for payer in payers
+            if payer.max_spend_usd is not None
+        ]
+        child = _agent_from_parent(
+            parent,
+            team=self.team,
+            model=model,
+            journal=opened,
+            allowed=allowed,
+            system_prompt=system if system is not None else parent.system_prompt,
+            account=account,
+            max_rounds=max_rounds,
+            max_spend_usd=min(left, default=None),
         )
-        return _ChildModel(model=new_model, spec=new_spec, provider=built_provider)
+        # One conversation to vendors: the child keeps its own id, from its
+        # journal, and takes its root's.
+        above, below = parent.runtime, child.runtime
+        below.agent = below.conversation
+        below.conversation = above.conversation
+        below.parent = above.agent or above.conversation
+        below.parent_turn = above.turns
+        below.root_prompt = (
+            above.root_prompt or Request(agent=below.parent, turn=above.turns).prompt_id
+        )
+        below.name = f"{above.name}/{label}"
+        self.team.join(
+            child,
+            label=label,
+            parent=parent_label,
+            max_depth=max_depth,
+            closing=stack,
+            spec=spec,
+        )
+        try:
+            if opened is not None:
+                await stack.enter_async_context(opened)
+            if recall:
+                await child.recall(self.team.catalog)
+            await stack.enter_async_context(child)
+            # Its journal's standing records are read as it opens.
+            self.team.restore(label)
+        except BaseException:
+            await self.team.stop(label)
+            # The child never opened, so it will not close the model it owns.
+            await model.aclose()
+            raise
+        child.runtime.observers.extend(
+            (_Forward(label=label, parent=parent), _Charge(label=label, payers=payers)),
+        )
+        return child
 
-    # - ``names is None``: inherit. Use factory's ``self._tools`` if set, else parent's
-    # full toolset (including AgentSpawn, so children can spawn further subagents). -
-    # ``names == []``: explicit empty; child runs with no tools. Honored - don't
-    # silently upgrade to inherit. - ``names == ["Read", ...]``: subset by ``.name``;
-    # error on unknown.
-    #
-    # Bundling rule: ``BackgroundTask`` rides along whenever ``AgentSpawn`` is granted.
-    # Any agent that can create persistent / background work must be able to list,
-    # cancel, and foreground that work -- decoupling the two is how runaway children
-    # become uncancellable. This applies to hot spawns too: a hot child's rendered
-    # prompt never reflects its own tool list anyway (``frozen_system`` skips that loop
-    # entirely, see #361), so bundling ``BackgroundTask`` here costs nothing on the
-    # cache side while keeping the cancel-capability guarantee intact.
-    def _resolve_tools(
+    async def _run(
         self,
-        names: list[str] | None,
-        parent_agent: Agent | None,
-    ) -> list[Tool] | ToolResult:
-        """Resolve LLM-supplied tool names to tool instances."""
-        available: list[Tool]
-        if self._tools is not None:
-            available = list(self._tools)
-        elif parent_agent is not None:
-            available = list(parent_agent.tools)
-        else:
-            available = []
+        child: Agent,
+        *,
+        label: str,
+        parent: Agent,
+        a: AgentSpawn.Arguments,
+        stdout: Stream[str],
+    ) -> ToolOutput[AgentSpawnResult, str, str]:
+        """Run ``child`` on the prompt to idle; it stays, its inbox open."""
+        started = time.monotonic()
+        tally = _Tally()
+        waits = _DetachOnWait(parent=parent, task=asyncio.current_task())
+        reply_writer = _ReplyWriter(stdout=stdout, tools=child.tools)
+        child.runtime.observers.extend((tally, waits, reply_writer))
+        self.team.awaited.add(label)
+        try:
+            reply, state = await _answer(child, a.prompt)
+        except asyncio.CancelledError:
+            # The spawn is cancelled, not the child: it stops its turn and stays.
+            child.runtime.halt(sender=parent.runtime.tool_context.label)
+            child.runtime.push(types.ToolHalt())
+            raise
+        finally:
+            self.team.awaited.discard(label)
+            for observer in (tally, waits, reply_writer):
+                if observer in child.runtime.observers:
+                    child.runtime.observers.remove(observer)
+        kept = child.session.journal.path
+        return ToolOutput(
+            # A reply the child said last is written already.
+            stdout=() if reply_writer.last == f"{reply}\n" else (reply,),
+            shown=reply,
+            result=AgentSpawnResult(
+                agent_id=label,
+                agent_kind="persistent",
+                prompt=a.prompt,
+                model=child.model.capability.model_id,
+                state=state,
+                tokens=tally.tokens.total,
+                spend=tally.spend,
+                duration_sec=time.monotonic() - started,
+                tool_calls=tally.calls,
+                output_file=str(kept) if kept else None,
+                exit_code=int(state != "completed"),
+            ),
+        )
 
-        if names is None:
-            return _bundle_background_task(available)
+    # A member's own; for an outside member, this machine's, as sagent here would run.
+    def _parent(self, label: str) -> Agent:
+        """Return the agent a child of ``label`` takes after."""
+        if label in self.team:
+            return self.team[label]
+        if label in self.team.outside and self.team.stand_in is not None:
+            return self.team.stand_in()
+        raise ValueError("AgentSpawn needs a calling agent in the team.")
 
-        by_name = {t.name: t for t in available}
-        missing = [n for n in names if n not in by_name]
-        if missing:
-            return ToolResult(
-                call_id="",
-                content=f"Unknown tools: {missing}. Available: {list(by_name)}",
-                is_error=True,
+    # An outside member's caps are kept on its own machine, as its spending is.
+    def _payers(self, label: str) -> tuple[Agent, ...]:
+        """Return ``label``'s agent and each above it, whose caps a child spends against."""
+        payers: list[Agent] = []
+        above: str | None = label
+        while above is not None and above in self.team:
+            payers.append(self.team[above])
+            above = self.team.parent(above)
+        return tuple(payers)
+
+    # A named ``account`` signs in the provider named, else the parent's, as that
+    # account; the catalog's own account stays as it was.
+    async def _model(
+        self,
+        parent: Agent,
+        *,
+        provider: str | None,
+        name: str | None,
+        account: str | None,
+        effort: ThinkingEffort | None,
+        budget: ThinkingBudget | None,
+        output: ThinkingOutput | None,
+    ) -> Model:
+        """Return a model of its own for the child, the parent's choices kept."""
+        current = parent.model
+        catalog = self.team.catalog
+        chosen: Provider | None = None
+        if account is not None:
+            chosen = catalog.signed_in(
+                provider or current.provider.name,
+                account=account,
             )
-        # A repeated name grants the tool once; the agent's registry rejects
-        # duplicates outright.
-        return _bundle_background_task([by_name[n] for n in dict.fromkeys(names)])
+        elif provider is not None:
+            chosen = catalog[provider]
+        build: Callable[[str], Model]
+        if chosen is None:
+            build = partial(catalog.model, current=current.provider.name)
+        else:
+            build = chosen.__getitem__
+            name = name or await counterpart(chosen, current)
+        model = await successor(
+            build,
+            name or current.capability.model_id,
+            current=current,
+            model_cache=parent.model_cache,
+        )
+        given: dict[ModelSettingName, object | None] = {
+            "thinking_effort": effort,
+            "thinking_budget": budget,
+            "thinking_output": output,
+        }
+        try:
+            model.settings = model.capability.with_choices(
+                model.settings,
+                {name: value for name, value in given.items() if value is not None},
+            )
+        except ValueError:
+            await model.aclose()
+            raise
+        return model
 
-    # ``<parent_session_dir>/<child_uuid>/``; the parent's session dir already encodes
-    # its identity in its path. Returns ``None`` when the parent has no session dir
-    # (ephemeral child, no transcript).
-    def _child_session_dir(
-        self,
-        parent_agent: Agent | None,
-    ) -> Path | None:
-        """Per-child subdir for transcript persistence, or None."""
-        if parent_agent is None or parent_agent.session_dir is None:
-            return None
-        return parent_agent.session_dir / str(uuid.uuid4())
+
+def _allowed(parent: Agent, names: tuple[str, ...] | None) -> frozenset[str] | None:
+    """Return what a child of ``parent`` may call: ``names``, or the parent's own."""
+    if names is None:
+        return parent.allowed
+    mine = parent.allowed if parent.allowed is not None else frozenset(parent.tools)
+    unknown = sorted(set(names) - mine - {AgentSend.name})
+    if unknown:
+        raise ValueError(
+            f"Unknown tools {', '.join(unknown)}; yours: {', '.join(sorted(mine))}",
+        )
+    return frozenset(names) if set(names) != set(parent.tools) else None
 
 
-# Operational events forwarded to the parent regardless of verbosity. The
-# child renderer MUST be able to materialize each (see
-# ``render._child_atomic_item`` and the binding test
-# ``test_every_always_forwarded_event_renders_a_child_block``). Error
-# ``ToolResult``s also always forward, but only when ``is_error`` -- handled
-# separately at the call site.
-_ALWAYS_FORWARD_TYPES = (ModelResponseError, ModelServiceSuspended, NoticeMessage)
-
-
-def always_forwarded_sample() -> tuple[RuntimeEvent, ...]:
-    """Return one instance of each always-forwarded event type.
-
-    The single source of truth shared by the forwarder and the render binding
-    test, so a new always-forwarded type cannot be added without the test
-    exercising it.
-
-    Returns:
-      events: One representative event for each always-forwarded type.
-
-    """
-    return (
-        ModelResponseError(RuntimeError("sample")),
-        ModelServiceSuspended(
-            provider="",
-            auth="",
-            account=None,
-            model_id="",
-            retry_at=0.0,
-            delay_sec=0.0,
-            server_supplied=False,
-            error=ServiceErrorSnapshot(type_name="E", message="m"),
-        ),
-        NoticeMessage(text="[sample]", tier="advisory"),
-        ToolResult(call_id="c", content="boom", is_error=True),
+# The one list of what an agent derived from another inherits; a child and a
+# watcher differ only in what they are given.
+def _agent_from_parent(
+    parent: Agent,
+    *,
+    team: Team,
+    model: Model,
+    journal: JsonlJournal | None,
+    allowed: Collection[str] | None,
+    system_prompt: str | None,
+    account: str | None,
+    max_rounds: int | None = None,
+    max_spend_usd: float | None = None,
+) -> Agent:
+    """Return a derived agent with communication always available."""
+    tools = dict(parent.tools)
+    tools[AgentSend.name] = tools.get(AgentSend.name) or AgentSend(team=team)
+    agent = Agent(
+        model=model,
+        tools=list(tools.values()),
+        allowed=None if allowed is None else frozenset(allowed) | {AgentSend.name},
+        system_prompt=system_prompt,
+        journal=journal,
+        compactor=parent.compactor_factory,
+        pruner=parent.pruner_factory,
+        # All of the parent's but what one agent alone keeps: a field added later
+        # is inherited unless it is reset here. The team sets ``label`` as the
+        # agent joins, and the agent its ``spill_dir`` from its journal.
+        tool_context=replace(parent.runtime.tool_context, files=FileTracker()),
+        max_rounds=max_rounds,
+        max_spend_usd=max_spend_usd,
+        agents_md=parent.agents_md,
+        environment=parent.environment,
+        user=parent.user,
+        account=account,
+        persistent_retry=parent.runtime.persistent_retry,
     )
+    agent.runtime.wake_schedules = parent.runtime.wake_schedules
+    agent.model_cache = dict(parent.model_cache)
+    return agent
 
 
-# Verbosity -> set of RuntimeEvent subclasses forwarded to the parent observer.
-# verbosity 0: nothing; 1: tool labels + tool results + assistant text and boundaries;
-# 2: also thinking blocks. See ``_ALWAYS_FORWARD_TYPES`` for the always-on set.
-_VERBOSITY: dict[int, frozenset[type]] = {
-    0: frozenset(),
-    1: frozenset(
-        {
-            ToolLabel,
-            ToolResult,
-            ModelResponsePartial,
-            ModelResponseComplete,
-            ModelResponseCancelled,
-        },
-    ),
-    2: frozenset(
-        {
-            ToolLabel,
-            ToolResult,
-            ModelResponsePartial,
-            ModelResponseComplete,
-            ModelResponseCancelled,
-            ModelResponseThinking,
-        },
-    ),
-}
+async def _answer(
+    child: Agent,
+    prompt: str,
+) -> tuple[str, Literal["completed", "failed"]]:
+    """Return what ``child`` replies to ``prompt``, or why it failed, and which."""
+    try:
+        return await child.send(prompt), "completed"
+    except Exception as e:  # noqa: BLE001 -- A child's failure is its spawn's result, not the parent's.
+        return describe(e), "failed"
 
 
-@dataclasses.dataclass(slots=True, kw_only=True)
-class ChildStats:
-    """Parent-scoped status-pane stats for one child agent."""
+@dataclass(slots=True, kw_only=True)
+class _Tally:
+    """What a child's model calls cost, counted as they finish."""
+
+    tokens: TokenCount = field(default_factory=TokenCount)
+    spend: TokenCost = field(default_factory=TokenCost)
+    calls: int = 0
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Count a finished model call."""
+        if isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
+            response = event.outcome.value
+            self.tokens += response.tokens
+            self.spend += response.spend
+            self.calls += sum(isinstance(r, ToolCall) for r in response.records)
+
+
+@dataclass(slots=True, kw_only=True)
+class _ReplyWriter:
+    """Writes what a child says, and the first line of each call it makes, as it works."""
+
+    stdout: Stream[str]
+    tools: Mapping[str, Tool]
+    last: str = ""
+    """The last line written."""
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Write each text and call of a finished model call."""
+        if not (
+            isinstance(event, types.ModelResponseCompleted)
+            and isinstance(event.outcome, Succeeded)
+        ):
+            return
+        for record in event.outcome.value.records:
+            if isinstance(record, AssistantMessage) and record.content not in {
+                None,
+                "",
+            }:
+                self._write(f"{record.content}\n")
+            elif isinstance(record, ToolCall):
+                tool = self.tools.get(record.name)
+                named = tool.summary(record.arguments) if tool else record.name
+                self._write(f"{named.partition('\n')[0]}\n")
+
+    def _write(self, line: str) -> None:
+        self.stdout.write(line)
+        self.last = line
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _DetachOnWait:
+    """Frees the parent of a spawn whose child began waiting out a spent quota.
+
+    The wait may last days, and a parent blocked in the call never reads its
+    child's reports: detached, it reads the wait now and the reply when it comes.
+    """
+
+    parent: Agent
+    task: asyncio.Future[object] | None
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Detach the spawn's call at the child's first quota wait."""
+        if isinstance(event, types.ModelResponseSuspended) and event.opens_a_quota_wait:
+            self.parent.runtime.detach(self.task)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Forward:
+    """Passes a child's events to its parent's observers, wrapped with its label."""
 
     label: str
-    """Child agent's display label."""
+    parent: Agent
 
-    start: float
-    """Monotonic clock seconds when the child run began."""
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Republish ``event`` on the parent's runtime."""
+        match event:
+            # A child's halt, a call of its that failed while its turn went on, and a
+            # compaction of its that did not happen, are its own.
+            case (
+                types.ModelResponseCompleted()
+                | types.ModelResponseTextStreamed()
+                | ModelIdle(outcome=Failed())
+                | types.ModelResponseSuspended()
+                | types.LoginSwitched()
+                | types.SessionCompactCompleted(outcome=Succeeded())
+                | AgentMessage()
+                | ToolMessage()
+            ):
+                self.parent.runtime.publish(
+                    types.ChildEvent(label=self.label, event=event),
+                )
+            case _:
+                pass
 
-    model_response_text: str = ""
-    """Response text streamed so far. Tokenized as a whole by readers so
-    sub-token chunk boundaries don't floor to zero."""
 
-    done: bool = False
-    """True after ``emit_done`` publishes the final ``ChildDoneEvent``."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Charge:
+    """Charges what a child's model calls cost to its parent and each agent above.
 
-
-class _ChildForwarder:
-    """Observer adapter: wraps child events as ``ChildEvent`` on parent.publish.
-
-    Tracks per-child stats so the parent's status pane can render running-child
-    summaries. Errors and tool results always forward; other events follow
-    the verbosity table.
-
-    When ``notify_on_asleep`` is True, the child's ``AgentIdle`` event is
-    additionally rendered as an ``AgentSendMessage`` (attributed to the
-    child's label) pushed into the parent's inbox so the parent's model
-    sees "child is idle" in its conversation history (not just its
-    observer pipeline). Distinct from rendering -- the inbox push is how
-    persistent-child status reaches the parent's decision layer.
+    Its replies, and what it charges itself, as its compactions; what its own
+    children charge it, their observers charge each payer already.
     """
 
-    __slots__ = (
-        "_child",
-        "_forward_set",
-        "_label",
-        "_notify_on_asleep",
-        "_parent_agent",
-        "_stats",
-    )
+    label: str
+    payers: tuple[Agent, ...]
 
-    def __init__(
-        self,
-        *,
-        parent_agent: Agent,
-        child: Agent,
-        forward_set: frozenset[type],
-        stats: ChildStats,
-        label: str,
-        notify_on_asleep: bool = False,
-    ) -> None:
-        self._parent_agent = parent_agent
-        self._child = child
-        self._forward_set = forward_set
-        self._stats = stats
-        self._label = label
-        self._notify_on_asleep = notify_on_asleep
-
-    def __call__(self, event: RuntimeEvent) -> None:
-        if isinstance(event, ChildEvent):
-            self._parent_agent.publish(
-                ChildEvent(label=f"{self._label}/{event.label}", inner=event.inner),
-            )
-            return
-        if isinstance(event, ChildDoneEvent):
-            self._parent_agent.publish(
-                ChildDoneEvent(
-                    label=f"{self._label}/{event.label}",
-                    elapsed=event.elapsed,
-                    tokens=event.tokens,
-                    cost=event.cost,
-                ),
-            )
-            return
-        if isinstance(event, ModelResponseError) and self._child.is_serviced:
-            # A child-fatal model failure (bad model id, revoked creds, cap hit)
-            # parks a SERVICED child on ``AWAIT_RECOVERY``: it never publishes
-            # ``AgentIdle`` and its ``serve_forever`` does not crash, so neither
-            # the idle-ping path below nor the ``_run`` failure handler ever
-            # surfaces it. Render-only forwarding (``ChildEvent``, below) reaches
-            # the parent's pane but NOT its model context, so the parent would
-            # wait on a dead child forever. Push the error into the parent's
-            # inbox -- the one channel its model reads -- regardless of
-            # ``notify_on_asleep`` (a parent that muted idle pings still must
-            # learn its child died). Fall through so the render path also fires.
-            # A oneshot child is exempt: ``_run_oneshot_child`` already returns
-            # the error as the spawn tool's ``ToolResult``, so an inbox push
-            # would double-signal the same failure.
-            self._parent_agent.runtime.inbox.push_back(
-                AgentSendMessage(
-                    source=self._label,
-                    text=f"[{self._label} failed] {describe(event.exception)}",
-                ),
-            )
-        if isinstance(event, AgentIdle) and self._notify_on_asleep:
-            # Inbox push -- not parent.publish. The parent's model sees
-            # this in its conversation history; the runtime event bus
-            # (observers) is the rendering layer, not the decision
-            # layer. Edge-triggered upstream: AgentRuntime publishes
-            # AgentIdle at most once per idle transition, so we get one
-            # push per idle, not per round.
-            #
-            # Boot suppression: the runtime publishes its first
-            # ``AgentIdle`` at the top of the first ``run_forever``
-            # iteration -- i.e. before the child has done any work. The
-            # The empty-history check suppresses that useless
-            # "[child is idle]" ping; without it
-            # every fresh child spams the parent before its seeded prompt
-            # is even processed.
-            if not bool(self._child.history):
-                return
-            # Carry the child's last assistant text so a child that
-            # replied with plain assistant text instead of AgentSend
-            # still reaches the parent's model context. Without this,
-            # the persistent reply channel silently drops content.
-            last_text = _last_assistant_result(self._child.history).content
-            body = (
-                f"[{self._label} is idle] {last_text}"
-                if last_text
-                else f"[{self._label} is idle]"
-            )
-            self._parent_agent.runtime.inbox.push_back(
-                AgentSendMessage(source=self._label, text=body),
-            )
-            return
-        if isinstance(event, ModelResponsePartial):
-            # Accumulate raw text; tokenize the whole at emit_done so a
-            # chunk shorter than one token does not floor to zero.
-            self._stats.model_response_text += event.text
-        always_forward = isinstance(event, _ALWAYS_FORWARD_TYPES) or (
-            isinstance(event, ToolResult) and event.is_error
-        )
-        if not always_forward and type(event) not in self._forward_set:
-            return
-        self._parent_agent.publish(ChildEvent(label=self._label, inner=event))
-
-    def emit_done(self) -> None:
-        """Publish the final ``ChildDoneEvent`` summary for this child run."""
-        self._stats.done = True
-        elapsed = time.monotonic() - self._stats.start
-        self._parent_agent.publish(
-            ChildDoneEvent(
-                label=self._label,
-                elapsed=elapsed,
-                tokens=self._child.model.approx_text_tokens(
-                    self._stats.model_response_text,
-                ),
-                cost=self._child.own_spend.total,
-            ),
-        )
-
-
-# Walks back to the most recent ``AssistantMessage``. If that turn has an ``AgentSend``
-# tool call, returns its ``content`` arg -- otherwise returns the turn's text (even when
-# empty).
-#
-# The one-step lookback is needed because ``AgentSend`` is a tool call: dispatching it
-# leaves a ``ToolResult`` at history tail, which triggers a mandatory follow-up model
-# round whose short acknowledgement ("Done.") would otherwise shadow the real payload at
-# idle-publish time. When the last turn is text-only AND the immediately-prior assistant
-# turn has an ``AgentSend``, the prior content is the substantive reply -- the trailing
-# turn is the ack.
-#
-# Older ``AgentSend``s further back are not surfaced: the child has moved on past them;
-# returning ancient content would feed the parent a stale message.
-def _last_assistant_result(
-    history: list[ModelContextEvent],
-) -> ToolResult:
-    """Return the child's most recent outbound reply as a ``ToolResult``."""
-    last_assistant: AssistantMessage | None = None
-    prior_assistant: AssistantMessage | None = None
-    for m in reversed(history):
-        if not isinstance(m, AssistantMessage):
-            continue
-        if last_assistant is None:
-            last_assistant = m
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Charge a finished model call to each payer."""
+        if isinstance(event, types.ModelResponseCompleted) and isinstance(
+            event.outcome,
+            Succeeded,
+        ):
+            spend = event.outcome.value.spend
+        elif isinstance(event, types.SessionSpendCharged) and event.label == self.label:
+            spend = event.spend
         else:
-            prior_assistant = m
-            break
-    if last_assistant is None:
-        return ToolResult(call_id="", content="")
-    last_send = _last_agent_send_content(last_assistant)
-    if last_send is not None:
-        return ToolResult(call_id="", content=last_send)
-    if not last_assistant.tool_calls and prior_assistant is not None:
-        prior_send = _last_agent_send_content(prior_assistant)
-        if prior_send is not None:
-            return ToolResult(call_id="", content=prior_send)
-    return ToolResult(call_id="", content=last_assistant.text)
-
-
-# Walks the assistant turn's tool_calls in reverse so two parallel ``AgentSend`` calls
-# surface the LAST one (the child's most recent intent), not the first.
-def _last_agent_send_content(message: AssistantMessage) -> str | None:
-    """Return the most recent non-empty ``AgentSend`` ``content`` in ``message``."""
-    for tc in reversed(message.tool_calls):
-        if tc.name == "AgentSend":
-            content = tc.args.get("content")
-            if isinstance(content, str) and content:
-                return content
-    return None
-
-
-def resume_serviced_child(
-    parent: Agent,
-    child: Agent,
-    *,
-    label: str,
-    run_id: str,
-    notify_on_asleep: bool,
-    verbosity: int = 1,
-) -> None:
-    """Re-host a persisted serviced child on the spawn path's own lifecycle.
-
-    The child continues its recorded run: no new ``running`` record is
-    written, and on exit the same terminal ``completed``/``failed``/
-    ``cancelled`` record a freshly spawned child writes lands under
-    ``run_id``, so a later resume does not resurrect it.
-
-    Args:
-      parent: Agent that owns the child and receives its lifecycle records.
-      child: Rebuilt child agent, already restored from its own session.
-      label: Free registry label for the child (see ``_label_error``).
-      run_id: The recorded run this child continues.
-      notify_on_asleep: Whether the child's idles ping ``parent``.
-      verbosity: Which child events are forwarded to ``parent``.
-
-    Raises:
-      ValueError: ``label`` is reserved or already registered.
-
-    """
-    label_error = _label_error(label)
-    if label_error is not None:
-        raise ValueError(label_error.content)
-    _start_serviced(
-        child,
-        label=label,
-        run_id=run_id,
-        parent_agent=parent,
-        parent_label=parent.name,
-        notify_on_asleep=notify_on_asleep,
-        verbosity=verbosity,
-        child_path="",
-        eff_max_depth=max_depth_var.get(),
-    )
-
-
-# The one serviced lifecycle shared by spawn and resume: mark the child serviced, add
-# the IPC rule, register it, attach the parent forwarder, launch ``_run_serviced``, and
-# expose it as the parent's background job. Callers own the ``running`` record and the
-# first inbox message.
-def _start_serviced(
-    child: Agent,
-    *,
-    label: str,
-    run_id: str,
-    parent_agent: Agent | None,
-    parent_label: str,
-    notify_on_asleep: bool,
-    verbosity: int,
-    child_path: str,
-    eff_max_depth: int | None,
-) -> None:
-    """Register and launch a serviced child under ``parent_agent``."""
-    child._lifecycle = "serviced"  # noqa: SLF001 -- Cross-layer lifecycle flag.
-    child._is_subagent = True  # noqa: SLF001 -- Cross-layer subagent flag.
-    child.name = label
-    child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- Spec mutation is intentional for the serviced IPC rule.
-        child._system_spec,  # noqa: SLF001 -- See above.
-        parent_label=parent_label,
-    )
-    agent_registry[label] = child
-    forwarder = _build_forwarder(
-        label,
-        verbosity,
-        parent_agent,
-        child=child,
-        notify_on_asleep=notify_on_asleep,
-    )
-    if forwarder is not None:
-        child.runtime.observers.append(forwarder)
-    bg_key = f"persistent:{label}"
-    task = asyncio.create_task(
-        _run_serviced(
-            child=child,
-            label=label,
-            run_id=run_id,
-            forwarder=forwarder,
-            parent_agent=parent_agent,
-            bg_key=bg_key,
-            notify_on_asleep=notify_on_asleep,
-            child_path=child_path,
-            eff_max_depth=eff_max_depth,
-        ),
-    )
-    _persistent_tasks[label] = task
-    if parent_agent is not None:
-        parent_agent.register_background(
-            bg_key,
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="serviced-agent",
-                queue_id=label,
-                started=time.time(),
-                hidden=False,
-                kind="subagent",
-                lifecycle="serviced",
-                persistent_run_id=run_id,
-                notify_on_asleep=notify_on_asleep,
-            ),
-        )
-
-
-async def _run_serviced(
-    *,
-    child: Agent,
-    label: str,
-    run_id: str,
-    forwarder: _ChildForwarder | None,
-    parent_agent: Agent | None,
-    bg_key: str,
-    notify_on_asleep: bool,
-    child_path: str,
-    eff_max_depth: int | None,
-) -> None:
-    """Run a serviced child and clean up its parent-side bookkeeping."""
-    state: PersistentAgentState = "completed"
-    try:
-        with _child_scope(child_path=child_path, max_depth=eff_max_depth):
-            await child.serve_forever()
-    except asyncio.CancelledError:
-        state = "cancelled"
-        raise
-    except Exception:
-        state = "failed"
-        logger.exception("serviced agent %r crashed in serve_forever", label)
-    finally:
-        if parent_agent is not None:
-            append_persistent_agent_lifecycle(
-                parent_agent,
-                child,
-                label,
-                run_id,
-                state=state,
-                notify_on_asleep=notify_on_asleep,
-            )
-        if forwarder is not None and forwarder in child.runtime.observers:
-            child.runtime.observers.remove(forwarder)
-        if forwarder is not None:
-            forwarder.emit_done()
-        agent_registry.pop(label, None)
-        _persistent_tasks.pop(label, None)
-        if parent_agent is not None:
-            parent_agent.forget_background(bg_key)
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ChildModel:
-    """The model a child runs on, its recipe, and the provider the child owns."""
-
-    model: Model
-    spec: ModelRecipe | None
-    provider: Provider | None
-    """``None`` when ``model`` is the parent's own, which the parent keeps."""
-
-
-def _build_failed(model_id: str, error: Exception) -> ToolResult:
-    """Report a provider or model that could not be built."""
-    return ToolResult(
-        call_id="",
-        content=f"Failed to build model {model_id!r}: {error}",
-        is_error=True,
-    )
-
-
-# Both lifecycles run the child under this scope: its ``agent_path_var`` names the
-# child so the child's own spawns label as ``Agent_<path>_<n>``, and its
-# ``max_depth_var`` carries the effective cap so a leaf child cannot spawn.
-@contextmanager
-def _child_scope(*, child_path: str, max_depth: int | None) -> Generator[None]:
-    """Install a child's spawn-tree position for the duration of the block."""
-    path_token = agent_path_var.set(child_path)
-    depth_token = max_depth_var.set(max_depth)
-    try:
-        yield
-    finally:
-        max_depth_var.reset(depth_token)
-        agent_path_var.reset(path_token)
-
-
-def _spawn_generations(depth: int, cap: int | None) -> int | None:
-    """Count the generations an agent at ``depth`` may spawn; ``None`` is unbounded."""
-    return None if cap is None else cap - depth
-
-
-def _label_error(label: str) -> ToolResult | None:
-    """Reject a label that is reserved or already addressable."""
-    if label.startswith("job-"):
-        return ToolResult(
-            call_id="",
-            content=f"Agent label {label!r} is reserved for job ids.",
-            is_error=True,
-        )
-    if label in agent_registry:
-        return ToolResult(
-            call_id="",
-            content=(
-                f"Agent {label!r} is already running. Kill it via"
-                " BackgroundTask before spawning a replacement with the same"
-                " label."
-            ),
-            is_error=True,
-        )
-    return None
-
-
-async def _await_stopped(task: asyncio.Task[None]) -> None:
-    """Await a child's stopped loop; a cancel aimed at the caller still propagates."""
-    try:
-        await task
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise
-
-
-# ``notify_on_asleep`` only takes effect when this forwarder is attached to a serviced
-# child; a one-shot child's forwarder is detached before it could publish a second idle.
-# The ``child`` handle lets the forwarder read ``child.history`` at idle time so the
-# parent's inbox notification can carry the child's last assistant text.
-def _build_forwarder(
-    label: str,
-    verbosity: int,
-    parent_agent: Agent | None,
-    *,
-    child: Agent,
-    notify_on_asleep: bool = False,
-) -> _ChildForwarder | None:
-    """Construct a forwarder bound to ``parent_agent`` (or None when at root)."""
-    if parent_agent is None:
-        return None
-    forward_set = _VERBOSITY.get(verbosity, _VERBOSITY[1])
-    stats = ChildStats(label=label, start=time.monotonic())
-    return _ChildForwarder(
-        parent_agent=parent_agent,
-        child=child,
-        forward_set=forward_set,
-        stats=stats,
-        label=label,
-        notify_on_asleep=notify_on_asleep,
-    )
-
-
-def _child_error_result(label: str, error: BaseException) -> ToolResult:
-    """Report a child's terminal model error as the spawn's error result."""
-    return ToolResult(
-        call_id="",
-        content=f"Child agent {label!r} failed: {describe(error)}",
-        is_error=True,
-    )
-
-
-# The persistent reply channel is asymmetric: a child's plain assistant text is
-# invisible to the parent's model. The only reliable way for the child to talk back is
-# to call ``AgentSend(to=<parent label>)``. Telling the child this in its system prompt
-# closes the loop -- without it, the child's LLM naturally responds with assistant text
-# and gets ghosted.
-def _augment_system_for_persistent(
-    spec: SystemPromptArg,
-    *,
-    parent_label: str,
-) -> SystemPromptArg:
-    """Append the persistent-agent IPC rule to a system-prompt spec."""
-    rule = (
-        f"You are a persistent agent whose output is only known to"
-        f" your creator via AgentSend(to={parent_label!r}, ...). Any"
-        f" other output is invisible to the parent and unless you"
-        f" AgentSend them, they will be stuck indefinitely."
-    )
-    if isinstance(spec, str):
-        return f"{spec}\n\n{rule}" if spec else rule
-
-    def _composed() -> str:
-        base = spec()
-        return f"{base}\n\n{rule}" if base else rule
-
-    return _composed
-
-
-# ``current_agent_var`` is typed as the minimal ``AgentLike`` Protocol so ``tools.core``
-# avoids a circular import with the concrete class. Inside ``AgentSpawn`` we always need
-# the full surface; non-``Agent`` holders (e.g. ``FakeAgent`` in unit tests) return
-# ``None`` so callers fall through to "no parent" semantics.
-def _current_agent() -> Agent | None:
-    """Resolve the currently-executing concrete ``Agent``."""
-    agent = current_agent_var.get()
-    return agent if isinstance(agent, Agent) else None
-
-
-def _pick_field(
-    llm_val: str | None,
-    fac_val: str | None,
-    spec_val: str | None,
-) -> str | None:
-    """Return the first non-None value among LLM, factory, and spec."""
-    if llm_val is not None:
-        return llm_val
-    if fac_val is not None:
-        return fac_val
-    return spec_val
-
-
-# Cancel/foreground are non-negotiable companion capabilities to spawn: every code path
-# that resolves a non-empty child toolset runs through this gate. The fresh
-# ``BackgroundTask()`` is stateless -- safe to mint on demand when the parent didn't
-# carry one. Returns ``tools`` unchanged if either ``AgentSpawn`` is absent or
-# ``BackgroundTask`` is already present.
-def _bundle_background_task(tools: list[Tool]) -> list[Tool]:
-    """Append ``BackgroundTask`` when ``AgentSpawn`` is present."""
-    names = {t.name for t in tools}
-    if "AgentSpawn" not in names or "BackgroundTask" in names:
-        return tools
-    return [*tools, BackgroundTask()]
+            return
+        if spend.total:
+            for payer in self.payers:
+                payer.charge(spend, label=self.label)

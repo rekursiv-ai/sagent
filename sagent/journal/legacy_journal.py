@@ -1,0 +1,891 @@
+"""Old sagent session logs, read as one window of today's records.
+
+The experimental sagent wrote ``session.jsonl`` as a tape: ``kind: history``
+records, and ``context_splice`` records that hide some of them and show a
+payload in their place; before splices, ``context_override``, ``context_clear``
+and ``update`` records did the same. Before the tape, v3 wrote ``kind:
+message`` records of nested ``descriptor`` parts, and before v3, ``kind:
+message`` records tagged by ``role``.
+
+:func:`convert` plays a log back to what its model last saw, as that sagent
+did, and returns it as one window: a ``ContextClear``, then each record. Its
+sessions shared today's directories and file name, ``<id>/session.jsonl``:
+:func:`upgrade` rewrites one in place as today's journal, and :func:`find_old`
+finds those not yet rewritten. Only this module knows the old formats:
+deleting it ends their support.
+
+Typical usage example:
+
+  if is_legacy(path):
+      upgrade(path)
+  async with JsonlJournal(path) as journal:
+      list(journal)                              # The old session, converted.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import PurePath
+from typing import TYPE_CHECKING, Literal
+
+import base64
+import binascii
+import glob
+import logging
+import os
+
+from treekle import PlainTree, ReadError, from_plain, json_loads
+
+from sagent.journal.jsonl import record_line
+from sagent.journal.projects import is_session, legacy_log
+from sagent.journal.types import (
+    FORMER_TAPE_KINDS,
+    AgentMessage,
+    AgentSpawnResult,
+    AssistantMessage,
+    Attachment,
+    BashResult,
+    ContextClear,
+    EditResult,
+    ReadResult,
+    SessionRecord,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+    WebFetchResult,
+    WriteResult,
+)
+from sagent.lib.files.owner_only import write_private
+from sagent.lib.userdirs import data_dir
+from sagent.model.types import Response
+from sagent.runtime.context import (
+    alive_splices,
+    masked_refs_by_alive,
+    resolve_context,
+)
+from sagent.runtime.tape import (
+    ContextSplice,
+    InvalidReplacementError,
+    MaskRange,
+    ReferrableTapeEvent,
+    TapeRecord,
+    TapeRef,
+    full_tape_mask,
+    mask_contains_ref,
+    merge_mask_ranges,
+    splice_safe_repair,
+    unpaired_call_ids,
+)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+    from pathlib import Path
+
+    from sagent.runtime.types import ModelContextEvent
+
+
+__all__ = [
+    "convert",
+    "find_old",
+    "is_legacy",
+    "upgrade",
+]
+
+
+logger = logging.getLogger(__name__)
+
+
+type _Record = Mapping[str, PlainTree]
+
+
+def is_legacy(path: Path) -> bool:
+    """Return whether ``path`` is an old sagent log: its first record is untagged.
+
+    Today's journal tags every record with its class, as ``py/object``.
+
+    Args:
+      path: The log.
+
+    Returns:
+      legacy: ``False`` for a log of today's records, an empty one, one
+        that is no JSON, or one not yet written.
+
+    """
+    if not path.exists():
+        return False
+    for record in _records(path):
+        return "py/object" not in record
+    return False
+
+
+def convert(path: Path) -> tuple[SessionRecord, ...]:
+    """Return the old log at ``path`` as one window: what its model last saw.
+
+    Args:
+      path: The log.
+
+    Returns:
+      records: A ``ContextClear``, then each record, as a live journal writes
+        a window.
+
+    """
+    meta: _Record = dict[str, PlainTree]()
+    tape: list[_Record] = []
+    for record in _records(path):
+        kind = record.get("kind")
+        # Some writers left the kind off their meta records.
+        if kind == "meta" or (kind is None and "session_id" in record):
+            meta = record
+        elif kind == "message":
+            entry = _history(record)
+            if entry is not None:
+                tape.append(entry)
+        elif kind in FORMER_TAPE_KINDS:
+            tape.append(record)
+    tape_records = _tape(tape, _str(meta.get("session_id")))
+    seen = splice_safe_repair(resolve_context(tape_records).messages)
+    clear = ContextClear(
+        timestamp=datetime.now(UTC),
+        extra={"spend_usd": _spent(meta), "converted_from": str(path)},
+    )
+    return (
+        clear,
+        *(
+            record
+            for entry in seen
+            for record in (entry.records if isinstance(entry, Response) else (entry,))
+        ),
+    )
+
+
+def upgrade(path: Path) -> bool:
+    """Rewrite the old log at ``path`` as today's journal of :func:`convert`.
+
+    The log itself moves to ``projects.legacy_log``, whole: the journal keeps
+    only its last window. A log with nothing said is left as it is: there is
+    nothing to resume.
+
+    Args:
+      path: The log.
+
+    Returns:
+      upgraded: Whether it held something said, and so was rewritten.
+
+    """
+    records = convert(path)
+    if len(records) <= 1:
+        return False
+    # The log is kept aside first, then replaced at once: a crash between leaves it
+    # whole in both places, and the next upgrade finds its copy already kept.
+    kept = legacy_log(path.parent)
+    try:
+        os.link(path, kept)
+    except FileExistsError:
+        if not kept.samefile(path):
+            raise
+    write_private(path, b"".join(record_line(record) for record in records))
+    return True
+
+
+def find_old(prefix: str, *, root: Path | None = None) -> list[Path]:
+    """Return the log of each old session not yet rewritten whose id starts with ``prefix``.
+
+    Args:
+      prefix: The start of an id; matched literally.
+      root: Where projects live; the per-user root when omitted.
+
+    Returns:
+      logs: Each session's ``<id>/session.jsonl`` still in an old format, in
+        path order.
+
+    """
+    base = (
+        root if root is not None else data_dir() / "rekursiv-ai" / "sagent" / "projects"
+    )
+    return sorted(
+        log
+        for log in base.glob(f"**/{glob.escape(prefix)}*/session.jsonl")
+        if is_session(log) and is_legacy(log)
+    )
+
+
+def _records(path: Path) -> Iterator[_Record]:
+    """Yield each JSON object ``path`` holds, one per line; skip the rest."""
+    with path.open("rb") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            try:
+                yield from_plain(json_loads(line), dict[str, PlainTree])
+            except ValueError:
+                logger.warning("skipping a line of %s that holds no record", path)
+
+
+# Resolved as the old loader did: synthetic refs for records that carry none, a
+# duplicated ref moved past every other, and ordinal order.
+def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
+    """Return the old records as today's tape."""
+    entries = _Entries()
+    tape: list[TapeRecord] = []
+    # Never keyed by ``None``, which an update with no id looks up and misses.
+    ids: dict[int | None, int] = {}
+    cursor = 0
+    for record in records:
+        kind = record.get("kind")
+        ref = _ref(record.get("ref")) or TapeRef(session_id=session_id, ordinal=cursor)
+        built: TapeRecord | None = None
+        if kind == "history":
+            event = entries.read(record)
+            if event is not None:
+                built = ReferrableTapeEvent(ref=ref, event=event)
+                n = _int(record.get("id"))
+                if isinstance(event, ToolMessage) and n is not None:
+                    ids[n] = len(tape)
+        elif kind == "persistent_agent":
+            directory = PurePath(_str(record.get("session_dir")))
+            entries.children[_str(record.get("label"))] = directory.name
+        elif kind in ("clear", "context_clear"):
+            built = _splice(ref=ref, mask=full_tape_mask(tape), strategy="clear")
+        elif kind == "update":
+            _patch(entries, tape, ids.get(_int(record.get("id"))), record)
+        else:
+            built = _splice(
+                ref=ref,
+                mask=_mask(record, ref)
+                if kind == "context_override"
+                else _ranges(record),
+                insert_after=_ref(
+                    record.get(
+                        "inject_after"
+                        if kind == "context_override"
+                        else "insert_after",
+                    ),
+                ),
+                replacement=_replacement(entries, record.get("payload")),
+                paired=frozenset(
+                    s
+                    for s in _list(record.get("paired_externally"))
+                    if isinstance(s, str)
+                ),
+                strategy=_str(record.get("strategy")),
+            )
+        if built is not None:
+            tape.append(built)
+            cursor = max(cursor, built.ref.ordinal + 1)
+    return sorted(_unique(tape), key=lambda r: r.ref.ordinal)
+
+
+def _replacement(entries: _Entries, raw: PlainTree) -> tuple[ModelContextEvent, ...]:
+    """Return the entries a journaled splice's ``payload`` key holds."""
+    events: list[ModelContextEvent] = []
+    for item in _list(raw):
+        event = entries.read(_object(item))
+        if event is not None:
+            events.append(event)
+    return tuple(events)
+
+
+def _splice(
+    *,
+    ref: TapeRef,
+    mask: tuple[MaskRange, ...],
+    strategy: str,
+    insert_after: TapeRef | None = None,
+    replacement: tuple[ModelContextEvent, ...] = (),
+    paired: frozenset[str] = frozenset(),
+) -> ContextSplice:
+    """Return the splice; a replacement not valid on its own is repaired first."""
+    mask = merge_mask_ranges(mask)
+    try:
+        return ContextSplice(
+            ref=ref,
+            mask=mask,
+            insert_after=insert_after,
+            replacement=replacement,
+            strategy=strategy,
+            paired_externally=paired,
+        )
+    except InvalidReplacementError:
+        repaired = splice_safe_repair(replacement, paired_externally=paired)
+        return ContextSplice(
+            ref=ref,
+            mask=mask,
+            insert_after=insert_after,
+            replacement=repaired,
+            strategy=strategy,
+            paired_externally=unpaired_call_ids(repaired),
+        )
+
+
+# Two writers could take one ordinal. A splice re-appended at a masked position was an
+# edit applied twice, and is dropped; anything else is someone's work, and moves on,
+# keeping its position's fate: a splice written after it that hid the position hides
+# where it moved, and one written before it never meant to.
+def _unique(tape: list[TapeRecord]) -> list[TapeRecord]:
+    """Return ``tape`` with each ref held once."""
+    if not tape:
+        return []
+    masked = masked_refs_by_alive(tape, alive_splices(tape))
+    after = max(
+        (
+            *(r.ref.ordinal for r in tape),
+            *(m.hi for r in tape if isinstance(r, ContextSplice) for m in r.mask),
+        ),
+    )
+    seen: set[TapeRef] = set()
+    moved: list[tuple[TapeRef, TapeRef]] = []
+    kept: list[TapeRecord] = []
+    for record in tape:
+        if record.ref not in seen:
+            seen.add(record.ref)
+            kept.append(_carried(record, moved=moved))
+        elif not (isinstance(record, ContextSplice) and record.ref in masked):
+            after += 1
+            fresh = replace(record.ref, ordinal=after)
+            kept.append(_carried(replace(record, ref=fresh), moved=moved))
+            moved.append((record.ref, fresh))
+    return kept
+
+
+def _carried(
+    record: TapeRecord,
+    *,
+    moved: Sequence[tuple[TapeRef, TapeRef]],
+) -> TapeRecord:
+    """Return ``record``, a splice also hiding where what it hid moved before it."""
+    if not isinstance(record, ContextSplice):
+        return record
+    extra = tuple(
+        MaskRange(session_id=fresh.session_id, lo=fresh.ordinal, hi=fresh.ordinal)
+        for ref, fresh in moved
+        if mask_contains_ref(record.mask, ref)
+    )
+    if not extra:
+        return record
+    return replace(record, mask=merge_mask_ranges(record.mask + extra))
+
+
+def _patch(
+    entries: _Entries,
+    tape: list[TapeRecord],
+    at: int | None,
+    record: _Record,
+) -> None:
+    """Rewrite the result at ``at`` as an ``update`` record says."""
+    if at is None:
+        return
+    held = tape[at]
+    assert isinstance(held, ReferrableTapeEvent)
+    result = held.event
+    assert isinstance(result, ToolMessage)
+    tape[at] = replace(
+        held,
+        event=entries.result(
+            result.call_id,
+            _str(record.get("content")),
+            failed=_bool(record.get("is_error")),
+            timestamp=result.timestamp,
+            attachments=result.attachments,
+        ),
+    )
+
+
+def _ref(raw: PlainTree) -> TapeRef | None:
+    """Return the ``{session_id, ordinal}`` ref, or ``None`` when malformed."""
+    record = _object(raw)
+    session_id, ordinal = record.get("session_id"), record.get("ordinal")
+    if not isinstance(session_id, str) or isinstance(ordinal, bool):
+        return None
+    if not isinstance(ordinal, int) or ordinal < 0:
+        return None
+    return TapeRef(session_id=session_id, ordinal=ordinal)
+
+
+def _ranges(record: _Record) -> tuple[MaskRange, ...]:
+    """Return a splice's ``[[from, to], ...]`` mask; a malformed range is dropped."""
+    ranges: list[MaskRange] = []
+    for pair in _list(record.get("mask")):
+        ends = _list(pair)
+        if len(ends) != 2:
+            continue
+        lo, hi = _ref(ends[0]), _ref(ends[1])
+        if lo is None or hi is None or lo.session_id != hi.session_id:
+            continue
+        if lo.ordinal <= hi.ordinal:
+            ranges.append(
+                MaskRange(session_id=lo.session_id, lo=lo.ordinal, hi=hi.ordinal),
+            )
+    return tuple(ranges)
+
+
+# An override named the records it hid; a barrier with none hid everything up to its
+# anchor, or before itself.
+def _mask(record: _Record, ref: TapeRef) -> tuple[MaskRange, ...]:
+    """Return an override's mask."""
+    hidden = [
+        r for raw in _list(record.get("suppresses")) if (r := _ref(raw)) is not None
+    ]
+    if hidden:
+        return tuple(
+            MaskRange(session_id=r.session_id, lo=r.ordinal, hi=r.ordinal)
+            for r in hidden
+        )
+    if not _bool(record.get("barrier")):
+        return ()
+    anchor = _ref(record.get("inject_after"))
+    if anchor is not None:
+        return (MaskRange(session_id=anchor.session_id, lo=0, hi=anchor.ordinal),)
+    return (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
+
+
+# ``spend`` is the agent's and its children's, as an agent's spend counts today;
+# ``own_spend``, its own alone, stands in for a log that kept nothing else.
+def _spent(meta: _Record) -> float:
+    """Return what the log says its agent and its children spent, in USD."""
+    for key in ("spend", "own_spend"):
+        buckets = _object(meta.get(key))
+        if buckets:
+            return sum(
+                v
+                for v in buckets.values()
+                if isinstance(v, int | float) and not isinstance(v, bool)
+            )
+    cost = meta.get("total_cost_usd")
+    return (
+        float(cost)
+        if isinstance(cost, int | float) and not isinstance(cost, bool)
+        else 0.0
+    )
+
+
+def _history(record: _Record) -> _Record | None:
+    """Return a v3 or role ``message`` record as the history record it stood for."""
+    if "descriptor" in record:
+        return _from_v3(record)
+    if "role" in record:
+        return _from_role(record)
+    return None
+
+
+@dataclass(slots=True, kw_only=True)
+class _Entries:
+    """Read history entries in order, typing each result by the call it answers.
+
+    A result names only the id of its call, so each call read is remembered.
+    """
+
+    calls: dict[str, ToolCall] = field(default_factory=dict[str, ToolCall])
+    children: dict[str, str] = field(default_factory=dict[str, str])
+    """Each spawned child's directory name, by the label its spawn gave it."""
+
+    def read(self, entry: _Record) -> ModelContextEvent | None:
+        """Return one history entry as the tape's event.
+
+        Args:
+          entry: A ``kind: history`` record, or a splice payload's entry.
+
+        Returns:
+          event: The record it says; an assistant turn is one ``Response`` of
+            its thinking, text and calls, in that order, possibly none;
+            ``None`` for an entry no model saw.
+
+        """
+        kind = entry.get("type")
+        text = _str(entry.get("text"))
+        attachments = _attachments(entry.get("attachments"))
+        timestamp = _time(entry.get("timestamp"))
+        if kind == "user":
+            return UserMessage(
+                timestamp=timestamp,
+                content=text,
+                attachments=attachments,
+            )
+        if kind == "agent_send":
+            return AgentMessage(
+                timestamp=timestamp,
+                content=text,
+                attachments=attachments,
+                sender=_str(entry.get("source")) or None,
+            )
+        # The agent's own reminders to its model: the harness, never the user.
+        if kind == "system_message":
+            return SystemMessage(timestamp=timestamp, content=text, subtype="reminder")
+        if kind == "assistant":
+            return self._turn(entry, text=text, timestamp=timestamp)
+        if kind == "tool_result":
+            return self.result(
+                _str(entry.get("call_id")),
+                _str(entry.get("content")),
+                failed=_bool(entry.get("is_error")),
+                kind=entry.get("result_kind"),
+                timestamp=timestamp,
+                attachments=attachments,
+            )
+        return None
+
+    def result(
+        self,
+        call_id: str,
+        content: str,
+        *,
+        failed: bool,
+        kind: PlainTree = None,
+        timestamp: datetime | None = None,
+        attachments: tuple[Attachment, ...] = (),
+    ) -> ToolMessage:
+        """Return a result as today's, typed by the call it answers.
+
+        Args:
+          call_id: The call answered.
+          content: The text the model read.
+          failed: Whether the call failed: its result is then untyped, with a
+            nonzero exit code, since a failed call did not do what it names.
+          kind: The ``result_kind`` it was written with, if any.
+          timestamp: When it was written.
+          attachments: What came with it.
+
+        Returns:
+          result: A stand-in stays what it stood for, with no result.
+
+        """
+        stub = _stub(kind, content)
+        return ToolMessage(
+            timestamp=timestamp,
+            call_id=call_id,
+            state=stub or "done",
+            stdout=(*((content,) if content else ()), *attachments),
+            result=None if stub else self._typed(call_id, failed=failed),
+            extra={"is_error": failed},
+        )
+
+    def _typed(
+        self,
+        call_id: str,
+        *,
+        failed: bool,
+    ) -> (
+        BashResult
+        | ReadResult
+        | WriteResult
+        | EditResult
+        | WebFetchResult
+        | AgentSpawnResult
+        | UncategorizedToolResult
+    ):
+        """Return a result's type and fields from the call it answers."""
+        call = self.calls.get(call_id)
+        if failed or call is None:
+            return UncategorizedToolResult(exit_code=int(failed))
+        name = call.name.lower()
+        args = call.arguments
+        path = _str(args.get("file_path") or args.get("path")) or None
+        if name == "bash":
+            command = _str(args.get("command"))
+            return BashResult(command=(command,) if command else None)
+        if name == "read":
+            return ReadResult(path=path)
+        if name == "write":
+            return WriteResult(path=path, content=_str(args.get("content")) or None)
+        if name == "edit":
+            return EditResult(path=path)
+        if name == "webfetch":
+            return WebFetchResult(url=_str(args.get("url")) or None)
+        if name == "agentspawn":
+            label = _str(args.get("label"))
+            return AgentSpawnResult(
+                agent_id=self.children.get(label) if label else None,
+                agent_kind=label or None,
+                prompt=_str(args.get("prompt")) or None,
+                model=_str(args.get("model_id")) or None,
+            )
+        return UncategorizedToolResult()
+
+    # Gemini's signature rides on its part; a call with no id or name was never sent.
+    def _turn(
+        self,
+        entry: _Record,
+        *,
+        text: str,
+        timestamp: datetime | None,
+    ) -> Response:
+        """Return an assistant entry as one model turn, remembering each call."""
+        calls = [
+            ToolCall(
+                timestamp=timestamp,
+                call_id=call_id,
+                name=name,
+                arguments=_object(call.get("args")),
+                extra=_signature(call),
+            )
+            for call in map(_object, _list(entry.get("tool_calls")))
+            if (call_id := _str(call.get("id"))) and (name := _str(call.get("name")))
+        ]
+        self.calls.update((call.call_id, call) for call in calls)
+        said = (
+            [
+                AssistantMessage(
+                    timestamp=timestamp,
+                    content=text,
+                    extra=_signature(entry),
+                ),
+            ]
+            if text
+            else []
+        )
+        thinking = [
+            t
+            for b in _list(entry.get("thinking_blocks"))
+            if (t := _thinking(_object(b), timestamp))
+        ]
+        return Response(
+            records=(*thinking, *said, *calls),
+            stop_reason="",
+        )
+
+
+def _signature(record: _Record) -> dict[str, PlainTree]:
+    """Return a part's Gemini signature as today's ``extra``."""
+    signature = _str(record.get("thought_signature"))
+    return {"thoughtSignature": signature} if signature else {}
+
+
+# Anthropic seals its thinking with a signature, or redacts it whole; OpenAI seals its
+# reasoning beside its id. The oldest blocks name no type, only their thinking.
+def _thinking(block: _Record, timestamp: datetime | None) -> Thinking | None:
+    """Return a thinking block as today's ``Thinking``; ``None`` for one unknown."""
+    kind = block.get("type", "thinking" if "thinking" in block else None)
+    if kind == "thinking":
+        return Thinking(
+            timestamp=timestamp,
+            content=_str(block.get("thinking")) or None,
+            encrypted=_str(block.get("signature")) or None,
+        )
+    if kind == "redacted_thinking":
+        return Thinking(timestamp=timestamp, encrypted=_str(block.get("data")) or None)
+    if kind != "reasoning":
+        return None
+    content = "".join(_str(_object(p).get("text")) for p in _list(block.get("content")))
+    summary = "".join(_str(_object(p).get("text")) for p in _list(block.get("summary")))
+    return Thinking(
+        timestamp=timestamp,
+        content=content or _str(block.get("text")) or None,
+        summary=summary or None,
+        encrypted=_str(block.get("encrypted_content")) or None,
+        reasoning_id=_str(block.get("id")) or None,
+    )
+
+
+def _stub(kind: PlainTree, content: str) -> Literal["pending", "cancelled"] | None:
+    """Return what a stand-in result stood for, from its kind or, before kinds, its text."""
+    if kind in ("pending", "cancelled"):
+        return "pending" if kind == "pending" else "cancelled"
+    if kind == "final":
+        return None
+    if content.startswith(
+        (
+            "[detached: tool still running; real result arrives in a later message]",
+            "[Running in background: ",
+        ),
+    ):
+        return "pending"
+    if content == "[cancelled: tool killed before completion; no result will follow]":
+        return "cancelled"
+    return None
+
+
+def _attachments(raw: PlainTree) -> tuple[Attachment, ...]:
+    """Return the ``{mime, data}`` attachments; one that does not decode is dropped."""
+    out: list[Attachment] = []
+    for item in map(_object, _list(raw)):
+        mime, data = _str(item.get("mime")), _str(item.get("data"))
+        try:
+            out.append(
+                Attachment(
+                    mime_descriptor=mime,
+                    data=base64.b64decode(data, validate=True),
+                ),
+            )
+        except binascii.Error:
+            logger.warning("dropping an attachment that does not decode")
+    return tuple(a for a in out if a.mime_descriptor and a.data)
+
+
+# Some writers took the monotonic clock, which no date reads from.
+def _time(raw: PlainTree) -> datetime | None:
+    """Return the time seconds or nanoseconds since the epoch name."""
+    if not isinstance(raw, int | float) or isinstance(raw, bool):
+        return None
+    # Seconds past year 9999 are nanoseconds; a monotonic clock falls short of 2001.
+    for seconds in (raw, raw / 1e9):
+        try:
+            when = datetime.fromtimestamp(seconds, UTC)
+        except (OverflowError, OSError, ValueError):
+            continue
+        return when if seconds > 1e9 else None
+    return None
+
+
+# The oldest family: a turn names its calls' arguments ``input`` or ``args``.
+def _from_role(record: _Record) -> _Record | None:
+    """Return a role-tagged ``message`` record as the history record it stood for."""
+    role = record.get("role")
+    text = _str(record.get("content"))
+    if role == "user":
+        return {"kind": "history", "type": "user", "text": text}
+    if role == "assistant":
+        return {
+            "kind": "history",
+            "type": "assistant",
+            "text": text,
+            "thinking_blocks": record.get("thinking_blocks"),
+            "tool_calls": [
+                {
+                    "id": call.get("id"),
+                    "name": call.get("name"),
+                    "args": call.get("input") or call.get("args"),
+                }
+                for call in map(_object, _list(record.get("tool_calls")))
+            ],
+        }
+    if role == "tool":
+        return {
+            "kind": "history",
+            "type": "tool_result",
+            "call_id": record.get("tool_call_id"),
+            "content": text,
+            "is_error": record.get("is_error"),
+        }
+    return None
+
+
+# v3 parts nest: a turn holds text, thinking, and calls, each a call's id and arguments.
+def _from_v3(record: _Record) -> _Record | None:
+    """Return a v3 ``message`` record as the history record it stood for."""
+    descriptor = record.get("descriptor")
+    content = record.get("content")
+    parts = [_object(p) for p in _list(content)]
+    base: dict[str, PlainTree] = {
+        "kind": "history",
+        "timestamp": record.get("_timestamp"),
+        "id": record.get("_id"),
+    }
+    if descriptor in (
+        "text/x-user-message",
+        "multipart/x-user-message",
+        "multipart/x-user-turn",
+    ):
+        return {
+            **base,
+            "type": "user",
+            "text": _text(content, parts),
+            "attachments": _v3_attachments(parts),
+        }
+    if descriptor in ("multipart/x-model-message", "multipart/x-assistant-turn"):
+        return {
+            **base,
+            "type": "assistant",
+            "text": _joined(parts, "text/plain", "text/markdown"),
+            "thinking_blocks": [
+                p.get("content")
+                for p in parts
+                if _str(p.get("descriptor")).startswith("application/x-thinking")
+            ],
+            "tool_calls": [
+                _v3_call(p)
+                for p in parts
+                if p.get("descriptor") == "multipart/x-tool-call"
+            ],
+        }
+    if descriptor == "multipart/x-tool-result":
+        return {
+            **base,
+            "type": "tool_result",
+            "call_id": _joined(parts, "text/x-queue-id"),
+            "content": _text(content, parts, "text/x-error"),
+            "is_error": any(p.get("descriptor") == "text/x-error" for p in parts),
+            "attachments": _v3_attachments(parts),
+        }
+    return None
+
+
+def _v3_call(part: _Record) -> dict[str, PlainTree]:
+    """Return a v3 call part as the history's ``{id, name, args}``."""
+    pieces = [_object(p) for p in _list(part.get("content"))]
+    tool = next(
+        (
+            p
+            for p in pieces
+            if _str(p.get("descriptor")).startswith("application/x-tool-")
+        ),
+        dict[str, PlainTree](),
+    )
+    return {
+        "id": _joined(pieces, "text/x-queue-id"),
+        "name": _str(tool.get("descriptor")).removeprefix("application/x-tool-"),
+        "args": _object(tool.get("content")),
+    }
+
+
+def _v3_attachments(parts: Sequence[_Record]) -> list[PlainTree]:
+    """Return a v3 message's image parts as the history's ``{mime, data}``."""
+    return [
+        {
+            "mime": _str(p.get("descriptor")),
+            "data": _str(_object(p.get("content")).get("_bytes")),
+        }
+        for p in parts
+        if _str(p.get("descriptor")).startswith("image/")
+    ]
+
+
+def _text(content: PlainTree, parts: Sequence[_Record], *more: str) -> str:
+    """Return a v3 message's text: its string, or its text parts, a line each."""
+    if isinstance(content, str):
+        return content
+    return _joined(parts, "text/plain", "text/markdown", *more)
+
+
+def _joined(parts: Sequence[_Record], *descriptors: str) -> str:
+    """Return the text of the parts of the ``descriptors``, a line each."""
+    return "\n".join(
+        t
+        for p in parts
+        if p.get("descriptor") in descriptors
+        if (t := _str(p.get("content")))
+    )
+
+
+def _object(raw: PlainTree) -> dict[str, PlainTree]:
+    """Return ``raw`` as a JSON object; ``{}`` for anything else."""
+    try:
+        return from_plain(raw, dict[str, PlainTree])
+    except ReadError:
+        return {}
+
+
+def _list(raw: PlainTree) -> list[PlainTree]:
+    """Return ``raw`` as a JSON array; ``[]`` for anything else."""
+    try:
+        return from_plain(raw, list[PlainTree])
+    except ReadError:
+        return []
+
+
+def _str(raw: PlainTree) -> str:
+    """Return ``raw`` if a string, else ``""``."""
+    return raw if isinstance(raw, str) else ""
+
+
+def _int(raw: PlainTree) -> int | None:
+    """Return ``raw`` if an int, else ``None``."""
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+def _bool(raw: PlainTree) -> bool:
+    """Return ``raw`` if a bool, else ``False``."""
+    return raw if isinstance(raw, bool) else False
