@@ -113,7 +113,9 @@ from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
 from sagent.tools.remote import Link, RemoteSession, local_link, saved, tls_link
 from sagent.tools.types import ToolContext
+from sagent.tui.details import inspect
 from sagent.tui.prompt import (
+    OPEN_DETAILS,
     OPEN_TREE,
     Input,
     Panes,
@@ -170,6 +172,7 @@ if TYPE_CHECKING:
     from sagent.settings.types import Setting
     from sagent.tools.types import Tool
     from sagent.tui.console import ConsolePrinter, Screen, terminal_console
+    from sagent.tui.details import entries
     from sagent.tui.tree import pick
     from sagent.tui.views import Views
     from sagent.tui.welcome import print_welcome
@@ -181,6 +184,8 @@ else:
     ConsolePrinter = lazy_import("sagent.tui.console", "ConsolePrinter")
     Screen = lazy_import("sagent.tui.console", "Screen")
     terminal_console = lazy_import("sagent.tui.console", "terminal_console")
+    entries = lazy_import("sagent.tui.details", "entries")
+    inspect_details = lazy_import("sagent.tui.details", "inspect")
     pick = lazy_import("sagent.tui.tree", "pick")
     Views = lazy_import("sagent.tui.views", "Views")
     print_welcome = lazy_import("sagent.tui.welcome", "print_welcome")
@@ -566,6 +571,10 @@ async def run(
                     await _tree(views)
                     continue
                 try:
+                    words = line.split()
+                    if line == OPEN_DETAILS or words[:1] == ["/details"]:
+                        await _details(views, words[1:])
+                        continue
                     if await views.current.commands(line):
                         break
                     session.app.invalidate()
@@ -640,6 +649,28 @@ def _prompt_session(views: Views, *, entry: Input, history: Path) -> PromptSessi
         key_bindings=DynamicKeyBindings(lambda: views.current.keys),
         style=DynamicStyle(views.theme.prompt_style),
     )
+
+
+async def _details(views: Views, args: list[str]) -> None:
+    """Show the full entry while the normal scrollback buffers incoming events."""
+    items = entries(views.current.agent)
+    if (
+        len(args) > 1
+        or (args and not args[0].isascii())
+        or (args and not args[0].isdecimal())
+    ):
+        raise ValueError("Use /details or /details NUMBER")
+    if not items:
+        views.printer.note("No command or diff in this agent's current context.")
+        return
+    number = int(args[0]) if args else len(items)
+    if number < 1 or number > len(items):
+        raise ValueError(f"Choose a detail from 1 to {len(items)}")
+    views.hold()
+    try:
+        await inspect(items, number)
+    finally:
+        views.release(show=True)
 
 
 # Nothing may print while the tree is up: a print suspends a full-screen app.

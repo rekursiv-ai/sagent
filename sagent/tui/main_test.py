@@ -60,6 +60,7 @@ from sagent.journal.types import (
     SessionRecord,
     Succeeded,
     Thinking,
+    ToolCall,
     ToolMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
@@ -5936,6 +5937,53 @@ async def test_run_shares_the_theme_and_terminal_with_the_printer(
     assert views.printer.theme is views.theme
     if explicit:
         assert views.theme is theme
+
+
+@pytest.mark.asyncio
+async def test_tool_details_returns_to_the_same_prompt_draft(tmp_path: Path) -> None:
+    provider = ScriptedProvider(replies=[reply("done")])
+    catalog = _Script().catalog()
+    screen = io.StringIO()
+    async with Agent(model=provider["scripted"], tools=[Bash()]) as agent:
+        agent.session.append(
+            ToolCall(name="Bash", call_id="a", arguments={"command": "echo hello"}),
+        )
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("ac" + _LEFT + "\x0fq" + "b\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+        assert any(
+            isinstance(r, UserMessage) and r.content == "abc"
+            for req in provider.requests
+            for r in req.records
+        )
+        assert "Ctrl+F search" in screen.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_details_explains_empty_and_invalid_selections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = Mock(spec=Views, current=Mock(agent=Mock()), printer=Mock())
+    monkeypatch.setattr(main, "entries", Mock(return_value=[]))
+    await main._details(views, [])
+    views.printer.note.assert_called_once()
+    monkeypatch.setattr(main, "entries", Mock(return_value=[("Bash", "ls")]))
+    with pytest.raises(ValueError, match="NUMBER"):
+        await main._details(views, ["bad"])
+    with pytest.raises(ValueError, match="1 to 1"):
+        await main._details(views, ["2"])
+    views.hold.assert_not_called()
 
 
 if __name__ == "__main__":

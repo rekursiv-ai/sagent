@@ -78,6 +78,7 @@ else:
 
 
 __all__ = [
+    "OPEN_DETAILS",
     "OPEN_TREE",
     "Deferred",
     "Input",
@@ -92,6 +93,7 @@ __all__ = [
 ]
 
 
+OPEN_DETAILS: Final = "\x00details"
 OPEN_TREE: Final = "\x00tree"
 """What the prompt returns for Left on an empty line; no typed line holds a NUL."""
 
@@ -394,6 +396,7 @@ class PromptSource:
         self.session = session
         self.panes = panes
         self.notice = notice
+        self._restore_draft = False
 
     async def line(self) -> str | None:
         """Return the next typed line.
@@ -408,7 +411,12 @@ class PromptSource:
                 # Not ``handle_sigint``: on exit it removes the loop's SIGINT handler,
                 # so a Ctrl+C while a command ran reached nothing. Our ``c-c``
                 # binding still takes the key while the prompt reads.
+                draft = (
+                    self.session.default_buffer.document if self._restore_draft else ""
+                )
+                self._restore_draft = False
                 text = await self.session.prompt_async(
+                    default=draft,
                     set_exception_handler=False,
                     handle_sigint=False,
                 )
@@ -416,6 +424,7 @@ class PromptSource:
                 break
             except KeyboardInterrupt:
                 continue
+            self._restore_draft = text == OPEN_DETAILS
             if text.strip().lower() not in ("/quit", "/exit"):
                 return text
             break
@@ -456,6 +465,7 @@ def key_bindings(runtime: Runtime, panes: Panes, nav: Navigation) -> KeyBindings
     keys.add("up", filter=editing)(functools.partial(_up, runtime, panes, nav))
     keys.add("down", filter=editing)(functools.partial(_down, runtime, panes, nav))
     keys.add("left", filter=editing)(_left)
+    keys.add("c-o", filter=editing)(_details)
     keys.add("escape", "enter", filter=focused)(_newline)
     keys.add("s-up", filter=focused)(
         functools.partial(_search, step=Buffer.history_backward),
@@ -658,6 +668,11 @@ def _restore(panes: Panes, stop: Stop, text: str, *, runtime: Runtime | None) ->
         panes.deferred = staged
     else:
         panes.queue = staged
+
+
+def _details(event: KeyPressEvent) -> None:
+    """Suspend input and open the tool-details view at the current draft."""
+    event.app.exit(result=OPEN_DETAILS)
 
 
 def _left(event: KeyPressEvent) -> None:

@@ -46,6 +46,7 @@ from sagent.runtime import (
 )
 from sagent.runtime.runtime import Await, Runtime
 from sagent.tui.prompt import (
+    OPEN_DETAILS,
     OPEN_TREE,
     Deferred,
     Input,
@@ -923,6 +924,19 @@ async def test_ctrl_c_halts_a_busy_agent(busy_with: str) -> None:
     await task
 
 
+def test_ctrl_o_opens_details_without_submitting_the_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _Prompt()
+    exiting = Mock()
+    monkeypatch.setattr(prompt.app, "exit", exiting)
+    prompt.type("draft")
+    prompt.press(Keys.ControlO)
+    exiting.assert_called_once_with(result=OPEN_DETAILS)
+    assert prompt.buffer.text == "draft"
+    assert prompt.pushed() == []
+
+
 def test_the_keys_that_send_stop_once_the_prompt_is_accepted() -> None:
     prompt = _Prompt()
     with set_app(prompt.app):
@@ -937,6 +951,7 @@ def test_the_keys_that_send_stop_once_the_prompt_is_accepted() -> None:
     guarded = {
         (Keys.ControlM,),
         (Keys.ControlI,),
+        (Keys.ControlO,),
         (Keys.Up,),
         (Keys.Down,),
         (Keys.Left,),
@@ -975,7 +990,7 @@ async def _line(
     source = PromptSource(session, panes=panes or Panes(), notice=notices.append)
     line = await source.line()
     assert reading.await_args_list == [
-        call(set_exception_handler=False, handle_sigint=False),
+        call(default="", set_exception_handler=False, handle_sigint=False),
     ] * len(answers)
     assert focus.call_args_list == [call(DEFAULT_BUFFER)] * len(answers)
     return line, notices
@@ -1029,7 +1044,11 @@ async def test_reopening_the_prompt_restores_focus_before_reading() -> None:
     )
     source = PromptSource(session, panes=Panes(), notice=list[str]().append)
     assert await source.line() == "/after"
-    reading.assert_awaited_once_with(set_exception_handler=False, handle_sigint=False)
+    reading.assert_awaited_once_with(
+        default="",
+        set_exception_handler=False,
+        handle_sigint=False,
+    )
 
 
 @pytest.mark.parametrize(

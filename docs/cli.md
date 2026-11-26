@@ -238,3 +238,5 @@ Weekly limit reached. Resumes Sat Oct 31 06:00:00 (1d 22h 3m 5s).
 
 The `stream-json` output channel forwards the same text as a
 `text/x-notice` record.
+
+Press Ctrl+O to inspect the full Bash commands and file diffs in the focused agent’s current context. Your prompt draft and cursor are restored on return. `/details` opens the latest entry and `/details NUMBER` selects one directly. Ctrl+P/N switches entries, Ctrl+F searches, and Esc returns.
