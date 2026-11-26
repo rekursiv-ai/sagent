@@ -1,0 +1,528 @@
+"""What a model offers, where it starts, and what one model instance chose.
+
+model = catalog["anthropic"]["opus"]
+model.capability.thinking_effort                    # every effort level offered
+model.capability.default                            # what a new model starts with
+model.settings.context_size.tokens
+model.capability.prices["smallcontext"]             # the size ``smallcontext`` names
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Literal, TypeAliasType, cast, get_args
+
+from sagent.model.context import ContextSize
+from sagent.model.cost import PriceCatalog, ServiceTier
+
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
+
+
+__all__ = [
+    "Compaction",
+    "ModelCapability",
+    "ModelLimits",
+    "ModelSettingName",
+    "ModelSettings",
+    "Permission",
+    "PruningPolicy",
+    "SummaryKind",
+    "ThinkingBudget",
+    "ThinkingEffort",
+    "ThinkingOutput",
+    "literal_members",
+    "model_setting_names",
+    "typed_text",
+]
+
+
+type ThinkingEffort = Literal[
+    "none",
+    "min",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
+
+type ThinkingBudget = Literal[
+    "none",
+    "auto",
+    "fixed",
+]
+
+type ThinkingOutput = Literal[
+    "none",
+    "text",
+    "redacted",
+]
+
+type Compaction = Literal[
+    "bespoke",
+    "provider",
+]
+"""Who summarizes a full context: sagent's own prompt, or the vendor's API."""
+
+type ModelSettingName = Literal[
+    "thinking_effort",
+    "thinking_budget",
+    "thinking_output",
+    "service_tier",
+    "cache_ttl_sec",
+    "manage_context_server_side",
+    "compaction",
+]
+"""A ``ModelSettings`` field a model offers a choice of."""
+
+type SummaryKind = Literal[
+    "none",
+    "auto",
+    "concise",
+    "detailed",
+]
+
+type Permission = Literal[
+    "ask",
+    "accept_edits",
+    "bypass",
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelLimits:
+    """Hard ceilings of one model's window."""
+
+    max_request_tokens: int = 0
+    """Input tokens the model accepts; ``0`` means unknown."""
+
+    max_response_tokens: int = 0
+    """Output tokens the model can generate in one response, thinking included."""
+
+    max_context_tokens: int = 0
+    """Input and output together; ``0`` means ``max_request_tokens`` bounds both."""
+
+    truncates_at_context: bool | None = None
+    """Whether input plus ``max_tokens`` past the context is accepted and the reply
+    stopped there (``True``) or the request rejected (``False``); ``None`` is unknown."""
+
+    max_request_bytes: int = 0
+    """HTTP wire ceiling, distinct from the token window; ``0`` = none."""
+
+    max_image_edge_px: int = 0
+    """Long edge above which the server downscales; ``0`` = no resize."""
+
+    max_image_bytes: int = 0
+    """Per-image byte cap after resize; ``0`` = no cap."""
+
+    request_betas: frozenset[str] = frozenset()
+    """Vendor beta features every request needs."""
+
+    @property
+    def context_tokens(self) -> int:
+        """Return what input and output may hold together."""
+        return self.max_context_tokens or self.max_request_tokens
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PruningPolicy:
+    """Which old tool output may be replaced by a stub, to keep the context small.
+
+    The client prunes when the cost says so (``agent.pruner.Pruner``); a server
+    that prunes, with ``manage_context_server_side``, goes by the two token marks.
+    """
+
+    trigger_tokens: int = 100_000
+    """A server that prunes starts once a request's context passes this."""
+
+    target_tokens: int = 40_000
+    """A server that prunes stops once the context is back near this."""
+
+    keep_recent: int = 3
+    """The newest tool results, which are never pruned."""
+
+    expiry: float = 1.0
+    """``λ``: an unused result expires once its rent reaches ``λ`` times the cost of fetching it again."""
+
+    keep_tools: frozenset[str] = frozenset({"Skill"})
+    """Tools whose results are never pruned; a skill's steps stay while it runs."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelSettings:
+    """What one model instance chose, each choice resolved."""
+
+    thinking_effort: ThinkingEffort = "none"
+    thinking_budget: ThinkingBudget = "none"
+    thinking_output: ThinkingOutput = "none"
+    service_tier: ServiceTier = "auto"
+    cache_ttl_sec: float = 0.0
+    manage_context_server_side: bool = False
+    compaction: Compaction = "bespoke"
+    context_size: ContextSize = field(default_factory=ContextSize)
+    pruning: PruningPolicy | None = field(default_factory=PruningPolicy)
+
+    def value(self, name: ModelSettingName) -> object:
+        """Return the value chosen on the setting ``name``.
+
+        Args:
+          name: The setting.
+
+        Returns:
+          value: What it holds, as ``ModelCapability.values`` lists it.
+
+        """
+        match name:
+            case "thinking_effort":
+                return self.thinking_effort
+            case "thinking_budget":
+                return self.thinking_budget
+            case "thinking_output":
+                return self.thinking_output
+            case "service_tier":
+                return self.service_tier
+            case "cache_ttl_sec":
+                return self.cache_ttl_sec
+            case "manage_context_server_side":
+                return self.manage_context_server_side
+            case "compaction":
+                return self.compaction
+
+    def with_value(self, name: ModelSettingName, value: object) -> ModelSettings:
+        """Return these settings with ``value`` chosen on ``name``; unchecked.
+
+        Args:
+          name: The setting.
+          value: A value ``ModelCapability.values`` lists for it.
+
+        Returns:
+          settings: The new choice made, offered by no model in particular.
+
+        Raises:
+          ValueError: ``value`` is no value of that setting's type.
+
+        """
+        match name:
+            case "thinking_effort":
+                return replace(self, thinking_effort=cast(ThinkingEffort, value))
+            case "thinking_budget":
+                return replace(self, thinking_budget=cast(ThinkingBudget, value))
+            case "thinking_output":
+                return replace(self, thinking_output=cast(ThinkingOutput, value))
+            case "service_tier":
+                return replace(self, service_tier=cast(ServiceTier, value))
+            case "cache_ttl_sec" if isinstance(value, int | float) and not isinstance(
+                value,
+                bool,
+            ):
+                return replace(self, cache_ttl_sec=float(value))
+            case "manage_context_server_side" if isinstance(value, bool):
+                return replace(self, manage_context_server_side=value)
+            case "compaction" if value in literal_members(Compaction):
+                return replace(self, compaction=cast(Compaction, value))
+            case _:
+                raise ValueError(f"{name}={value!r} is no choice")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelCapability:
+    """What one model offers, where it starts, and what it costs.
+
+    Each setting offers only values that change what is sent; one its provider
+    does not send offers the one thing the vendor does unasked.
+    """
+
+    thinking_effort: frozenset[ThinkingEffort] = frozenset({"none"})
+    thinking_budget: frozenset[ThinkingBudget] = frozenset({"none"})
+    thinking_output: frozenset[ThinkingOutput] = frozenset({"none"})
+    service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
+    manage_context_server_side: frozenset[bool] = frozenset({False, True})
+    cache_ttl_sec: frozenset[float] = frozenset({0.0})
+    compaction: frozenset[Compaction] = frozenset({"bespoke"})
+    default: ModelSettings = field(default_factory=ModelSettings)
+
+    model_id: str = ""
+    wire_model_id: str = ""
+    knowledge_cutoff: str | None = None
+    """ISO 8601 at the precision the vendor publishes: ``2026-06`` or ``2026-05-18``."""
+
+    tokenizer: str | None = None
+    """Declared tokenizer identity; omitted identities are local to provider/model."""
+
+    approx_chars_per_token: float = 4.0
+    limits: ModelLimits = field(default_factory=ModelLimits)
+    prices: PriceCatalog = field(default_factory=PriceCatalog)
+    effort_as_level: bool = False
+    thinking_off_max_effort: ThinkingEffort | None = None
+    """The highest effort at which ``thinking_budget='none'`` is taken; ``None``, any."""
+
+    retries_internally: bool = False
+    account_auth: bool = False
+    keeps_user_turns_apart: bool = False
+    """Whether the API keeps adjacent user turns apart instead of joining them."""
+
+    def check(self, settings: ModelSettings) -> None:
+        """Raise unless this model offers every choice in ``settings``, its size too.
+
+        A size is offered when it is what its own count names here: within the
+        window, in the band that count falls in.
+
+        Args:
+          settings: The choices to check.
+
+        Raises:
+          ValueError: A choice this model does not offer, named with what it does.
+
+        """
+        for name in model_setting_names():
+            _check_offered(self.model_id, name, settings.value(name), self.values(name))
+        if self._thinking_off_refused(settings):
+            raise ValueError(
+                f"thinking_budget='none' is not offered by {self.model_id or 'this model'}"
+                f" at thinking_effort={settings.thinking_effort!r};"
+                f" allowed: thinking_effort up to {self.thinking_off_max_effort!r}",
+            )
+        size = settings.context_size
+        if size != self.prices[size.tokens or size.context_name]:
+            whole = self.prices.sizes()[-1].display_name
+            raise ValueError(
+                f"context_size={size.display_name} is not offered by"
+                f" {self.model_id or 'this model'}; allowed: 1 to {whole}",
+            )
+
+    def values(self, name: ModelSettingName) -> tuple[object, ...]:
+        """Return the values this model offers on the setting ``name``.
+
+        Args:
+          name: The setting.
+
+        Returns:
+          values: Each one, the least committing first.
+
+        """
+        match name:
+            case "thinking_effort":
+                return _ladder(self.thinking_effort, literal_members(ThinkingEffort))
+            case "thinking_budget":
+                return _ladder(self.thinking_budget, literal_members(ThinkingBudget))
+            case "thinking_output":
+                return _ladder(self.thinking_output, literal_members(ThinkingOutput))
+            case "service_tier":
+                return _ladder(self.service_tier, literal_members(ServiceTier))
+            case "cache_ttl_sec":
+                return tuple(sorted(self.cache_ttl_sec))
+            case "manage_context_server_side":
+                return tuple(sorted(self.manage_context_server_side))
+            case "compaction":
+                return _ladder(self.compaction, literal_members(Compaction))
+
+    def parse_value(self, name: ModelSettingName, text: str) -> object:
+        """Return the value this model offers on ``name`` that ``text`` types.
+
+        Args:
+          name: The setting.
+          text: The value as a user types it, in any case.
+
+        Returns:
+          value: The offered value.
+
+        Raises:
+          ValueError: The model offers no such value; the message lists those it does.
+
+        """
+        values = self.values(name)
+        hits = [v for v in values if typed_text(v) == text.strip().lower()]
+        if not hits:
+            texts = ", ".join(typed_text(v) for v in values)
+            raise ValueError(f"{text!r} is not one of: {texts}")
+        return hits[0]
+
+    def with_choices(
+        self,
+        settings: ModelSettings,
+        choices: Mapping[ModelSettingName, object],
+    ) -> ModelSettings:
+        """Return ``settings`` with ``choices`` made; what they conflict with yields.
+
+        Thinking off at an effort too high to take it: a budget chosen lowers the
+        effort to the highest that takes it; otherwise thinking turns on, at the
+        default budget, or else the least committing one offered. Two choices
+        that conflict stand, for ``check`` to refuse.
+
+        Args:
+          settings: The settings the choices are made on.
+          choices: Each value chosen, by setting.
+
+        Returns:
+          settings: The choices made, unchecked.
+
+        Raises:
+          ValueError: A value is no value of its setting's type.
+
+        """
+        for name, value in choices.items():
+            settings = settings.with_value(name, value)
+        return self._settled(settings, chosen=choices.keys())
+
+    def fit(
+        self,
+        settings: ModelSettings,
+        *,
+        was: ModelCapability,
+    ) -> ModelSettings:
+        """Return ``settings`` as this model takes them.
+
+        Each choice this model offers is kept, the rest are its defaults; what
+        conflicts yields as ``with_choices`` says. A size ``was`` named stays
+        named; a size counted stays that count, within the window.
+
+        Args:
+          settings: Choices made on ``was``.
+          was: The model they were made on.
+
+        Returns:
+          settings: Each choice offered here.
+
+        """
+        d = self.default
+        size = settings.context_size
+        named = was.prices[size.context_name] == size
+        fitted = ModelSettings(
+            thinking_effort=_kept(
+                settings.thinking_effort,
+                self.thinking_effort,
+                d.thinking_effort,
+            ),
+            thinking_budget=_kept(
+                settings.thinking_budget,
+                self.thinking_budget,
+                d.thinking_budget,
+            ),
+            thinking_output=_kept(
+                settings.thinking_output,
+                self.thinking_output,
+                d.thinking_output,
+            ),
+            service_tier=_kept(
+                settings.service_tier,
+                self.service_tier,
+                d.service_tier,
+            ),
+            cache_ttl_sec=_kept(
+                settings.cache_ttl_sec,
+                self.cache_ttl_sec,
+                d.cache_ttl_sec,
+            ),
+            manage_context_server_side=_kept(
+                settings.manage_context_server_side,
+                self.manage_context_server_side,
+                d.manage_context_server_side,
+            ),
+            compaction=_kept(settings.compaction, self.compaction, d.compaction),
+            context_size=self.prices[size.context_name if named else size.tokens],
+            pruning=settings.pruning,
+        )
+        return self._settled(fitted, chosen=())
+
+    def _settled(
+        self,
+        settings: ModelSettings,
+        *,
+        chosen: Collection[ModelSettingName],
+    ) -> ModelSettings:
+        """Return ``settings`` with what conflicts with ``chosen`` yielded."""
+        cap = self.thinking_off_max_effort
+        if cap is None or not self._thinking_off_refused(settings):
+            return settings
+        budget_chosen = "thinking_budget" in chosen
+        if budget_chosen and "thinking_effort" in chosen:
+            return settings
+        if budget_chosen:
+            return replace(settings, thinking_effort=cap)
+        ladder: tuple[ThinkingBudget, ...] = literal_members(ThinkingBudget)
+        thinks = [
+            b
+            for b in (self.default.thinking_budget, *ladder)
+            if b != "none" and b in self.thinking_budget
+        ]
+        return replace(settings, thinking_budget=thinks[0]) if thinks else settings
+
+    def _thinking_off_refused(self, settings: ModelSettings) -> bool:
+        """Return whether ``settings`` turn thinking off above the effort that may."""
+        if settings.thinking_budget != "none" or self.thinking_off_max_effort is None:
+            return False
+        ladder: tuple[ThinkingEffort, ...] = literal_members(ThinkingEffort)
+        return ladder.index(settings.thinking_effort) > ladder.index(
+            self.thinking_off_max_effort,
+        )
+
+
+def literal_members[T](alias: object) -> tuple[T, ...]:
+    """Return a ``type X = Literal[...]`` alias's members, in declaration order.
+
+    ``get_args`` of the alias itself is ``()``: the members live on its
+    ``__value__``, which typeshed types as ``Any``.
+
+    Args:
+      alias: The alias, such as ``ThinkingEffort``.
+
+    Returns:
+      members: Each member, the least committing first where a ladder is meant.
+
+    """
+    return cast(
+        tuple[T, ...],
+        get_args(cast(object, cast(TypeAliasType, alias).__value__)),
+    )
+
+
+def model_setting_names() -> tuple[ModelSettingName, ...]:
+    """Return each ``ModelSettings`` field a model offers a choice of, in order."""
+    return literal_members(ModelSettingName)
+
+
+def typed_text(value: object) -> str:
+    """Return a setting's ``value`` as a user types it: ``true``, ``300``, ``high``.
+
+    Args:
+      value: A value of some setting.
+
+    Returns:
+      text: What reads back as it.
+
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _ladder(offered: Collection[object], order: Sequence[object]) -> tuple[object, ...]:
+    """Return ``offered`` in the order ``order`` lists it."""
+    return tuple(v for v in order if v in offered)
+
+
+def _kept[T](value: T, offered: Collection[T], default: T) -> T:
+    """Return ``value`` if ``offered`` holds it, else ``default``."""
+    return value if value in offered else default
+
+
+def _check_offered(
+    model_id: str,
+    name: str,
+    value: object,
+    offered: Collection[object],
+) -> None:
+    """Raise unless ``offered`` holds ``value``."""
+    if value in offered:
+        return
+    # ``repr`` before ``sorted``: these sets mix strings, floats, and bools,
+    # which do not order against each other.
+    allowed = ", ".join(sorted(repr(v) for v in offered))
+    raise ValueError(
+        f"{name}={value!r} is not offered by {model_id or 'this model'};"
+        f" allowed: {allowed}",
+    )

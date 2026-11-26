@@ -35,195 +35,155 @@ A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapp
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/compaction.md">Compaction</a>
   ·
-  <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/slack.md">Slack</a>
-  ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md">Self-hosted</a>
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/showcase.md">Showcase</a>
-  ·
-  <a href="https://github.com/rekursiv-ai/sagent/tree/main/examples">Examples</a>
 </p>
 
 ## Quick Start
 
 ```bash
-# Mac:
-#   # Required for quick install.
-#   brew install uv
-#   # Optional for improved performance.
-#   brew install ripgrep fd
-
-# Ubuntu/Debian:
-#   # Required for quick install.
-#   sudo apt-get install -y curl
-#   curl -LsSf https://astral.sh/uv/install.sh | sh
-#   # Optional for improved performance.
-#   sudo apt-get install -y ripgrep fd-find
-
-uv tool install sagent
-
-sagent
+uvx sagent@latest
 ```
 
-## Better CLI
+See [Install](#install) for additional details.
 
-Things Claude Code, Codex CLI, and Gemini CLI don't do:
+## Features
 
-- **Async REPL.** Chat with agents *about* jobs while those jobs run. No ctrl+b, no manual juggling.
-- **Hot self-mutation.** Switch provider, model, or thinking effort mid-session in plain English. No restart.
-- **One CLI, every provider.** Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted HuggingFace models, and a managed `llama.cpp` server, all behind one binary.
-- **Unified cost tracking.** One USD total across every provider in a session; sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
-- **Self-directing agent fleets.** Agents retune their own runtime -- provider, model, thinking, context -- mid-task. A coordinator can do it to its workers over `AgentSend`: *"switch to o1, crank thinking, recompact and drop the file reads."*
-- **Recursive agent messaging.** Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star. Claude Code's experimental Agent Teams is flat (one lead, no nesting); Codex and Gemini have no peer messaging.
-- **Interruptible, detachable tasks.** Tell a stuck task to stop, or detach one and let it keep running.
-- **Richer built-in tools.** `PaperSearch`/`PaperFetch` walk citation graphs and fetch PDFs, multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
-- **Unix-aligned and pipeable.** `stdin`, `stdout`, exit codes, and `--output-format json` are first-class. Pipe through `jq`, drop into `ipython` (same `prompt_toolkit` underneath).
+1. Async runtime.
+   - Commands auto-background when you type or when long-lived.
+   - Consequence: Your agent always responds as fast as your service provider.
+   - Tell a stuck task to stop, or detach one and let it keep running.
+
+2. Hot self-mutation.
+   - Conversationally change the model / service provider.
+   - Conversationally have the model edit its own session.
+
+3. Every Provider, every auth.
+   - Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted HuggingFace models, and a managed `llama.cpp` server, all behind one binary.
+   - Subscriptions supported and terms-of-service compliant.
+
+4. Unified cost tracking.
+   - One USD total across every provider in a session.
+   - Pricing based on API costs when on sub.
+   - Sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
+
+5. Self-directing agent fleets.
+   - Agents retune their own runtime -- provider, model, thinking, context -- mid-task.
+   - A coordinator can do it to its workers over `AgentSend`: *"switch to luna, crank thinking, recompact and drop the file reads."*
+
+6. Recursive agent messaging.
+   - Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star.
+   - Claude Code's experimental Agent Teams is flat (one lead, no nesting); Codex and Gemini have no peer messaging.
+
+7. Richer built-in tools.
+   - WebSearch/Fetch use headed or headless chrome.
+   - `PaperDetails` walks citation graphs; `PaperFetch` fetches PDFs.
+   - Multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
+
+8. Unix-aligned and pipeable.
+   - `stdin`, `stdout`, exit codes, and `--output-format json` are first-class.
+   - Pipe through `jq`, drop into `ipython` (same `prompt_toolkit` underneath).
+
+9. Misaligned Bash tool calls are auto promoted to dedicated types.
+   - Example: `ls files/` is auto-promoted to `List(files/)` tool call.
+
+10. Universal session format.
+    - Typed session records keep whatever no field names in `extra`.
+
+11. All spawns' sessions (ancestors and/or descendants) can be focused.
+
+12. Send a message to parent to autocreate an autopiloting agent.
+
+13. Apache 2 license.
 
 ## Uniquely also an API
 
-- **One runtime, every surface.** The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
-- **Typed Python objects.** `Agent`, `Tool`, `Model`, `Provider`, and `Message` are protocols and dataclasses you import, compose, and unit-test.
-- **Peer-to-peer agent messaging.** Any spawned agent can `AgentSend` to any other named peer -- not just its parent. Like user input, peer messages preempt the receiving agent's tool calls, so no agent blocks waiting on a stuck child.
+14. One runtime, every surface.
+    - The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
 
-Use it as a library:
+15. Typed Python objects.
+    - `Agent`, `Tool`, `Model`, `Provider`, and the session records are protocols and dataclasses you import, compose, and unit-test.
+    - Passes strict: `basedpyright`, `pyrefly`, and `ty`.
+
+Example:
 
 ```python
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Google
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
+from sagent.tools.glob_tool import Glob
+from sagent.tools.grep import Grep
+from sagent.tools.read import Read
 
-agent = Agent(
-    model=Google.from_env().model("gemini-pro-3.1"),
-    system="You are a scientist.",
-    tools=[tools.Read(), tools.Glob(), tools.Grep()],
-)
-result = await agent.run(immutable({"prompt": "analyze the CSV in ./data/"}))
-print(result.content)
+async with ModelCatalog() as catalog:
+    async with Agent(
+        model=catalog["google"]["gemini-pro-3.1"],
+        system_prompt="You are a scientist.",
+        tools=[Read(), Glob(), Grep()],
+    ) as agent:
+        print(await agent.send("analyze the CSV in ./data/"))
 ```
 
 ## Install
 
-Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are
-optional -- sagent has Python fallbacks when absent -- but recommended
-for faster `Grep` / `Glob`. PDF rendering uses the bundled `pypdfium2`
-wheel and needs no system install. The [Quick Start](#quick-start)
-above installs the `sagent` CLI.
+```bash
+uv tool install sagent && sagent
+# Later: uv tool upgrade sagent
+```
 
-Add sagent to your own project as a library:
+If you're missing `uvx`/`uv`,
+- Mac
+  ```bash
+  brew install uv
+  ```
+- Linux
+  ```bash
+  sudo apt install -y curl
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
 
+Optionally, for faster glob and grep,
+- Mac
+  ```bash
+  brew install fd ripgrep
+  ```
+- Linux
+  ```bash
+  sudo apt install -y fd-find ripgrep
+  ```
+
+To add sagent to your own project as a library,
 ```bash
 uv add sagent
 ```
 
-Or run from a source checkout:
-
+Or run from a source checkout,
 ```bash
 git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
 cd sagent
 uv run sagent --help
 ```
 
-## Run
+## Authorization
 
-Bare `sagent` uses Anthropic and reads `ANTHROPIC_API_KEY`:
+Sagent supports all subscriptions and API KEYs.
 
-```bash
-export ANTHROPIC_API_KEY=...
-sagent
-```
-
-Pick a different provider by setting its key (see
-[Provider setup](#provider-setup)) and passing `--provider`:
-
-```bash
-export OPENAI_API_KEY=...
-sagent --provider OpenAI
-```
-
-`--provider` defaults to the first name in `--allow-providers`, so
-`SAGENT_ALLOW_PROVIDERS` alone picks the default backend and also caps
-which providers spawned sub-agents may use:
-
-```bash
-SAGENT_ALLOW_PROVIDERS=OpenAI sagent   # OpenAI is now the default provider
-```
-
-Pipe a prompt on stdin for non-interactive use:
-
-```bash
-printf 'Say hi in one sentence.' | \
-  sagent --provider OpenAI --output-format json
-```
-
-Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--ephemeral` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
-
-See [CLI](https://github.com/rekursiv-ai/sagent/blob/main/docs/cli.md) and [Sessions](https://github.com/rekursiv-ai/sagent/blob/main/docs/sessions.md) for the full flag set.
-
-## Quickstart: Python
-
-```python
-import asyncio
-
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Anthropic
-
-
-async def main() -> None:
-    agent = Agent(
-        model=Anthropic.from_env().model("claude-sonnet-4-6"),
-        system="You are a concise coding assistant.",
-        tools=[tools.Read(), tools.Grep(), tools.Glob()],
-    )
-    result = await agent.run(immutable({"prompt": "Summarize README.md"}))
-    print(result.content)
-
-
-asyncio.run(main())
-```
-
-`Agent.run()` accepts a JSON directive with a `prompt` key and returns a `Message`.
-
-See [API](https://github.com/rekursiv-ai/sagent/blob/main/docs/api.md), [Tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), and [Concepts](https://github.com/rekursiv-ai/sagent/blob/main/docs/concepts.md) for more detail.
-
-## Provider setup
-
-Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints, a subscription-backed `AnthropicCLI` that rides your installed `claude` login, plus a managed local `LlamaCpp` provider. Set the key (or run the login) for the provider you plan to use:
-
-```bash
-export ANTHROPIC_API_KEY=...
-export OPENAI_API_KEY=...
-export GOOGLE_API_KEY=...
-export MOONSHOT_API_KEY=...
-export DASHSCOPE_API_KEY=...
-export MINIMAX_API_KEY=...
-```
-
-and
-
-```bash
-export SAGENT_ALLOW_PROVIDERS=...
-```
-
-to set the default value of the `--provider` flag.
-
-| Provider | Environment variable | Example model |
-| --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` |
-| `AnthropicCLI` | none (`claude auth login --claudeai`) | `fable-5.1` |
-| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` |
-| `Google` | `GOOGLE_API_KEY` | `gemini-pro-3.1` |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-2.6` |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` |
-| `MiniMax` | `MINIMAX_API_KEY` | `minimax-2.7` |
-| `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
-| `LlamaCpp` | none (uses `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER`) | `qwen3.6-27b-12gb` |
+| Provider       | Env variable / Command         |
+| -------------- | ------------------------------ |
+| `Anthropic`    | `ANTHROPIC_API_KEY`, or workload identity |
+| `AnthropicCLI` | `sagent login --provider acli` |
+| `OpenAI`       | `OPENAI_API_KEY`, or workload identity |
+| `Google`       | `GOOGLE_API_KEY`               |
+| `GoogleCLI`    | `sagent login --provider gcli` |
+| `Moonshot`     | `MOONSHOT_API_KEY`             |
+| `DashScope`    | `DASHSCOPE_API_KEY`            |
+| `MiniMax`      | `MINIMAX_API_KEY`              |
+| `SelfHosted`   |                                |
+| `LlamaCpp`     | `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER` |
 
 See [Providers](https://github.com/rekursiv-ai/sagent/blob/main/docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
 
-## Self-hosted models
+## Self-Hosted
 
 Install the local runtime extra from a checkout:
 
@@ -248,7 +208,7 @@ For a small smoke test:
 
 ```bash
 sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
-  --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+  --effort none --max-tool-call-rounds 1
 ```
 
 SelfHosted options use `+` suffixes after the model name. Device, dtype, and `compile` can appear in any order, but each category can appear once.
@@ -261,17 +221,58 @@ endpoint. Point `LLAMA_CPP_SERVER` at a built `llama-server` binary and
 
 See [Self-hosted Models](https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
 
-## Examples
+## MCP
 
-The [`examples/`](https://github.com/rekursiv-ai/sagent/tree/main/examples/) directory contains small, runnable examples:
+Sagent calls the tools of MCP servers. Manage them with `sagent mcp`, which
+takes the arguments `claude mcp` does; each command has `--help`, and each is
+also `/mcp.COMMAND` at the prompt:
 
-- `offline_custom_tool.py`: run an agent/tool/model loop without API keys.
-- `decorator_tool.py`: wrap a function as a tool.
-- `custom_tool.py`: implement the full `Tool` protocol.
-- `multi_agent_reviewer.py`: spawn an isolated reviewer child.
-- `openai_compatible_provider.py`: connect an OpenAI-compatible endpoint.
+```bash
+sagent mcp add git -- uvx mcp-server-git                       # a local command
+sagent mcp add -t http linear https://mcp.linear.app/mcp       # a remote URL
+sagent mcp add -t http github https://api.githubcopilot.com/mcp/ \
+  -H 'Authorization: Bearer ${GITHUB_TOKEN}'                   # read at connect
+sagent mcp login linear    # OAuth sign-in to a remote server; --headless over ssh
+sagent mcp list            # each server, and whether it connects
+sagent mcp get linear      # one server
+sagent mcp logout linear   # forget its sign-in
+sagent mcp remove linear   # and the server
+```
 
-Start with the [tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), then use the examples as copyable patterns. See [Examples](https://github.com/rekursiv-ai/sagent/tree/main/examples/) and [Tools](https://github.com/rekursiv-ai/sagent/blob/main/docs/tools.md).
+`add` writes this project's servers; `-s user` writes every project's. A
+session reads the servers it starts with; one already open keeps its own.
+
+Each tool becomes `mcp__<server>__<tool>`. An `on_demand` server is one tool,
+`mcp__<server>`, that lists, describes, and runs its tools, so a large server
+costs no tokens until used. Its options beyond `add`'s flags go in with
+`add-json`, as the entry another tool's `mcpServers` JSON holds:
+
+```bash
+sagent mcp add-json linear '{"url": "https://mcp.linear.app/mcp", "loading": "on_demand"}'
+```
+
+A remote server that signs users in with OAuth, as Linear and Notion do, needs
+one sign-in before it connects. One that takes a token instead, as GitHub's
+does, reads it from its header. Config copied from Claude Code, Cursor, or Pi
+works as it is: pass the file with `--mcp-config PATH`.
+
+In code, open the servers and pass their tools:
+
+```python
+from pathlib import Path
+
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
+from sagent.tools.mcp import McpSession, servers
+from sagent.tools.read import Read
+
+async with ModelCatalog() as catalog, McpSession(servers(Path.cwd())) as mcp:
+    model = catalog["google"]["gemini-pro-3.1"]
+    async with Agent(model=model, tools=[Read(), *mcp.tools()]) as agent:
+        ...
+```
+
+See the `sagent.tools.mcp` docstring for every field.
 
 ## Security and privacy
 
@@ -282,7 +283,7 @@ services. Sessions are plaintext local state and may contain prompts, model
 responses, tool results, file snippets, and paths.
 
 Use narrow tool sets, pass `--ephemeral` for one-off sensitive
-prompts so sessions and auto-memory are disabled, and run Sagent inside your own
+prompts so no journal or memories are kept, and run Sagent inside your own
 OS/container sandbox when a task needs hard isolation. See
 [Security](https://github.com/rekursiv-ai/sagent/blob/main/docs/security.md).
 
@@ -291,7 +292,7 @@ OS/container sandbox when a task needs hard isolation. See
 <details>
 <summary>How Sagent compares to aider, LangChain, Claude Code, Codex CLI, Gemini CLI, and other adjacent projects</summary>
 
-Not yet in Sagent: MCP, LSP, native sandboxing, desktop UI, tree-sitter repo map, hosted service, browser automation.
+Not yet in Sagent: LSP, native sandboxing, desktop UI, tree-sitter repo map, hosted service, browser automation.
 
 This comparison focuses on the runtime shape rather than every feature
 of each project.

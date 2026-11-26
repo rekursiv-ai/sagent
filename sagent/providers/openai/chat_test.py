@@ -1,0 +1,1090 @@
+"""Tests for the Chat Completions translation: request bodies and streamed replies."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING
+
+import io
+
+from PIL import Image
+from treekle import from_plain, mutable
+
+import pytest
+
+from sagent.journal.types import (
+    AssistantMessage,
+    Attachment,
+    SystemMessage,
+    Thinking,
+    TokenUsage,
+    ToolCall,
+    ToolMessage,
+    UncategorizedToolResult,
+    UserMessage,
+)
+from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import DisconnectedError, RateLimitedError
+from sagent.model.types import Request, TextChunk
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
+from sagent.providers.openai import chat, wire
+from sagent.tools.read import Read
+
+
+if TYPE_CHECKING:
+    from treekle import PlainTree
+
+    from sagent.model.capability import ModelCapability
+
+
+def _model(name: str) -> tuple[ModelCapability, ModelSettings]:
+    """Return a DashScope row: a vendor whose rows span every thinking shape."""
+    table = DashScope.models()
+    return table.resolve(name)
+
+
+def _encode(
+    request: Request,
+    name: str = "qwen-plus-3.7",
+    *,
+    reasoning_field: str = "reasoning_content",
+    temperature: float | None = None,
+    **choices: object,
+) -> dict[str, object]:
+    capability, settings = _model(name)
+    for field in model_setting_names():
+        if field in choices:
+            settings = settings.with_value(field, choices.pop(field))
+    assert not choices, f"no such setting: {sorted(choices)}"
+    capability.check(settings)
+    return chat.encode(
+        request,
+        capability=capability,
+        settings=settings,
+        reasoning_field=reasoning_field,
+        temperature=temperature,
+    )
+
+
+def _png() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (2, 2), "green").save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_encode_streams_the_conversation_with_its_usage() -> None:
+    request = Request(
+        system=("Be terse.", "", "Mind the tests."),
+        records=(UserMessage(content="hi"),),
+    )
+    assert _encode(request, temperature=1.0, thinking_effort="none") == {
+        "model": "qwen3.7-plus",
+        "messages": [
+            {"role": "system", "content": "Be terse.\n\nMind the tests."},
+            {"role": "user", "content": "hi"},
+        ],
+        "temperature": 1.0,
+        "max_completion_tokens": 65_536,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "reasoning_effort": "none",
+    }
+    # A model that cannot reason takes ``max_tokens`` and no effort; no prompt
+    # sends no system.
+    body = _encode(Request(), "qwen-coder-480b-a35b-3.0")
+    assert body["max_tokens"] == 65_536
+    assert body["messages"] == []
+    assert "max_completion_tokens" not in body
+    assert "temperature" not in body
+    assert "reasoning_effort" not in body
+
+
+@pytest.mark.parametrize(
+    ("name", "key"),
+    [
+        ("qwen-plus-3.7", "max_completion_tokens"),
+        ("qwen-coder-480b-a35b-3.0", "max_tokens"),
+    ],
+)
+def test_encode_asks_no_more_than_the_room_the_request_leaves(
+    name: str,
+    key: str,
+) -> None:
+    body = _encode(Request(max_response_tokens=9_000), name)
+    assert body[key] == 9_000
+
+
+def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
+    png = _png()
+    image = Attachment(mime_descriptor="image/png", data=png)
+    url = wire.image_url(image, limits=_model("qwen-plus-3.7")[0].limits)
+    records = (
+        UserMessage(
+            content="look",
+            attachments=(image, Attachment(mime_descriptor="text/plain", data=b"t")),
+        ),
+        Thinking(content="I should ", summary="(the gist)"),
+        Thinking(summary="read it."),
+        AssistantMessage(content="Reading"),
+        # Empty text adds nothing, not even an empty part.
+        AssistantMessage(content=""),
+        AssistantMessage(content=" both."),
+        ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
+        ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
+        TokenUsage(),
+        ToolMessage(
+            call_id="toolu_a",
+            state="done",
+            stdout=(
+                "x = 1",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
+        ToolMessage(
+            call_id="toolu_b",
+            state="done",
+            stdout=(
+                "gone",
+                image,
+            ),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+        Thinking(content="hmm"),
+        UserMessage(content="next"),
+        AssistantMessage(content=""),
+        ToolCall(call_id="toolu_c", name="Read"),
+    )
+    image_block = {"type": "image_url", "image_url": {"url": url}}
+    assert _encode(Request(records=records))["messages"] == [
+        {"role": "user", "content": [image_block, {"type": "text", "text": "look"}]},
+        {
+            "role": "assistant",
+            "content": "Reading both.",
+            "reasoning_content": "I should read it.",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path": "a.py"}'},
+                },
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path": "b.py"}'},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "x = 1"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "[Error] gone"},
+        # A tool message cannot carry an image; the run's images follow it.
+        {"role": "user", "content": [image_block, image_block]},
+        {"role": "assistant", "content": None, "reasoning_content": "hmm"},
+        {"role": "user", "content": "next"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+    ]
+
+
+def test_encode_leaves_reasoning_out_for_a_server_that_reads_none_back() -> None:
+    records = (
+        Thinking(content="I should."),
+        AssistantMessage(content="Done."),
+        UserMessage(content="ok"),
+        # Reasoning alone, unsent, leaves an empty message, which is dropped.
+        Thinking(content="hmm"),
+    )
+    assert _encode(Request(records=records), reasoning_field="")["messages"] == [
+        {"role": "assistant", "content": "Done."},
+        {"role": "user", "content": "ok"},
+    ]
+    # Sealed reasoning that says nothing is sent as nothing.
+    sealed = (UserMessage(content="go"), Thinking(encrypted="sig"))
+    assert _encode(Request(records=sealed))["messages"] == [
+        {"role": "user", "content": "go"},
+    ]
+    only_image = (
+        UserMessage(
+            attachments=(Attachment(mime_descriptor="image/png", data=_png()),),
+        ),
+    )
+    messages = _encode(Request(records=only_image))["messages"]
+    url = wire.image_url(
+        only_image[0].attachments[0],
+        limits=_model("qwen-plus-3.7")[0].limits,
+    )
+    # No text says nothing, so no text block rides with the image.
+    assert messages == [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("none", "none"),
+        ("min", "minimal"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "high"),
+        ("max", "high"),
+    ],
+)
+def test_encode_spells_the_effort_in_openais_words(
+    effort: str,
+    wire_effort: str,
+) -> None:
+    assert _encode(Request(), thinking_effort=effort)["reasoning_effort"] == wire_effort
+
+
+def test_encode_offers_the_tools_and_names_a_tier_only_when_chosen() -> None:
+    read = Read()
+    body = _encode(Request(tools=(read,)), "qwen-coder-480b-a35b-3.0")
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": read.description,
+                "parameters": mutable(read.schema),
+            },
+        },
+    ]
+    assert "reasoning_effort" not in body
+    assert "service_tier" not in body
+    capability, settings = MiniMax.models().resolve("minimax-3.0")
+    settings = replace(settings, service_tier="priority")
+    body = chat.encode(
+        Request(),
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+    )
+    assert body["service_tier"] == "priority"
+
+
+def _reader(
+    name: str = "qwen-plus-3.7",
+    *,
+    reasoning_field: str = "reasoning_content",
+) -> chat.StreamReader:
+    capability, settings = _model(name)
+    return chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field=reasoning_field,
+    )
+
+
+def _chunk(finish: str | None = None, **delta: object) -> dict[str, object]:
+    return {"choices": [{"delta": delta, "finish_reason": finish}], "usage": None}
+
+
+def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:
+    reader = _reader()
+    assert reader.feed(_chunk(role="assistant")) == ()
+    assert reader.feed(_chunk(reasoning_content="Hmm.")) == (
+        TextChunk(text="Hmm.", thinking=True),
+    )
+    assert reader.feed(_chunk(content="Hi")) == (TextChunk(text="Hi", record=1),)
+    assert reader.feed(_chunk(content=" there")) == (
+        TextChunk(text=" there", record=1),
+    )
+    assert reader.feed({"choices": [], "usage": None}) == ()
+    assert reader.feed(_chunk("stop")) == ()
+    response = reader.response()
+    assert response.records == (
+        Thinking(content="Hmm."),
+        AssistantMessage(content="Hi there"),
+    )
+    assert response.stop_reason == "end_turn"
+
+
+@pytest.mark.parametrize("provider", [DashScope, MiniMax, Moonshot])
+def test_a_vendor_that_streams_reasoning_unasked_says_its_output_is_text(
+    provider: type[DashScope | MiniMax | Moonshot],
+) -> None:
+    """Its reasoning is read and kept whatever is chosen: ``none`` would be a label."""
+    shown = {
+        name: row.thinking_output
+        for name, row in provider.models().items()
+        if row.thinking_output != frozenset({"none"})
+        or row.thinking_budget != frozenset({"none"})
+    }
+    assert set(shown.values()) == {frozenset({"text"})}
+
+
+def test_a_server_that_streams_no_reasoning_has_its_field_ignored() -> None:
+    reader = _reader(reasoning_field="")
+    assert reader.feed(_chunk(reasoning_content="Hmm.", **{"": "Not reasoning"})) == ()
+    reader.feed(_chunk("stop", content="Hi"))
+    assert reader.response().records == (AssistantMessage(content="Hi"),)
+
+
+def test_a_tool_calls_fragments_join_by_index() -> None:
+    reader = _reader()
+    first = {
+        "index": 0,
+        "id": "call_x",
+        "function": {"name": "Read", "arguments": '{"file'},
+    }
+    second = {
+        "index": 1,
+        "id": "call_y",
+        "function": {"name": "Read", "arguments": "{"},
+    }
+    reader.feed(_chunk(tool_calls=[first, second]))
+    reader.feed(
+        _chunk(tool_calls=[{"index": 0, "function": {"arguments": '_path": "a"}'}}]),
+    )
+    reader.feed(_chunk(tool_calls=[{"index": 1, "function": {"arguments": "bad"}}]))
+    # A fragment that never names its call is no call.
+    reader.feed(_chunk(tool_calls=[{"index": 2, "function": {"arguments": "{}"}}]))
+    reader.feed(_chunk("tool_calls"))
+    response = reader.response()
+    assert response.records == (
+        ToolCall(call_id="call_x", name="Read", arguments={"file_path": "a"}),
+        ToolCall(call_id="call_y", name="Read", arguments={}),
+    )
+    assert response.stop_reason == "tool_use"
+
+
+def test_arguments_that_are_json_but_no_object_are_none() -> None:
+    reader = _reader()
+    call = {
+        "index": 0,
+        "id": "call_x",
+        "function": {"name": "Read", "arguments": "[1]"},
+    }
+    reader.feed(_chunk(tool_calls=[call]))
+    reader.feed(_chunk("tool_calls"))
+    assert reader.response().records == (
+        ToolCall(call_id="call_x", name="Read", arguments={}),
+    )
+
+
+def test_the_tokens_split_the_cached_prompt_from_the_uncached_and_are_priced() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+    # A trailing chunk that names no finish leaves the one named standing.
+    reader.feed(_chunk())
+    usage = {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 20,
+        "prompt_tokens_details": {"cached_tokens": 700, "cache_write_tokens": 200},
+    }
+    reader.feed({"choices": [], "usage": usage})
+    reader.feed({"choices": [], "usage": None})
+    response = reader.response()
+    tokens = TokenCount(request=100, response=20, cache_write=200, cache_read=700)
+    assert response.tokens == tokens
+    capability, _ = _model("qwen-plus-3.7")
+    cost = capability.prices["auto", tokens.prompt, datetime.now(UTC).date()] * tokens
+    assert response.spend == cost
+    assert cost.total > 0
+
+
+@pytest.mark.parametrize(
+    ("finish", "refusal", "stop_reason", "details"),
+    [
+        ("stop", "", "end_turn", ""),
+        ("length", "", "max_tokens", ""),
+        ("function_call", "", "tool_use", ""),
+        ("content_filter", "", "refusal", "content_filter"),
+        ("stop", "I can't.", "refusal", "I can't."),
+        # A refusal streamed in two chunks is one.
+        ("stop", "I can't.|Sorry.", "refusal", "I can't.Sorry."),
+        ("eos", "", "eos", ""),
+    ],
+)
+def test_the_stop_reason_is_in_the_shared_vocabulary(
+    finish: str,
+    refusal: str,
+    stop_reason: str,
+    details: str,
+) -> None:
+    reader = _reader()
+    for part in filter(None, refusal.split("|")):
+        assert reader.feed(_chunk(refusal=part)) == (TextChunk(text=part),)
+    reader.feed(_chunk(finish))
+    response = reader.response()
+    assert response.stop_reason == stop_reason
+    assert response.stop_details == details
+
+
+def test_of_two_finish_reasons_the_last_stands() -> None:
+    reader = _reader()
+    reader.feed(_chunk("length"))
+    reader.feed(_chunk("stop"))
+
+    assert reader.response().stop_reason == "end_turn"
+
+
+def test_calls_under_a_plain_stop_are_tool_use() -> None:
+    reader = _reader()
+    reader.feed(
+        _chunk(tool_calls=[{"index": 0, "id": "c", "function": {"name": "Read"}}]),
+    )
+    reader.feed(_chunk("stop"))
+    assert reader.response().stop_reason == "tool_use"
+
+
+def test_a_reply_that_never_finished_is_a_disconnect() -> None:
+    reader = _reader()
+    reader.feed(_chunk(content="Hal"))
+    with pytest.raises(
+        DisconnectedError,
+        match=r"^The reply ended before it was finished\.$",
+    ):
+        reader.response()
+
+
+def test_an_in_stream_error_raises_what_it_means() -> None:
+    with pytest.raises(RateLimitedError, match="Slow"):
+        _reader().feed({"error": {"code": "rate_limit_exceeded", "message": "Slow"}})
+    # An event has no HTTP status: it is ``0``.
+    with pytest.raises(RuntimeError, match=r"^The server replied 0 : broke$"):
+        _reader().feed({"object": "error", "message": "broke"})
+    # A chunk that names no error is not one.
+    assert _reader().feed({"error": None, **_chunk(content="ok")}) == (
+        TextChunk(text="ok"),
+    )
+
+
+def test_reasoning_streamed_in_pieces_is_one_thought() -> None:
+    reader = _reader()
+    reader.feed(_chunk(reasoning_content="Hm"))
+    reader.feed(_chunk("stop", reasoning_content="m."))
+
+    assert reader.response().records == (Thinking(content="Hmm."),)
+
+
+def test_a_reply_that_reports_no_usage_used_nothing() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"choices": [], "usage": {"prompt_tokens": 10}})
+
+    assert reader.response().tokens == TokenCount(request=10)
+
+
+def test_a_reply_with_no_usage_at_all_used_nothing() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+
+    assert reader.response().tokens == TokenCount()
+
+
+def test_a_fragment_naming_no_index_is_the_first_call() -> None:
+    reader = _reader()
+    reader.feed(_chunk(tool_calls=[{"id": "c", "function": {"name": "Read"}}]))
+    reader.feed(
+        _chunk(tool_calls=[{"index": 0, "function": {"arguments": '{"a": 1}'}}]),
+    )
+    # A fragment with no arguments adds none.
+    reader.feed(_chunk(tool_calls=[{"index": 0, "function": dict[str, str]()}]))
+    reader.feed(_chunk("tool_calls"))
+
+    assert reader.response().records == (
+        ToolCall(call_id="c", name="Read", arguments={"a": 1}),
+    )
+
+
+class _Evening:
+    """Stands in for ``datetime``: 6 October in the evening here, 7 October in UTC."""
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:
+        if tz is UTC:
+            return datetime(2026, 10, 7, 1, tzinfo=UTC)
+        return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+
+def test_a_reply_is_billed_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    capability = replace(
+        capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(): TokenPrice(response=1.0),
+                PriceCondition(effective_date=date(2026, 10, 7)): TokenPrice(
+                    response=2.0,
+                ),
+            },
+            window=capability.prices.window,
+        ),
+    )
+    monkeypatch.setattr(chat, "datetime", _Evening)
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+    )
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"choices": [], "usage": {"completion_tokens": 1_000_000}})
+
+    assert reader.response().spend.response == 2.0
+
+
+def test_what_is_said_among_a_turn_s_results_follows_them() -> None:
+    """A server takes a call's tool message right after the turn that made it."""
+    body = _encode(
+        Request(
+            records=(
+                UserMessage(content="go"),
+                ToolCall(call_id="a", name="Read"),
+                ToolCall(call_id="b", name="Read"),
+                ToolMessage(call_id="a", state="done", stdout=("1",)),
+                SystemMessage(content="later", subtype="nudge"),
+                ToolMessage(call_id="b", state="done", stdout=("2",)),
+                UserMessage(content="and?"),
+            ),
+        ),
+    )
+    roles = [m["role"] for m in from_plain(body["messages"], list[dict[str, object]])]
+    assert roles == ["user", "assistant", "tool", "tool", "user", "user"]
+
+
+def test_a_results_images_follow_its_run_of_results() -> None:
+    png = _png()
+    image = Attachment(mime_descriptor="image/png", data=png)
+    url = wire.image_url(image, limits=_model("qwen-plus-3.7")[0].limits)
+    shown = {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": url}}],
+    }
+    records = (
+        ToolCall(call_id="a", name="Read"),
+        ToolMessage(
+            call_id="a",
+            state="done",
+            stdout=(
+                "1",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
+        AssistantMessage(content="next"),
+        ToolCall(call_id="b", name="Read"),
+        ToolMessage(
+            call_id="b",
+            state="done",
+            stdout=(
+                "2",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
+        UserMessage(content="and"),
+        # A result whose call this request never made.
+        ToolMessage(
+            call_id="z",
+            state="done",
+            stdout=(
+                "3",
+                image,
+            ),
+            result=UncategorizedToolResult(),
+        ),
+    )
+
+    messages = _encode(Request(records=records))["messages"]
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "1"},
+        shown,
+        {
+            "role": "assistant",
+            "content": "next",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "2"},
+        shown,
+        {"role": "user", "content": "and"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "3"},
+        shown,
+    ]
+
+
+def test_a_model_of_unknown_reply_length_is_sent_no_cap() -> None:
+    capability, _ = _model("qwen-plus-3.7")
+    capability = replace(capability, limits=ModelLimits())
+    settings = capability.default
+    body = chat.encode(
+        Request(),
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+    )
+    assert not {"max_tokens", "max_completion_tokens"} & body.keys()
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 700,
+        },
+        {"prompt_tokens": 1000, "completion_tokens": 20, "cached_tokens": 700},
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 700},
+        },
+    ],
+)
+def test_vendor_cache_usage_counts_each_prompt_token_once(
+    usage: dict[str, object],
+) -> None:
+    reader = _reader()
+    reader.feed({**_chunk("stop"), "usage": usage})
+    assert reader.response().tokens == TokenCount(
+        request=300,
+        response=20,
+        cache_read=700,
+    )
+
+
+def test_usage_nested_in_a_stream_envelope_is_not_lost() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"x_groq": {"usage": {"prompt_tokens": 3, "completion_tokens": 2}}})
+    assert reader.response().tokens == TokenCount(request=3, response=2)
+
+
+def test_content_blocks_are_text_not_their_python_representation() -> None:
+    reader = _reader()
+    assert reader.feed(
+        _chunk(
+            content=[
+                {"type": "text", "text": "Hi"},
+                {"type": "text"},
+                {"type": "text", "text": " there"},
+            ],
+        ),
+    ) == (TextChunk(text="Hi there"),)
+    reader.feed(_chunk("stop"))
+    assert reader.response().records == (AssistantMessage(content="Hi there"),)
+
+
+def test_mixed_thinking_and_text_blocks_keep_both_channels() -> None:
+    reader = _reader()
+    assert reader.feed(
+        _chunk(
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": [
+                        {"type": "text", "text": "Hmm"},
+                        {"type": "text"},
+                        {"type": "text", "text": "."},
+                    ],
+                },
+                {"type": "text", "text": "Hi"},
+            ],
+        ),
+    ) == (TextChunk(text="Hmm.", thinking=True), TextChunk(text="Hi", record=1))
+    reader.feed(_chunk("stop"))
+    assert reader.response().records == (
+        Thinking(content="Hmm."),
+        AssistantMessage(content="Hi"),
+    )
+
+
+@pytest.mark.parametrize("same_model", [True, False])
+@pytest.mark.parametrize("details_field", ["reasoning_details", "", "other_details"])
+def test_opaque_reasoning_fragments_replay_only_to_the_matching_dialect(
+    same_model: bool,
+    details_field: str,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    reader.feed(
+        _chunk(
+            reasoning_details=[
+                {"index": 1, "type": "reasoning.encrypted", "data": "sealed"},
+                {"index": 0, "type": "reasoning.text", "text": "First"},
+            ],
+        ),
+    )
+    reader.feed(
+        _chunk(
+            "stop",
+            reasoning_details=[
+                {"index": 1, "data": " tail", "signature": "sig"},
+                {"index": 0, "text": " thought"},
+            ],
+        ),
+    )
+    details = [
+        {"index": 0, "type": "reasoning.text", "text": "First thought"},
+        {
+            "index": 1,
+            "type": "reasoning.encrypted",
+            "data": "sealed tail",
+            "signature": "sig",
+        },
+    ]
+    response = reader.response()
+    assert response.records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+    )
+    target = capability if same_model else replace(capability, wire_model_id="other")
+    body = chat.encode(
+        Request(records=response.records),
+        capability=target,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field=details_field,
+    )
+    assert body["messages"] == (
+        [{"role": "assistant", "content": None, "reasoning_details": details}]
+        if same_model and details_field == "reasoning_details"
+        else []
+    )
+
+
+@pytest.mark.parametrize("same_model", [True, False])
+@pytest.mark.parametrize("content_blocks", [True, False])
+def test_native_thinking_replays_before_text_without_flattened_reasoning(
+    same_model: bool,
+    content_blocks: bool,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(_chunk("stop", content="Hi"))
+    records = (
+        *reader.response().records,
+        AssistantMessage(content=" there"),
+        ToolCall(call_id="c", name="Read"),
+    )
+    body = chat.encode(
+        Request(records=records),
+        capability=capability
+        if same_model
+        else replace(capability, wire_model_id="other"),
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=content_blocks,
+    )
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": "Hi there",
+        "reasoning_content": "Hmm",
+        "tool_calls": [
+            {
+                "id": "call_0",
+                "type": "function",
+                "function": {"name": "Read", "arguments": "{}"},
+            },
+        ],
+    }
+    if same_model and content_blocks:
+        message.pop("reasoning_content")
+        message["content"] = [thought, {"type": "text", "text": "Hi there"}]
+    assert body["messages"] == [message]
+
+
+def test_native_thinking_without_readable_field_replays_without_an_answer() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk("stop", content=[thought]))
+    body = chat.encode(
+        Request(records=reader.response().records),
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_content_blocks=True,
+    )
+    assert body["messages"] == [{"role": "assistant", "content": [thought]}]
+
+
+def test_native_thinking_is_not_overwritten_by_a_tool_only_turn() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(
+        _chunk(
+            "tool_calls",
+            tool_calls=[
+                {
+                    "index": 0,
+                    "id": "original",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        ),
+    )
+    response = reader.response()
+    body = chat.encode(
+        Request(
+            records=(
+                *response.records,
+                ToolMessage(
+                    call_id="original",
+                    state="done",
+                    stdout=("ok",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        ),
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    assert body["messages"] == [
+        {
+            "role": "assistant",
+            "content": [thought],
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+    ]
+
+
+@pytest.mark.parametrize("native_blocks", [False, True])
+def test_unreadable_reasoning_still_precedes_streamed_text(native_blocks: bool) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+        reasoning_content_blocks=native_blocks,
+    )
+    if native_blocks:
+        reader.feed(_chunk(content=[{"type": "thinking", "signature": "sealed"}]))
+    else:
+        reader.feed(
+            _chunk(
+                reasoning_details=[{"type": "reasoning.encrypted", "data": "sealed"}],
+            ),
+        )
+    assert reader.feed(_chunk("stop", content="Hi")) == (
+        TextChunk(text="Hi", record=1),
+    )
+    thinking, answer = reader.response().records
+    assert isinstance(thinking, Thinking)
+    assert answer == AssistantMessage(content="Hi")
+
+
+@pytest.mark.parametrize("null_index", [False, True])
+def test_indexless_reasoning_blocks_keep_their_payloads_and_order(
+    null_index: bool,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    details: list[dict[str, PlainTree]] = [
+        {"type": "reasoning.encrypted", "data": "first", "signature": "sig-a"},
+        {"type": "reasoning.encrypted", "data": "second", "signature": "sig-b"},
+    ]
+    if null_index:
+        for block in details:
+            block["index"] = None
+    reader.feed(_chunk(reasoning_details=[details[0]]))
+    reader.feed(_chunk("stop", reasoning_details=[details[1]]))
+
+    assert reader.response().records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+    )
+
+
+def test_indexless_and_indexed_reasoning_blocks_finish_together() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    details: list[dict[str, PlainTree]] = [
+        {"type": "reasoning.encrypted", "data": "first", "signature": "sig-a"},
+        {
+            "index": 1,
+            "type": "reasoning.encrypted",
+            "data": "second",
+            "signature": "sig-b",
+        },
+    ]
+    reader.feed(_chunk(reasoning_details=details))
+    reader.feed(_chunk("stop", content="Hi"))
+
+    assert reader.response().records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+        AssistantMessage(content="Hi"),
+    )
+
+
+def test_encode_defaults_to_readable_reasoning_and_a_string_answer() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(
+        _chunk(
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": "Hmm"}],
+                    "signature": "sealed",
+                },
+            ],
+        ),
+    )
+    reader.feed(_chunk("stop", content="Hi"))
+    request = Request(records=reader.response().records)
+    body = chat.encode(
+        request,
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+    )
+
+    assert body["messages"] == [
+        {"role": "assistant", "content": "Hi", "reasoning_content": "Hmm"},
+    ]
+    assert body == chat.encode(
+        request,
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=False,
+    )
+
+
+def test_native_content_keeps_the_default_details_dialect_empty() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    thought: dict[str, PlainTree] = {
+        "type": "thinking",
+        "thinking": [{"type": "text", "text": "Hmm"}],
+        "signature": "sealed",
+    }
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(_chunk("stop", content="Hi"))
+
+    assert reader.response().records == (
+        Thinking(
+            content="Hmm",
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "",
+                    "details": [],
+                    "content": [thought],
+                },
+            },
+        ),
+        AssistantMessage(content="Hi"),
+    )
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

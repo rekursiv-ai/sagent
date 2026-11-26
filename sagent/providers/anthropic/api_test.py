@@ -1,1746 +1,996 @@
-"""Tests for ``providers.anthropic``: wire-format translation + response parse."""
+"""Tests for Claude over the Messages API, against a fake HTTP transport."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast, override
-from unittest.mock import AsyncMock, MagicMock, patch
+from dataclasses import dataclass, field, replace
+from datetime import date
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, ClassVar, override
 
-import json
-import operator
-
-from treekle import from_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import httpx2
 import pytest
 
-from sagent.agent.retry import error_status, is_retryable
-from sagent.bin.cli import DEFAULT_TOOLS, resolve_tools
-from sagent.catalog.anthropic import api
-from sagent.catalog.table import ModelCatalog, ModelTable
-from sagent.providers.anthropic.api import (
-    Anthropic,
-    _AnthropicModel,
-    _assistant_blocks,
-    _build_messages,
-    _is_prompt_too_long_text,
-    _parse_response,
-    _raw_message_stream,
-    _RawMessage,
-    _tool_result_block,
-    _tool_use_block,
-    build_context_management,
+from sagent.journal.types import AssistantMessage, Attachment, UserMessage
+from sagent.model.exceptions import (
+    AuthError,
+    ContextOverflowError,
+    DisconnectedError,
+    OverloadedError,
+    RateLimitedError,
+    UnknownModelError,
 )
-from sagent.providers.lib.errors import (
-    PolicyBlockedError,
-    StreamingResponseNotReadError,
-)
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ModelSettings,
-    ThinkingCapability,
-)
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    TokenCount,
-    TokenPrice,
-)
-from sagent.types.model import (
-    ModelRequest,
-    PromptTooLongError,
-    RequestTooLargeError,
-)
-from sagent.types.runtime import (
-    DETACHED_PLACEHOLDER,
-    AssistantMessage,
-    BytesMessage,
-    ModelContextEvent,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.anthropic import api, wire
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.anthropic.cli import AnthropicCLI
+from sagent.providers.catalog import listings
+from sagent.providers.resources import SharedResources
+from sagent.providers.testing import paused_backoff
+from sagent.providers.types import HasLogin, UsageWindow
 
 
 if TYPE_CHECKING:
-    from anthropic.types import MessageParam
-    from treekle import MutablePlainTree
+    from collections.abc import AsyncIterator, Callable, Mapping
 
-    import anthropic as anthropic_sdk
+    from sagent.model.capability import ThinkingBudget
+    from sagent.model.cost import ServiceTier
 
-    from sagent.types.capability import ThinkingBudget, ThinkingOutput
-    from sagent.types.tools import Tool
 
-else:
-    from wrapt import lazy_import
-
-    # The subject module defers the SDK (569ms cold); importing it eagerly
-    # here would put that back onto every worker's collection.
-    anthropic_sdk = lazy_import("anthropic")
-    MessageParam = lazy_import("anthropic.types", "MessageParam")
+_REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
 
 
 @pytest.fixture(autouse=True)
-def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> ModelTable:
-    row = ModelCapability(
-        model_id="example-1.0",
-        wire_model_id="wire-example",
-        approx_chars_per_token=2.5,
-        context={
-            "": ModelLimits(max_request_tokens=600_000, max_response_tokens=96_000),
-            "+200k": ModelLimits(
-                max_request_tokens=200_000,
-                max_response_tokens=48_000,
-            ),
+def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record each backoff instead of waiting it out."""
+    return paused_backoff(monkeypatch)
+
+
+def _sse(*events: Mapping[str, object]) -> bytes:
+    return "".join(
+        f"event: {event['type']}\ndata: {json_dumps(event)}\n\n" for event in events
+    ).encode()
+
+
+def _said(text: str, **usage: object) -> tuple[dict[str, object], ...]:
+    """Return the events of a reply that says ``text``."""
+    return (
+        {"type": "message_start", "message": {"usage": {"input_tokens": 3}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": text},
         },
-        thinking=ThinkingCapability(
-            effort=frozenset({"none", "low", "high"}),
-            budget=frozenset({"none", "auto", "fixed"}),
-            output=frozenset({"none", "text", "redacted"}),
-        ),
-        service_tier=frozenset({"auto", "default", "priority"}),
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=3.0,
-                    response=7.0,
-                    cache_write=2.0,
-                    cache_write_1h=4.0,
-                    cache_read=0.5,
-                ),
-            },
-        ),
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1, **usage},
+        },
+        {"type": "message_stop"},
     )
-    table = ModelTable(
-        rows=(
-            row,
-            replace(
-                row,
-                model_id="utility-example-1.0",
-                service_tier=frozenset({"auto", "default"}),
-            ),
-        ),
-        roles={"default": "example", "utility": "utility-example"},
+
+
+def _ok(
+    text: str = "Hello",
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> httpx2.Response:
+    return httpx2.Response(200, headers=headers, content=_sse(*_said(text)))
+
+
+def _failed(
+    status: int,
+    kind: str,
+    message: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> httpx2.Response:
+    body = {"type": "error", "error": {"type": kind, "message": message}}
+    return httpx2.Response(status, headers=headers, content=json_dumps(body).encode())
+
+
+async def _stream(
+    model: api.AnthropicModel,
+    request: Request = _REQUEST,
+) -> list[object]:
+    return [event async for event in model.stream(request)]
+
+
+def _body(request: httpx2.Request) -> dict[str, object]:
+    return json_loads(request.content, dict[str, object])
+
+
+@pytest.mark.asyncio
+async def test_credentials_are_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert await Anthropic().credentials() == {"x-api-key": "sk-test"}
+    for unset in ("", None):
+        if unset is None:
+            monkeypatch.delenv("ANTHROPIC_API_KEY")
+        else:
+            monkeypatch.setenv("ANTHROPIC_API_KEY", unset)
+        with pytest.raises(AuthError, match=r"^ANTHROPIC_API_KEY is not set\.$"):
+            await Anthropic().credentials()
+
+
+@pytest.mark.asyncio
+async def test_a_providers_headers_are_made_from_each_request() -> None:
+    """A subscription names the session each request belongs to."""
+    server = _Server(
+        replies=[
+            _ok(),
+            httpx2.Response(200, content=json_dumps({"input_tokens": 1}).encode()),
+        ],
     )
-    monkeypatch.setattr(
-        Anthropic,
-        "catalog",
-        ModelCatalog(models=table, transport=api()),
+    async with _Served(server) as shared:
+        opus = _Tagged(resources=shared)["opus"]
+        await _stream(opus)
+        await opus.count(_REQUEST)
+    assert [sent.headers["x-system"] for sent in server.requests] == ["Be terse."] * 2
+
+
+@pytest.mark.asyncio
+async def test_stream_posts_the_request_and_yields_text_then_the_response() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        events = await _stream(opus)
+    (sent,) = server.requests
+    assert (sent.method, str(sent.url)) == (
+        "POST",
+        "https://api.anthropic.com/v1/messages",
     )
-    return table
-
-
-def _free_model() -> _AnthropicModel:
-    """Return a model whose every rate is zero -- cost is not what these assert."""
-    m = Anthropic.from_key("k").model("wire-example")
-    m._capability = replace(
-        m.capability,
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=0.0,
-                    response=0.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
+    assert sent.headers["x-api-key"] == "sk-test"
+    assert sent.headers["anthropic-version"] == "2023-06-01"
+    assert sent.headers["content-type"] == "application/json"
+    # Thinking, on unasked, keeps its old turns by the context-management beta.
+    assert sent.headers["anthropic-beta"] == "context-management-2025-06-27"
+    body, _ = wire.encode(
+        _REQUEST,
+        capability=opus.capability,
+        settings=opus.settings,
+        system=wire.system_blocks(_REQUEST.system, settings=opus.settings),
     )
-    return m
+    assert _body(sent) == body
+    assert events[0] == TextChunk(text="Hello")
+    assert len(events) == 2
+    response = events[1]
+    assert isinstance(response, Response)
+    assert response.records == (AssistantMessage(content="Hello"),)
+    assert (response.tokens.request, response.tokens.response) == (3, 1)
 
 
-def _fast_model() -> _AnthropicModel:
-    """Opus rates with a 2x priority tier, for the billed-speed tests."""
-    m = Anthropic.from_key("k").model("wire-example")
-    m._capability = replace(
-        m.capability,
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-                PriceKey("priority"): TokenPrice(
-                    request=10.0,
-                    response=50.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
+@pytest.mark.asyncio
+async def test_requests_go_to_the_base_url_given_else_anthropic_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://gateway/anthropic/")
+    server = _Server(replies=[_ok(), _ok()])
+    async with _Served(server) as shared:
+        await _stream(Anthropic(resources=shared)["opus"])
+        await _stream(Anthropic(resources=shared, base_url="http://box/X/")["opus"])
+    # Only the trailing slash is dropped, never a path's last letter.
+    assert [str(sent.url) for sent in server.requests] == [
+        "http://gateway/anthropic/v1/messages",
+        "http://box/X/v1/messages",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_betas_a_request_needs_ride_one_header() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        opus.settings = replace(
+            opus.settings,
+            thinking_budget="auto",
+            thinking_output="redacted",
+            service_tier="priority",
+        )
+        await _stream(opus)
+    assert server.requests[0].headers["anthropic-beta"] == (
+        "redact-thinking-2026-02-12,context-management-2025-06-27,fast-mode-2026-02-01"
     )
-    m._settings = replace(m.settings, service_tier="priority")
-    return m
 
 
-def _make_request(
-    messages: list[ModelContextEvent],
-) -> ModelRequest:
-    return ModelRequest(messages=messages)
+@pytest.mark.asyncio
+async def test_each_reply_updates_the_accounts_windows() -> None:
+    limits = {
+        "anthropic-ratelimit-unified-5h-utilization": "0.25",
+        "anthropic-ratelimit-unified-5h-status": "allowed",
+    }
+    server = _Server(replies=[_ok(headers=limits), _ok()])
+    async with _Served(server) as shared:
+        anthropic = Anthropic(resources=shared)
+        assert anthropic.usage == ()
+        await _stream(anthropic["opus"])
+        window = UsageWindow(label="5h", utilization=0.25)
+        assert anthropic.usage == (window,)
+        # A reply that reports no window leaves the last report standing.
+        await _stream(anthropic["opus"])
+        assert anthropic.usage == (window,)
 
 
-def test_normalized_anthropic_id_uses_vendor_id_on_the_wire() -> None:
-    model = Anthropic.from_key("k").model("example-1.0")
-    kwargs = model._build_kwargs(
-        ModelRequest(messages=[UserMessage(text="hello")]),
-        [],
+@pytest.mark.asyncio
+async def test_an_error_reply_raises_what_it_means(slept: list[float]) -> None:
+    server = _Server(
+        replies=[
+            _failed(400, "invalid_request_error", "prompt is too long: 300000 tokens"),
+            httpx2.Response(400, content=b"<html>Bad Request</html>"),
+            httpx2.Response(400, content=b"{truncated"),
+        ],
     )
-    assert kwargs["model"] == "wire-example"
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        with pytest.raises(ContextOverflowError) as overflow:
+            await _stream(opus)
+        # The message is the error's own, read out of the JSON body.
+        assert overflow.value.args == ("prompt is too long: 300000 tokens",)
+        with pytest.raises(RuntimeError, match=r"400 : <html>Bad Request</html>"):
+            await _stream(opus)
+        # A body that only looks like JSON is read as text.
+        with pytest.raises(RuntimeError, match=r"400 : \{truncated"):
+            await _stream(opus)
+    assert len(server.requests) == 3
+    assert slept == []
 
 
-def test_the_default_tools_serialize_as_request_json() -> None:
-    # Tool schemas are frozen (nested mappingproxy); the SDK posts them with
-    # ``json.dumps``, so a shallow copy fails at the first nested object.
-    model = Anthropic.from_key("k").model("example-1.0")
-    kwargs = model._build_kwargs(
-        ModelRequest(
-            messages=[UserMessage(text="hello")],
-            tools=resolve_tools(list(DEFAULT_TOOLS)),
-        ),
-        [],
+@pytest.mark.asyncio
+async def test_a_short_failure_before_the_first_event_is_retried(
+    slept: list[float],
+) -> None:
+    server = _Server(
+        replies=[
+            _failed(529, "overloaded_error", "Overloaded"),
+            _failed(429, "rate_limit_error", "slow", headers={"retry-after": "2"}),
+            _ok(),
+        ],
     )
-    json.dumps(kwargs["tools"])
+    async with _Served(server) as shared:
+        events = await _stream(Anthropic(resources=shared)["opus"])
+    assert events[0] == TextChunk(text="Hello")
+    assert len(server.requests) == 3
+    # Doubling backoff, or the server's advice when it is longer.
+    assert slept == [0.5, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_retrying_stops_after_five_attempts(slept: list[float]) -> None:
+    server = _Server(replies=[_failed(529, "overloaded_error", "Overloaded")] * 5)
+    async with _Served(server) as shared:
+        with pytest.raises(OverloadedError, match="Overloaded"):
+            await _stream(Anthropic(resources=shared)["opus"])
+    assert len(server.requests) == 5
+    assert slept == [0.5, 1.0, 2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_no_requests_left_holds_the_key_before_a_429(
+    slept: list[float],
+) -> None:
+    # ``paused_backoff``'s clock reads 1_000_000; the bucket refills 20s later.
+    spent = {
+        "anthropic-ratelimit-requests-remaining": "0",
+        "anthropic-ratelimit-requests-reset": "1970-01-12T13:47:00Z",
+    }
+    server = _Server(replies=[_ok(headers=spent), _ok()])
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        await _stream(opus)
+        assert slept == []
+        await _stream(opus)
+    assert slept == [pytest.approx(20.0)]
+    assert len(server.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_headers", [False, True])
+async def test_a_quota_recheck_uses_only_the_new_responses_limits(
+    slept: list[float],
+    fresh_headers: bool,
+) -> None:
+    spent = {
+        "anthropic-ratelimit-requests-remaining": "0",
+        "anthropic-ratelimit-requests-reset": "1970-01-17T13:46:40Z",
+    }
+    fresh = (
+        {**spent, "anthropic-ratelimit-requests-remaining": "10"}
+        if fresh_headers
+        else {}
+    )
+    server = _Server(replies=[_ok(headers=spent), _ok(headers=fresh), _ok()])
+    async with _Served(server) as shared:
+        model = Anthropic(resources=shared)["opus"]
+        await _stream(model)
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model)
+        await _stream(model, replace(_REQUEST, recheck_quota=True))
+        await _stream(model)
+    assert len(server.requests) == 3
+    assert slept == []
+
+
+def test_two_keys_of_one_organization_are_paced_as_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic limits the organization; its keys share every limit."""
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org-1")
+    first = Anthropic().gate_key("opus-5.5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-other")
+    assert Anthropic().gate_key("opus-5.5") == first
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org-2")
+    assert Anthropic().gate_key("opus-5.5") != first
+
+
+@pytest.mark.asyncio
+async def test_a_weekly_opus_limit_leaves_sonnet_free(
+    slept: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window named for one family holds that family's model, not the account."""
+    monkeypatch.setattr(wire, "time", SimpleNamespace(time=lambda: 1_000_000.0))
+    opus_spent = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+        "anthropic-ratelimit-unified-reset": str(1_000_000 + 3 * 86_400),
+    }
+    weekly = _failed(429, "rate_limit_error", "weekly", headers=opus_spent)
+    server = _Server(replies=[weekly, _ok()])
+    async with _Served(server) as shared:
+        provider = Anthropic(resources=shared)
+        with pytest.raises(RateLimitedError) as opus:
+            await _stream(provider["opus"])
+        assert opus.value.limit == "weekly Opus"
+        await _stream(provider["sonnet"])
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(provider["opus"])
+    assert slept == []
+    assert len(server.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> None:
+    server = _Server(
+        replies=[
+            _failed(429, "rate_limit_error", "slow", headers={"retry-after": "31"}),
+        ],
+    )
+    async with _Served(server) as shared:
+        with pytest.raises(RateLimitedError) as raised:
+            await _stream(Anthropic(resources=shared)["opus"])
+    assert raised.value.retry_after_sec == 31.0
+    assert len(server.requests) == 1
+    assert slept == []
+    # Thirty seconds is still short enough to wait out here.
+    server = _Server(
+        replies=[
+            _failed(429, "rate_limit_error", "slow", headers={"retry-after": "30"}),
+            _ok(),
+        ],
+    )
+    async with _Served(server) as shared:
+        await _stream(Anthropic(resources=shared)["opus"])
+    # The account's first 429 held it 31s for every caller: this one waits that
+    # out before it sends, then the 30s its own 429 advises.
+    assert slept == [31.0, 30.0]
+    assert len(server.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_connection_is_a_disconnect_and_is_retried(
+    slept: list[float],
+) -> None:
+    refused = httpx2.ConnectError("Connection refused")
+    server = _Server(replies=[refused, _ok()])
+    async with _Served(server) as shared:
+        events = await _stream(Anthropic(resources=shared)["opus"])
+    assert events[0] == TextChunk(text="Hello")
+    assert slept == [0.5]
+    server = _Server(replies=[refused] * 5)
+    async with _Served(server) as shared:
+        with pytest.raises(DisconnectedError, match="Connection refused"):
+            await _stream(Anthropic(resources=shared)["opus"])
+    assert len(server.requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_text_has_streamed_is_not_retried(
+    slept: list[float],
+) -> None:
+    """Text the caller already showed cannot be taken back."""
+    server = _Server(
+        replies=[httpx2.Response(200, content=_broken(_said("Partial")[:3]))],
+    )
+    async with _Served(server) as shared:
+        stream = Anthropic(resources=shared)["opus"].stream(_REQUEST)
+        assert await anext(stream) == TextChunk(text="Partial")
+        with pytest.raises(DisconnectedError, match="reset"):
+            await anext(stream)
+    assert len(server.requests) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_api_key_is_not_renewed(slept: list[float]) -> None:
+    server = _Server(
+        replies=[_failed(401, "authentication_error", "invalid x-api-key")],
+    )
+    async with _Served(server) as shared:
+        anthropic = Anthropic(resources=shared)
+        assert await anthropic.reauthenticate() is False
+        with pytest.raises(AuthError, match="invalid x-api-key"):
+            await _stream(anthropic["opus"])
+    assert len(server.requests) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_401_renews_credentials_and_retries_once(slept: list[float]) -> None:
+    server = _Server(
+        replies=[_failed(401, "authentication_error", "expired"), _ok()],
+    )
+    async with _Served(server) as shared:
+        renewing = _Renewing(resources=shared)
+        await _stream(renewing["opus"])
+    assert [sent.headers["x-api-key"] for sent in server.requests] == ["old", "new"]
+    server = _Server(replies=[_failed(401, "authentication_error", "revoked")] * 2)
+    async with _Served(server) as shared:
+        renewing = _Renewing(resources=shared)
+        with pytest.raises(AuthError, match="revoked"):
+            await _stream(renewing["opus"])
+    assert renewing.renewals == 1
+    assert len(server.requests) == 2
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_providers_own_betas_lead_and_none_repeats() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        opus = _Renewing(resources=shared)["opus"]
+        opus.settings = replace(opus.settings, thinking_budget="auto")
+        await _stream(opus)
+    assert server.requests[0].headers["anthropic-beta"] == (
+        "context-management-2025-06-27,interleaved-thinking-2025-05-14"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tier", "betas"),
+    [
+        ("priority", "context-management-2025-06-27,fast-mode-2026-02-01"),
+        ("default", "context-management-2025-06-27"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_count_asks_the_server_without_generation_knobs(
+    tier: ServiceTier,
+    betas: str,
+) -> None:
+    server = _Server(
+        replies=[
+            httpx2.Response(200, content=json_dumps({"input_tokens": 42}).encode()),
+        ],
+    )
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        opus.settings = replace(
+            opus.settings,
+            thinking_budget="auto",
+            thinking_effort="high",
+            service_tier=tier,
+        )
+        assert await opus.count(_REQUEST) == 42
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.anthropic.com/v1/messages/count_tokens"
+    body = _body(sent)
+    assert body.keys() == {
+        "model",
+        "messages",
+        "system",
+        "thinking",
+        "context_management",
+    }
+    assert body["model"] == "claude-opus-5-5"
+    assert sent.headers["anthropic-beta"] == betas
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_not_a_json_object_is_refused() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b"[42]")])
+    async with _Served(server) as shared:
+        with pytest.raises(ReadError):
+            await Anthropic(resources=shared).reply(
+                "/v1/messages/count_tokens",
+                body={},
+                betas=(),
+                headers={},
+            )
+
+
+@pytest.mark.asyncio
+async def test_the_cache_lapses_only_after_an_answer_left_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1_000.0]
+    monkeypatch.setattr(api, "time", SimpleNamespace(time=lambda: now[0]))
+    server = _Server(replies=[_ok(), _ok(), _ok()])
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        opus.settings = replace(opus.settings, thinking_budget="auto")
+        assert opus.settings.cache_ttl_sec == 300.0
+        await _stream(opus)  # Never answered before, so nothing has lapsed.
+        now[0] += 300.0
+        await _stream(opus)  # Idle exactly the cache's lifetime.
+        now[0] += 301.0
+        await _stream(opus)
+    kept = [_kept_thinking(_body(sent)) for sent in server.requests]
+    assert kept == ["all", "all", {"type": "thinking_turns", "value": 1}]
+
+
+@pytest.mark.parametrize(
+    ("name", "model_id"),
+    [
+        ("opus", "opus-5.5"),
+        ("opus-4", "opus-4.8"),
+        ("opus-5.0", "opus-5.0"),
+        ("claude-opus-4-8", "opus-4.8"),
+        ("default", "opus-5.5"),
+        ("best", "fable-5.2"),
+        ("fable", "fable-5.2"),
+        ("claude-fable-5-2", "fable-5.2"),
+        ("everyday", "sonnet-5.5"),
+        ("utility", "haiku-5.5"),
+    ],
+)
+def test_a_model_answers_to_its_name_role_family_or_vendor_id(
+    name: str,
+    model_id: str,
+) -> None:
+    model = Anthropic()[name]
+    assert model.capability.model_id == model_id
+    assert model.provider.name == "anthropic"
+
+
+def test_a_context_tag_selects_its_size() -> None:
+    model = Anthropic()["opus+200k"]
+    assert model.settings.context_size.tokens == 200_000
+    assert model.capability.limits.max_request_tokens == 1_000_000
+    with pytest.raises(UnknownModelError, match="'gpt-5'"):
+        Anthropic()["gpt-5"]
+
+
+def test_iterating_lists_the_sections_models() -> None:
+    names = list(Anthropic())
+    assert names[:3] == ["fable-5.2", "fable-5.1", "fable-5.0"]
+    assert len(names) == 18
+    assert "default" not in names
+
+
+def test_a_provider_is_named_for_its_section_unless_named() -> None:
+    assert Anthropic().name == "anthropic"
+    assert Anthropic(name="work").name == "work"
+    assert not isinstance(Anthropic(), HasLogin)  # An API key needs no sign-in.
+
+
+@pytest.mark.asyncio
+async def test_a_provider_closes_only_resources_it_made() -> None:
+    own = Anthropic()
+    client = own.resources.http
+    await own.aclose()
+    assert client.is_closed
+    async with SharedResources() as shared:
+        client = shared.http
+        await Anthropic(resources=shared).aclose()
+        assert not client.is_closed
+
+
+@pytest.mark.parametrize(
+    ("model_id", "cutoff"),
+    [
+        ("fable-5.2", "2026-06-01"),
+        ("fable-5.1", "2026-06-01"),
+        ("opus-5.0", "2026-05-01"),
+        ("opus-4.6", "2025-05-01"),
+        ("sonnet-4.6", "2025-08-01"),
+        ("haiku-4.5", "2025-02-01"),
+    ],
+)
+def test_every_row_states_its_published_cutoff(model_id: str, cutoff: str) -> None:
+    assert Anthropic.models()[model_id].knowledge_cutoff == cutoff
+
+
+@pytest.mark.parametrize(
+    ("model_id", "rates"),
+    [
+        ("fable-5.2", (8.0, 40.0, 10.0, 16.0, 0.2)),
+        ("fable-5.1", (10.0, 50.0, 12.5, 20.0, 0.25)),
+        ("opus-5.5", (4.0, 20.0, 5.0, 8.0, 0.2)),
+        ("sonnet-4.6", (3.0, 15.0, 3.75, 6.0, 0.3)),
+        ("haiku-5.5", (0.1, 0.5, 0.125, 0.2, 0.01)),
+    ],
+)
+def test_a_row_bills_the_published_standard_card(
+    model_id: str,
+    rates: tuple[float, float, float, float, float],
+) -> None:
+    card = Anthropic.models()[model_id].prices["auto", 1, date(2026, 10, 22)]
+    assert (
+        card.request,
+        card.response,
+        card.cache_write,
+        card.cache_write_1h,
+        card.cache_read,
+    ) == rates
+
+
+def test_only_the_fast_mode_models_offer_priority() -> None:
+    table = Anthropic.models()
+    fast = {name for name, row in table.items() if "priority" in row.service_tier}
+    assert fast == {"fable-5.2", "mythos-5.2", "opus-5.5", "opus-5.0", "opus-4.8"}
+    card = table["opus-5.0"].prices["priority", 1, date(2026, 10, 22)]
+    assert (card.request, card.cache_write, card.cache_read) == (10.0, 12.5, 1.0)
+    # Fast mode's $16 / $80 card, with the caching multipliers on top.
+    card = table["fable-5.2"].prices["priority", 1, date(2026, 11, 9)]
+    assert (
+        card.request,
+        card.response,
+        card.cache_write,
+        card.cache_write_1h,
+        card.cache_read,
+    ) == (16.0, 80.0, 20.0, 32.0, 0.4)
+
+
+def test_dated_and_banded_cards_bill_their_published_rates() -> None:
+    table = Anthropic.models()
+    sonnet = table["sonnet-5.5"].prices
+    before, after = date(2026, 10, 6), date(2026, 10, 7)
+    assert sonnet["auto", 1, before].cache_read == 0.2
+    assert sonnet["auto", 1, after].cache_read == 0.1
+    haiku = table["haiku-5.5"].prices
+    at = date(2026, 10, 22)
+    assert haiku["auto", 100_000, at].request == 0.1
+    assert haiku["auto", 100_001, at].request == 0.5
 
 
 @pytest.mark.parametrize(
     "model_id",
-    ["example", "example+200k", "utility"],
+    ["fable-5.2", "fable-5.1", "opus-5.5", "sonnet-5.0"],
 )
-def test_no_model_sends_the_retired_1m_context_beta(model_id: str) -> None:
-    """1M is the default on every 1M model; the beta header is no longer needed."""
-    model = Anthropic.from_key("k").model(model_id)
-    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
-    headers = cast(dict[str, str], kwargs["extra_headers"])
-    betas = headers["anthropic-beta"].split(",")
-    assert "context-1m-2025-08-07" not in betas
-    assert "context-management-2025-06-27" in betas
+def test_1m_models_serve_1m(model_id: str) -> None:
+    limits = Anthropic.models()[model_id].limits
+    assert limits.max_request_tokens == 1_000_000
+    assert limits.max_response_tokens == 128_000
+
+
+@pytest.mark.parametrize("model_id", ["opus-4.5", "sonnet-4.5", "haiku-4.5"])
+def test_pre_4_6_models_have_a_200k_window(model_id: str) -> None:
+    limits = Anthropic.models()[model_id].limits
+    assert limits.max_request_tokens == 200_000
+    assert limits.max_response_tokens == 64_000
+
+
+def test_small_is_haikus_cheaper_band_and_opus_has_none() -> None:
+    assert Anthropic()["haiku-5.5+smallcontext"].settings.context_size.tokens == 100_000
+    assert (
+        Anthropic()["opus-5.5+smallcontext"].settings.context_size.tokens == 1_000_000
+    )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "budget", "output", "display"),
+    ("model_id", "budget"),
     [
-        ("example-1.0", "auto", "text", "summarized"),
-        ("example", "auto", "text", "summarized"),
-        ("example", "auto", "redacted", "omitted"),
-        ("example", "fixed", "text", "summarized"),
-        ("utility-example-1.0", "fixed", "redacted", "omitted"),
+        # ``enabled`` is rejected from 4.7 on: adaptive only. Fable, Mythos, and
+        # the 5.5 models also reject ``disabled``: thinking cannot be turned off.
+        ("fable-5.2", {"auto"}),
+        ("fable-5.1", {"auto"}),
+        ("opus-5.5", {"auto"}),
+        ("sonnet-5.5", {"auto"}),
+        ("haiku-5.5", {"none", "auto"}),
+        ("opus-5.0", {"none", "auto"}),
+        ("opus-4.8", {"none", "auto"}),
+        ("opus-4.6", {"none", "auto", "fixed"}),
+        # The 4.5 generation rejects ``adaptive``.
+        ("opus-4.5", {"none", "fixed"}),
+        ("haiku-4.5", {"none", "fixed"}),
     ],
 )
-def test_thinking_output_selects_the_wire_display(
+def test_each_generation_offers_its_measured_budget_modes(
     model_id: str,
-    budget: ThinkingBudget,
-    output: ThinkingOutput,
-    display: str,
+    budget: set[ThinkingBudget],
 ) -> None:
-    """4.7-and-later default ``display`` to omitted, so ``text`` must ask for it."""
-    model = Anthropic.from_key("k").model(model_id)
-    model.settings.thinking_budget = budget
-    model.settings.thinking_output = output
-    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
-    thinking = cast(dict[str, object], kwargs["thinking"])
-    assert thinking["display"] == display
+    assert Anthropic.models()[model_id].thinking_budget == budget
 
 
-def test_thinking_without_an_output_choice_sends_no_display() -> None:
-    model = Anthropic.from_key("k").model("example-1.0")
-    model.settings.thinking_budget = "auto"
-    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
-    assert kwargs["thinking"] == {"type": "adaptive"}
+def test_thinking_off_is_capped_at_high_effort_only_where_claude_caps_it() -> None:
+    capped = {
+        model_id: row.thinking_off_max_effort
+        for model_id, row in Anthropic.models().items()
+        if row.thinking_off_max_effort is not None
+    }
+    assert capped == {"opus-5.0": "high", "haiku-5.5": "high"}
+    opus = Anthropic.models()["opus-5.0"]
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        opus.check(
+            replace(opus.default, thinking_effort="xhigh", thinking_budget="none"),
+        )
 
 
-def test_no_thinking_sends_no_display() -> None:
-    """``display`` is invalid with thinking off; nothing to display."""
-    model = Anthropic.from_key("k").model("example")
-    model.settings.thinking_output = "text"
-    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
-    assert "thinking" not in kwargs
+def test_xhigh_effort_is_a_4_7_and_later_level() -> None:
+    table = Anthropic.models()
+    assert table["fable-5.1"].thinking_effort == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    assert "xhigh" not in table["opus-4.6"].thinking_effort
 
 
 @pytest.mark.parametrize(
-    "msg",
-    [
-        "prompt is too long: 123",
-        "Request exceeded context window",
-        "PROMPT_TOO_LONG",
-    ],
+    ("model_id", "edge_px", "chars_per_token"),
+    [("opus-5.5", 2576, 2.38), ("opus-4.6", 1568, 3.12), ("sonnet-4.5", 1568, 3.12)],
 )
-def test_is_prompt_too_long_text_positive(msg: str) -> None:
-    assert _is_prompt_too_long_text(msg) is True
-
-
-def test_is_prompt_too_long_text_negative() -> None:
-    assert _is_prompt_too_long_text("rate limited") is False
-
-
-def test_is_prompt_too_long_text_false_positive_tool_schema_validation() -> None:
-    """Tool-schema validation errors mention ``context window`` benignly."""
-    msg = (
-        "Invalid tool schema: parameter 'max_context_window' must be a positive integer"
-    )
-    assert _is_prompt_too_long_text(msg) is False
-
-
-def test_is_prompt_too_long_text_structured_body_overflow() -> None:
-    """Structured ``error.type`` + overflow ``message`` is the canonical signal."""
-    body: Mapping[str, object] = {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": "prompt is too long: 250000 tokens > 200000 maximum",
-        },
-    }
-    assert _is_prompt_too_long_text("stringified blob", error_body=body) is True
-
-
-def test_is_prompt_too_long_text_structured_body_unrelated_invalid_request() -> None:
-    """Unrelated 400s under ``invalid_request_error`` must not classify as overflow."""
-    body: Mapping[str, object] = {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": (
-                "tools.0.input_schema: parameter 'context window' must be an object"
-            ),
-        },
-    }
-    assert _is_prompt_too_long_text(str(body), error_body=body) is False
-
-
-def test_build_messages_user_text_only() -> None:
-    msgs = _build_messages(_make_request([UserMessage(text="hi")]))
-    assert len(msgs) == 1
-    assert msgs[0]["role"] == "user"
-    blocks = cast(list[dict[str, object]], msgs[0]["content"])
-    # Cache breakpoint may have rewritten the last block to add cache_control;
-    # ensure the underlying text payload is preserved.
-    assert any(b.get("text") == "hi" for b in blocks)
-
-
-def test_build_messages_marks_a_cache_point_ahead_of_the_last_message() -> None:
-    document = UserMessage(text="long shared document", cache_point=True)
-    question = UserMessage(text="the question")
-    msgs = _build_messages(_make_request([document, question]), cache_ttl="1h")
-    # Two user messages in a row coalesce into one wire message; both blocks
-    # keep their own cache_control.
-    blocks = [b for m in msgs for b in cast(list[dict[str, object]], m["content"])]
-    marks = [(b.get("text"), b.get("cache_control")) for b in blocks]
-    assert marks == [
-        ("long shared document", {"type": "ephemeral", "ttl": "1h"}),
-        ("the question", {"type": "ephemeral", "ttl": "1h"}),
-    ]
-    plain = _build_messages(_make_request([UserMessage(text="a"), question]))
-    first = cast(list[dict[str, object]], plain[0]["content"])[0]
-    assert "cache_control" not in first
-
-
-def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
-    asst = AssistantMessage(
-        text="thinking",
-        tool_calls=(ToolCall(id="orig-9", name="Bash", args={"cmd": "ls"}),),
-    )
-    msgs = _build_messages(_make_request([asst]))
-    assert msgs[0]["role"] == "assistant"
-    blocks = cast(list[dict[str, object]], msgs[0]["content"])
-    # First block is the text, second is tool_use with the remapped id.
-    assert blocks[0]["type"] == "text"
-    assert blocks[1]["type"] == "tool_use"
-    assert blocks[1]["id"] == "toolu_0"
-    assert blocks[1]["name"] == "Bash"
-
-
-def test_build_messages_consecutive_tool_results_batched_into_single_user() -> None:
-    asst = AssistantMessage(
-        tool_calls=(
-            ToolCall(id="c1", name="N", args={}),
-            ToolCall(id="c2", name="N", args={}),
-        ),
-    )
-    res1 = ToolResult(call_id="c1", content="r1")
-    res2 = ToolResult(call_id="c2", content="r2")
-    msgs = _build_messages(_make_request([asst, res1, res2]))
-    # [assistant, user(with 2 tool_results)].
-    assert len(msgs) == 2
-    assert msgs[-1]["role"] == "user"
-    content = cast(list[dict[str, object]], msgs[-1]["content"])
-    # Both tool_results in one batch (last has cache_control sidecar).
-    tool_results = [b for b in content if b.get("type") == "tool_result"]
-    assert len(tool_results) == 2
-
-
-def test_user_after_tool_results_coalesces_into_same_wire_msg() -> None:
-    """C1: mid-cohort user text MUST merge with pending tool_results.
-
-    Emitting a separate ``role=user`` message after a ``role=user``
-    (tool_results) breaks Anthropic's strict alternation and triggers
-    HTTP 400. The fix coalesces both into the same wire user message.
-    """
-    asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    tool_result = ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER)
-    user_redirect = UserMessage(text="actually do something else")
-    msgs = _build_messages(_make_request([asst, tool_result, user_redirect]))
-    # Expect 2 messages: assistant(tool_use) + user(tool_result + text).
-    assert len(msgs) == 2, [m["role"] for m in msgs]
-    assert msgs[0]["role"] == "assistant"
-    assert msgs[1]["role"] == "user"
-    content = cast(list[dict[str, object]], msgs[1]["content"])
-    type_names = {b.get("type") for b in content}
-    assert "tool_result" in type_names
-    assert "text" in type_names
-
-
-def test_build_messages_tool_result_id_pairs_with_call() -> None:
-    asst = AssistantMessage(
-        tool_calls=(ToolCall(id="orig-X", name="N", args={}),),
-    )
-    msgs = _build_messages(
-        _make_request([asst, ToolResult(call_id="orig-X", content="ok")]),
-    )
-    blocks = cast(list[dict[str, object]], msgs[0]["content"])
-    tool_use = next(b for b in blocks if b.get("type") == "tool_use")
-    tool_result_block_msg = cast(list[dict[str, object]], msgs[1]["content"])
-    tool_result = next(
-        b for b in tool_result_block_msg if b.get("type") == "tool_result"
-    )
-    assert tool_use["id"] == tool_result["tool_use_id"]
-
-
-def test_build_messages_empty_history_no_messages() -> None:
-    assert _build_messages(_make_request([])) == []
-
-
-def test_assistant_blocks_thinking_only_appends_placeholder() -> None:
-    """Thinking-only assistant gets a trailing ``.`` text block."""
-    asst = AssistantMessage(
-        thinking_blocks=({"type": "thinking", "thinking": "...", "signature": "s"},),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert blocks[-1] == {"type": "text", "text": "."}
-
-
-def test_assistant_blocks_text_only() -> None:
-    asst = AssistantMessage(text="hello")
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert blocks == [{"type": "text", "text": "hello"}]
-
-
-def test_assistant_blocks_thinking_text_tool() -> None:
-    asst = AssistantMessage(
-        text="answer",
-        thinking_blocks=({"type": "thinking", "thinking": "...", "signature": "s"},),
-        tool_calls=(ToolCall(id="x", name="N", args={"a": 1}),),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert blocks[0]["type"] == "thinking"
-    assert blocks[1] == {"type": "text", "text": "answer"}
-    assert blocks[2]["type"] == "tool_use"
-
-
-def test_assistant_blocks_drops_signature_only_thinking() -> None:
-    """Drop thinking blocks whose signed body was lost.
-
-    A persisted ``thinking`` block with a non-empty ``signature`` but empty
-    ``thinking`` text cannot re-validate against the server's signature, since
-    the signed payload is gone. Replaying it triggers HTTP 400 ``thinking ...
-    blocks in the latest assistant message cannot be modified``. The provider
-    elides such blocks; intact thinking blocks and ``redacted_thinking`` (which
-    has no client-visible body to lose) pass through.
-    """
-    asst = AssistantMessage(
-        text="ok",
-        thinking_blocks=(
-            {"type": "thinking", "thinking": "", "signature": "sig0"},
-            {"type": "thinking", "thinking": "kept", "signature": "sig1"},
-            {"type": "redacted_thinking", "data": "opaque"},
-        ),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert [b["type"] for b in blocks] == [
-        "thinking",
-        "redacted_thinking",
-        "text",
-    ]
-    assert blocks[0].get("thinking") == "kept"
-
-
-def test_assistant_blocks_drops_foreign_reasoning_blocks() -> None:
-    """Non-native thinking-block types are dropped on cross-provider switch.
-
-    After a session swaps from OpenAI / Moonshot / MiniMax / OpenAI-sub to
-    Anthropic, ``AssistantMessage.thinking_blocks`` may carry
-    ``{"type":"reasoning",...}`` entries. Anthropic's API rejects unknown
-    block types with HTTP 400, and there's no faithful translation, so the
-    serializer must silently elide them rather than forward verbatim.
-    """
-    asst = AssistantMessage(
-        text="ok",
-        thinking_blocks=(
-            {"type": "reasoning", "text": "hidden"},
-            {"type": "thinking", "thinking": "kept", "signature": "sig"},
-        ),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    types = [b.get("type") for b in blocks]
-    assert "reasoning" not in types
-    assert types == ["thinking", "text"]
-
-
-def test_assistant_blocks_drops_foreign_reasoning_only_appends_placeholder() -> None:
-    """Foreign-only thinking + no text/tool_calls still emits a valid message.
-
-    After elision the assistant message is empty; the existing rule that
-    Anthropic rejects assistant messages with no content drives a fallback
-    text block.
-    """
-    asst = AssistantMessage(
-        thinking_blocks=({"type": "reasoning", "text": "hidden"},),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    # Empty blocks list after elision; no trailing placeholder is needed
-    # because the message has no thinking block to mask. Anthropic will
-    # reject an empty assistant turn upstream, but that's the caller's
-    # contract -- we don't synthesize content out of nothing.
-    assert blocks == []
-
-
-def test_assistant_blocks_preserves_mixed_thinking_modes() -> None:
-    asst = AssistantMessage(
-        text="ok",
-        thinking_blocks=(
-            {"type": "thinking", "thinking": "visible", "signature": "sig1"},
-            {"type": "redacted_thinking", "data": "opaque"},
-            {"type": "thinking", "thinking": "visible again", "signature": "sig2"},
-        ),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert blocks[:3] == [
-        {"type": "thinking", "thinking": "visible", "signature": "sig1"},
-        {"type": "redacted_thinking", "data": "opaque"},
-        {"type": "thinking", "thinking": "visible again", "signature": "sig2"},
-    ]
-    assert blocks[3] == {"type": "text", "text": "ok"}
-
-
-def test_assistant_blocks_drops_unsigned_thinking() -> None:
-    """A thinking block without a signature (Gemini, ACP) cannot validate."""
-    asst = AssistantMessage(
-        text="ok",
-        thinking_blocks=(
-            {"type": "thinking", "thinking": "gemini thought"},
-            {"type": "thinking", "thinking": "kept", "signature": "sig"},
-        ),
-    )
-    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
-    assert [(b["type"], b.get("thinking")) for b in blocks] == [
-        ("thinking", "kept"),
-        ("text", None),
-    ]
-
-
-def test_tool_use_block_remaps_id_through_remapper() -> None:
-    ids = IdRemapper("toolu_")
-    out = _tool_use_block(ToolCall(id="ext", name="N", args={"k": "v"}), ids)
-    assert out == {
-        "type": "tool_use",
-        "id": "toolu_0",
-        "name": "N",
-        "input": {"k": "v"},
-    }
-
-
-def test_tool_result_block_plain_text() -> None:
-    ids = IdRemapper("toolu_")
-    out = _tool_result_block(
-        ToolResult(call_id="ext-1", content="done"),
-        ids,
-        max_image_dim=8000,
-        max_image_bytes=5 * 1024 * 1024,
-    )
-    assert out == {
-        "type": "tool_result",
-        "tool_use_id": "toolu_0",
-        "content": "done",
-        "is_error": False,
-    }
-
-
-def test_tool_result_block_is_error_flag_propagates() -> None:
-    ids = IdRemapper("toolu_")
-    out = _tool_result_block(
-        ToolResult(call_id="x", content="oops", is_error=True),
-        ids,
-        max_image_dim=8000,
-        max_image_bytes=5 * 1024 * 1024,
-    )
-    assert out["is_error"] is True
-
-
-def test_tool_result_block_skips_svg_attachment() -> None:
-    ids = IdRemapper("toolu_")
-    out = _tool_result_block(
-        ToolResult(
-            call_id="x",
-            content="[image: qr.svg]",
-            attachments=(BytesMessage(data=b"<svg/>", descriptor="image/svg+xml"),),
-        ),
-        ids,
-        max_image_dim=8000,
-        max_image_bytes=5 * 1024 * 1024,
-    )
-    assert out["content"] == "[image: qr.svg]"
-
-
-def test_tool_result_block_keeps_pdf_attachment() -> None:
-    out = _tool_result_block(
-        ToolResult(
-            call_id="x",
-            content="report",
-            attachments=(BytesMessage(data=b"%PDF-1.4", descriptor="application/pdf"),),
-        ),
-        IdRemapper("toolu_"),
-        max_image_dim=8000,
-        max_image_bytes=5 * 1024 * 1024,
-    )
-    content = cast(list[dict[str, object]], out["content"])
-    assert [block["type"] for block in content] == ["text", "document"]
-
-
-def _build_anthropic_message(
-    *,
-    text: str = "",
-    tool_calls: tuple[tuple[str, str, dict[str, object]], ...] = (),
-    stop_reason: str = "end_turn",
-    input_tokens: int = 0,
-    output_tokens: int = 0,
-    cache_creation: int = 0,
-    cache_read: int = 0,
-    speed: str | None = None,
-) -> _RawMessage:
-    """Return a duck-typed object mimicking ``anthropic.types.Message``."""
-    # Use the real anthropic SDK classes via the lazy-imported module so
-    # ``isinstance`` checks inside ``_parse_response`` succeed.
-    text_blocks: list[object] = []
-    if text:
-        text_blocks.append(anthropic_sdk.types.TextBlock(type="text", text=text))
-    for tc_id, tc_name, args in tool_calls:
-        text_blocks.append(
-            anthropic_sdk.types.ToolUseBlock(
-                type="tool_use",
-                id=tc_id,
-                name=tc_name,
-                input=args,
-            ),
-        )
-    # ``speed`` is an extra the SDK model keeps but does not declare.
-    usage = anthropic_sdk.types.Usage.model_validate(
-        {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_creation_input_tokens": cache_creation,
-            "cache_read_input_tokens": cache_read,
-            "speed": speed,
-        },
-    )
-    msg = MagicMock()
-    msg.content = text_blocks
-    msg.usage = usage
-    msg.stop_reason = stop_reason
-    msg.stop_sequence = None
-    msg.id = "msg_xyz"
-    msg._request_id = "req_xyz"
-    return cast(_RawMessage, msg)
-
-
-def test_parse_response_text_only() -> None:
-    raw = _build_anthropic_message(text="hi", input_tokens=5, output_tokens=2)
-    resp = _parse_response(raw, _free_model())
-    assert resp.message.text == "hi"
-    assert resp.stop_reason == "model_finished"
-    assert resp.tokens.request == 5
-    assert resp.tokens.response == 2
-
-
-def test_parse_response_tool_call_extracted() -> None:
-    raw = _build_anthropic_message(
-        tool_calls=(("toolu_xyz", "Bash", {"cmd": "ls"}),),
-        stop_reason="tool_use",
-    )
-    resp = _parse_response(raw, _free_model())
-    assert len(resp.message.tool_calls) == 1
-    call = resp.message.tool_calls[0]
-    assert call.id == "toolu_xyz"
-    assert call.name == "Bash"
-    assert dict(call.args) == {"cmd": "ls"}
-    assert resp.stop_reason == "model_tool_use"
-
-
-def test_parse_response_drops_placeholder_tool_name() -> None:
-    """Tool blocks whose name is not a valid identifier are filtered out.
-
-    Anthropic's API server injects its tool-use spec into the model's
-    hidden context when tools are registered. When the user asks the
-    model to dump its context, the model echoes the spec verbatim, and
-    the API parses that echo as a structured ``tool_use`` block with
-    ``name="$FUNCTION_NAME"`` (or other template placeholders). Without
-    this guard, ``runtime._run_tool_and_post`` emits a visible
-    "Unknown tool: $FUNCTION_NAME" and the unmatched tool_use poisons
-    history for the next request.
-    """
-    raw = _build_anthropic_message(
-        tool_calls=(
-            ("toolu_real", "Bash", {"cmd": "ls"}),
-            ("toolu_bad", "$FUNCTION_NAME", {}),
-        ),
-        stop_reason="tool_use",
-    )
-    resp = _parse_response(raw, _free_model())
-    assert [c.name for c in resp.message.tool_calls] == ["Bash"]
-
-
-def test_parse_response_accepts_hyphenated_tool_name() -> None:
-    raw = _build_anthropic_message(
-        tool_calls=(("toolu_1", "mcp-server_tool", {}),),
-        stop_reason="tool_use",
-    )
-    resp = _parse_response(raw, _free_model())
-    assert [c.name for c in resp.message.tool_calls] == ["mcp-server_tool"]
-
-
-def test_parse_response_all_placeholder_calls_is_finished() -> None:
-    """Filtering every tool_use leaves prose, not an interrupted stream."""
-    raw = _build_anthropic_message(
-        text="here is my context",
-        tool_calls=(("toolu_bad", "$FUNCTION_NAME", {}),),
-        stop_reason="tool_use",
-    )
-    resp = _parse_response(raw, _free_model())
-    assert resp.message.tool_calls == ()
-    assert resp.stop_reason == "model_finished"
-
-
-def test_parse_response_cache_tokens_split_correctly() -> None:
-    raw = _build_anthropic_message(
-        input_tokens=1000,
-        output_tokens=100,
-        cache_creation=200,
-        cache_read=400,
-    )
-    model = Anthropic.from_key("k").model("wire-example")
-    model._capability = replace(
-        model.capability,
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=1.0,
-                    response=2.0,
-                    cache_write=4.0,
-                    cache_read=0.5,
-                    cache_write_1h=0.0,
-                ),
-            },
-        ),
-    )
-    resp = _parse_response(raw, model)
-    assert resp.tokens.cache_write == 200
-    assert resp.tokens.cache_read == 400
-    # Input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
-    assert (
-        resp.spend.request + resp.spend.cache_write + resp.spend.cache_read
-    ) == pytest.approx(0.002)
-
-
-def test_parse_response_carries_message_and_request_ids() -> None:
-    raw = _build_anthropic_message()
-    resp = _parse_response(raw, _free_model())
-    assert resp.message_id == "msg_xyz"
-    assert resp.request_id == "req_xyz"
-
-
-def test_anthropic_from_key() -> None:
-    p = Anthropic.from_key("sk-ant-test")
-    assert p._api_key == "sk-ant-test"
-
-
-def test_anthropic_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="API key not configured"):
-        Anthropic.from_env()
-
-
-def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
-    p = Anthropic.from_env()
-    assert p._api_key == "sk-ant-key"
-
-
-def test_anthropic_model_known_id_returns_backend(
-    synthetic_catalog: ModelTable,
+def test_image_limits_and_tokenizer_follow_the_generation(
+    model_id: str,
+    edge_px: int,
+    chars_per_token: float,
 ) -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("example-1.0")
-    expected = synthetic_catalog["example"] & api()
-    assert m.capability == expected
-    assert m.limits == expected.context[""]
+    row = Anthropic.models()[model_id]
+    assert row.approx_chars_per_token == chars_per_token
+    assert row.limits.max_image_edge_px == edge_px
+    # 10 MB base64-encoded on the wire is 7.5 MB raw.
+    assert row.limits.max_image_bytes == 7_500_000
+    # The first-party Messages API takes 128 MB; 32 MB is the cloud platforms'.
+    assert row.limits.max_request_bytes == 128 * 1024 * 1024
 
 
-def test_anthropic_model_unknown_id_raises() -> None:
-    p = Anthropic.from_key("k")
-    with pytest.raises(ValueError, match="Unknown model"):
-        _ = p.model("unknown-claude")
+def test_the_api_offers_both_cache_lifetimes_and_retries_itself() -> None:
+    row = Anthropic.models()["opus"]
+    assert row.cache_ttl_sec == {300.0, 3600.0}
+    assert row.manage_context_server_side == {False, True}
+    assert row.service_tier == {"auto", "default", "priority"}
+    assert row.thinking_output == {"none", "text", "redacted"}
+    assert row.retries_internally
+    assert not row.account_auth
+    # The API joins adjacent user turns: 58 input tokens for two as for one.
+    assert not row.keeps_user_turns_apart
 
 
-def test_anthropic_model_rejects_unknown_provider_options() -> None:
-    p = Anthropic.from_key("k")
-    with pytest.raises(TypeError, match="typoo"):
-        _ = operator.methodcaller("model", "example", typoo=True)(p)
+def test_the_catalog_is_read_once_per_section() -> None:
+    assert Anthropic.models() is Anthropic.models()
+    assert Anthropic.models() is not AnthropicCLI.models()
 
 
-def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
-    """``+200k`` selects the smaller context profile."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example+200k")
-    assert m.limits.max_request_tokens == 200_000
+@dataclass(slots=True, kw_only=True)
+class _Server:
+    """Answers each request with the next scripted reply, and keeps the requests."""
+
+    replies: list[httpx2.Response | Exception]
+    requests: list[httpx2.Request] = field(default_factory=list[httpx2.Request])
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
-def test_anthropic_default_model_resolves() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model()
-    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
+class _Served(SharedResources):
+    """Shared resources whose HTTP client answers from ``handler``, never the network."""
+
+    def __init__(self, handler: Callable[[httpx2.Request], httpx2.Response]) -> None:
+        super().__init__()
+        self._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+
+    @property
+    @override
+    def http(self) -> httpx2.AsyncClient:
+        return self._client
+
+    @override
+    async def aclose(self) -> None:
+        await super().aclose()
+        await self._client.aclose()
 
 
-@pytest.mark.parametrize("role", ["best", "default", "everyday", "utility"])
-def test_anthropic_roles_resolve(role: str, synthetic_catalog: ModelTable) -> None:
-    p = Anthropic.from_key("k")
-    assert p.model(role).capability.model_id == synthetic_catalog[role].model_id
+class _Renewing(Anthropic):
+    """A provider whose key the server rejects until it is renewed."""
 
-
-def test_anthropic_context_selection_preserves_tag(
-    synthetic_catalog: ModelTable,
-) -> None:
-    p = Anthropic.from_key("k")
-    full = p.model("example")
-    small = p.model("example+200k")
-    assert full.limits == synthetic_catalog["example"].context[""]
-    assert small.limits == synthetic_catalog["example"].context["+200k"]
-    assert small.tagged_model_id == "example-1.0+200k"
-
-
-def test_anthropic_subscription_property_false_on_api_key() -> None:
-    assert Anthropic.from_key("k").subscription is False
-
-
-def test_anthropic_model_is_context_overflow_via_prompt_too_long() -> None:
-    m = Anthropic.from_key("k").model("example")
-    assert m.is_context_overflow(PromptTooLongError("too long")) is True
-
-
-def test_anthropic_model_token_estimate_uses_profile_approx_chars_per_token() -> None:
-    m = Anthropic.from_key("k").model("example")
-    assert m.approx_text_tokens("a" * 28) == 11
-
-
-def test_anthropic_model_pricing_exposed(synthetic_catalog: ModelTable) -> None:
-    m = Anthropic.from_key("k").model("example")
-    assert m.capability.prices is synthetic_catalog["example"].prices
-
-
-@pytest.mark.asyncio
-async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
-    """``actual_request_tokens`` routes through the SDK's ``count_tokens``."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    fake_sdk = MagicMock()
-    fake_result = MagicMock()
-    fake_result.input_tokens = 42
-    fake_sdk.messages.count_tokens = AsyncMock(return_value=fake_result)
-    with patch.object(p, "get_sdk", AsyncMock(return_value=fake_sdk)):
-        n = await m.actual_request_tokens(
-            ModelRequest(messages=[UserMessage(text="ping")]),
-        )
-    assert n == 42
-    # ``count_tokens`` rejects kwargs that ``create`` accepts -- verify
-    # we stripped them before the call.
-    await_args = fake_sdk.messages.count_tokens.await_args
-    assert await_args is not None
-    kwargs = cast(dict[str, object], await_args.kwargs)
-    assert "max_tokens" not in kwargs
-    assert "temperature" not in kwargs
-    assert kwargs["model"] == "wire-example"
-
-
-def test_anthropic_token_count_default_typing() -> None:
-    # ``TokenCount`` from the model module must accept keyword construction.
-    t = TokenCount(request=1, response=2)
-    assert t.request == 1
-    assert t.response == 2
-
-
-def test_anthropic_model_capability() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    assert m.capability.thinking.effort != frozenset({"none"})
-    assert m.capability.cache_ttl_sec == frozenset({300.0, 3600.0})
-    assert m.capability.retries_internally is True
-    assert m.capability.manage_context_server_side == frozenset({False, True})
-    assert m.capability.account_auth is False
-    assert m.capability.service_tier == frozenset({"auto", "default", "priority"})
-
-
-def test_anthropic_model_supports_context_management_when_opted_in() -> None:
-    p = Anthropic.from_key("k", server_side_context_management=True)
-    m = p.model("wire-example")
-    assert m.capability.manage_context_server_side == frozenset({False, True})
-
-
-def test_anthropic_build_kwargs_sends_default_tier_as_standard_only() -> None:
-    """The Messages API ``service_tier`` enum is ``auto`` | ``standard_only``."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    m._settings = replace(m.settings, service_tier="default")
-    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    assert kwargs["service_tier"] == "standard_only"
-
-
-def test_anthropic_build_kwargs_omits_the_default_tier() -> None:
-    """``auto`` is "let the vendor pick"; sending it pins nothing."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    assert "service_tier" not in kwargs
-
-
-def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> None:
-    # Doubling the reply budget must not exceed the row's output ceiling.
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    m._settings = replace(m.settings, thinking_budget="fixed")
-    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    max_tokens = from_plain(kwargs["max_tokens"], int)
-    thinking = cast(dict[str, object], kwargs["thinking"])
-    budget = from_plain(thinking["budget_tokens"], int)
-    assert max_tokens <= m.limits.max_response_tokens
-    assert budget < max_tokens
-
-
-def test_anthropic_build_kwargs_fixed_thinking_budget_meets_api_floor() -> None:
-    """Anthropic rejects ``budget_tokens < 1024``, however small the reply."""
-    m = Anthropic.from_key("k").model("wire-example")
-    m._settings = replace(m.settings, thinking_budget="fixed")
-    kwargs = m._build_kwargs(
-        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=500),
-        [],
-    )
-    thinking = cast(dict[str, object], kwargs["thinking"])
-    budget = from_plain(thinking["budget_tokens"], int)
-    assert budget >= 1024
-    assert budget < from_plain(kwargs["max_tokens"], int)
-
-
-def test_anthropic_priority_tier_sets_speed_and_beta() -> None:
-    """``speed`` rides ``extra_body``: the stream path is a raw POST.
-
-    A first-class ``speed=`` exists only on the SDK's beta endpoints, so
-    dropping this injection silently bills standard. Fast mode is ``speed``
-    alone: ``priority`` is not a value of the API's ``service_tier`` enum.
-    """
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    m._settings = replace(m.settings, service_tier="priority")
-    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    body = cast(dict[str, object], kwargs["extra_body"])
-    assert body["speed"] == "fast"
-    headers = cast(dict[str, str], kwargs["extra_headers"])
-    assert "fast-mode-2026-02-01" in headers["anthropic-beta"].split(",")
-    assert "service_tier" not in kwargs
-
-
-def test_anthropic_priority_tier_is_unselectable_on_an_unsupported_model() -> None:
-    """The capability rejects it up front rather than billing standard."""
-    m = Anthropic.from_key("k").model("utility-example")
-    with pytest.raises(ValueError, match="service_tier"):
-        m.settings.service_tier = "priority"
-
-
-def test_parse_response_bills_fast_when_server_reports_fast() -> None:
-    raw = _build_anthropic_message(
-        text="x",
-        input_tokens=1_000_000,
-        output_tokens=1_000_000,
-        speed="fast",
-    )
-    resp = _parse_response(raw, _fast_model())
-    assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 10.0
-    assert resp.spend.response == 50.0
-
-
-def test_parse_response_bills_standard_when_server_falls_back() -> None:
-    raw = _build_anthropic_message(
-        text="x",
-        input_tokens=1_000_000,
-        output_tokens=1_000_000,
-        speed="standard",
-    )
-    resp = _parse_response(raw, _fast_model())
-    assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 5.0
-    assert resp.spend.response == 25.0
-
-
-def test_anthropic_image_byte_limits_read_from_the_row_not_a_constant() -> None:
-    """The three byte/image limits come from the capability, per-model.
-
-    A constant ``return`` would report one value for every model; reading
-    the row lets a future model with different vision/wire limits diverge
-    without touching the provider class.
-    """
-    row = ModelCapability(
-        model_id="wire-example",
-        context=MappingProxyType(
-            {
-                "": ModelLimits(
-                    max_image_edge_px=4096,
-                    max_image_bytes=7 * 1024 * 1024,
-                    max_request_bytes=15 * 1024 * 1024,
-                ),
-            },
-        ),
-    )
-    m = _AnthropicModel(
-        provider=Anthropic.from_key("k"),
-        capability=row,
-        settings=ModelSettings.narrowest(row),
-    )
-    assert m.limits.max_image_edge_px == 4096
-    assert m.limits.max_image_bytes == 7 * 1024 * 1024
-    assert m.limits.max_request_bytes == 15 * 1024 * 1024
-
-
-def test_anthropic_model_is_context_overflow_non_api_status_error() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    assert m.is_context_overflow(RuntimeError("anything")) is False
-
-
-def test_anthropic_byte_limit_not_classified_as_context_overflow() -> None:
-    """A 413 byte-overflow must NOT classify as token-context overflow.
-
-    The two limits are distinct: a larger-window model relieves token
-    overflow but not the byte ceiling. ``is_context_overflow`` must
-    return False so the byte case routes to byte-overflow recovery.
-    """
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _request_too_large_error("Request exceeds the maximum size")
-    assert m.is_context_overflow(err) is False
-
-
-def test_anthropic_byte_413_without_structured_body_stays_byte() -> None:
-    """A 413 byte error with no structured body still classifies as byte.
-
-    The structured-body path already handles ``request_too_large``, but a
-    413 whose body is not a parsed mapping (stringified error, proxy-mangled
-    body) falls through to ``is_context_overflow_text`` on the raw text -- a
-    text like "request too large: maximum exceeded by context window" would
-    then mis-classify as token overflow. The shared ``is_request_too_large``
-    guard keys on the 413 STATUS, closing that hole and matching every other
-    provider's classifier.
-    """
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(413, request=request)
-    err = anthropic_sdk.APIStatusError(
-        "request entity too large: maximum exceeded by context window",
-        response=response,
-        body=None,  # No structured body -> falls to substring path.
-    )
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    assert m.is_context_overflow(err) is False
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
-    """The stream path raises ``RequestTooLargeError`` chaining the original.
-
-    The original ``APIStatusError`` must be preserved on ``__cause__`` so
-    diagnostics and the retry classifier can inspect the provider error.
-    """
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _request_too_large_error(
-        "Request exceeds the maximum allowed number of bytes."
-        " The maximum request size is 32 MB",
-    )
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(RequestTooLargeError) as raised,
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-    assert raised.value.__cause__ is err, (
-        "original APIStatusError must chain via __cause__"
+    betas: ClassVar[tuple[str, ...]] = (
+        "context-management-2025-06-27",
+        "interleaved-thinking-2025-05-14",
     )
 
+    def __init__(self, *, resources: SharedResources) -> None:
+        super().__init__(resources=resources)
+        self.renewals = 0
 
-def _api_status_error(
-    status_code: int,
-    message: str,
-    *,
-    request_id: str = "",
-) -> anthropic_sdk.APIStatusError:
-    """Construct an APIStatusError as the SDK would, with an arbitrary status."""
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(
-        status_code,
-        request=request,
-        headers={"request-id": request_id} if request_id else None,
+    @override
+    async def credentials(self) -> dict[str, str]:
+        return {"x-api-key": "new" if self.renewals else "old"}
+
+    @override
+    async def reauthenticate(self) -> bool:
+        self.renewals += 1
+        return True
+
+
+class _Tagged(Anthropic):
+    """A provider whose every request carries its system prompt in a header."""
+
+    @override
+    def headers(self, request: Request) -> dict[str, str]:
+        return {"x-system": request.system[0]}
+
+
+async def _broken(events: tuple[Mapping[str, object], ...]) -> AsyncIterator[bytes]:
+    """Stream ``events``, then drop the connection."""
+    yield _sse(*events)
+    raise httpx2.ReadError("Connection reset by peer")
+
+
+def _kept_thinking(body: Mapping[str, object]) -> object:
+    management = from_plain(
+        body["context_management"],
+        dict[str, list[dict[str, object]]],
     )
-    body = {
-        "type": "error",
-        "error": {"type": "invalid_request_error", "message": message},
-    }
-    return anthropic_sdk.APIStatusError(message, response=response, body=body)
+    (edit,) = management["edits"]
+    return edit["keep"]
 
 
-def _request_too_large_error(message: str) -> anthropic_sdk.APIStatusError:
-    """Construct the 413 ``request_too_large`` APIStatusError the SDK yields."""
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(413, request=request)
-    body = {
-        "type": "error",
-        "error": {"type": "request_too_large", "message": message},
-    }
-    return anthropic_sdk.APIStatusError(message, response=response, body=body)
-
-
-class _BodyError(Exception):
-    """Exception with an SDK-like ``body`` attribute."""
-
-    def __init__(self, body: object) -> None:
-        self.body = body
-        super().__init__("x")
-
-
-class _ResponseNotReadStatusError(Exception):
-    """Exception mirroring SDK status metadata plus ResponseNotRead cause."""
-
-    def __init__(self, status_code: int) -> None:
-        self.status_code = status_code
-        super().__init__("Anthropic streaming request failed")
-        self.__cause__ = httpx2.ResponseNotRead()
-
-
-def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text() -> (
-    None
-):
-    """Generic APIStatusError (non-{400,413}) carrying overflow text is overflow.
-
-    Reproduces the production failure where the SDK returned a status
-    code outside the SDK's per-code subclass map -- yielding the bare
-    ``APIStatusError`` -- with body text ``Request size exceeds model
-    context window``. The body is the canonical signal; the status
-    code adds nothing.
-    """
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(414, "Request size exceeds model context window")
-    assert m.is_context_overflow(err) is True
-
-
-def test_anthropic_model_is_context_overflow_uses_structured_body() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(400, "Request size exceeds model context window")
-    err.args = ("unrelated invalid request",)
-
-    assert m.is_context_overflow(err) is True
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_uses_structured_overflow_body() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(400, "Request size exceeds model context window")
-    err.args = ("unrelated invalid request",)
-
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(PromptTooLongError),
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-
-@pytest.mark.asyncio
+# Claude Code 2.1.309's own choice, captured on 2026-10-27 with no settings: the
+# ``output_config.effort`` it sent each model. The 4.5 Sonnet and Haiku take none.
 @pytest.mark.parametrize(
-    "message",
+    ("model", "effort"),
     [
-        "Output blocked by content filtering policy",
-        "Fable 5's safeguards flagged this message under the Usage Policy.",
-        "This request has been blocked by our content filters.",
-        "Request rejected for safety reasons.",
+        ("fable-5.1", "high"),
+        ("fable-5.0", "high"),
+        ("mythos-5.1", "high"),
+        ("mythos-5.0", "high"),
+        ("opus-5.5", "medium"),
+        ("opus-5.0", "high"),
+        ("opus-4.8", "high"),
+        ("opus-4.7", "xhigh"),
+        ("opus-4.6", "high"),
+        ("opus-4.5", "high"),
+        ("sonnet-5.5", "medium"),
+        ("sonnet-5.0", "high"),
+        ("sonnet-4.6", "high"),
+        ("sonnet-4.5", "none"),
+        ("haiku-5.5", "medium"),
+        ("haiku-4.5", "none"),
     ],
 )
-async def test_anthropic_stream_raises_policy_blocked_error(message: str) -> None:
-    """Safeguard 400s preserve Anthropic's reason and stop same-context retries."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    request_id = "req_policy_block"
-    err = _api_status_error(400, message, request_id=request_id)
-
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(PolicyBlockedError) as raised,
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-    assert raised.value.provider_message == message
-    assert raised.value.request_id == request_id
-    assert message in str(raised.value)
-    assert request_id in str(raised.value)
-    assert "do not retry" in str(raised.value).lower()
-    assert raised.value.__cause__ is err
+def test_a_model_starts_at_the_effort_claude_code_gives_it(
+    model: str,
+    effort: str,
+) -> None:
+    for provider in _claude_code_providers():
+        capability, settings = provider.models().resolve(model)
+        assert (capability.model_id, settings.thinking_effort) == (model, effort)
 
 
-@pytest.mark.asyncio
-async def test_anthropic_auth_retry_normalizes_policy_error() -> None:
-    """The second request must pass through the same error boundary as the first."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(401, request=request)
-    auth_error = anthropic_sdk.AuthenticationError(
-        "Unauthorized",
-        response=response,
-        body=None,
-    )
-    policy_error = _api_status_error(
-        400,
-        "This request has been blocked by our content filters.",
-    )
-
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch.object(p, "handle_auth_error", AsyncMock()) as handle_auth,
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=[auth_error, policy_error]),
-        ),
-        pytest.raises(PolicyBlockedError),
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-    handle_auth.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_preserves_unrelated_invalid_request() -> None:
-    """An ordinary invalid request must retain the SDK's diagnostic taxonomy."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(400, "tools.0.name is invalid")
-
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(anthropic_sdk.APIStatusError) as raised,
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-    assert raised.value is err
-
-
-@pytest.mark.asyncio
+# The thinking Claude Code 2.1.309 sent each model, captured likewise: adaptive,
+# except a 31,999-token budget to the 4.5 models.
 @pytest.mark.parametrize(
-    "message",
+    ("model", "budget"),
     [
-        "Request blocked because this key lacks access",
-        "cache_control rejected: at most 4 blocks are allowed by the caching policy",
-        "Request rejected under your organization's data retention policy",
-        "Unknown beta flag; see the API versioning policy",
+        ("fable-5.1", "auto"),
+        ("opus-5.5", "auto"),
+        ("opus-4.6", "auto"),
+        ("sonnet-4.6", "auto"),
+        ("haiku-5.5", "auto"),
+        ("opus-4.5", "fixed"),
+        ("sonnet-4.5", "fixed"),
+        ("haiku-4.5", "fixed"),
     ],
 )
-async def test_anthropic_stream_does_not_misclassify_unrelated_block(
-    message: str,
-) -> None:
-    """A rejection citing a non-safety policy is not a provider safety decision."""
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(400, message)
-
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(anthropic_sdk.APIStatusError) as raised,
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-    assert raised.value is err
+def test_a_model_thinks_as_claude_code_has_it(model: str, budget: str) -> None:
+    for provider in _claude_code_providers():
+        _, settings = provider.models().resolve(model)
+        assert settings.thinking_budget == budget
 
 
-@pytest.mark.asyncio
-async def test_anthropic_sdk_connect_timeout_outlasts_a_network_stall() -> None:
-    """The SDK default connect timeout is 5s; a Wi-Fi stall outlasted it.
-
-    Only ``send_with_retry`` retries: the SDK's own two retries made one stalled
-    attempt three 30s connects, so five attempts blocked for ~450s.
-    """
-    sdk = await Anthropic.from_key("k").get_sdk()
-    timeout = sdk.timeout
-    assert isinstance(timeout, httpx2.Timeout)
-    assert (timeout.connect, timeout.read) == (30.0, 600.0)
-    assert sdk.max_retries == 0
-    await sdk.close()
-
-
-@pytest.mark.asyncio
-async def test_anthropic_raw_stream_reads_status_error_body() -> None:
-    p = Anthropic.from_key("k")
-    sdk = await p.get_sdk()
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(
-        400,
-        request=request,
-        json={
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "message": "Request size exceeds model context window",
-            },
-        },
-    )
-    with (
-        patch.object(
-            sdk._client,
-            "send",
-            AsyncMock(return_value=response),
-        ) as send,
-        pytest.raises(anthropic_sdk.APIStatusError) as raised,
-    ):
-        await _raw_message_stream(
-            sdk,
-            {
-                "model": "wire-example",
-                "messages": [],
-                "max_tokens": 1,
-            },
-        )
-
-    assert raised.value.body == {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": "Request size exceeds model context window",
-        },
-    }
-    assert raised.value.status_code == 400
-    call = send.await_args
-    assert call is not None
-    sent_request = cast(httpx2.Request, call.args[0])
-    assert sent_request.method == "POST"
-    assert call.kwargs == {"stream": True}
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_status_body_overflow_triggers_prompt_too_long() -> None:
-    p = Anthropic.from_key("k")
-    sdk = await p.get_sdk()
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(
-        400,
-        request=request,
-        json={
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "message": "Request size exceeds model context window",
-            },
-        },
-    )
-    with (
-        patch.object(sdk._client, "send", AsyncMock(return_value=response)),
-        patch.object(p, "get_sdk", AsyncMock(return_value=sdk)),
-    ):
-        m = p.model("wire-example")
-        with pytest.raises(PromptTooLongError):
-            await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-
-def test_response_not_read_provider_error_preserves_retry_status() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _ResponseNotReadStatusError(529)
-
-    assert is_retryable(err, m) is True
-    assert error_status(err) == 529
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_wraps_bare_response_not_read() -> None:
-    # A raw ``httpx2.ResponseNotRead`` escaping mid-stream is neither an
-    # APIStatusError (so it dodges the overflow branch) nor a transport
-    # error (so the retry classifier deems it fatal). It must be wrapped
-    # in a user-facing error rather than surface as a bare exception.
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=httpx2.ResponseNotRead()),
-        ),
-        pytest.raises(StreamingResponseNotReadError),
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_wraps_chained_response_not_read() -> None:
-    # The SDK can chain ``ResponseNotRead`` under another exception while
-    # formatting an error from an unread streaming body.
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    wrapped = RuntimeError("stream formatting failed")
-    wrapped.__cause__ = httpx2.ResponseNotRead()
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=wrapped),
-        ),
-        pytest.raises(StreamingResponseNotReadError),
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-
-
-@pytest.mark.asyncio
-async def test_anthropic_stream_preserves_retryable_status_over_response_not_read() -> (
-    None
-):
-    # A retryable 429 whose APIStatusError happens to chain a
-    # ResponseNotRead must re-raise as the APIStatusError so the retry
-    # classifier still sees the 429 and retries -- NOT be converted into a
-    # fatal StreamingResponseNotReadError. The body-read crash is handled
-    # downstream in retry.py::_response_body_excerpt.
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _api_status_error(429, "Rate limited")
-    err.__cause__ = httpx2.ResponseNotRead()
-    with (
-        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
-        patch(
-            "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=err),
-        ),
-        pytest.raises(anthropic_sdk.APIStatusError) as raised,
-    ):
-        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-    assert raised.value.status_code == 429
-    assert not isinstance(raised.value, StreamingResponseNotReadError)
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
-    """The provider owns the client, so the provider closes it."""
-    p = Anthropic.from_key("k")
-    fake_sdk = MagicMock()
-    fake_sdk.close = AsyncMock()
-    p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
-
-    await p.close_sdk()
-
-    fake_sdk.close.assert_awaited_once()
-    assert p._sdk is None
-
-
-@pytest.mark.asyncio
-async def test_closing_one_model_leaves_a_sibling_model_usable() -> None:
-    """The SDK belongs to the provider, so one model may not destroy it.
-
-    ``sagent --advisor`` builds both models from one provider
-    (``bin/cli.py``), and ``Agent.shutdown`` closes only its own model.
-    Tearing down the shared client there strands the advisor mid-call.
-    """
-    p = Anthropic.from_key("k")
-    model = p.model("wire-example")
-    _advisor = p.model("utility-example")
-    fake_sdk = MagicMock()
-    fake_sdk.close = AsyncMock()
-    p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
-
-    await model.close()
-
-    fake_sdk.close.assert_not_awaited()
-    assert p._sdk is fake_sdk
-
-
-def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _BodyError({"type": "rate_limit_error"})
-    assert m.is_retryable_provider_error(err) is True
-
-
-def test_anthropic_model_is_retryable_provider_error_nested_api_error() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _BodyError({"type": "error", "error": {"type": "api_error"}})
-    assert m.is_retryable_provider_error(err) is True
-
-
-def test_anthropic_model_is_retryable_provider_error_nested_invalid_request() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _BodyError({"type": "error", "error": {"type": "invalid_request_error"}})
-    assert m.is_retryable_provider_error(err) is False
-
-
-def test_anthropic_model_is_retryable_provider_error_unrelated_type() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    err = _BodyError({"type": "permanent_error"})
-    assert m.is_retryable_provider_error(err) is False
-
-
-def test_anthropic_model_is_retryable_provider_error_no_body_attr() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    assert m.is_retryable_provider_error(RuntimeError("x")) is False
-
-
-def test_anthropic_provider_extra_headers_for_1m_omit_the_context_beta() -> None:
-    p = Anthropic.from_key("k")
-    model = p.model("example")
-    headers = p.extra_headers(model.capability, model.settings)
-    assert "context-1m" not in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_provider_extra_headers_includes_context_management() -> None:
-    """Modern models opt into the context-management beta unconditionally."""
-    p = Anthropic.from_key("k")
-    model = p.model("wire-example")
-    headers = p.extra_headers(model.capability, model.settings)
-    assert "context-management-2025-06-27" in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_provider_extra_headers_redact_thinking_opt_in() -> None:
-    p = Anthropic.from_key("k", redact_thinking=True)
-    model = p.model("wire-example")
-    headers = p.extra_headers(model.capability, model.settings)
-    assert "redact-thinking-2026-02-12" in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_provider_extra_headers_redact_thinking_default_off() -> None:
-    p = Anthropic.from_key("k")
-    model = p.model("wire-example")
-    headers = p.extra_headers(model.capability, model.settings)
-    assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_constructor_defaults_keep_optional_features_off() -> None:
-    """Direct construction has the same conservative defaults as ``from_key``."""
-    p = Anthropic(api_key="k")
-    model = p.model("wire-example")
-
-    assert p.server_side_context_management is False
-    headers = p.extra_headers(model.capability, model.settings)
-    assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_provider_extra_body_default_none() -> None:
-    p = Anthropic.from_key("k")
-    assert (
-        p.extra_body(
-            has_thinking=False,
-            cache_cold=False,
-            trigger_tokens=100_000,
-            tools=(),
-        )
-        is None
-    )
-
-
-def test_build_kwargs_no_context_management_by_default() -> None:
-    """Default is ``server_side_context_management=False`` -- no cm_config injected.
-
-    Sagent's own client-side compactor handles budget. Server-side clearing
-    must be explicitly opted in (see session bd952b0c audit for rationale).
-    """
-    p = Anthropic.from_key("k")
-    model = p.model("wire-example")
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
-    msgs: list[MessageParam] = [
-        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+# The Messages API ones send what Claude Code sends; ``claude`` itself is it.
+def _claude_code_providers() -> list[type[Anthropic | AnthropicCLI]]:
+    """Return each provider whose models start as Claude Code starts them."""
+    listed = {each.section for each in listings()}
+    providers: list[type[Anthropic | AnthropicCLI]] = [
+        kind
+        for kind in (Anthropic, *Anthropic.__subclasses__())
+        if kind.section in listed
     ]
-    kwargs = model._build_kwargs(req, msgs)
-    body = kwargs.get("extra_body")
-    assert body is None or "context_management" not in cast(dict[str, object], body)
+    assert Anthropic in providers
+    return [*providers, AnthropicCLI]
 
 
-def test_build_kwargs_includes_context_management_when_opted_in() -> None:
-    """``server_side_context_management=True`` injects the ``clear_tool_uses`` config."""
-    p = Anthropic.from_key("k", server_side_context_management=True)
-    model = p.model("wire-example")
-    req = ModelRequest(
-        messages=[UserMessage(text="hi")],
-        system="s",
-        max_response_tokens=128_000,
+def test_an_attachment_is_billed_by_the_vendor_s_formula() -> None:
+    model = Anthropic()["default"]
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+        "1f15c4890000000d49444154789c6360f8cf000000030101005c0d6a1c0000000049454e44ae426082",
     )
-    msgs: list[MessageParam] = [
-        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-    ]
-    kwargs = model._build_kwargs(req, msgs)
-    body = cast(dict[str, object], kwargs["extra_body"])
-    cm = cast(dict[str, object], body["context_management"])
-    edits = cast(list[dict[str, object]], cm["edits"])
-    assert any(e["type"] == "clear_tool_uses_20250919" for e in edits)
-
-
-def test_context_management_unclearable_tool_is_excluded() -> None:
-    class UnclearableTool:
-        name = "Legacy"
-        clearable_results = False
-
-    config = build_context_management(
-        server_side_context_management=True,
-        trigger_tokens=100_000,
-        tools=[UnclearableTool()],
+    attached = Attachment(mime_descriptor="image/png", data=png)
+    assert model.attachment_tokens(attached) == wire.attachment_tokens(
+        attached,
+        limits=model.capability.limits,
     )
-    assert config is not None
-    edit = cast(Mapping[str, object], config["edits"][0])
-    assert edit["clear_tool_inputs"] == []
-    assert edit["exclude_tools"] == ["Legacy"]
 
 
-def test_build_kwargs_context_management_trigger_scales_with_context_window() -> None:
-    """``trigger`` is half of the model's context window."""
-    p = Anthropic.from_key("k", server_side_context_management=True)
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
-    msgs: list[MessageParam] = [
-        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-    ]
-
-    m200 = p.model("wire-example+200k")
-    kw200 = m200._build_kwargs(req, msgs)
-    body200 = cast(dict[str, object], kw200["extra_body"])
-    cm200 = cast(dict[str, object], body200["context_management"])
-    edit200 = cast(list[dict[str, object]], cm200["edits"])[0]
-    trig200 = cast(dict[str, object], edit200["trigger"])
-    assert trig200["value"] == 100_000
-
-    m1m = p.model("wire-example")
-    kw1m = m1m._build_kwargs(req, msgs)
-    body1m = cast(dict[str, object], kw1m["extra_body"])
-    cm1m = cast(dict[str, object], body1m["context_management"])
-    edit1m = cast(list[dict[str, object]], cm1m["edits"])[0]
-    trig1m = cast(dict[str, object], edit1m["trigger"])
-    assert trig1m["value"] == m1m.limits.max_request_tokens // 2
+def _granted(token: str) -> httpx2.Response:
+    answer = json_dumps({"access_token": token, "expires_in": 600}).encode()
+    return httpx2.Response(200, content=answer)
 
 
-def test_build_kwargs_preserves_provider_context_management() -> None:
-    """Subclass-supplied ``context_management`` must NOT be clobbered.
+@pytest.fixture
+def workload_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN_COMMAND", "/bin/echo aws-jwt")
+    monkeypatch.setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_x")
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org")
+    monkeypatch.setenv("ANTHROPIC_SERVICE_ACCOUNT_ID", "svac_x")
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_x")
 
-    Regression test: ``Anthropic._build_kwargs`` previously always
-    overwrote the ``context_management`` key with a hardcoded
-    ``clear_tool_uses_20250919`` config, silently discarding whatever
-    a subclass with its own env-gated, thinking-aware,
-    whitelist-filtered policy had built.
-    Bug: the subclass opted out of server clearing via env vars, but
-    the base class injected aggressive clearing anyway.
-    """
-    # Custom config that mimics what a subclass builds when
-    # ``USE_API_CLEAR_TOOL_RESULTS`` is set + thinking is on.
-    custom_cm: dict[str, MutablePlainTree] = {
-        "edits": [
-            {"type": "clear_thinking_20251015", "keep": "all"},
-            {
-                "type": "clear_tool_uses_20250919",
-                "trigger": {"type": "input_tokens", "value": 180_000},
-                "clear_at_least": {"type": "input_tokens", "value": 140_000},
-                "clear_tool_inputs": ["Bash", "Read", "Grep"],
-                "exclude_tools": ["Edit", "Write"],
-            },
-        ],
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_with_no_key_the_identity_command_supplies_a_bearer_token() -> None:
+    server = _Server(replies=[_granted("short-lived")])
+    async with _Served(server) as shared:
+        headers = await Anthropic(resources=shared).credentials()
+
+    assert headers == {"authorization": "Bearer short-lived"}
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.anthropic.com/v1/oauth/token"
+    assert json_loads(sent.content, dict[str, object]) == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": "aws-jwt",
+        "federation_rule_id": "fdrl_x",
+        "organization_id": "org",
+        "service_account_id": "svac_x",
+        "workspace_id": "wrkspc_x",
     }
 
-    class _CustomCmAnthropic(Anthropic):
-        @override
-        def extra_body(
-            self,
-            *,
-            has_thinking: bool,
-            cache_cold: bool,
-            trigger_tokens: int,
-            tools: Sequence[Tool],
-        ) -> dict[str, MutablePlainTree] | None:
-            del has_thinking, cache_cold, trigger_tokens, tools
-            return {"context_management": custom_cm}
 
-    # Opt the base into server-side clearing so the gate is open -- the
-    # test then proves the subclass policy wins over the base default.
-    p = _CustomCmAnthropic.from_key("k", server_side_context_management=True)
-    model = p.model("wire-example")
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
-    msgs: list[MessageParam] = [
-        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-    ]
-    kwargs = model._build_kwargs(req, msgs)
-    body = cast(dict[str, object], kwargs["extra_body"])
-    cm = cast(dict[str, object], body["context_management"])
-    # The subclass config must round-trip untouched.
-    assert cm is custom_cm
-    edits = cast(list[dict[str, object]], cm["edits"])
-    # Subscription's whitelist must survive (proves no merge/clobber).
-    tool_edit = next(e for e in edits if e["type"] == "clear_tool_uses_20250919")
-    assert tool_edit["clear_tool_inputs"] == ["Bash", "Read", "Grep"]
-    assert tool_edit["exclude_tools"] == ["Edit", "Write"]
-    trig = cast(dict[str, object], tool_edit["trigger"])
-    assert trig["value"] == 180_000
-
-
-def test_anthropic_provider_build_system_passthrough() -> None:
-    p = Anthropic.from_key("k")
-    assert p.build_system("hello") == "hello"
-
-
-def test_anthropic_provider_build_system_empty_returns_not_given() -> None:
-    p = Anthropic.from_key("k")
-    out = p.build_system("")
-    # ``anthropic.NOT_GIVEN`` is a sentinel; type is anthropic.NotGiven.
-    assert out is anthropic_sdk.NOT_GIVEN
-
-
-def test_anthropic_model_max_response_tokens_from_profile(
-    synthetic_catalog: ModelTable,
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_stored_key_wins_over_the_identity_command(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("wire-example")
-    assert (
-        m.limits.max_response_tokens
-        == synthetic_catalog["example"].context[""].max_response_tokens
-    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    server = _Server(replies=[])
+    async with _Served(server) as shared:
+        headers = await Anthropic(resources=shared).credentials()
+
+    assert headers == {"x-api-key": "sk-ant"}
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_401_renews_a_workload_identity_token() -> None:
+    server = _Server(replies=[_granted("old"), _granted("new")])
+    async with _Served(server) as shared:
+        anthropic = Anthropic(resources=shared)
+        await anthropic.credentials()
+
+        assert await anthropic.reauthenticate()
+        assert await anthropic.credentials() == {"authorization": "Bearer new"}
+
+
+@pytest.mark.asyncio
+async def test_a_401_cannot_renew_a_stored_key() -> None:
+    assert not await Anthropic().reauthenticate()
 
 
 if __name__ == "__main__":

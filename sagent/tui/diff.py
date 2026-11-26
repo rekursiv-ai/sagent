@@ -1,0 +1,411 @@
+"""Diffs in the scrollback: highlighted, with changed words marked.
+
+Typical usage example:
+
+  render_diff(console, splice_diff(edits), row_indent="  ")
+  console.print(highlight_source("ls -la", "bash"))
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import difflib
+import re
+import textwrap
+
+from pygments.lexers import TextLexer, get_lexer_by_name, get_lexer_for_filename
+from pygments.util import ClassNotFound
+from rich.cells import cell_len
+from rich.style import Style
+from rich.text import Text
+
+from sagent.tools.display import Elided
+from sagent.tui.theme import load_theme
+from sagent.tui.types import Sticky, hang
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from pygments.lexer import Lexer
+    from rich.console import Console
+
+    from sagent.journal.types import Splice
+    from sagent.tui.theme import Theme
+
+
+__all__ = [
+    "DiffStyle",
+    "highlight_source",
+    "render_diff",
+    "splice_diff",
+    "write_diff",
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DiffStyle:
+    """Explicit diff overrides; empty styles inherit the selected theme."""
+
+    added: str | Style = ""
+    removed: str | Style = ""
+    added_word: str | Style = ""
+    removed_word: str | Style = ""
+    gutter: str | Style = ""
+
+    word_threshold: float = 0.4
+    """Share of changed characters past which a line is marked whole, not by word."""
+
+
+def render_diff(
+    console: Console,
+    diff: str,
+    *,
+    row_indent: str,
+    path: str = "",
+    style: DiffStyle | None = None,
+    lines: tuple[int, int] | None = None,
+    sticky: Sticky | None = None,
+    theme: Theme | None = None,
+) -> None:
+    """Print a unified diff, its line numbers read from the ``@@`` headers.
+
+    Args:
+      console: Where to print.
+      diff: The diff; ``---``/``+++`` file headers are skipped.
+      row_indent: What starts every row.
+      path: The file, whose name picks the highlighting.
+      style: Explicit color and word-marking overrides.
+      lines: Body lines kept from the head and the tail, the rest counted in
+        a ``⋯ N lines ⋯`` row; ``None`` keeps all.
+      sticky: This turn's width, shared with its other blocks.
+      theme: Semantic colors; original appearance when omitted.
+
+    """
+    theme = theme if theme is not None else load_theme()
+    overrides = style if style is not None else DiffStyle()
+    s = DiffStyle(
+        added=overrides.added or theme.style("added"),
+        removed=overrides.removed or theme.style("removed"),
+        added_word=overrides.added_word or theme.style("added_word"),
+        removed_word=overrides.removed_word or theme.style("removed_word"),
+        gutter=overrides.gutter or theme.styles["gutter"],
+        word_threshold=overrides.word_threshold,
+    )
+    lexer = _path_lexer(path)
+    hunk = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+    body = _dedent(
+        [
+            ln
+            for ln in diff.splitlines()
+            if not re.match(r"^(?:---|\+\+\+)(?:\s|$)", ln)
+        ],
+        hunk,
+    )
+    changes = [ln for ln in body if not hunk.match(ln)]
+    pairs = _word_pairs(changes, threshold=s.word_threshold)
+    digits = len(str(_last_number(body, hunk)))
+    longest = max((cell_len(ln) for ln in changes), default=0)
+    sticky = sticky if sticky is not None else Sticky()
+    # The margin: the row indent, the number, a space.
+    width = sticky.cells(
+        longest - 1,
+        total_padding=cell_len(row_indent) + digits + 1,
+        width=console.width,
+    )
+    hidden = (
+        range(lines[0], len(changes) - lines[1])
+        if lines is not None and len(changes) > sum(lines)
+        else range(0)
+    )
+    indent = Text(row_indent)
+    index = old = new = 0
+    for line in body:
+        if m := hunk.match(line):
+            old, new = int(m.group(1)), int(m.group(2))
+            continue
+        sigil = line[:1] if line[:1] in "+-" else " "
+        number = old if sigil == "-" else new
+        if index in hidden:
+            if index == hidden.start:
+                lead = indent + " " * (digits + 1)
+                hang(
+                    console,
+                    Text(Elided(hidden=len(hidden)).marker, style=theme.style("muted")),
+                    first=lead,
+                    rest=lead,
+                    width=width,
+                )
+        elif index in pairs:
+            _print_words(
+                console,
+                indent,
+                f"{number:>{digits}} ",
+                sigil,
+                pairs[index],
+                s=s,
+                width=width,
+                lexer=lexer,
+                theme=theme,
+            )
+        else:
+            background = {"+": s.added, "-": s.removed}.get(sigil, "")
+            _print_line(
+                console,
+                indent,
+                f"{number:>{digits}} ",
+                content=_highlight(line[1:], lexer, theme=theme),
+                background=background,
+                gutter=s.gutter if background else theme.style("muted"),
+                width=width,
+            )
+        old += sigil != "+"
+        new += sigil != "-"
+        index += 1
+
+
+def splice_diff(edits: Sequence[Splice]) -> str:
+    """Return an edit's replacements as a unified diff.
+
+    Args:
+      edits: What Edit replaced, in the order it did.
+
+    Returns:
+      diff: One hunk per replacement, numbered for the file after the edit.
+
+    """
+    hunks: list[str] = []
+    shift = 0
+    for splice in edits:
+        before = (splice.before or "").splitlines()
+        after = (splice.after or "").splitlines()
+        start = splice.start if splice.start is not None else 1
+        hunks.append(f"@@ -{start},{len(before)} +{start + shift},{len(after)} @@")
+        hunks.extend(f"-{ln}" for ln in before)
+        hunks.extend(f"+{ln}" for ln in after)
+        shift += len(after) - len(before)
+    return "\n".join(hunks)
+
+
+def write_diff(content: str) -> str:
+    """Return a write's content as a unified diff adding every line.
+
+    Args:
+      content: What Write wrote.
+
+    Returns:
+      diff: One hunk adding the file's lines from line 1.
+
+    """
+    lines = content.splitlines()
+    return "\n".join([f"@@ -0,0 +1,{len(lines)} @@", *(f"+{ln}" for ln in lines)])
+
+
+def highlight_source(code: str, language: str, *, theme: Theme | None = None) -> Text:
+    """Return ``code`` highlighted as ``language``; plain when the name is unknown.
+
+    Args:
+      code: The source.
+      language: A Pygments lexer name, such as ``"bash"``.
+      theme: Semantic colors; original appearance when omitted.
+
+    Returns:
+      text: The highlighted source.
+
+    """
+    theme = theme if theme is not None else load_theme()
+    if not code:
+        return Text("")
+    try:
+        lexer = get_lexer_by_name(language, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return Text(code, style=theme.style("code"))
+    return _highlight(code, lexer, theme=theme)
+
+
+def _path_lexer(path: str) -> Lexer:
+    """Return the lexer ``path``'s name picks, or plain text."""
+    try:
+        return get_lexer_for_filename(path, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return TextLexer(stripnl=False, ensurenl=False)
+
+
+def _dedent(body: list[str], hunk: re.Pattern[str]) -> list[str]:
+    """Return ``body`` without the indent all its non-blank lines share, after the sigil."""
+    lines = [ln for ln in body if not hunk.match(ln)]
+    contents = iter(textwrap.dedent("\n".join(ln[1:] for ln in lines)).split("\n"))
+    return [ln if hunk.match(ln) else ln[:1] + next(contents) for ln in body]
+
+
+def _highlight(code: str, lexer: Lexer, *, theme: Theme) -> Text:
+    """Return ``code`` highlighted by ``lexer``."""
+    text = Text(style=theme.style("code"))
+    text.append_tokens(
+        (value, theme.source_style(token))
+        for token, value in lexer.get_tokens(code.rstrip("\n"))
+    )
+    return text
+
+
+def _words(
+    removed: str,
+    added: str,
+    *,
+    threshold: float,
+) -> list[tuple[str, str]] | None:
+    """Return a line pair's words as ``=``, ``-`` or ``+``; ``None`` past ``threshold``."""
+    token = re.compile(r"(\s+|\w+|[^\s\w]+)")
+    a, b = token.findall(removed), token.findall(added)
+    parts: list[tuple[str, str]] = []
+    changed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        a=a,
+        b=b,
+        autojunk=False,
+    ).get_opcodes():
+        if tag == "equal":
+            parts.append(("=", "".join(a[i1:i2])))
+            continue
+        if tag in ("delete", "replace"):
+            parts.append(("-", "".join(a[i1:i2])))
+            changed += len(parts[-1][1])
+        if tag in ("insert", "replace"):
+            parts.append(("+", "".join(b[j1:j2])))
+            changed += len(parts[-1][1])
+    total = len(removed) + len(added)
+    return None if total and changed / total > threshold else parts
+
+
+# A run of ``-`` lines pairs with the ``+`` run after it, aligned by ``difflib`` so a
+# deleted line does not shift every pairing after it.
+def _word_pairs(
+    lines: list[str],
+    *,
+    threshold: float,
+) -> dict[int, list[tuple[str, str]]]:
+    """Return the word parts of each body line that pairs with a changed partner."""
+    pairs: dict[int, list[tuple[str, str]]] = {}
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith("-"):
+            i += 1
+            continue
+        r_start = i
+        while i < len(lines) and lines[i].startswith("-"):
+            i += 1
+        a_start = i
+        while i < len(lines) and lines[i].startswith("+"):
+            i += 1
+        removed = [ln[1:] for ln in lines[r_start:a_start]]
+        added = [ln[1:] for ln in lines[a_start:i]]
+        matcher = difflib.SequenceMatcher(a=removed, b=added, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag not in ("equal", "replace"):
+                continue
+            for r, a in zip(range(i1, i2), range(j1, j2), strict=False):
+                parts = _words(removed[r], added[a], threshold=threshold)
+                if parts is not None:
+                    pairs[r_start + r] = parts
+                    pairs[a_start + a] = parts
+    return pairs
+
+
+def _last_number(body: list[str], hunk: re.Pattern[str]) -> int:
+    """Return the highest line number the diff's margin shows."""
+    old = new = last = 0
+    for line in body:
+        if m := hunk.match(line):
+            old, new = int(m.group(1)), int(m.group(2))
+            continue
+        sigil = line[:1]
+        last = max(last, old if sigil == "-" else new)
+        old += sigil != "+"
+        new += sigil != "-"
+    return last
+
+
+def _print_line(
+    console: Console,
+    row_indent: Text,
+    margin: str,
+    *,
+    content: Text,
+    background: str | Style,
+    gutter: str | Style,
+    width: int,
+) -> None:
+    """Print one diff line: margin, content, and its style to the edge."""
+    style = console.get_style(background) + console.get_style(gutter)
+    if background:
+        content = content.copy()
+        content.stylize_before(background)
+    _print_rows(
+        console,
+        row_indent,
+        margin,
+        content,
+        margin_style=style,
+        fill_style=style if background else "",
+        width=width,
+    )
+
+
+def _print_words(
+    console: Console,
+    row_indent: Text,
+    margin: str,
+    sigil: str,
+    parts: list[tuple[str, str]],
+    *,
+    s: DiffStyle,
+    width: int,
+    lexer: Lexer,
+    theme: Theme,
+) -> None:
+    """Print one changed line with its changed words marked."""
+    line_bg = s.added if sigil == "+" else s.removed
+    word_bg = s.added_word if sigil == "+" else s.removed_word
+    kept = [(kind, text) for kind, text in parts if kind in ("=", sigil)]
+    content = _highlight("".join(text for _, text in kept), lexer, theme=theme)
+    content.stylize_before(line_bg)
+    at = 0
+    for kind, text in kept:
+        if kind != "=":
+            content.stylize(word_bg, at, at + len(text))
+        at += len(text)
+    _print_rows(
+        console,
+        row_indent,
+        margin,
+        content,
+        margin_style=console.get_style(line_bg) + console.get_style(s.gutter),
+        fill_style=line_bg,
+        width=width,
+    )
+
+
+def _print_rows(
+    console: Console,
+    row_indent: Text,
+    margin: str,
+    content: Text,
+    *,
+    margin_style: str | Style,
+    fill_style: str | Style,
+    width: int,
+) -> None:
+    """Print ``content`` inside ``width``, later rows blank under ``row_indent`` and ``margin``."""
+    hang(
+        console,
+        content,
+        first=Text.assemble(row_indent, Text(margin, style=margin_style)),
+        rest=Text.assemble(
+            " " * row_indent.cell_len,
+            Text(" " * len(margin), style=margin_style),
+        ),
+        width=width,
+        background=fill_style,
+    )

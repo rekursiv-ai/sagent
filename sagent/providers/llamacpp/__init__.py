@@ -1,1 +1,1 @@
-"""llama.cpp provider family: transport modules and the model catalog."""
+"""Models in a local llama.cpp server this provider starts and stops."""

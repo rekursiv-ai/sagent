@@ -1,0 +1,1240 @@
+sources:
+  models: https://developers.openai.com/api/docs/models/<model>
+  pricing: https://developers.openai.com/api/docs/pricing
+  images_vision: https://developers.openai.com/api/docs/guides/images-vision
+
+roles:
+  best: astra
+  default: sol
+  everyday: sol
+  utility: luna
+
+reference:
+  # What Codex picks unasked where it serves the model, else the API's own.
+  # A model that can reason does unasked; the wire has no budget to send.
+  thinking_effort_default: medium
+  thinking_budget_default: auto
+  approx_chars_per_token: 3.71
+  # A 1.05M window takes input only up to the room a full reply needs, whatever
+  # max_output_tokens says; a reply asked past the window is served and cut.
+  limits:
+    max_request_tokens: 921_000
+    max_context_tokens: 1_050_000
+    max_response_tokens: 128_000
+    max_request_bytes: 536_870_912
+    max_image_edge_px: 65_535
+    truncates_at_context: true
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [none]
+  compaction: [bespoke, provider]
+
+profiles:
+  reasoning_only:
+    thinking:
+      effort: [low, medium, high, xhigh, max]
+      budget: [none, auto]
+      output: [none, text]
+
+  # Image edges measured 2026-11-18 (input_tokens of an 8000x1000 image at auto
+  # detail): GPT-6 models keep it whole, 5.5 and 5.5 Pro cut it to 6000, 5.4,
+  # 5.4 Pro, 5.2, and 5.2 Pro to 2048.
+  gpt_6:
+    limits:
+      max_request_tokens: 921_000
+      max_context_tokens: 1_050_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 65_535
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high, xhigh, max]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_5_6:
+    thinking:
+      effort: [none, low, medium, high, xhigh, max]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_5_5:
+    limits:
+      max_request_tokens: 921_000
+      max_context_tokens: 1_050_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 6_000
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_pro_1m:
+    limits:
+      max_request_tokens: 921_000
+      max_context_tokens: 1_050_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_5_4:
+    thinking_effort_default: none
+    limits:
+      max_request_tokens: 921_000
+      max_context_tokens: 1_050_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_mini_5_4:
+    thinking_effort_default: none
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 400_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_5_2:
+    thinking_effort_default: none
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 400_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_pro_400k:
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 400_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [medium, high, xhigh]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_5_1:
+    thinking_effort_default: none
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 400_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+    thinking:
+      effort: [none, low, medium, high]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_4_1:
+    thinking_effort_default: none
+    thinking_budget_default: none
+    limits:
+      max_request_tokens: 1_047_576
+      max_context_tokens: 0
+      max_response_tokens: 32_768
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+
+  # Efforts measured 2026-11-18 (a refused effort is a 400 from the free
+  # input_tokens count), and each default as a reply sent none reported it;
+  # no window was measured, so no truncation is claimed.
+  gpt_5:
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 400_000
+      max_response_tokens: 128_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: null
+    thinking:
+      effort: [min, low, medium, high]
+      budget: [none, auto]
+      output: [none, text]
+
+  gpt_pro_5:
+    thinking_effort_default: high
+    limits:
+      max_request_tokens: 400_000
+      max_context_tokens: 0
+      max_response_tokens: 272_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: null
+    thinking:
+      effort: [high]
+      budget: [none, auto]
+      output: [none, text]
+
+  o_3:
+    limits:
+      max_request_tokens: 200_000
+      max_context_tokens: 0
+      max_response_tokens: 100_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: null
+    thinking:
+      effort: [low, medium, high]
+      budget: [none, auto]
+      output: [none, text]
+
+  # gpt-4o-mini served 120,014 input tokens beside max_output_tokens 16,384.
+  gpt_omni:
+    thinking_effort_default: none
+    thinking_budget_default: none
+    limits:
+      max_request_tokens: 128_000
+      max_context_tokens: 0
+      max_response_tokens: 16_384
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 2_048
+      truncates_at_context: true
+
+models:
+# GPT-6.2 has no flex tier; ultrafast is 3x standard through 2027-02-28, 6x after.
+- model_id: astra-6.2
+  wire_model_id: gpt-6.2-astra
+  profile: reasoning_only
+  knowledge_cutoff: '2026-05-18'
+  prices:
+  - service_tier: auto
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 16.0
+    response: 60.0
+    cache_write: 20.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: priority
+    request: 16.0
+    response: 80.0
+    cache_write: 20.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 32.0
+    response: 120.0
+    cache_write: 40.0
+    cache_write_1h: 0.0
+    cache_read: 1.6
+  - service_tier: ultrafast
+    request: 24.0
+    response: 120.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 48.0
+    response: 180.0
+    cache_write: 60.0
+    cache_write_1h: 0.0
+    cache_read: 2.4
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    request: 48.0
+    response: 240.0
+    cache_write: 60.0
+    cache_write_1h: 0.0
+    cache_read: 2.4
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    effective_prompt_tokens: 272_000
+    request: 96.0
+    response: 360.0
+    cache_write: 120.0
+    cache_write_1h: 0.0
+    cache_read: 4.8
+
+- model_id: sol-6.2
+  wire_model_id: gpt-6.2-sol
+  # New ChatGPT Work chats start GPT-6.2 Sol at Light (``low``).
+  thinking_effort_default: low
+  profile: reasoning_only
+  knowledge_cutoff: '2026-06-01'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 30.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: ultrafast
+    request: 6.0
+    response: 30.0
+    cache_write: 7.5
+    cache_write_1h: 0.0
+    cache_read: 0.3
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 12.0
+    response: 45.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    request: 12.0
+    response: 60.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_date: '2027-03-01'
+    effective_prompt_tokens: 272_000
+    request: 24.0
+    response: 90.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+
+- model_id: astra-6.0
+  wire_model_id: gpt-6-astra
+  profile: reasoning_only
+  knowledge_cutoff: '2026-04-30'
+  prices:
+  - service_tier: auto
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 0.0
+    cache_read: 1.0
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 20.0
+    response: 75.0
+    cache_write: 25.0
+    cache_write_1h: 0.0
+    cache_read: 2.0
+  - service_tier: flex
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 10.0
+    response: 37.5
+    cache_write: 12.5
+    cache_write_1h: 0.0
+    cache_read: 1.0
+  - service_tier: priority
+    request: 20.0
+    response: 100.0
+    cache_write: 25.0
+    cache_write_1h: 0.0
+    cache_read: 2.0
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 40.0
+    response: 150.0
+    cache_write: 50.0
+    cache_write_1h: 0.0
+    cache_read: 4.0
+  - service_tier: ultrafast
+    request: 60.0
+    response: 300.0
+    cache_write: 75.0
+    cache_write_1h: 0.0
+    cache_read: 6.0
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 120.0
+    response: 450.0
+    cache_write: 150.0
+    cache_write_1h: 0.0
+    cache_read: 12.0
+
+- model_id: sol-6.1
+  wire_model_id: gpt-6.1-sol
+  thinking_effort_default: low
+  profile: reasoning_only
+  knowledge_cutoff: '2026-04-30'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: flex
+    request: 1.0
+    response: 5.0
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.05
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 2.0
+    response: 7.5
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: priority
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 30.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: ultrafast
+    request: 12.0
+    response: 60.0
+    cache_write: 15.0
+    cache_write_1h: 0.0
+    cache_read: 0.6
+  - service_tier: ultrafast
+    effective_prompt_tokens: 272_000
+    request: 24.0
+    response: 90.0
+    cache_write: 30.0
+    cache_write_1h: 0.0
+    cache_read: 1.2
+
+- model_id: terra-6.1
+  wire_model_id: gpt-6.1-terra
+  profile: gpt_6
+  knowledge_cutoff: '2026-06-01'
+  prices:
+  - service_tier: auto
+    request: 1.0
+    response: 5.0
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.05
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 2.0
+    response: 7.5
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: flex
+    request: 0.5
+    response: 2.5
+    cache_write: 0.625
+    cache_write_1h: 0.0
+    cache_read: 0.025
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 1.0
+    response: 3.75
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.05
+  - service_tier: priority
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+
+- model_id: sol-6.0
+  wire_model_id: gpt-6-sol
+  profile: gpt_6
+  knowledge_cutoff: '2026-04-20'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: flex
+    request: 1.0
+    response: 5.0
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 2.0
+    response: 7.5
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 30.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+
+- model_id: luna-6.0
+  wire_model_id: gpt-6-luna
+  profile: gpt_6
+  knowledge_cutoff: '2026-05-18'
+  prices:
+  - service_tier: auto
+    request: 0.1
+    response: 0.5
+    cache_write: 0.125
+    cache_write_1h: 0.0
+    cache_read: 0.01
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 0.2
+    response: 0.75
+    cache_write: 0.25
+    cache_write_1h: 0.0
+    cache_read: 0.02
+  - service_tier: flex
+    request: 0.05
+    response: 0.25
+    cache_write: 0.0625
+    cache_write_1h: 0.0
+    cache_read: 0.005
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 0.1
+    response: 0.375
+    cache_write: 0.125
+    cache_write_1h: 0.0
+    cache_read: 0.01
+  - service_tier: priority
+    request: 0.2
+    response: 1.0
+    cache_write: 0.25
+    cache_write_1h: 0.0
+    cache_read: 0.02
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 0.4
+    response: 1.5
+    cache_write: 0.5
+    cache_write_1h: 0.0
+    cache_read: 0.04
+
+- &sol_5_6
+  model_id: sol-5.6
+  wire_model_id: gpt-5.6-sol
+  thinking_effort_default: low
+  profile: gpt_5_6
+  knowledge_cutoff: '2026-02-16'
+  prices:
+  - service_tier: auto
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 30.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: flex
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 15.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: priority
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 16.0
+    response: 60.0
+    cache_write: 20.0
+    cache_write_1h: 0.0
+    cache_read: 1.6
+
+# OpenAI routes the ``gpt-5.6`` alias to GPT-5.6 Sol, so it is that row by name.
+- <<: *sol_5_6
+  model_id: gpt-5.6
+  wire_model_id: gpt-5.6
+
+- model_id: luna-5.6
+  wire_model_id: gpt-5.6-luna
+  profile: gpt_5_6
+  knowledge_cutoff: '2026-02-16'
+  prices:
+  - service_tier: auto
+    request: 0.2
+    response: 1.2
+    cache_write: 0.25
+    cache_write_1h: 0.0
+    cache_read: 0.02
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 0.4
+    response: 1.8
+    cache_write: 0.5
+    cache_write_1h: 0.0
+    cache_read: 0.04
+  - service_tier: flex
+    request: 0.1
+    response: 0.6
+    cache_write: 0.125
+    cache_write_1h: 0.0
+    cache_read: 0.01
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 0.2
+    response: 0.9
+    cache_write: 0.25
+    cache_write_1h: 0.0
+    cache_read: 0.02
+  - service_tier: priority
+    request: 0.4
+    response: 2.4
+    cache_write: 0.5
+    cache_write_1h: 0.0
+    cache_read: 0.04
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 0.8
+    response: 3.6
+    cache_write: 1.0
+    cache_write_1h: 0.0
+    cache_read: 0.08
+
+- model_id: terra-5.6
+  wire_model_id: gpt-5.6-terra
+  profile: gpt_5_6
+  knowledge_cutoff: '2026-02-16'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 12.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 4.0
+    response: 18.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: flex
+    request: 1.0
+    response: 6.0
+    cache_write: 1.25
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 2.0
+    response: 9.0
+    cache_write: 2.5
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 4.0
+    response: 24.0
+    cache_write: 5.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+  - service_tier: priority
+    effective_prompt_tokens: 272_000
+    request: 8.0
+    response: 36.0
+    cache_write: 10.0
+    cache_write_1h: 0.0
+    cache_read: 0.8
+
+- model_id: gpt-5.5
+  wire_model_id: gpt-5.5
+  profile: gpt_5_5
+  knowledge_cutoff: '2025-12-01'
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 30.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 10.0
+    response: 45.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 1.0
+  - service_tier: flex
+    request: 2.5
+    response: 15.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 5.0
+    response: 22.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: priority
+    request: 12.5
+    response: 75.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 1.25
+
+- model_id: gpt-pro-5.5
+  wire_model_id: gpt-5.5-pro
+  thinking_effort_default: high
+  profile: gpt_pro_1m
+  knowledge_cutoff: '2025-12-01'
+  limits:
+    max_request_tokens: 921_000
+    max_context_tokens: 1_050_000
+    max_response_tokens: 128_000
+    max_request_bytes: 536_870_912
+    max_image_edge_px: 6_000
+    truncates_at_context: true
+  prices:
+  - service_tier: auto
+    request: 30.0
+    response: 180.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 60.0
+    response: 270.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+  - service_tier: flex
+    request: 15.0
+    response: 90.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-5.4
+  wire_model_id: gpt-5.4
+  profile: gpt_5_4
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 2.5
+    response: 15.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 5.0
+    response: 22.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: flex
+    request: 1.25
+    response: 7.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.13
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 2.5
+    response: 11.25
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+  - service_tier: priority
+    request: 5.0
+    response: 30.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+
+- model_id: gpt-pro-5.4
+  wire_model_id: gpt-5.4-pro
+  profile: gpt_pro_1m
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 30.0
+    response: 180.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+  - service_tier: auto
+    effective_prompt_tokens: 272_000
+    request: 60.0
+    response: 270.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+  - service_tier: flex
+    request: 15.0
+    response: 90.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+  - service_tier: flex
+    effective_prompt_tokens: 272_000
+    request: 30.0
+    response: 135.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-mini-5.4
+  wire_model_id: gpt-5.4-mini
+  profile: gpt_mini_5_4
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 0.75
+    response: 4.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+  - service_tier: flex
+    request: 0.375
+    response: 2.25
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0375
+  - service_tier: priority
+    request: 1.5
+    response: 9.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.15
+
+- model_id: gpt-nano-5.4
+  wire_model_id: gpt-5.4-nano
+  profile: gpt_mini_5_4
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 0.2
+    response: 1.25
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.02
+  - service_tier: flex
+    request: 0.1
+    response: 0.625
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.01
+
+- model_id: gpt-5.2
+  wire_model_id: gpt-5.2
+  profile: gpt_5_2
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 1.75
+    response: 14.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.175
+  - service_tier: flex
+    request: 0.875
+    response: 7.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0875
+  - service_tier: priority
+    request: 3.5
+    response: 28.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.35
+
+- model_id: gpt-pro-5.2
+  wire_model_id: gpt-5.2-pro
+  profile: gpt_pro_400k
+  knowledge_cutoff: '2025-08-31'
+  prices:
+  - service_tier: auto
+    request: 21.0
+    response: 168.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-5.1
+  wire_model_id: gpt-5.1
+  profile: gpt_5_1
+  knowledge_cutoff: '2024-09-30'
+  prices:
+  - service_tier: auto
+    request: 1.25
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.125
+  - service_tier: flex
+    request: 0.625
+    response: 5.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0625
+  - service_tier: priority
+    request: 2.5
+    response: 20.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+
+- model_id: gpt-5.0
+  wire_model_id: gpt-5
+  profile: gpt_5
+  knowledge_cutoff: '2024-09-30'
+  prices:
+  - service_tier: auto
+    request: 1.25
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.125
+  - service_tier: flex
+    request: 0.625
+    response: 5.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0625
+  - service_tier: priority
+    request: 2.5
+    response: 20.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+
+- model_id: gpt-pro-5.0
+  wire_model_id: gpt-5-pro
+  profile: gpt_pro_5
+  knowledge_cutoff: '2024-09-30'
+  prices:
+  - service_tier: auto
+    request: 15.0
+    response: 120.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-mini-5.0
+  wire_model_id: gpt-5-mini
+  profile: gpt_5
+  knowledge_cutoff: '2024-05-31'
+  prices:
+  - service_tier: auto
+    request: 0.25
+    response: 2.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.025
+  - service_tier: flex
+    request: 0.125
+    response: 1.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0125
+  - service_tier: priority
+    request: 0.45
+    response: 3.6
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.045
+
+- model_id: gpt-nano-5.0
+  wire_model_id: gpt-5-nano
+  profile: gpt_5
+  knowledge_cutoff: '2024-05-31'
+  prices:
+  - service_tier: auto
+    request: 0.05
+    response: 0.4
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.005
+  - service_tier: flex
+    request: 0.025
+    response: 0.2
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0025
+
+- model_id: o-3.0
+  wire_model_id: o3
+  profile: o_3
+  knowledge_cutoff: '2024-06-01'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 8.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: flex
+    request: 1.0
+    response: 4.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+  - service_tier: priority
+    request: 3.5
+    response: 14.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.875
+
+- model_id: o-pro-3.0
+  wire_model_id: o3-pro
+  profile: o_3
+  knowledge_cutoff: '2024-06-01'
+  prices:
+  - service_tier: auto
+    request: 20.0
+    response: 80.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-4.1
+  wire_model_id: gpt-4.1
+  profile: gpt_4_1
+  knowledge_cutoff: '2024-06-01'
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 8.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.5
+  - service_tier: priority
+    request: 3.5
+    response: 14.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.875
+
+- model_id: gpt-mini-4.1
+  wire_model_id: gpt-4.1-mini
+  profile: gpt_4_1
+  knowledge_cutoff: '2024-06-01'
+  prices:
+  - service_tier: auto
+    request: 0.4
+    response: 1.6
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: priority
+    request: 0.7
+    response: 2.8
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.175
+
+- model_id: gpt-omni-4.0
+  wire_model_id: gpt-4o
+  profile: gpt_omni
+  knowledge_cutoff: '2023-10-01'
+  prices:
+  - service_tier: auto
+    request: 2.5
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 1.25
+  - service_tier: priority
+    request: 4.25
+    response: 17.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 2.125
+
+- model_id: gpt-omni-mini-4.0
+  wire_model_id: gpt-4o-mini
+  profile: gpt_omni
+  knowledge_cutoff: '2023-10-01'
+  prices:
+  - service_tier: auto
+    request: 0.15
+    response: 0.6
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+  - service_tier: priority
+    request: 0.25
+    response: 1.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.125
+
+# The ChatGPT endpoint serves 32k out and no tier but priority beyond the default;
+# it takes 272k in, except the models measured to take their 1.05M window.
+providers:
+  openai:
+    sends: [thinking_effort, thinking_output, service_tier, compaction]
+    # A ``compaction_trigger`` item returns one sealed ``compaction`` item; measured
+    # 2026-11-22 on api.openai.com and the ChatGPT endpoint.
+    compaction: [bespoke, provider]
+    compaction_default: provider
+    # What a cache lasts unasked; none is sent. GPT-5.6 and later keep at least 30
+    # minutes; earlier models with extended retention keep about as long.
+    cache_ttl_sec: [1800.0]
+    retries_internally: true
+    # Measured 2026-11-19, Chat Completions and Responses: two adjacent user turns
+    # count 4 tokens more than the same text in one, so each stays its own.
+    keeps_user_turns_apart: true
+    models:
+      # A model off OpenAI's extended-retention list keeps its cache in memory,
+      # 5 to 10 idle minutes.
+      gpt-pro-5.4: &in_memory
+        cache_ttl_sec: [300.0]
+      gpt-mini-5.4: *in_memory
+      gpt-nano-5.4: *in_memory
+      gpt-pro-5.2: *in_memory
+      gpt-pro-5.0: *in_memory
+      gpt-mini-5.0: *in_memory
+      gpt-nano-5.0: *in_memory
+      o-3.0: *in_memory
+      o-pro-3.0: *in_memory
+      gpt-mini-4.1: *in_memory
+      gpt-omni-4.0: *in_memory
+      gpt-omni-mini-4.0: *in_memory
+  openai-sub:
+    sends: [thinking_effort, thinking_output, service_tier, compaction]
+    compaction: [bespoke, provider]
+    compaction_default: provider
+    # Measured from journals: no misses up to 30 minutes, 1 in 11 at 30 to 60.
+    cache_ttl_sec: [3600.0]
+    retries_internally: true
+    account_auth: true
+    service_tier: [auto, priority]
+    # No window is stated; unmeasured whether 272k in leaves room for 32k out.
+    limits:
+      max_request_tokens: 272_000
+      max_context_tokens: 0
+      max_response_tokens: 32_000
+      max_request_bytes: 536_870_912
+      max_image_edge_px: 65_535
+      truncates_at_context: true
+    models:
+      # Bsearched 2026-11-18: the most input tokens served, by the server's
+      # count; one more was refused (ContextOverflowError), as was 1,000,000.
+      # The 32k reply and byte and image limits are the section's, not re-measured.
+      astra-6.2: &sub_1m_6_2
+        limits:
+          max_request_tokens: 921_624
+          max_context_tokens: 1_050_000
+          max_response_tokens: 32_000
+          max_request_bytes: 536_870_912
+          max_image_edge_px: 65_535
+          truncates_at_context: true
+      sol-6.2: *sub_1m_6_2
+      astra-6.0: &sub_1m_6_0
+        limits:
+          max_request_tokens: 921_858
+          max_context_tokens: 1_050_000
+          max_response_tokens: 32_000
+          max_request_bytes: 536_870_912
+          max_image_edge_px: 65_535
+          truncates_at_context: true
+      sol-6.1: *sub_1m_6_0

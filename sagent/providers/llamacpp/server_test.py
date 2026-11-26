@@ -1,146 +1,660 @@
-"""Tests for ``providers.llamacpp``: managed llama-server provider plumbing."""
+"""Tests for the managed llama.cpp provider, with a stand-in ``llama-server``.
+
+Each stand-in is a shell script on ``PATH`` that logs a line, records its
+command line, and then lives, dies, or ignores being asked to stop; the HTTP it
+would serve is a fake transport, so nothing listens and nothing reaches the
+network.
+"""
 
 from __future__ import annotations
 
-from queue import Queue
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 
-import shutil
+import asyncio
+import gc
+import os
+import signal
+import socket
+import sys
 
+from treekle import json_dumps
+
+import httpx2
 import pytest
 
+from sagent.journal.types import AssistantMessage, UserMessage
+from sagent.lib.posix.pids import kill_and_reap, written_pid
+from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.llamacpp import server
-from sagent.providers.llamacpp.server import (
-    LlamaCpp,
-    _free_port,
-    _looks_like_path,
-    _startup_error,
-)
+from sagent.providers.llamacpp.server import LlamaCpp
+from sagent.providers.resources import SharedResources
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable, Coroutine
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "/abs/path/model.gguf",
-        "./relative/model.gguf",
-        "../parent/model.gguf",
-        "~/home/model.gguf",
-        "anything.gguf",
-    ],
+_REQUEST = Request(records=(UserMessage(content="hi"),))
+
+# The command line lands whole, by rename: ``_Http`` answers once the file has
+# any text, and a server stopped mid-``printf`` left a cut-off one on macOS.
+_LIVES = (
+    'echo "loading model"\nprintf "%s\\n" "$@" > "$FAKE_LLAMA_ARGS.tmp"\n'
+    'mv "$FAKE_LLAMA_ARGS.tmp" "$FAKE_LLAMA_ARGS"\nexec sleep 30\n'
 )
-def test_looks_like_path_positive(value: str) -> None:
-    assert _looks_like_path(value) is True
+_DIES = 'echo "error: failed to open model"\necho "done" >&2\nexit 1\n'
+# Each ``sleep`` off the server's stdout: one holding the pipe outlives the
+# kill, the test's loop closes first, and the transport it strands, collected
+# in a later test, pins that test's frames -- a dropped provider is never freed.
+_STUBBORN = (
+    "trap '' TERM\nprintf trapped > \"$FAKE_LLAMA_ARGS\"\n"
+    "while :; do sleep 0.05 > /dev/null 2>&1; done\n"
+)
 
 
-@pytest.mark.parametrize("value", ["sk-key", "no-auth", "local"])
-def test_looks_like_path_negative(value: str) -> None:
-    assert _looks_like_path(value) is False
+@pytest.fixture(autouse=True)
+def bare(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Clear every llama.cpp variable, and give PATH and HOME nothing to find."""
+    for name in (
+        "LLAMA_CPP_API_KEY",
+        "LLAMA_CPP_BASE_URL",
+        "LLAMA_CPP_MODEL",
+        "LLAMA_CPP_SERVER",
+        "LLAMA_CPP_CONTEXT",
+        "LLAMA_CPP_KV",
+        "LLAMA_CPP_SPEC_TYPE",
+        "LLAMA_CPP_MTP_DRAFT",
+        "LLAMA_CPP_EXTRA_ARGS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FAKE_LLAMA_ARGS", str(tmp_path / "args.txt"))
+    return bin_dir
 
 
-def test_startup_error_no_log() -> None:
-    assert _startup_error("server died", []) == "server died"
+def _install(directory: Path, body: str, *, name: str = "llama-server") -> Path:
+    """Write an executable stand-in for ``llama-server`` into ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / name
+    script.write_text(f"#!/bin/sh\n{body}")
+    script.chmod(0o755)
+    return script
 
 
-def test_startup_error_with_full_log() -> None:
-    log = [f"line {i}" for i in range(30)]
-    out = _startup_error("server died", log)
-    assert out == "server died; recent log:\n" + "\n".join(log)
-    # Whole log: llama.cpp announces the real cause in the FIRST lines
-    # (missing model file, bad GPU layer count), which a tail dropped.
-    assert "line 29" in out
-    assert "line 0" in out
+def _argv(tmp_path: Path) -> list[str]:
+    """Return the command line the stand-in recorded."""
+    return (tmp_path / "args.txt").read_text().splitlines()
 
 
-def test_free_port_returns_int_within_range() -> None:
-    p = _free_port()
-    assert 1 <= p <= 65_535
+def _port(argv: list[str]) -> str:
+    return argv[argv.index("--port") + 1]
 
 
-def test_llamacpp_from_key_with_path_treated_as_model_path() -> None:
-    p = LlamaCpp.from_key("/opt/models/model.gguf")
-    # ``api_key`` falls back to "local"; model_path stored separately.
-    assert p.api_key == "local"
-
-
-def test_llamacpp_from_key_non_path_stays_as_api_key() -> None:
-    p = LlamaCpp.from_key("api-key-string")
-    # Non-path treats the string as a literal api key.
-    assert p.api_key == "api-key-string"
-
-
-def test_llamacpp_from_key_empty_falls_back_to_local() -> None:
-    p = LlamaCpp.from_key("")
-    assert p.api_key == "local"
-
-
-def test_llamacpp_from_env_uses_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLAMA_CPP_API_KEY", "env-key")
-    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://stub.test/v1")
-    monkeypatch.delenv("LLAMA_CPP_MODEL", raising=False)
-    p = LlamaCpp.from_env()
-    assert p.api_key == "env-key"
-
-
-def test_llamacpp_catalog_uses_shared_models() -> None:
-    assert LlamaCpp.catalog.models is server.models("llamacpp")
-
-
-def test_llamacpp_close_idempotent() -> None:
-    p = LlamaCpp.from_key("local")
-    p.close()
-    p.close()  # Second call must not raise.
-
-
-def test_llamacpp_model_without_model_path_or_base_url_raises(
+@pytest.mark.asyncio
+async def test_the_key_is_the_one_given_else_its_variable_else_local(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("LLAMA_CPP_BASE_URL", raising=False)
-    p = LlamaCpp.from_key("not-a-path")
-    with pytest.raises(RuntimeError, match="LLAMA_CPP_MODEL"):
-        _ = p.model()
+    assert await LlamaCpp().credentials() == {"authorization": "Bearer local"}
+    monkeypatch.setenv("LLAMA_CPP_API_KEY", "sk-env")
+    assert await LlamaCpp().credentials() == {"authorization": "Bearer sk-env"}
+    assert await LlamaCpp(api_key="sk-given").credentials() == {
+        "authorization": "Bearer sk-given",
+    }
 
 
-def test_llamacpp_argv_missing_server_raises(
+def test_the_provider_serves_its_sections_models() -> None:
+    local = LlamaCpp()
+    assert local.name == "llamacpp"
+    assert list(local) == ["qwen-27b-12gb-3.6", "qwen-27b-mtp-64k-3.6", "local-0.0"]
+    assert local["default"].capability.wire_model_id == "qwen3.6-27b-12gb"
+
+
+def test_a_provider_keeps_its_name_and_reads_unset_settings_as_empty() -> None:
+    assert LlamaCpp(name="gpu").name == "gpu"
+    local = LlamaCpp()
+    unset = (local._base_url, local._model_path, local._server, local._spec_type)
+    assert unset == ("", "", "", "")
+    assert (local._started_url, local._reached) == ("", False)
+    assert local._startup_timeout_sec == 120.0
+
+
+@pytest.mark.asyncio
+async def test_count_is_estimated_without_starting_the_server(bare: Path) -> None:
+    _install(bare, _DIES)
+    local = LlamaCpp(model_path="m.gguf")
+    assert await local["default"].count(_REQUEST) == 0
+    assert local._process is None
+
+
+@pytest.mark.asyncio
+async def test_the_server_starts_on_the_first_request_with_the_settings_given(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    _install(bare, _LIVES)
+    fake = _Http(ready=tmp_path / "args.txt")
+    async with _Served(fake) as shared:
+        local = LlamaCpp(
+            resources=shared,
+            model_path="~/models/qwen.gguf",
+            context_tokens=8_192,
+            kv_cache="q8_0",
+            spec_type="mtp",
+            draft_tokens=2,
+            extra_args=("--flash-attn", "on"),
+        )
+        model = local["default"]
+        assert local._process is None
+        events = [event async for event in model.stream(_REQUEST)]
+        process = local._process
+        assert process is not None
+        # A second request reaches the same server, with no second start.
+        [event async for event in model.stream(_REQUEST)]
+        assert local._process is process
+        stopping = local._stopping
+        assert stopping is not None
+        assert stopping.alive
+        await local.aclose()
+        # Closed, it no longer needs stopping when collected.
+        assert not stopping.alive
+    argv = _argv(tmp_path)
+    port = _port(argv)
+    assert argv == [
+        "-m",
+        str(tmp_path / "home" / "models" / "qwen.gguf"),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        port,
+        "--spec-type",
+        "mtp",
+        "--spec-draft-n-max",
+        "2",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0",
+        "--parallel",
+        "1",
+        "-c",
+        "8192",
+        "-ngl",
+        "12",
+        "--reasoning",
+        "off",
+        "--flash-attn",
+        "on",
+    ]
+    urls = [str(request.url) for request in fake.requests]
+    # Asked for its models until it answered, then sent both requests.
+    assert set(urls[:-2]) == {f"http://127.0.0.1:{port}/v1/models"}
+    assert urls[-2:] == [f"http://127.0.0.1:{port}/v1/chat/completions"] * 2
+    assert fake.requests[-1].headers["authorization"] == "Bearer local"
+    assert events[0] == TextChunk(text="Hi")
+    response = events[-1]
+    assert isinstance(response, Response)
+    assert response.records == (AssistantMessage(content="Hi"),)
+    # Closed, it stopped the server.
+    assert process.returncode == -signal.SIGTERM
+    assert local._process is None
+
+
+@pytest.mark.asyncio
+async def test_unnamed_settings_come_from_the_environment(
+    bare: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """No ``llama-server`` on PATH and no env override → RuntimeError."""
-    fake_model = tmp_path / "missing.gguf"
-    p = LlamaCpp.from_key(str(fake_model))
+    script = _install(tmp_path / "elsewhere", _LIVES, name="my-llama")
+    monkeypatch.setenv("LLAMA_CPP_MODEL", "/m/env.gguf")
+    monkeypatch.setenv("LLAMA_CPP_SERVER", str(script))
+    monkeypatch.setenv("LLAMA_CPP_CONTEXT", "4096")
+    monkeypatch.setenv("LLAMA_CPP_KV", "f16")
+    monkeypatch.setenv("LLAMA_CPP_SPEC_TYPE", "draft")
+    monkeypatch.setenv("LLAMA_CPP_MTP_DRAFT", "5")
+    monkeypatch.setenv("LLAMA_CPP_EXTRA_ARGS", "--threads '4'")
+    del bare
+    async with (
+        _Served(_Http(ready=tmp_path / "args.txt")) as shared,
+        LlamaCpp(resources=shared) as local,
+    ):
+        await local.endpoint()
+    argv = _argv(tmp_path)
+    assert argv[:2] == ["-m", "/m/env.gguf"]
+    assert argv[6:] == [
+        "--spec-type",
+        "draft",
+        "--spec-draft-n-max",
+        "5",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16",
+        "--parallel",
+        "1",
+        "-c",
+        "4096",
+        "-ngl",
+        "12",
+        "--reasoning",
+        "off",
+        "--threads",
+        "4",
+    ]
 
-    def _which(name: str) -> str | None:
-        del name
-        return None
 
-    def _no_docker() -> str | None:
-        return None
+@pytest.mark.asyncio
+async def test_with_nothing_named_the_defaults_apply(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    _install(bare, _LIVES)
+    async with (
+        _Served(_Http(ready=tmp_path / "args.txt")) as shared,
+        LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+    ):
+        await local.endpoint()
+    argv = _argv(tmp_path)
+    assert argv[6:] == [
+        "--cache-type-k",
+        "q4_0",
+        "--cache-type-v",
+        "q4_0",
+        "--parallel",
+        "1",
+        "-c",
+        "16384",
+        "-ngl",
+        "12",
+        "--reasoning",
+        "off",
+    ]
 
-    monkeypatch.setattr(shutil, "which", _which)
-    monkeypatch.setattr(server, "_docker_server", _no_docker)
-    with pytest.raises(RuntimeError, match="llama-server not found"):
-        _ = p._argv(8080)
+
+@pytest.mark.asyncio
+async def test_docker_desktops_server_is_found_when_none_is_on_path(
+    tmp_path: Path,
+) -> None:
+    _install(tmp_path / "home" / ".docker" / "bin" / "inference", _LIVES)
+    async with (
+        _Served(_Http(ready=tmp_path / "args.txt")) as shared,
+        LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+    ):
+        await local.endpoint()
+    assert _argv(tmp_path)[:2] == ["-m", "/m.gguf"]
 
 
-def test_first_line_failure_survives_the_log_window() -> None:
-    """llama.cpp names the real cause in its FIRST lines.
+@pytest.mark.asyncio
+async def test_no_model_named_is_an_error_before_anything_starts() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Name a GGUF file with model_path= or LLAMA_CPP_MODEL\.$",
+    ):
+        await LlamaCpp().endpoint()
 
-    A missing model file or a bad GPU layer count is announced at
-    startup; a tail-only window reports the generic lines that follow
-    and drops the diagnosis.
-    """
-    server = LlamaCpp.__new__(LlamaCpp)
-    server._log = []
-    server._log_queue = Queue()
-    server._log_queue.put("FIRST_FAILURE: model file not found")
-    for i in range(60):
-        server._log_queue.put(f"line {i}")
-    server._drain_log()
-    out = _startup_error("llama-server exited", server._log)
-    assert "FIRST_FAILURE" in out, "the startup cause was dropped by the log window"
+
+@pytest.mark.asyncio
+async def test_no_server_found_says_how_to_name_one() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match=r"^llama-server was not found; set LLAMA_CPP_SERVER\.$",
+    ):
+        await LlamaCpp(model_path="/m.gguf").endpoint()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_exits_reports_its_log(
+    bare: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its error output is its log too; its reader gets a moment to catch up."""
+    real = asyncio.wait
+    waited: list[float | None] = []
+
+    async def wait(
+        tasks: set[asyncio.Task[None]],
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- ``asyncio.wait``'s own.
+    ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+        waited.append(timeout)
+        return await real(tasks, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait", wait)
+    _install(bare, _DIES)
+    fake = _Http(up=False)
+    async with (
+        _Served(fake) as shared,
+        LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            await local.endpoint()
+        assert local._process is None
+    assert str(raised.value) == (
+        "llama-server exited; its log:\nerror: failed to open model\ndone"
+    )
+    # The stop that follows waits on the reader too, unbounded.
+    assert waited[0] == 1.0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Reads its stdin from /proc.")
+@pytest.mark.asyncio
+async def test_the_server_reads_nothing_from_the_terminal(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    _install(bare, f"readlink /proc/$$/fd/0 > {tmp_path / 'stdin'}\nexit 1\n")
+    # Our own stdin a pipe, as a terminal would be: the server must not get it.
+    ours, theirs = os.pipe()
+    saved = os.dup(0)
+    os.dup2(ours, 0)
+    try:
+        async with (
+            _Served(_Http(up=False)) as shared,
+            LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+        ):
+            with pytest.raises(RuntimeError, match="exited"):
+                await local.endpoint()
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, ours, theirs):
+            os.close(fd)
+
+    assert (tmp_path / "stdin").read_text() == "/dev/null\n"
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_job_holds_its_output_still_stops(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    """A job it started keeps the log open; the reader is stopped, not waited out."""
+    job = tmp_path / "job.pid"
+    _install(bare, f"sleep 60 &\necho $! > {job}\n{_LIVES}")
+    try:
+        async with _Served(_Http(ready=tmp_path / "args.txt")) as shared:
+            local = LlamaCpp(resources=shared, model_path="/m.gguf")
+            await local.endpoint()
+            await asyncio.wait_for(local.aclose(), timeout=5)
+    finally:
+        kill_and_reap([await written_pid(job)])
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_is_not_utf8_is_logged_as_near_as_it_reads() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"bad \xff byte\n")
+    reader.feed_eof()
+    log = server._Log()
+    await server._read_log(reader, into=log)
+    assert log.failure("x") == "x; its log:\nbad \ufffd byte"
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_exits_as_it_is_asked_to_is_left_alone() -> None:
+    """It can exit between the check and the signal."""
+
+    def gone(pid: int, sig: int) -> None:
+        del pid, sig
+        raise ProcessLookupError
+
+    running = await asyncio.create_subprocess_exec("sleep", "60")
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "kill", gone)
+            server._terminate(running)
+    finally:
+        running.kill()
+        await running.wait()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_never_answers_is_stopped(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    """Its log so far explains the failure; refused only once it logged, it has one."""
+    _install(bare, _LIVES)
+    async with _Served(_Http(up=False, ready=tmp_path / "args.txt")) as shared:
+        local = LlamaCpp(
+            resources=shared,
+            model_path="/m.gguf",
+            startup_timeout_sec=0.01,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=r"did not come up; its log:\nloading model",
+        ):
+            await local.endpoint()
+        assert local._process is None
+        await local.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_died_is_started_again(bare: Path) -> None:
+    _install(bare, _LIVES)
+    async with (
+        _Served(_Http()) as shared,
+        LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+    ):
+        await local.endpoint()
+        process = local._process
+        assert process is not None
+        process.kill()
+        await process.wait()
+        await local.endpoint()
+        again = local._process
+        assert again is not None
+        assert again is not process
+        assert again.returncode is None
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_ignores_the_request_to_stop_is_killed(
+    bare: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install(bare, _STUBBORN)
+    monkeypatch.setattr(LlamaCpp, "stop_timeout_sec", 0.01)
+    async with _Served(_Http(ready=tmp_path / "args.txt")) as shared:
+        local = LlamaCpp(resources=shared, model_path="/m.gguf")
+        await local.endpoint()
+        process = local._process
+        assert process is not None
+        started = asyncio.get_running_loop().time()
+        await local.aclose()
+        # Killed once the grace given ran out, not some other.
+        assert asyncio.get_running_loop().time() - started < 0.5
+    assert process.returncode == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+async def test_a_close_cancelled_midway_still_stops_the_server(
+    bare: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancelled while it waits out the grace, the stop still kills the server."""
+    _install(bare, _STUBBORN)
+    monkeypatch.setattr(LlamaCpp, "stop_timeout_sec", 0.05)
+    async with _Served(_Http(ready=tmp_path / "args.txt")) as shared:
+        local = LlamaCpp(resources=shared, model_path="/m.gguf")
+        await local.endpoint()
+        process = local._process
+        reading = local._reading
+        assert process is not None
+        assert reading is not None
+        closing = asyncio.create_task(local.aclose())
+        await asyncio.sleep(0)
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=5)
+    assert process.returncode == -signal.SIGKILL
+    assert reading.done()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_dropped_without_closing_stops_its_server(bare: Path) -> None:
+    _install(bare, _LIVES)
+    # Frozen, the session's heap is left out of the collection below, which then
+    # reads only what this test made: a whole worker's heap took 0.4s on CI.
+    gc.freeze()
+    try:
+        async with _Served(_Http()) as shared:
+            local = LlamaCpp(resources=shared, model_path="/m.gguf")
+            await local.endpoint()
+            process = local._process
+            assert process is not None
+            del local
+            gc.collect()
+            assert (
+                await asyncio.wait_for(process.wait(), timeout=5.0) == -signal.SIGTERM
+            )
+    finally:
+        gc.unfreeze()
+
+
+@pytest.mark.asyncio
+async def test_a_server_already_gone_is_left_alone() -> None:
+    gone = await asyncio.create_subprocess_exec("true")
+    assert await gone.wait() == 0
+    # Its pid may be another process's by now, so it is not signaled.
+    server._terminate(gone)
+    assert gone.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_a_running_server_is_checked_once_and_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://gpu-box:8081/v1")
+    fake = _Http()
+    async with _Served(fake) as shared, LlamaCpp(resources=shared) as local:
+        assert await local.endpoint() == "http://gpu-box:8081/v1"
+        assert await local.endpoint() == "http://gpu-box:8081/v1"
+        assert local._process is None
+    assert [str(request.url) for request in fake.requests] == [
+        "http://gpu-box:8081/v1/models",
+    ]
+    async with _Served(_Http(up=False)) as shared:
+        down = LlamaCpp(
+            resources=shared,
+            base_url="http://down:1/v1",
+            startup_timeout_sec=0.01,
+        )
+        with pytest.raises(RuntimeError, match="did not come up"):
+            await down.endpoint()
+
+
+@pytest.mark.asyncio
+async def test_a_running_server_that_answers_an_error_is_not_up() -> None:
+    """Asked again promptly, each ask given a second."""
+    fake = _Http(statuses=[503, 200])
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    async with _Served(fake) as shared:
+        local = LlamaCpp(resources=shared, base_url="http://box/v1")
+        assert await local.endpoint() == "http://box/v1"
+    assert loop.time() - began < 0.5
+    assert len(fake.requests) == 2
+    each = dict.fromkeys(("connect", "read", "write", "pool"), 1.0)
+    assert [request.extensions["timeout"] for request in fake.requests] == [each] * 2
+
+
+def test_a_port_is_read_only_from_an_ipv4_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Relative: macOS caps a socket's path at 104 bytes, and a test's temporary
+    # directory there runs past 120.
+    monkeypatch.chdir(tmp_path)
+    with socket.socket(socket.AF_UNIX) as unix:
+        unix.bind("s")
+        with pytest.raises(
+            TypeError,
+            match=r"^The socket is not bound to an IPv4 address\.$",
+        ):
+            server._port(unix)
+    with socket.socket() as ipv4:
+        ipv4.bind(("127.0.0.1", 0))
+        assert 0 < server._port(ipv4) < 65_536
+
+
+def test_the_log_keeps_its_first_lines_and_its_last() -> None:
+    log = server._Log()
+    assert log.failure("failed") == "failed"
+    for i in range(100):
+        log.add(f"line {i}")
+    kept = [f"line {i}" for i in (*range(20), *range(60, 100))]
+    assert log.failure("failed") == "failed; its log:\n" + "\n".join(kept)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Http:
+    """Answers as a llama-server would: its models, then a short reply."""
+
+    up: bool = True
+    ready: Path | None = None
+    """A file the server writes as it starts; until then a request waits."""
+
+    statuses: list[int] = field(default_factory=list[int])
+    requests: list[httpx2.Request] = field(default_factory=list[httpx2.Request])
+
+    async def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        if request.url.path.endswith("/models"):
+            if self.statuses:
+                return httpx2.Response(self.statuses.pop(0))
+            if self.ready is not None:
+                await _written(self.ready)
+            if not self.up:
+                raise httpx2.ConnectError("Connection refused")
+            return httpx2.Response(200, content=b'{"data": []}')
+        chunks: tuple[dict[str, object], ...] = (
+            {"choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        )
+        body = "".join(f"data: {json_dumps(chunk)}\n\n" for chunk in chunks)
+        return httpx2.Response(200, content=f"{body}data: [DONE]\n\n".encode())
+
+
+async def _written(path: Path) -> None:
+    """Wait until the stand-in has written ``path``."""
+    async with asyncio.timeout(5):
+        while True:
+            if _has_text(path):
+                return
+            await asyncio.sleep(0.005)  # house-ignore[sleep] -- Its file is the signal.
+
+
+def _has_text(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 0
+
+
+class _Served(SharedResources):
+    """Shared resources whose HTTP client answers from ``handler``, never the network."""
+
+    def __init__(
+        self,
+        handler: Callable[[httpx2.Request], Coroutine[None, None, httpx2.Response]],
+    ) -> None:
+        super().__init__()
+        self._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+
+    @property
+    @override
+    def http(self) -> httpx2.AsyncClient:
+        return self._client
+
+    @override
+    async def aclose(self) -> None:
+        await super().aclose()
+        await self._client.aclose()
 
 
 if __name__ == "__main__":

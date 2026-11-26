@@ -1,116 +1,139 @@
-"""OpenAI API-key provider using the Responses API."""
+"""OpenAI models over the Responses API, billed to an API key.
+
+Typical usage example:
+
+  async with OpenAI() as openai:                # reads OPENAI_API_KEY
+      sol = openai["sol"]
+      await sol.count(request)                   # exact, from the server
+      async for event in sol.stream(request):    # TextChunk..., then Response
+          ...
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar, Final, override
 
+import functools
 import os
 
-from sagent.catalog.loader import models
-from sagent.catalog.openai import api
-from sagent.catalog.table import ModelCatalog
-from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.openai.responses import (
-    _STREAM_IDLE_TIMEOUT,
-    _OpenAIResponsesModel,
-)
+from treekle import from_plain
+
+from sagent.providers import openai
+from sagent.providers.openai.compat import ResponsesCompatible
+from sagent.providers.workload_identity import WorkloadIdentity
 
 
 if TYPE_CHECKING:
-    import httpx2
-    import openai as openai_sdk
+    from types import ModuleType
 
-else:
-    from wrapt import lazy_import
-
-    httpx2 = lazy_import("httpx2")
-    openai_sdk = lazy_import("openai")
-
-__all__ = ["OpenAI"]
+    from sagent.model.types import Request
+    from sagent.providers.openai.compat import OpenAIModel
 
 
-class OpenAI:
-    """API-key authentication and loop-local OpenAI SDK ownership."""
+__all__ = [
+    "EXCHANGE_URL",
+    "OpenAI",
+    "exchange",
+]
 
-    ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
-    BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
-    catalog = ModelCatalog(models=models("openai"), transport=api())
+EXCHANGE_URL: Final = "https://auth.openai.com/oauth/token"
 
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
-        self.api_key = api_key
-        self.base_url = base_url or self.BASE_URL
-        self._sdks: PerLoop[openai_sdk.AsyncOpenAI] = PerLoop(self._make_sdk)
 
-    @classmethod
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
-        """Construct a provider from an API key.
+class OpenAI(ResponsesCompatible):
+    """OpenAI's models, billed to the API key in ``OPENAI_API_KEY``.
 
-        Args:
-          api_key: OpenAI API key.
-          base_url: Optional Responses endpoint override.
+    With no key, ``OPENAI_IDENTITY_TOKEN_COMMAND`` turns on workload identity,
+    with ``OPENAI_IDENTITY_PROVIDER_ID`` and ``OPENAI_SERVICE_ACCOUNT_ID``. A key wins.
 
-        Returns:
-          provider: Configured provider.
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``OPENAI_API_KEY``.
+      base_url: The endpoint, up to and including ``/v1``; empty reads
+        ``OPENAI_BASE_URL``, as OpenAI's SDK does, then uses OpenAI's.
 
-        """
-        return cls(api_key=api_key, base_url=base_url)
+    """
 
-    @classmethod
-    def from_env(cls, *, base_url: str | None = None) -> Self:
-        """Construct a provider from OPENAI_API_KEY.
+    section: ClassVar[str] = "openai"
+    aliases: ClassVar[tuple[str, ...]] = ("openai-api", "oapi")
+    package: ClassVar[ModuleType] = openai
+    url: ClassVar[str] = "https://api.openai.com/v1"
+    key_variable: ClassVar[str] = "OPENAI_API_KEY"
+    base_url_variable: ClassVar[str] = "OPENAI_BASE_URL"
 
-        Args:
-          base_url: Optional Responses endpoint override.
+    _identity: WorkloadIdentity | None = None
 
-        Returns:
-          provider: Configured provider.
+    @override
+    async def credentials(self) -> dict[str, str]:
+        """Return the headers that authenticate a request."""
+        command = os.environ.get("OPENAI_IDENTITY_TOKEN_COMMAND", "")
+        if self._api_key or os.environ.get(self.key_variable, "") or not command:
+            return await super().credentials()
+        if self._identity is None:
+            self._identity = WorkloadIdentity(
+                resources=self._resources,
+                url=EXCHANGE_URL,
+                command=command,
+                request=functools.partial(
+                    exchange,
+                    provider=os.environ.get("OPENAI_IDENTITY_PROVIDER_ID", ""),
+                    service_account=os.environ.get("OPENAI_SERVICE_ACCOUNT_ID", ""),
+                ),
+            )
+        return {"authorization": f"Bearer {await self._identity.token()}"}
 
-        """
-        key = os.environ.get(cls.ENV_VAR, "")
-        if not key:
-            raise RuntimeError(f"{cls.__name__} API key not configured.")
-        return cls(api_key=key, base_url=base_url)
+    @override
+    async def reauthenticate(self) -> bool:
+        """Renew a workload identity token after a 401; ``False`` for an API key."""
+        if self._identity is None:
+            return False
+        self._identity.forget()
+        return True
 
-    def model(self, model_id: str | None = None) -> _OpenAIResponsesModel:
-        """Resolve a catalog model or role to a Responses backend.
-
-        Args:
-          model_id: Model id, context-tagged id, or role.
-
-        Returns:
-          model: Configured Responses model.
-
-        """
-        capability, settings = self.catalog.resolve(
-            model_id if model_id is not None else "default",
+    @override
+    async def count(self, request: Request, *, model: OpenAIModel) -> int:
+        """Return the tokens ``request`` would send ``model``, as the server counts them."""
+        body = self.encode(request, model=model)
+        # ``input_tokens`` rejects the generation knobs it has no use for.
+        counted = {
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "reasoning",
+        }
+        reply = await self.reply(
+            "/responses/input_tokens",
+            body={key: value for key, value in body.items() if key in counted},
+            headers=self.headers(request),
         )
-        return _OpenAIResponsesModel(
-            provider=self,
-            capability=capability,
-            settings=settings,
-        )
+        return from_plain(reply.get("input_tokens"), int)
 
-    async def get_sdk(self) -> openai_sdk.AsyncOpenAI:
-        """Get this event loop's SDK client.
 
-        Returns:
-          sdk: Reusable client owned by this provider.
+def exchange(
+    subject: str,
+    *,
+    provider: str,
+    service_account: str,
+) -> dict[str, object]:
+    """Build OpenAI's token exchange request for an identity token.
 
-        """
-        return self._sdks.get()
+    Args:
+      subject: The identity token.
+      provider: The identity provider's ID.
+      service_account: The service account to act as.
 
-    async def close_sdk(self) -> None:
-        """Close and release this loop's SDK without creating one."""
-        sdk = self._sdks.peek()
-        self._sdks.clear()
-        if sdk is not None:
-            await sdk.close()
+    Returns:
+      request: The JSON body of the exchange.
 
-    def _make_sdk(self) -> openai_sdk.AsyncOpenAI:
-        return openai_sdk.AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            max_retries=0,
-            # The SDK's 5s connect default fails on one Wi-Fi stall.
-            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
-        )
+    """
+    return {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "subject_token": subject,
+        "identity_provider_id": provider,
+        "service_account_id": service_account,
+    }
