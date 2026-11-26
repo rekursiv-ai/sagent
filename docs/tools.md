@@ -219,6 +219,11 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 - `source="openalex"` queries OpenAlex only.
 - `source="searxng"` queries a self-hosted SearXNG science metasearch.
 - Optional filters: `year_from`, `year_to`, `open_access_only`, `limit`, `abstract_chars`.
+- Incomplete searches retain retrieved papers. A coverage notice is added when
+  the existing truncation notice does not already show that results are missing.
+  Coverage can be incomplete because of backend errors or retrieval limits;
+  the notice does not distinguish the cause. An empty incomplete response does
+  not establish that no papers match.
 
 `PaperDetails` takes `ids`, DOIs or arXiv IDs, one string or a list. Omit `operation` for metadata, use `operation="references"` for cited papers, and `operation="citations"` for citing papers, each with exactly one id. `source` picks the citation backend (`s2` by default, or `openalex`). Citation mode also supports `influential_only` and `year_from`.
 

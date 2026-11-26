@@ -209,8 +209,18 @@ class PaperSearch:
             "\n".join(format_record(r, abstract_chars=a.abstract_chars) for r in shown)
             + truncation_notice(len(shown), found.total)
             if shown
-            else "(no results)" + _empty_hint(query)
+            else (
+                "(no results)"
+                if found.complete
+                else "(no results in the retrieved portion)"
+            )
+            + _empty_hint(query, complete=found.complete)
         )
+        if not found.complete and (not shown or found.total <= len(shown)):
+            text = (
+                "Search coverage is incomplete; returned records may omit "
+                "matches from the queried sources.\n" + text
+            )
         if found.complete:
             self.cache[key] = text
         return ToolOutput(stdout=(text,), result=PaperSearchResult(query=a.query))
@@ -234,13 +244,13 @@ def _named(source: str) -> str:
 
 # Every backend ANDs the terms against title and abstract, so one rare term
 # zeroes a query; and none matches author names.
-def _empty_hint(query: str) -> str:
+def _empty_hint(query: str, *, complete: bool) -> str:
     """Return the advice given with an empty result."""
     hint = (
         "\nNote: every query term must appear in a paper's title/abstract (terms are"
         " AND-ed). A zero result usually means one specific term has no match --"
         " drop the most specific term and retry to broaden."
-        if len(query.split()) > 1
+        if complete and len(query.split()) > 1
         else ""
     )
     return hint + (

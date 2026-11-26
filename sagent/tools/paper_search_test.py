@@ -151,6 +151,19 @@ async def test_nothing_found_says_why_a_search_may_miss(
 
 
 @pytest.mark.asyncio
+async def test_partial_empty_results_do_not_diagnose_the_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _searches(monkeypatch, SearchResult(records=[], total=0, complete=False))
+    output = await settled(
+        _tool().call(ToolContext(cwd=tmp_path), {"query": "rare topic"}),
+    )
+    assert "no results in the retrieved portion" in output.text()
+    assert "drop the most specific term" not in output.text()
+
+
+@pytest.mark.asyncio
 async def test_a_complete_result_is_kept_and_a_partial_one_is_not(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -167,7 +180,8 @@ async def test_a_complete_result_is_kept_and_a_partial_one_is_not(
     complete = await settled(tool.call(context, {"query": "x"}))
     again = await settled(tool.call(context, {"query": " x "}))
     other = await settled(tool.call(context, {"query": "x", "limit": 1}))
-    assert partial.text() == format_record(_ONE)
+    assert partial.text().startswith("Search coverage is incomplete")
+    assert partial.text().endswith(format_record(_ONE))
     assert complete.text() == again.text() == format_record(_TWO)
     assert len(calls) == 3
     assert other.text() == format_record(_ONE)
