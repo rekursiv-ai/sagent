@@ -1890,8 +1890,9 @@ def test_interleaved_workers_show_finished_paragraphs_before_completion() -> Non
     for label, text in [("a", "First paragraph.\n\nNext"), ("b", "Other")]:
         render(
             types.ChildEvent(
-                label=label, event=types.ModelResponseTextStreamed(text=text)
-            )
+                label=label,
+                event=types.ModelResponseTextStreamed(text=text),
+            ),
         )
     assert printer.printed == [("note", "a: First paragraph.")]
     render(types.ChildEvent(label="b", event=_turn(text="Other")))
@@ -1907,13 +1908,15 @@ def test_interrupted_worker_keeps_the_tail_without_repeating_the_paragraph() -> 
     render, printer = _renderer()
     render(
         types.ChildEvent(
-            label="a", event=types.ModelResponseTextStreamed(text="One.\n\nPartial")
-        )
+            label="a",
+            event=types.ModelResponseTextStreamed(text="One.\n\nPartial"),
+        ),
     )
     render(
         types.ChildEvent(
-            label="a", event=types.ModelResponseCompleted(outcome=Cancelled())
-        )
+            label="a",
+            event=types.ModelResponseCompleted(outcome=Cancelled()),
+        ),
     )
     render(types.ChildEvent(label="a", event=_turn(text="Fresh.")))
     assert printer.printed == [
@@ -1921,6 +1924,19 @@ def test_interrupted_worker_keeps_the_tail_without_repeating_the_paragraph() -> 
         ("note", "a: Partial"),
         ("note", "a: Fresh."),
     ]
+
+
+def test_worker_with_a_long_unbroken_reply_flushes_before_completion() -> None:
+    draw, printer = _renderer(flush_chars=4)
+    draw(
+        types.ChildEvent(
+            label="a",
+            event=types.ModelResponseTextStreamed(text="12345"),
+        ),
+    )
+    assert printer.printed == [("note", "a: 12345")]
+    draw(types.ChildEvent(label="a", event=_turn(text="123456")))
+    assert printer.printed[-1] == ("note", "a: 6")
 
 
 if __name__ == "__main__":
