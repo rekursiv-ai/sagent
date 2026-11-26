@@ -602,6 +602,16 @@ async def test_pending_reads_locally_without_starting_a_turn() -> None:
     assert desk.pushed() == []
 
 
+@pytest.mark.asyncio
+async def test_pending_from_a_worker_reads_the_root_and_rejects_extra_args() -> None:
+    desk, _ = _teamed("kid")
+    assert desk.team is not None
+    commands = await desk.commands.child_commands(desk.team, "kid")
+    assert await commands._pending("") == "No pending work reported."
+    with pytest.raises(SettingError, match="takes no arguments"):
+        await commands._pending("typo")
+
+
 def test_the_actions_that_say_more_say_it() -> None:
     longer = {".".join(a.name): a.help_long for a in Commands.actions() if a.help_long}
     assert sorted(longer) == ["focus", "login", "login.precedence", "send"]

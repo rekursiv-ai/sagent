@@ -151,7 +151,7 @@ class Views:
                     self.current.status.frame(),
                     pending_text(self._root.session, brief=True),
                 ),
-            )
+            ),
         )
 
     def screen(self, label: str) -> ThinkingView:

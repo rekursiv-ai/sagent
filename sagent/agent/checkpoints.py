@@ -43,7 +43,9 @@ def reports(session: Session) -> dict[str, Checkpoint]:
                 "user_action": str(action),
             }:
                 found[label] = Checkpoint(
-                    progress=progress, pending=pending, user_action=action
+                    progress=progress,
+                    pending=pending,
+                    user_action=action,
                 )
             case _:
                 continue
@@ -90,7 +92,8 @@ def pending_text(session: Session, *, brief: bool = False) -> str:
     """
     lines: list[str] = []
     for label, item in sorted(
-        reports(session).items(), key=lambda pair: (not pair[1].user_action, pair[0])
+        reports(session).items(),
+        key=lambda pair: (not pair[1].user_action, pair[0]),
     ):
         parts = [f"Action needed: {item.user_action}"] if item.user_action else []
         if item.pending:

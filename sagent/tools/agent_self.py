@@ -235,7 +235,7 @@ class AgentSelf:
                 root = parent
             report(self.team[root].session, label, a.checkpoint)
             lines.append(
-                "checkpoint cleared" if a.checkpoint is None else "checkpoint recorded"
+                "checkpoint cleared" if a.checkpoint is None else "checkpoint recorded",
             )
         if a.diagnostics:
             lines.extend(_diagnostics(agent, label=label))

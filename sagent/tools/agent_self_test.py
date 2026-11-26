@@ -793,9 +793,29 @@ async def test_checkpoint_survives_resume_and_clears(tmp_path: Path) -> None:
         worker = Agent(model=catalog["scripted"]["scripted"])
         team.join(worker, label="worker", parent="Agent")
         await _patch(
-            AgentSelf(team=team), tmp_path, {"checkpoint": None}, label="worker"
+            AgentSelf(team=team),
+            tmp_path,
+            {"checkpoint": None},
+            label="worker",
         )
         assert pending_text(root.session) == ""
+
+
+@pytest.mark.asyncio
+async def test_invalid_checkpoint_rejects_the_whole_patch(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+    seen: list[RuntimeEvent] = []
+    agent.runtime.observers.append(seen.append)
+    with pytest.raises(ValueError, match="progress must contain text"):
+        await _patch(
+            tool,
+            tmp_path,
+            {
+                "status": "New title",
+                "checkpoint": {"progress": " ", "pending": "", "user_action": ""},
+            },
+        )
+    assert seen == []
 
 
 if __name__ == "__main__":
