@@ -17,9 +17,16 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import MessageKind, Team
-from sagent.journal.types import AgentMessage, AgentSendResult
-from sagent.model.scripted import ScriptedProvider
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AgentSendResult,
+    Succeeded,
+    SystemMessage,
+)
+from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
+from sagent.runtime import types
 from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -250,6 +257,48 @@ async def test_a_reply_settles_what_was_owed_and_creates_no_debt(
 
 
 @pytest.mark.asyncio
+async def test_a_blank_reply_is_refused_settles_nothing_and_is_nudged(
+    tmp_path: Path,
+) -> None:
+    team = _team(tmp_path)
+    send = AgentSend(team=team)
+    # A debtor without AgentSend is answered for, not nudged.
+    _ = team.join(
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tools=[send],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
+        label="helper",
+        parent="Agent",
+    )
+    helper = _context(tmp_path, label="helper")
+    team.send("Agent", "helper", "status?")
+    blank = {"to": "parent", "content": " "}
+
+    with pytest.raises(ValueError, match="'content' is blank"):
+        _ = await send.call(helper, blank).result
+    runtime = team["helper"].runtime
+    runtime.publish(
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=reply(calls=[call("AgentSend", **blank)])),
+        ),
+    )
+    runtime.publish(AgentIdle())
+
+    assert team.owes("helper") == {"Agent": "status?"}
+    assert _inbox(team, "Agent") == []
+    assert [
+        m.subtype for m in _inbox(team, "helper") if isinstance(m, SystemMessage)
+    ] == ["nudge"]
+    _ = await settled(send.call(helper, {"to": "parent", "content": "all green"}))
+    assert team.owes("helper") == {}
+    assert _inbox(team, "Agent") == [
+        AgentMessage(sender="helper", recipient="Agent", content="all green"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_root_has_no_parent_to_send_to(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="You have no parent"):
         _ = (
@@ -410,8 +459,10 @@ async def test_an_unnamed_sender_signs_as_unknown_and_is_never_itself(
 @pytest.mark.parametrize(
     ("arguments", "match"),
     [
-        ({"to": "", "content": "hi"}, "'to' and 'content' are required"),
-        ({"to": "bob", "content": ""}, "'to' and 'content' are required"),
+        ({"to": "", "content": "hi"}, "'to' is required"),
+        ({"to": "bob", "content": ""}, "'content' is blank"),
+        ({"to": "bob", "content": " "}, "'content' is blank"),
+        ({"to": "bob", "content": "\n\t ", "delay": 5}, "'content' is blank"),
         (
             {"to": "carol", "content": "hi"},
             r"Unknown agent 'carol'. Active: \['Agent', 'bob'\]",
@@ -464,6 +515,7 @@ async def test_a_delayed_message_reaches_whoever_holds_the_label_then(
         deliver(*args)
 
     assert result.text() == "Scheduled for bob in 5s."
+    assert result.result == AgentSendResult(to="bob", delay_sec=5)
     assert delay == 5
     assert new.runtime.inbox.drain_nowait() == [
         AgentMessage(
@@ -516,7 +568,12 @@ async def test_a_delayed_reply_settles_the_debt_when_sent_not_when_it_lands(
 @pytest.mark.parametrize(
     ("label", "arguments", "message"),
     [
-        ("Agent", {"to": "", "content": "hi"}, "'to' and 'content' are required."),
+        ("Agent", {"to": "", "content": "hi"}, "'to' is required."),
+        (
+            "Agent",
+            {"to": "user", "content": " "},
+            "'content' is blank: write the message.",
+        ),
         ("Agent", {"to": "parent", "content": "hi"}, "You have no parent."),
         ("stranger", {"to": "parent", "content": "hi"}, "You have no parent."),
         (
@@ -562,6 +619,11 @@ async def test_every_result_is_for_no_call_and_a_self_send_says_why_it_is_odd(
         ),
     ]
     assert [r.call_id for r in results] == ["", "", ""]
+    assert [r.result for r in results] == [
+        AgentSendResult(to="Agent"),
+        AgentSendResult(to="bob"),
+        AgentSendResult(to="bob", delay_sec=1),
+    ]
     assert results[0].text() == (
         "Delivered to Agent. Note: you sent yourself a message without a delay;"
         " this is likely not intentional."
