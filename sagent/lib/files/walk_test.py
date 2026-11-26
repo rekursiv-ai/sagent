@@ -44,6 +44,21 @@ def test_hidden_files_and_directories_are_skipped(tmp_path: Path) -> None:
     assert list(walk.files(tmp_path)) == [kept]
 
 
+def test_hidden_lists_dot_entries_but_never_dot_git(tmp_path: Path) -> None:
+    _write(tmp_path, ".git/HEAD")
+    _write(tmp_path, ".env")
+    _write(tmp_path, ".venv/lib/site.py")
+    _write(tmp_path, "a.py")
+
+    listed = walk.files(tmp_path, hidden=True)
+
+    assert [path.relative_to(tmp_path).as_posix() for path in listed] == [
+        ".env",
+        ".venv/lib/site.py",
+        "a.py",
+    ]
+
+
 def test_a_gitignore_drops_files_and_directories(tmp_path: Path) -> None:
     _write(tmp_path, ".gitignore", "*.log\nbuild/\n")
     _write(tmp_path, "run.log")
@@ -274,6 +289,24 @@ def test_only_the_wanted_suffixes_are_expanded(tmp_path: Path) -> None:
     files = _kinds(tmp_path)
 
     assert walk.expand([tmp_path], suffixes={".py"}) == [files["py"]]
+
+
+def test_directory_expansion_skips_dangling_and_directory_symlinks(
+    tmp_path: Path,
+) -> None:
+    kept = _write(tmp_path, "kept.py")
+    (tmp_path / "dangling.py").symlink_to("missing.py")
+    (tmp_path / "target").mkdir()
+    (tmp_path / "linked.py").symlink_to("target", target_is_directory=True)
+
+    assert walk.expand([tmp_path], suffixes={".py"}) == [kept]
+
+
+def test_a_named_dangling_symlink_is_kept_as_given(tmp_path: Path) -> None:
+    named = tmp_path / "dangling.py"
+    named.symlink_to("missing.py")
+
+    assert walk.expand([named], suffixes={".py"}) == [named]
 
 
 def test_a_named_file_is_kept_as_given(tmp_path: Path) -> None:

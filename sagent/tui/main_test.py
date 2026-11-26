@@ -1,0 +1,5973 @@
+"""Tests for the command line: flags, journals, tools, and both front ends."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, cast, override
+from unittest.mock import AsyncMock, MagicMock, Mock
+
+import argparse
+import asyncio
+import contextlib
+import fcntl
+import functools
+import io
+import logging
+import os
+import pty
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+
+from prompt_toolkit.application.current import create_app_session
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input import create_input, create_pipe_input
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.output import DummyOutput, create_output
+from prompt_toolkit.output.plain_text import PlainTextOutput
+from prompt_toolkit.patch_stdout import StdoutProxy
+from treekle import PlainTree, json_dumps, json_loads
+from wesearch.fetch import FetchSession
+
+import pytest
+
+from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
+from sagent.agent.compaction.compactor import SummaryCompactor
+from sagent.agent.compaction.pruner import Pruner
+from sagent.agent.team import Team
+from sagent.host import daemon
+from sagent.host.strings import ServeDirs
+from sagent.journal import projects
+from sagent.journal.jsonl import JsonlJournal, read_record
+from sagent.journal.projects import list_sessions, project_dir
+from sagent.journal.recording import RecordingJournal
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    BashResult,
+    SessionContext,
+    SessionRecord,
+    Succeeded,
+    Thinking,
+    ToolCall,
+    ToolMessage,
+    UncategorizedRecord,
+    UncategorizedToolResult,
+    UserMessage,
+    record_classes,
+)
+from sagent.lib.posix.attach import stop, viewers
+from sagent.lib.posix.detached import await_ready
+from sagent.lib.posix.host import serve_command
+from sagent.lib.posix.sockets import accepts, socket_address
+from sagent.lib.userdirs import config_dir, data_dir, state_dir
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog
+from sagent.model.exceptions import (
+    AuthError,
+    RateLimitedError,
+    UnknownModelError,
+)
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
+)
+from sagent.providers.anthropic.cli import AnthropicCLI
+from sagent.providers.catalog import ModelCatalog, default_provider
+from sagent.providers.login import Logins
+from sagent.providers.table import ModelTable
+from sagent.runtime import types
+from sagent.runtime.exceptions import BudgetExhaustedError
+from sagent.settings.exceptions import SettingError
+from sagent.settings.flags import ActionParser, flags
+from sagent.settings.harvest import harvest
+from sagent.settings.types import Setting
+from sagent.tools import mcp_settings
+from sagent.tools.agent_self import AgentSelf
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_session import AgentSession
+from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.bash import Bash
+from sagent.tools.display import ToolDisplay
+from sagent.tools.function import tool
+from sagent.tools.mcp import McpServer, McpSession
+from sagent.tools.memory import Memory
+from sagent.tools.paper_author import PaperAuthor
+from sagent.tools.paper_details import PaperDetails
+from sagent.tools.paper_fetch import PaperFetch
+from sagent.tools.paper_search import PaperSearch
+from sagent.tools.read import Read
+from sagent.tools.remote import Link, RemoteSession, RemoteTool, local_link
+from sagent.tools.skill import Skill
+from sagent.tools.types import (
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    settled,
+    whole_output,
+)
+from sagent.tools.web_fetch import WebFetch
+from sagent.tools.web_search import WebSearch
+from sagent.tui import main, slash
+from sagent.tui.console import ConsolePrinter, Screen, terminal_console
+from sagent.tui.prompt import Input, Panes, PromptSource, prompt_text
+from sagent.tui.recording import RecordingPrinter
+from sagent.tui.slash import Commands
+from sagent.tui.theme import Theme, ThemeState
+from sagent.tui.types import CommandOutput, Frame, Header
+from sagent.tui.views import Views
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterator, Sequence
+    from subprocess import Popen
+    from typing import IO, TextIO
+
+    from prompt_toolkit import PromptSession
+    from rich.console import Console
+
+    from sagent.model.types import Request, Response
+    from sagent.providers.types import (
+        Provider,
+        ProviderFactory,
+        ProviderResources,
+    )
+    from sagent.tools.remote import Link
+    from sagent.tools.types import Tool
+
+
+def _flags(*argv: str) -> main.Flags:
+    parser = argparse.ArgumentParser()
+    main._add_arguments(parser)
+    return cast("main.Flags", parser.parse_args(argv))
+
+
+_DEEP = ModelCapability(
+    model_id="deep",
+    thinking_effort=frozenset({"none", "high"}),
+    thinking_budget=frozenset({"none", "auto"}),
+    thinking_output=frozenset({"none", "text"}),
+    default=ModelSettings(context_size=PriceCatalog()["fullcontext"]),
+)
+
+
+class _Picky(ScriptedProvider):
+    """Answers only to ``scripted`` and ``deep``, the way a real catalog row does."""
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        # Its one size is its whole window, which a saved session names.
+        if model.removesuffix("+fullcontext") not in ("default", "scripted", "deep"):
+            raise UnknownModelError(f"No model {model!r}.")
+        return super().__getitem__(model)
+
+
+class _Signing(_Picky):
+    """Signs in, and serves only its own model: none of the starting provider's."""
+
+    def __init__(self, *, name: str, resources: ProviderResources) -> None:
+        super().__init__(
+            name=name,
+            resources=resources,
+            capability=replace(_DEEP, model_id="signed"),
+        )
+        self.signed_in = 0
+        self.headless: list[bool] = []
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        if model not in ("default", "signed"):
+            raise UnknownModelError(f"Unknown model {model!r}.")
+        return ScriptedProvider.__getitem__(self, model)
+
+    async def login(self, *, headless: bool = False) -> None:
+        self.signed_in += 1
+        self.headless.append(headless)
+
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "signing.json")
+
+
+@dataclass(slots=True, kw_only=True)
+class _Script:
+    """The replies the catalog's providers answer with, and what was built."""
+
+    replies: list[Reply] = field(default_factory=list[Reply])
+    capability: ModelCapability | None = None
+    catalogs: list[ModelCatalog] = field(default_factory=list[ModelCatalog])
+    accounts: list[str | None] = field(default_factory=list[str | None])
+    providers: dict[str, ScriptedProvider] = field(
+        default_factory=dict[str, ScriptedProvider],
+    )
+
+    def catalog(self, *, account: str | None = None) -> ModelCatalog:
+        self.accounts.append(account)
+
+        def scripted(*, name: str, resources: ProviderResources) -> Provider:
+            return self._keep(
+                _Picky(
+                    name=name,
+                    resources=resources,
+                    replies=self.replies,
+                    capability=self.capability,
+                ),
+            )
+
+        def deep(*, name: str, resources: ProviderResources) -> Provider:
+            return self._keep(_Picky(name=name, resources=resources, capability=_DEEP))
+
+        def signing(*, name: str, resources: ProviderResources) -> Provider:
+            return self._keep(_Signing(name=name, resources=resources))
+
+        def per_account(account: str | None) -> dict[str, ProviderFactory]:
+            del account
+            return {"scripted": scripted, "deep": deep, "signing": signing}
+
+        made = ModelCatalog(factories=per_account, account=account)
+        self.catalogs.append(made)
+        return made
+
+    def _keep(self, provider: ScriptedProvider) -> ScriptedProvider:
+        self.providers[provider.name] = provider
+        return provider
+
+
+@pytest.fixture(autouse=True)
+def offline_daemon(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Keep daemon lifecycle and socket startup at the CLI's dependency boundary."""
+    ensure = AsyncMock()
+    monkeypatch.setattr(daemon, "ensure", ensure)
+    monkeypatch.setattr(RemoteSession, "aopen", AsyncMock())
+    return ensure
+
+
+@contextlib.contextmanager
+def _no_stalls(*, threshold_sec: float) -> Generator[None]:
+    del threshold_sec
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_stall_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep wall-clock monitoring in its own tests; CLI wiring has a recording test."""
+    monkeypatch.setattr(main, "watch_stalls", _no_stalls)
+
+
+# Autouse: a shell running sagent sets these, and an allow list naming a provider
+# the export strips fails every test that builds the real catalog.
+@pytest.fixture(autouse=True)
+def no_sagent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the shell's ``SAGENT_*`` settings out of every test."""
+    for name in ("SAGENT_PROVIDER", "SAGENT_ALLOW_PROVIDERS", "SAGENT_LOG_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def script(monkeypatch: pytest.MonkeyPatch) -> _Script:
+    """Make ``main`` build its catalog from a script, never a real provider."""
+    made = _Script()
+    monkeypatch.setattr(main, "ModelCatalog", made.catalog)
+    monkeypatch.setenv("SAGENT_PROVIDER", "scripted")
+    return made
+
+
+# Autouse: ``main.main()`` runs an action through ``_logging``, which adds a root
+# file handler in this test's isolated data dir. Left behind, it outlives that dir
+# and breaks the next test in the worker that logs.
+@pytest.fixture(autouse=True)
+def logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[logging.Logger]:
+    """Let a test change the logging setup, and put it back after."""
+    root = logging.getLogger()
+    ours = logging.getLogger("sagent")
+    before = list(root.handlers)
+    monkeypatch.setattr(root, "handlers", list(root.handlers))
+    monkeypatch.setattr(logging, "lastResort", logging.lastResort)
+    level, root_level = ours.level, root.level
+    yield root
+    for handler in root.handlers:
+        if handler not in before:
+            handler.close()
+    ours.setLevel(level)
+    root.setLevel(root_level)
+
+
+class _Tty(io.StringIO):
+    @override
+    def isatty(self) -> bool:
+        return True
+
+
+def _stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    text: str = "",
+    *,
+    tty: bool = False,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", _Tty(text) if tty else io.StringIO(text))
+
+
+def _argv(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["sagent", *argv])
+
+
+def _quick_prints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``main``'s screen batch no prints; quitting waits out a batch."""
+    monkeypatch.setattr(main, "run", functools.partial(main.run, print_batch_sec=0))
+
+
+def _journal(
+    directory: Path,
+    *records: SessionRecord,
+    mtime: float = 1_000.0,
+) -> Path:
+    """Write ``records`` as the journal of the session ``directory``."""
+    path = directory / "session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    classes = record_classes()
+    path.write_text(
+        "".join(json_dumps(r, classes=classes, sort=False) + "\n" for r in records),
+    )
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_the_flags_default_to_a_fresh_interactive_session() -> None:
+    flags = _flags()
+    assert flags.allow_providers == ""
+    assert (flags.system_prompt, flags.append_system_prompt) == (None, "")
+    assert flags.compact is True
+    assert (flags.tools, flags.name) == (None, "Agent")
+    assert (flags.max_budget_usd, flags.max_tool_call_rounds) == (None, None)
+    assert (flags.session, flags.ephemeral, flags.resume, flags.continue_) == (
+        None,
+        False,
+        None,
+        False,
+    )
+    assert (flags.resume_all, flags.continue_all, flags.resume_limit) == (
+        False,
+        False,
+        20,
+    )
+    assert (
+        flags.history,
+        flags.output_format,
+        flags.input_format,
+        flags.log_level,
+    ) == (None, "text", "text", None)
+    assert flags.resume_persistent is True
+    assert flags.add_dir == []
+
+
+def test_the_environment_supplies_provider_allow_list_and_log_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAGENT_PROVIDER", "deep")
+    monkeypatch.setenv("SAGENT_ALLOW_PROVIDERS", "deep,scripted")
+    monkeypatch.setenv("SAGENT_LOG_LEVEL", "INFO")
+    flags = _flags()
+    assert (flags.allow_providers, flags.log_level) == ("deep,scripted", "INFO")
+    assert main._provider_name(_Script().catalog(), flags.allow_providers) == "deep"
+    monkeypatch.setenv("SAGENT_PROVIDER", "sig")
+    catalog = _Script().catalog()
+    assert main._provider_name(catalog, flags.allow_providers) == "signing"
+    assert list(catalog.factories) == ["deep", "scripted", "signing"]
+
+
+def test_the_parser_names_every_option_it_knows_so_the_rest_are_settings() -> None:
+    static = main._add_arguments(argparse.ArgumentParser())
+    assert {"-h", "--help", "--resume", "--no-compact", "--allow-providers"} <= static
+    assert {"--model", "--provider", "--effort", "--tool"}.isdisjoint(static)
+
+
+def test_the_flags_parse_into_their_types() -> None:
+    flags = _flags(
+        "--no-compact",
+        "--tools",
+        "Read",
+        "Bash",
+        "--max-budget-usd",
+        "2.5",
+        "--max-tool-call-rounds",
+        "3",
+        "--session",
+        "s.jsonl",
+        "--history",
+        "h",
+        "--resume-limit",
+        "5",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--name",
+        "lead",
+        "--no-resume-persistent",
+        "--add-dir",
+        "a",
+        "b",
+    )
+    assert flags.compact is False
+    assert flags.tools == ["Read", "Bash"]
+    assert (flags.max_budget_usd, flags.max_tool_call_rounds) == (2.5, 3)
+    assert (flags.session, flags.history, flags.resume_limit) == (
+        Path("s.jsonl"),
+        Path("h"),
+        5,
+    )
+    assert (flags.output_format, flags.input_format, flags.name) == (
+        "stream-json",
+        "stream-json",
+        "lead",
+    )
+    assert flags.resume_persistent is False
+    assert flags.add_dir == [Path("a"), Path("b")]
+
+
+def test_resume_takes_an_optional_id() -> None:
+    assert _flags("--resume").resume == ""
+    assert _flags("--resume", "3f2a").resume == "3f2a"
+    assert _flags("--continue").continue_ is True
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ["--session", "x", "--ephemeral"],
+        ["--resume", "--continue"],
+        ["--continue", "--resume-all"],
+        ["--resume-all", "--continue-all"],
+        ["--ephemeral", "--continue-all"],
+    ],
+)
+def test_the_session_selectors_exclude_each_other(pair: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _flags(*pair)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--output-format", "yaml"],
+        ["--input-format", "json"],
+        ["--log-level", "LOUD"],
+        ["--resume-limit", "0"],
+        ["--resume-limit", "-2"],
+        ["--resume-limit", "x"],
+        ["--max-tool-call-rounds", "0"],
+        ["--max-budget-usd", "0"],
+        ["--max-budget-usd", "-1"],
+        ["--max-budget-usd", "nan"],
+        ["--max-budget-usd", "inf"],
+        ["--max-budget-usd", "x"],
+    ],
+)
+def test_a_bad_value_is_a_usage_error(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _flags(*argv)
+
+
+@pytest.mark.parametrize(
+    ("parse", "raw", "error"),
+    [
+        (main._positive_int, "x", "expected an integer, got 'x'"),
+        (main._positive_int, "0", "must be >= 1, got 0"),
+        (main._positive_float, "x", "expected a number, got 'x'"),
+        (main._positive_float, "-1", "must be finite and > 0, got -1"),
+        (main._positive_float, "nan", "must be finite and > 0, got nan"),
+        (main._positive_float, "inf", "must be finite and > 0, got inf"),
+    ],
+)
+def test_a_count_or_amount_says_why_it_was_refused(
+    parse: Callable[[str], object],
+    raw: str,
+    error: str,
+) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match=f"^{error}$"):
+        parse(raw)
+
+
+def test_a_count_or_amount_that_fits_is_taken() -> None:
+    assert main._positive_int("1") == 1
+    assert main._positive_float("0.01") == 0.01
+
+
+@pytest.mark.parametrize("word", ["logout", "hello"])
+def test_an_unknown_command_points_at_help(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    word: str,
+) -> None:
+    _argv(monkeypatch, word, "there")
+    assert main.main() == 2
+    assert capsys.readouterr().err == (
+        f"Error: unknown command: sagent {word} there; see sagent --help\n"
+    )
+    del script
+
+
+def test_an_unknown_command_is_named_before_any_model_is_built(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A typo says it is one, not that the provider set up for a session fails."""
+    monkeypatch.setenv("SAGENT_PROVIDER", "nowhere")
+    _argv(monkeypatch, "hello")
+    assert main.main() == 2
+    assert capsys.readouterr().err == (
+        "Error: unknown command: sagent hello; see sagent --help\n"
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _Shown:
+    label: str = "Agent"
+
+
+@dataclass(slots=True, kw_only=True)
+class _TreeViews:
+    """What ``_tree`` asks of the views, and what it did to them."""
+
+    lineage: tuple[str, ...] = ("Agent", "a")
+    current: _Shown = field(default_factory=_Shown)
+    theme: ThemeState = field(default_factory=ThemeState)
+    released: list[bool] = field(default_factory=list[bool])
+    focused: list[str] = field(default_factory=list[str])
+    asked: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+
+    def hold(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def cancel(self) -> None:
+        pass
+
+    def release(self, *, show: bool) -> None:
+        self.released.append(show)
+
+    def focus(self, label: str) -> None:
+        self.focused.append(label)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("picked", "released", "focused"),
+    [
+        (None, [True], []),
+        ("Agent", [True], ["Agent"]),
+        ("a", [False], ["a"]),
+        ("gone", [False], []),
+    ],
+)
+async def test_the_tree_shows_the_agent_picked_or_the_one_before(
+    monkeypatch: pytest.MonkeyPatch,
+    picked: str | None,
+    released: list[bool],
+    focused: list[str],
+) -> None:
+    views = _TreeViews()
+
+    async def pick(lineage: object, **how: object) -> str | None:
+        assert lineage == views.lineage
+        views.asked.append(how)
+        return picked
+
+    monkeypatch.setattr(main, "pick", pick)
+    await main._tree(cast("Views", views))
+    assert (views.released, views.focused) == (released, focused)
+    assert views.asked == [
+        {
+            "focused": "Agent",
+            "stop": views.stop,
+            "cancel": views.cancel,
+            "theme": views.theme.current,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tree_that_fails_shows_the_agent_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = _TreeViews()
+
+    async def pick(lineage: object, **how: object) -> str | None:
+        del lineage, how
+        raise RuntimeError("tree broke")
+
+    monkeypatch.setattr(main, "pick", pick)
+    with pytest.raises(RuntimeError, match="tree broke"):
+        await main._tree(cast("Views", views))
+    assert views.released == [True]
+
+
+def test_an_action_s_options_are_its_own_and_those_no_setting_names() -> None:
+    async def done(args: str) -> str:
+        return args
+
+    def setting(name: str, *, valued: bool) -> Setting:
+        return Setting(
+            name=tuple(name.split(".")),
+            help_short="",
+            apply=done,
+            value=(lambda: "") if valued else None,
+            cli=True,
+        )
+
+    login = replace(setting("login", valued=False), flags=frozenset({"--headless"}))
+    settings = [
+        login,
+        setting("output", valued=True),
+        setting("zap", valued=False),
+        setting("theme.added", valued=True),
+        setting("mcp.add", valued=False),
+    ]
+    tail = ["--out=x", "--zap", "--zz", "-q", "--", "--after"]
+    assert main._action_options(login, tail, settings) == {
+        "--headless",
+        "--zap",
+        "--zz",
+    }
+    assert main._action_options(login, ["--zz"], settings) == {"--headless", "--zz"}
+    # ``--add`` spells ``theme.added`` by its letters, but names ``mcp.add``: taken
+    # as a setting, it would run that action before this one.
+    assert main._action_options(login, ["--add", "x"], settings) == {
+        "--headless",
+        "--add",
+    }
+
+
+def test_a_session_flag_is_never_abbreviated(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--ephem")
+    with pytest.raises(SystemExit):
+        main.main()
+    assert "--ephem" in capsys.readouterr().err
+    _argv(monkeypatch, "--help")
+    with pytest.raises(SystemExit):
+        main.main()
+    out = capsys.readouterr().out
+    assert "Run a coding agent: interactively on a terminal" in out
+    assert "\nExamples:\n  python -m sagent " in out
+    # A flag is named with what it takes.
+    assert "--directives TIERS" in out
+    del script
+
+
+def test_a_failed_command_is_logged_with_its_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[tuple[str | None, Path | None, bool]] = []
+
+    def noted(level: str | None, *, path: Path | None, interactive: bool) -> None:
+        seen.append((level, path, interactive))
+
+    async def broken(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setenv("SAGENT_LOG_LEVEL", "INFO")
+    monkeypatch.setattr(main, "_logging", noted)
+    monkeypatch.setattr(main, "_dispatch", broken)
+    with caplog.at_level(logging.WARNING, logger=main.__name__):
+        assert asyncio.run(main._action(["mcp", "list"])) == 1
+    assert seen == [("INFO", None, True)]
+    (record,) = caplog.records
+    assert record.getMessage() == "command ['mcp', 'list'] failed"
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[0] is RuntimeError
+    assert capsys.readouterr().err == "Error: RuntimeError: boom\n"
+
+
+def test_a_command_s_own_help_and_flags_are_not_the_allow_list_s(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "login", "--help")
+    assert main.main() == 0
+    assert capsys.readouterr().out.startswith("usage: sagent login [-h]")
+    # ``--allow`` abbreviates no flag here: it is login's to refuse.
+    _argv(monkeypatch, "login", "--allow", "signing", "--provider", "signing")
+    assert main.main() == 1
+    assert "unrecognized arguments: --allow signing" in capsys.readouterr().err
+    # A command's name may be followed by words it does not take, for it to refuse.
+    _argv(monkeypatch, "login", "nope", "--provider", "signing")
+    assert main.main() == 1
+    assert "unrecognized arguments: nope" in capsys.readouterr().err
+    del script
+
+
+def test_a_command_says_what_it_did(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # What ``sys.argv`` holds is not what the command reads.
+    _argv(monkeypatch, "--allow-providers", "nowhere")
+    argv = ["login", "--provider", "signing", "--screen.thinking", "show"]
+    assert asyncio.run(main._agent_action(argv)) == 0
+    assert capsys.readouterr().out == "signing signed in\n"
+    del script
+
+
+def test_a_word_a_command_does_not_take_is_refused(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "login", "--provider", "signing", "extra")
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        "Error: unrecognized arguments: extra; see sagent login --help\n"
+    )
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 0
+
+
+def test_a_commands_setting_flags_match_as_the_sessions_do(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--effrt`` is ``--model.thinking.effort`` after a command too, as alone."""
+    _argv(monkeypatch, "login", "--provider", "signing", "--effrt", "none")
+    assert main.main() == 0, capsys.readouterr()
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+
+
+def test_an_action_s_own_flag_is_never_taken_as_a_setting(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--out`` names ``model.thinking.output`` by its letters, but login takes it."""
+    made = slash._login_parser
+
+    def with_out() -> ActionParser:
+        parser = made()
+        parser.add_argument("--out")
+        return parser
+
+    monkeypatch.setattr(slash, "_login_parser", with_out)
+    _argv(monkeypatch, "login", "--provider", "signing", "--out", "x")
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+
+
+def test_a_command_builds_one_set_of_commands_for_its_flags_and_itself(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[Commands] = []
+
+    class _Counted(Commands):
+        def __init__(
+            self,
+            agent: Agent,
+            *,
+            catalog: ModelCatalog,
+            print_output: Callable[[CommandOutput], None],
+            screen: main._Screen,
+            panes: Panes,
+        ) -> None:
+            super().__init__(
+                agent,
+                catalog=catalog,
+                print_output=print_output,
+                screen=screen,
+                panes=panes,
+            )
+            built.append(self)
+
+    monkeypatch.setattr(main, "Commands", _Counted)
+    _argv(monkeypatch, "login", "--provider", "signing", "--effort", "none")
+    assert main.main() == 0
+    assert len(built) == 1
+    del script
+
+
+def test_an_unknown_tool_is_refused_before_a_session_file_is_made(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _argv(monkeypatch, "--provider", "scripted", "--tools", "Nope")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(
+        "Error: ValueError: unknown tools Nope; known: Bash, ",
+    )
+    assert not project_dir(tmp_path).exists()
+    del script
+
+
+def test_a_tool_its_server_does_not_give_is_refused_once_it_connects(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tools = Mock(return_value=[])
+    session = Mock(tools=tools)
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(main, "McpSession", build)
+    config = {"mcpServers": {"good": {"url": "https://mcp.example/mcp"}}}
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+        "--tools",
+        "mcp__good__yell",
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(
+        "Error: ValueError: unknown tools mcp__good__yell; known: Bash, ",
+    )
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    tools.assert_called_once_with()
+    exit_session.assert_awaited_once()
+    del script
+
+
+def test_mcp_keeps_its_own_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = {
+        "mcpServers": {"off": {"url": "https://mcp.example/mcp", "disabled": True}},
+    }
+    _argv(
+        monkeypatch,
+        "mcp",
+        "list",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+    )
+    assert main.main() == 0
+    assert capsys.readouterr().out == "off  http  every_request  disabled\n"
+
+
+def test_what_a_setting_flag_says_is_dropped() -> None:
+    """A flag applies before any screen exists; only a failure, which raises, shows."""
+    assert main._dropped(CommandOutput(text="[/effort] high", tone="note")) is None
+
+
+def test_a_setting_flag_with_no_value_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--effort")
+    with pytest.raises(SystemExit) as exit_info:
+        main.main()
+    assert exit_info.value.code == 2
+    assert "error: --effort needs a value" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, asyncio.CancelledError])
+def test_an_interrupt_exits_130(
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: type[BaseException],
+) -> None:
+    async def interrupted(
+        flags: main.Flags,
+        *,
+        given: Sequence[tuple[str, str]],
+    ) -> int:
+        del flags, given
+        raise interrupt
+
+    _argv(monkeypatch)
+    monkeypatch.setattr(main, "_main", interrupted)
+    assert main.main() == 130
+
+
+def test_piped_input_is_answered_once_and_printed(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    script.replies.append(reply("the answer"))
+    _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "  the question \n")
+
+    def welcome(**_kwargs: object) -> None:
+        pytest.fail("Piped input must not show the welcome")
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
+    assert main.main() == 0
+    out, err = capsys.readouterr()
+    assert (out, err) == ("the answer\n", "")
+    provider = script.providers["scripted"]
+    (request,) = provider.requests
+    assert [r.content for r in request.records if isinstance(r, UserMessage)] == [
+        "the question",
+    ]
+
+
+def test_a_signal_mid_answer_exits_130_without_a_traceback(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def interrupted(request: Request) -> Response:
+        del request
+        signal.raise_signal(signal.SIGINT)
+        return reply("too late")
+
+    script.replies.append(interrupted)
+    _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "go")
+    assert main.main() == 130
+    out, err = capsys.readouterr()
+    assert "too late" not in out
+    assert "Traceback" not in err
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_a_session_open_elsewhere_is_refused_without_a_traceback(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "000000000001" / "journal.jsonl"
+    path.parent.mkdir()
+    held = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    try:
+        _argv(
+            monkeypatch,
+            "--provider",
+            "scripted",
+            "--model",
+            "scripted",
+            "--session",
+            str(path),
+        )
+        _stdin(monkeypatch, "hi")
+        assert main.main() == 1
+    finally:
+        os.close(held)
+    # Only Linux says who holds a lock.
+    holder = f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
+    assert capsys.readouterr().err == f"Error: Journal {path} is open in {holder}.\n"
+    assert script.providers["scripted"].requests == []
+
+
+def test_the_journal_is_written_where_resume_finds_it(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script.replies.append(reply("noted"))
+    monkeypatch.chdir(tmp_path)
+    _argv(monkeypatch, "--provider", "scripted", "--model", "scripted")
+    _stdin(monkeypatch, "remember this")
+    assert main.main() == 0
+    (journal,) = project_dir(tmp_path).glob("*/session.jsonl")
+    assert "remember this" in journal.read_text()
+    assert "noted" in journal.read_text()
+
+
+@pytest.mark.parametrize(
+    ("resumed", "effort", "system"),
+    [
+        ((), "high", "mine"),
+        (("--effort", "low", "--system-prompt", "theirs"), "low", "theirs"),
+    ],
+)
+def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    resumed: tuple[str, ...],
+    effort: str,
+    system: str,
+) -> None:
+    script.capability = ModelCapability(
+        model_id="scripted",
+        thinking_effort=frozenset({"none", "low", "high"}),
+        default=ModelSettings(context_size=PriceCatalog()["fullcontext"]),
+    )
+    monkeypatch.chdir(tmp_path)
+    runs = (
+        ("--effort", "high", "--system-prompt", "mine"),
+        ("--continue", *resumed),
+    )
+    stood: list[str] = []
+    systems: list[str] = []
+    for given in runs:
+        script.replies.append(reply("ok"))
+        _argv(
+            monkeypatch,
+            "--provider",
+            "scripted",
+            "--model",
+            "scripted",
+            "--tools",
+            "none",
+            *given,
+        )
+        _stdin(monkeypatch, "hi")
+        assert main.main() == 0
+        (path,) = project_dir(tmp_path).glob("*/session.jsonl")
+        stood.append(_stood_model(path))
+        systems.append(script.providers["scripted"].requests[-1].system[0])
+
+    assert stood == [
+        "scripted/scripted+fullcontext+highthink",
+        f"scripted/scripted+fullcontext+{effort}think",
+    ]
+    assert [s.rpartition("\n\n")[2] for s in systems] == ["mine", system]
+
+
+def test_a_resumed_session_comes_back_on_its_account(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The catalog takes it too, so the next ``/model`` signs in as it."""
+    monkeypatch.chdir(tmp_path)
+    for given in (("--account", "work"), ("--continue",)):
+        script.replies.append(reply("ok"))
+        _argv(monkeypatch, "--provider", "scripted", *given)
+        _stdin(monkeypatch, "hi")
+        assert main.main() == 0
+    (path,) = project_dir(tmp_path).glob("*/session.jsonl")
+
+    assert (
+        _stood_model(path)
+        == "work@scripted/scripted+fullcontext+nothink"  # codespell:ignore nothink
+    )
+    assert script.catalogs[-1].account == "work"
+
+
+def _stood_model(path: Path) -> str:
+    """Return the model line ``path``'s journal stands last."""
+    lines = [
+        record.payload["model"]
+        for record in (read_record(line) for line in path.read_bytes().splitlines())
+        if isinstance(record, UncategorizedRecord) and record.kind == "model"
+    ]
+    model = lines[-1]
+    assert isinstance(model, str)
+    return model
+
+
+def _old_session(directory: Path, text: str) -> Path:
+    """Write an old sagent's ``session.jsonl`` in which the user said ``text``."""
+    log = directory / "session.jsonl"
+    log.parent.mkdir(parents=True)
+    _ = log.write_text(
+        json_dumps({"kind": "meta", "session_id": directory.name})
+        + "\n"
+        + json_dumps({"kind": "history", "type": "user", "text": text})
+        + "\n",
+    )
+    return log
+
+
+def test_an_old_session_resumes_by_id_converted_in_place(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _old_session(project_dir(tmp_path) / "ab1200000000", "remember 42")
+    script.replies.append(reply("42"))
+    monkeypatch.chdir(tmp_path)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--resume",
+        "ab",
+    )
+    _stdin(monkeypatch, "what was it?")
+    assert main.main() == 0
+    assert capsys.readouterr().err == f"[resume] {log}\n"
+    (request,) = script.providers["scripted"].requests
+    assert [r.content for r in request.records if isinstance(r, UserMessage)] == [
+        "remember 42\n\nwhat was it?",
+    ]
+    assert "what was it?" in log.read_text()
+    assert not log.with_name("journal.jsonl").exists()
+
+
+def test_an_old_session_with_nothing_said_resumes_fresh(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = project_dir(tmp_path) / "ab1200000000" / "session.jsonl"
+    log.parent.mkdir(parents=True)
+    _ = log.write_text(
+        json_dumps({"kind": "meta", "session_id": "ab1200000000"}) + "\n",
+    )
+    script.replies.append(reply("hi"))
+    monkeypatch.chdir(tmp_path)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--resume",
+        "ab",
+    )
+    _stdin(monkeypatch, "hello")
+    assert main.main() == 0
+    assert capsys.readouterr().err == (
+        f"[resume] {log}\n[resume] nothing to resume; starting fresh.\n"
+    )
+    assert "hello" not in log.read_text()
+    (journal,) = [
+        j
+        for j in project_dir(tmp_path).glob("*/session.jsonl")
+        if j.parent != log.parent
+    ]
+    assert "hello" in journal.read_text()
+
+
+@pytest.mark.parametrize(
+    ("argv", "error"),
+    [
+        (
+            ["--model", "nope"],
+            "Error: [--model] UnknownModelError: No model 'nope'.\n",
+        ),
+        (
+            ["--model", "deep", "--provider", "deep", "--effort", "max"],
+            "Error: [--model.thinking.effort] 'max' is not one of: none, high\n",
+        ),
+        (
+            ["--model", "deep/deep+xhigh"],
+            (
+                "Error: [--model] ValueError: thinking_effort='xhigh' is not offered"
+                " by deep; allowed: 'high', 'none'\n"
+            ),
+        ),
+        (
+            ["--screen.thinking", "louder"],
+            "Error: [--screen.thinking] 'louder' is not one of: default, show, hide\n",
+        ),
+        (
+            ["--context", "1m"],
+            "Error: [--model.context] UnknownModelError: No model 'scripted+1m'.\n",
+        ),
+        (["--nothing-at-all", "x"], "Error: --nothing-at-all names no setting"),
+        (["--help.x", "x"], "Error: --help.x names no setting"),
+        (["--tools", "Nope"], "Error: ValueError: unknown tools Nope; known: "),
+        (
+            ["--provider", "nowhere"],
+            (
+                "Error: [--model.provider] UnknownProviderError: unknown provider"
+                " 'nowhere'; known: scripted, deep, signing\n"
+            ),
+        ),
+        (
+            ["--allow-providers", "deep,ghost"],
+            "Error: UnknownProviderError: unknown providers ghost; known: scripted, deep, signing\n",
+        ),
+    ],
+)
+def test_a_flag_the_catalog_cannot_honor_is_an_error(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    error: str,
+) -> None:
+    _argv(monkeypatch, "--provider", "scripted", "--ephemeral", *argv)
+    _stdin(monkeypatch, "unused")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(error)
+    del script
+
+
+@pytest.mark.parametrize(
+    ("argv", "remote", "headless"),
+    [
+        ((), False, False),
+        ((), True, True),
+        (("--no-headless",), True, False),
+        (("--headless",), False, True),
+    ],
+    ids=["local", "remote", "told-browser", "told-headless"],
+)
+def test_login_signs_in_headless_where_it_must_unless_told(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: tuple[str, ...],
+    remote: bool,
+    headless: bool,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
+    if remote:
+        monkeypatch.setenv("SSH_TTY", "/dev/pts/1")
+    _argv(monkeypatch, "login", "--provider", "signing", *argv)
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+    assert provider.headless == [headless]
+    assert script.accounts == [None]
+
+
+def test_login_headless_as_an_account_reaches_the_provider(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(
+        monkeypatch,
+        "login",
+        "--provider",
+        "signing",
+        "--headless",
+        "--account",
+        "work",
+    )
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.headless == [True]
+    assert script.catalogs[0].account == "work"
+
+
+@pytest.mark.parametrize(
+    "allow",
+    [("--allow-providers", "signing"), ("--allow-providers=signing",)],
+)
+def test_login_takes_the_providers_allowed_as_a_session_does(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    allow: tuple[str, ...],
+) -> None:
+    """``sagent login --account work --allow-providers acli`` signs in to acli."""
+    monkeypatch.delenv("SAGENT_PROVIDER")
+    _argv(monkeypatch, "login", "--account", "work", *allow, "--headless")
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+    assert script.catalogs[0].account == "work"
+
+
+def test_an_account_that_is_no_name_is_an_error(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "login", "--provider", "signing", "--account", "../x")
+
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        "Error: [--model.provider.account] ValueError: account '../x' is not a name:"
+        " use letters, digits, '_', '-'\n"
+    )
+    assert "signing" not in script.providers
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (
+            AuthError("the code was for another sign-in"),
+            "Error: AuthError: the code was for another sign-in\n",
+        ),
+        (EOFError(), "Error: EOFError\n"),
+    ],
+    ids=["refused", "no-input"],
+)
+def test_a_failed_login_is_an_error_not_a_traceback(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+    said: str,
+) -> None:
+    async def refuse(self: _Signing, *, headless: bool = False) -> None:
+        del self, headless
+        raise error
+
+    monkeypatch.setattr(_Signing, "login", refuse)
+    _argv(monkeypatch, "login", "--provider", "signing")
+
+    assert main.main() == 1
+    assert capsys.readouterr().err == said
+    del script
+
+
+def test_login_to_a_provider_without_one_is_an_error(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "login", "--provider", "scripted")
+    assert main.main() == 1
+    assert capsys.readouterr().err == "Error: scripted has no interactive sign-in\n"
+    del script
+
+
+class _Pasting(ScriptedProvider):
+    """Signs in by asking the terminal for the address its page landed on."""
+
+    async def login(self, *, headless: bool = False) -> None:
+        pasted = await asyncio.to_thread(input, "Address: ")
+        await asyncio.to_thread(Path("pasted").write_text, f"{headless} {pasted}")
+
+    @property
+    def logins(self) -> Logins:
+        return Logins(Path("logins.json"))
+
+
+def _pasting_factories(account: str | None) -> dict[str, ProviderFactory]:
+    del account
+    return {"pasting": _Pasting}
+
+
+def _pasting_catalog(account: str | None = None) -> ModelCatalog:
+    return ModelCatalog(factories=_pasting_factories, account=account)
+
+
+def _until(fd: int, wanted: bytes, *, seen: bytearray, timeout_sec: float = 30) -> None:
+    """Read the terminal ``fd`` into ``seen`` until ``wanted`` shows after its start."""
+    start = len(seen)
+    deadline = time.monotonic() + timeout_sec
+    while wanted not in seen[start:]:
+        left = deadline - time.monotonic()
+        nothing: list[int] = []
+        ready, _, _ = select.select([fd], nothing, nothing, max(left, 0))
+        if not ready:
+            raise AssertionError(f"no {wanted!r} in {bytes(seen[start:])!r}")
+        # Linux says EIO once the child has closed the terminal: it exited.
+        try:
+            read = os.read(fd, 4096)
+        except OSError:
+            read = b""
+        if not read:
+            raise AssertionError(
+                f"exited before {wanted!r}; it said {bytes(seen[start:])!r}",
+            )
+        seen.extend(read)
+
+
+# On a real terminal, in this process: only a real terminal shows whether the
+# prompt lets go of it while a sign-in asks for the address.
+def test_a_headless_login_at_the_prompt_takes_the_address_pasted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "ModelCatalog", _pasting_catalog)
+    for name in [k for k in os.environ if k.startswith("SAGENT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("SAGENT_PROVIDER", "pasting")
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("PROMPT_TOOLKIT_NO_CPR", "1")
+    _argv(monkeypatch, "--ephemeral", "--history", "history")
+    _quick_prints(monkeypatch)
+    terminal, child = pty.openpty()
+    seen = bytearray()
+
+    def type_at_the_prompt() -> None:
+        _until(terminal, b"[/model]", seen=seen, timeout_sec=5)
+        os.write(terminal, b"/login --headless\r")
+        _until(terminal, b"Address: ", seen=seen, timeout_sec=5)
+        os.write(terminal, b"https://back/?code=c\r")
+        _until(terminal, b"[/login] pasting signed in", seen=seen, timeout_sec=5)
+        os.write(terminal, b"/quit\r")
+
+    typing = threading.Thread(target=type_at_the_prompt, daemon=True)
+    with (
+        os.fdopen(child, "r", closefd=False) as stdin,
+        os.fdopen(child, "w", closefd=False) as stdout,
+    ):
+        monkeypatch.setattr(sys, "stdin", stdin)
+        monkeypatch.setattr(sys, "stdout", stdout)
+        monkeypatch.setattr(sys, "stderr", stdout)
+        typing.start()
+        try:
+            # Named, not defaulted: a bare session inherits the input and output
+            # an earlier test's session cached, from a stdin since closed.
+            with create_app_session(
+                input=create_input(stdin),
+                output=create_output(stdout),
+            ):
+                status = main.main()
+        finally:
+            typing.join(timeout=5)
+            os.close(child)
+            os.close(terminal)
+    assert status == 0
+    assert not typing.is_alive()
+    assert (tmp_path / "pasted").read_text() == "True https://back/?code=c"
+
+
+def test_mcp_verbs_run_from_the_shell_without_a_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No provider is set up, and none is needed to manage MCP servers."""
+    session = Mock(status=Mock(return_value={"web": "failed: offline"}))
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(mcp_settings, "McpSession", build)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAGENT_PROVIDER", "nowhere")
+    for argv, out in [
+        (("mcp", "list"), "No MCP servers. Add one with `sagent mcp add`"),
+        (
+            ("mcp", "add", "-t", "http", "web", "https://h/mcp"),
+            "Added MCP server 'web' to local; sessions started from now use it.",
+        ),
+        (("mcp", "get", "web"), "web  http  every_request  failed: "),
+        (("mcp", "logout", "web"), "MCP server 'web' had no sign-in."),
+        (
+            ("mcp", "remove", "web"),
+            "Removed MCP server 'web' from local; sessions started from now go",
+        ),
+    ]:
+        _argv(monkeypatch, *argv)
+        assert main.main() == 0, argv
+        said = capsys.readouterr()
+        assert said.out.startswith(out), (argv, said)
+        assert said.err == "", (argv, said)
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once_with(None, None, None)
+
+
+def test_mcp_login_shows_the_sign_in_page_then_what_it_did(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The page to open is said along the way, as at the prompt; no error is."""
+
+    async def sign_in(
+        server: McpServer,
+        *,
+        show: Callable[[str], object],
+        headless: bool,
+    ) -> None:
+        del headless
+        show(f"Open https://auth/{server.name}")
+
+    monkeypatch.setattr(mcp_settings, "login", sign_in)
+    config = {"mcpServers": {"web": {"url": "https://h/mcp"}}}
+    _argv(monkeypatch, "mcp", "login", "web", "--mcp-config", json_dumps(config))
+    assert main.main() == 0
+    said = capsys.readouterr()
+    assert (said.out, said.err) == (
+        "Open https://auth/web\nSigned in to MCP server 'web'.\n",
+        "",
+    )
+
+
+def test_mcp_commands_log_to_the_log_file_not_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+) -> None:
+    session = Mock(status=Mock(return_value={"dead": "failed: offline"}))
+
+    async def connect() -> Mock:
+        logging.getLogger("sagent.tools.mcp").warning("MCP dependency warning")
+        return session
+
+    enter, exit_session = AsyncMock(side_effect=connect), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(mcp_settings, "McpSession", build)
+    config = {"mcpServers": {"dead": {"url": "http://127.0.0.1:9/mcp"}}}
+    _argv(monkeypatch, "mcp", "list", "--mcp-config", json_dumps(config))
+    assert main.main() == 0
+    said = capsys.readouterr()
+    assert said.out == "dead  http  every_request  failed: offline\n"
+    assert said.err == ""
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once_with(None, None, None)
+    for handler in logs.handlers:
+        handler.flush()
+    log = data_dir() / "rekursiv-ai" / "sagent" / "repl.log"
+    assert "MCP dependency warning" in log.read_text()
+
+
+@pytest.mark.parametrize("argv", [("mcp",), ("mcp", "--help"), ("mcp", "-h")])
+def test_a_group_lists_its_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+    _argv(monkeypatch, *argv)
+    assert main.main() == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "mcp commands"
+    assert [line.split()[:3] for line in out[1:] if line.startswith("  sagent ")] == [
+        ["sagent", "mcp", verb]
+        for verb in ("list", "get", "add", "add-json", "remove", "login", "logout")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "said", "code"),
+    [
+        (
+            ("mcp", "frob"),
+            "Error: unknown command: sagent mcp frob; see sagent mcp --help\n",
+            2,
+        ),
+        (
+            ("mcp", "login"),
+            (
+                "Error: the following arguments are required: name;"
+                " see sagent mcp login --help\n"
+            ),
+            1,
+        ),
+        (
+            ("mcp", "login", "nope"),
+            "Error: No MCP server 'nope'; configured: git\n",
+            1,
+        ),
+        (
+            ("mcp", "login", "git"),
+            "Error: ValueError: MCP server 'git' runs locally; it needs no sign-in.\n",
+            1,
+        ),
+        (
+            ("mcp", "list", "--effort", "high"),
+            (
+                "Error: unrecognized arguments: --effort high;"
+                " see sagent mcp list --help\n"
+            ),
+            1,
+        ),
+    ],
+)
+def test_a_bad_mcp_command_is_an_error_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+    said: str,
+    code: int,
+) -> None:
+    config = {"mcpServers": {"git": {"command": "uvx", "args": ["mcp-server-git"]}}}
+    flags = ("--strict-mcp-config", "--mcp-config", json_dumps(config))
+    _argv(monkeypatch, *argv, *(flags if len(argv) > 1 and argv[1] != "frob" else ()))
+    assert main.main() == code
+    assert capsys.readouterr().err == said
+
+
+async def _echoed(args: str) -> str:
+    return f"ran {args}".rstrip()
+
+
+# A group two levels deep (``sagent a b``) holding an action and a setting
+# with a value, which no shell action runs.
+_NESTED = (
+    Setting(name=("a", "b", "go"), help_short="go", apply=_echoed, cli=True),
+    Setting(
+        name=("a", "b", "level"),
+        help_short="level",
+        value=lambda: "low",
+        apply=_echoed,
+        cli=True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("argv", "code", "out", "err"),
+    [
+        (("a", "b", "go", "x"), 0, "ran x\n", ""),
+        (("a", "b"), 0, "a.b commands\n  sagent a b go", ""),
+        (
+            ("a", "b", "frob"),
+            2,
+            "",
+            "Error: unknown command: sagent a b frob; see sagent a b --help\n",
+        ),
+        (
+            ("a", "b", "level"),
+            2,
+            "",
+            "Error: unknown command: sagent a b level; see sagent a b --help\n",
+        ),
+        (
+            ("a", "b", "--frob"),
+            2,
+            "",
+            "Error: unknown command: sagent a b; see sagent a b --help\n",
+        ),
+        (("a", "b", "--help"), 0, "a.b commands\n", ""),
+    ],
+)
+def test_a_shell_command_runs_an_action_or_lists_its_group_at_any_depth(
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+    code: int,
+    out: str,
+    err: str,
+) -> None:
+    assert asyncio.run(main._dispatch(_NESTED, argv)) == code
+    said = capsys.readouterr()
+    assert (said.out.startswith(out), said.err) == (True, err)
+
+
+def test_a_group_listed_from_the_shell_is_a_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Said as ``/help`` says it at the prompt, where the tone shows."""
+    said: list[CommandOutput] = []
+    monkeypatch.setattr(main, "_print_to_shell", said.append)
+    assert asyncio.run(main._dispatch(_NESTED, ("a", "b"))) == 0
+    assert [(output.tone, output.text.splitlines()[0]) for output in said] == [
+        ("note", "a.b commands"),
+    ]
+
+
+@pytest.mark.parametrize("index", range(16))
+def test_every_shell_command_runs_as_its_prompt_command_does(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    index: int,
+) -> None:
+    """``sagent NAME ARGS`` and ``/NAME ARGS`` reach one action and say one thing."""
+    monkeypatch.chdir(tmp_path)
+    agent = Agent(
+        model=script.catalog()["scripted"]["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    printed: list[CommandOutput] = []
+    commands = Commands(
+        agent,
+        catalog=script.catalog(),
+        print_output=printed.append,
+        screen=main._Screen(),
+        panes=Panes(),
+    )
+    actions = [s for s in harvest(commands.owners()) if s.cli and s.value is None]
+    assert [" ".join(s.name) for s in actions] == [
+        "login",
+        "mcp list",
+        "mcp get",
+        "mcp add",
+        "mcp add-json",
+        "mcp remove",
+        "mcp login",
+        "mcp logout",
+        "host",
+        "host add",
+        "host edit",
+        "host del",
+        "host list",
+        "remote add",
+        "remote del",
+        "remote list",
+    ]
+    action = actions[index]
+    dotted = ".".join(action.name)
+    for args, code in [("--help", 0), ("--bogus", 1)]:
+        _argv(monkeypatch, *action.name, args)
+        assert main.main() == code, (action.name, args)
+        shell = capsys.readouterr()
+        asyncio.run(commands(f"/{dotted} {args}"))
+        (prompt,) = printed
+        printed.clear()
+        assert prompt.command == f"/{dotted}"
+        if code == 0:
+            assert prompt.tone == "note"
+            assert prompt.text == action.help_long.rstrip()
+            assert (shell.out, shell.err) == (f"{prompt.text}\n", "")
+        else:
+            assert prompt.tone == "error"
+            assert (shell.out, shell.err) == ("", f"Error: {prompt.text}\n")
+
+
+def test_the_allow_list_picks_the_provider_and_bounds_the_team(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SAGENT_PROVIDER")
+    _argv(
+        monkeypatch,
+        "--allow-providers",
+        " deep , scripted",
+        "--model",
+        "deep",
+        "--ephemeral",
+    )
+    _stdin(monkeypatch, "hi")
+    seen: list[str] = []
+    monkeypatch.setattr(main, "_headless", _note_model(seen))
+    assert main.main() == 0
+    assert seen == ["deep/deep", "label=Agent"]
+    (catalog,) = script.catalogs
+    assert list(catalog.factories) == ["deep", "scripted"]
+
+
+def test_the_provider_to_start_on_joins_the_allow_list(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(
+        monkeypatch,
+        "--allow-providers",
+        "deep",
+        "--model",
+        "scripted",
+        "--ephemeral",
+    )
+    _stdin(monkeypatch, "hi")
+    seen: list[str] = []
+    monkeypatch.setattr(main, "_headless", _note_model(seen))
+    assert main.main() == 0
+    assert seen == ["scripted/scripted", "label=Agent"]
+    assert list(script.catalogs[0].factories) == ["deep", "scripted"]
+
+
+def test_without_an_allow_list_every_provider_is_offered(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(monkeypatch, "--provider", "deep", "--model", "deep", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    seen: list[str] = []
+    monkeypatch.setattr(main, "_headless", _note_model(seen))
+    assert main.main() == 0
+    assert seen == ["deep/deep", "label=Agent"]
+    assert list(script.catalogs[0].factories) == ["scripted", "deep", "signing"]
+
+
+def _no_welcome(*, folder: Path, theme: Theme | None = None) -> None:
+    del folder, theme
+
+
+def _no_tools(flags: main.Flags, **kwargs: object) -> list[Tool]:
+    del flags, kwargs
+    return []
+
+
+def _note_model(seen: list[str]) -> Callable[[Agent, main.Flags], object]:
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        seen.append(f"{agent.model.provider.name}/{agent.model.capability.model_id}")
+        seen.append(f"label={agent.runtime.tool_context.label}")
+        return 0
+
+    return headless
+
+
+def test_the_name_labels_the_root_agent(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--ephemeral",
+        "--name",
+        "lead",
+    )
+    _stdin(monkeypatch, "hi")
+    seen: list[str] = []
+    monkeypatch.setattr(main, "_headless", _note_model(seen))
+    assert main.main() == 0
+    assert seen == ["scripted/scripted", "label=lead"]
+    del script
+
+
+@pytest.mark.parametrize(
+    ("argv", "resumed"),
+    [
+        ((), ["lead"]),
+        (("--no-resume-persistent",), []),
+        (("--tools", "Read"), []),
+    ],
+)
+def test_resume_persistent_restarts_the_children_the_session_left_running(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: tuple[str, ...],
+    resumed: list[str],
+) -> None:
+    labels: list[str] = []
+
+    async def resume(self: AgentSpawn, parent_label: str) -> list[str]:
+        del self
+        labels.append(parent_label)
+        return []
+
+    monkeypatch.setattr(AgentSpawn, "resume", resume)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--ephemeral",
+        "--name",
+        "lead",
+        *argv,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert labels == resumed
+    del script
+
+
+def test_add_dir_extends_where_agents_md_is_read(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--ephemeral",
+        "--add-dir",
+        str(tmp_path),
+    )
+    _stdin(monkeypatch, "hi")
+    dirs: list[tuple[Path, ...]] = []
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        dirs.append(agent.agents_md.additional_dirs)
+        return 0
+
+    monkeypatch.setattr(main, "_headless", headless)
+    assert main.main() == 0
+    assert dirs == [(tmp_path,)]
+    del script
+
+
+def test_directives_names_the_tiers_the_agent_and_its_skills_read(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--ephemeral",
+        "--directives",
+        "Project, Managed",
+    )
+    _stdin(monkeypatch, "hi")
+    read: list[tuple[frozenset[str], object]] = []
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        skill = agent.tools["Skill"]
+        assert isinstance(skill, Skill)
+        read.append((agent.agents_md.tiers, skill.tiers))
+        return 0
+
+    monkeypatch.setattr(main, "_headless", headless)
+    assert main.main() == 0
+    assert read == [(frozenset({"Managed", "Project"}),) * 2]
+    del script
+
+
+@pytest.mark.parametrize("given", ["", "Managed,Nope"])
+def test_directives_that_name_no_tier_are_refused(
+    capsys: pytest.CaptureFixture[str],
+    given: str,
+) -> None:
+    with pytest.raises(SystemExit) as refused:
+        _ = main.parse_flags(["--directives", given])
+    assert refused.value.code == 2
+    assert "names no tiers of: Local, Managed, Project, User" in capsys.readouterr().err
+
+
+def test_the_fetch_session_is_closed_when_the_run_ends(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[_Closing] = []
+
+    class _Closing(FetchSession):
+        closed: bool = False
+
+        @override
+        def close(self) -> None:
+            self.closed = True
+            super().close()
+
+    def make() -> FetchSession:
+        session = _Closing()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(main, "FetchSession", make)
+    script.replies.append(reply("x"))
+    _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert [s.closed for s in sessions] == [True]
+
+
+def test_an_interactive_run_opens_the_prompt_and_names_the_model(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--history",
+        str(tmp_path / "h"),
+    )
+    _stdin(monkeypatch, tty=True)
+    _quick_prints(monkeypatch)
+    welcomed: list[Path] = []
+
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        del theme
+        welcomed.append(folder)
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=DummyOutput()),
+    ):
+        pipe.send_text("/quit\r")
+        assert main.main() == 0
+    assert welcomed == [tmp_path]
+    err = capsys.readouterr().err
+    assert err.startswith(
+        "[/model] scripted/scripted+fullcontext+nothink\n",  # codespell:ignore nothink
+    )
+    (journal,) = project_dir(tmp_path).glob("*/session.jsonl")
+    assert any(
+        isinstance(h, logging.FileHandler)
+        and h.baseFilename == str(journal.with_suffix(".log"))
+        for h in logs.handlers
+    )
+    del script
+
+
+def test_an_interactive_run_logs_a_failed_mcp_server_to_its_file_not_the_terminal(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    session = Mock(tools=Mock(return_value=[]))
+
+    async def connect(context: object) -> Mock:
+        del context
+        logging.getLogger("sagent.tools.mcp").warning("MCP dependency warning")
+        return session
+
+    enter, exit_session = AsyncMock(side_effect=connect), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    run = AsyncMock()
+    monkeypatch.setattr(main, "McpSession", build)
+    monkeypatch.setattr(main, "run", run)
+    monkeypatch.chdir(tmp_path)
+    config = {"mcpServers": {"dead": {"url": "https://mcp.example/mcp"}}}
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--history",
+        str(tmp_path / "h"),
+        "--mcp-config",
+        json_dumps(config),
+    )
+    _stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(main, "print_welcome", _no_welcome)
+    assert main.main() == 0
+    assert "MCP dependency warning" not in capsys.readouterr().err
+    (journal,) = project_dir(tmp_path).glob("*/session.jsonl")
+    for handler in logs.handlers:
+        handler.flush()
+    assert "MCP dependency warning" in journal.with_suffix(".log").read_text()
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once()
+    run.assert_awaited_once()
+    del script
+
+
+@pytest.mark.parametrize(
+    ("named", "connected"),
+    [
+        (None, ["git", "github"]),
+        (("none",), []),
+        (("Read",), []),
+        (("mcp__git",), ["git"]),
+        (("Read", "mcp__github__search"), ["github"]),
+        (("mcp__git__log", "mcp__github"), ["git", "github"]),
+    ],
+)
+def test_only_the_servers_tools_names_are_connected(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    named: tuple[str, ...] | None,
+    connected: list[str],
+) -> None:
+    opened: list[list[str]] = []
+
+    class _Opened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            opened.append([s.name for s in servers])
+            super().__init__([])
+
+    config = {
+        "mcpServers": {
+            "git": {"command": "git-mcp"},
+            "github": {"url": "https://api.example/mcp"},
+        },
+    }
+    monkeypatch.setattr(main, "McpSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    tools = () if named is None else ("--tools", *named)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+        *tools,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert opened == [connected]
+    del script
+
+
+@pytest.mark.parametrize(
+    ("strict", "connected"),
+    [((), ["here", "git"]), (("--strict-mcp-config",), ["git"])],
+)
+def test_strict_mcp_config_leaves_out_the_project_s_servers(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict: tuple[str, ...],
+    connected: list[str],
+) -> None:
+    opened: list[list[str]] = []
+
+    class _Opened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            opened.append([s.name for s in servers])
+            super().__init__([])
+
+    monkeypatch.chdir(tmp_path)
+    project = project_dir(tmp_path) / "mcp.json"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(json_dumps({"mcpServers": {"here": {"command": "here-mcp"}}}))
+    monkeypatch.setattr(main, "McpSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--mcp-config",
+        json_dumps({"mcpServers": {"git": {"command": "git-mcp"}}}),
+        *strict,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert opened == [connected]
+    del script
+
+
+@pytest.mark.parametrize("ephemeral", [False, True])
+def test_a_session_is_named_to_remote_servers_by_its_journal(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ephemeral: bool,
+) -> None:
+    opened: list[RemoteSession] = []
+    teams: list[Team | None] = []
+
+    class _Opened(RemoteSession):
+        def __init__(
+            self,
+            links: Sequence[Link],
+            *,
+            journal: Path | None = None,
+            team: Team | None = None,
+        ) -> None:
+            teams.append(team)
+            super().__init__(links, journal=journal, team=team)
+
+        @override
+        async def aopen(self) -> None:
+            opened.append(self)
+            await super().aopen()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "RemoteSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        *(["--ephemeral"] if ephemeral else []),
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    (remote,) = opened
+    journals = [p.parent.name for p in project_dir(tmp_path).glob("*/session.jsonl")]
+    assert (remote.session_id in journals) is not ephemeral
+    (team,) = teams
+    assert team is not None
+    assert list(team) == ["Agent"]
+    del script
+
+
+@pytest.mark.parametrize("participation", ["on", "off"])
+def test_the_cli_configures_its_daemon_connection_and_applies_peer_flags(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    offline_daemon: AsyncMock,
+    participation: str,
+) -> None:
+    linked: list[Path] = []
+
+    def recording_link(address: Path) -> Link:
+        linked.append(address)
+        return local_link(address)
+
+    monkeypatch.setattr(main, "local_link", recording_link)
+
+    async def headless(agent: Agent, parsed: main.Flags) -> int:
+        del parsed
+        offline_daemon.assert_awaited_once()
+        routing = agent.tools["RemoteTool"]
+        assert isinstance(routing, RemoteTool)
+        assert [
+            e.where for e in routing.remote.endpoints().values() if e.where == "local"
+        ] == ["local"]
+        assert linked == [
+            socket_address(
+                state_dir() / "rekursiv-ai" / "sagent" / "serve" / "daemon.sock",
+            ),
+        ]
+        own = agent.runtime.tool_context.label
+        control = agent.tools["AgentSelf"]
+        assert isinstance(control, AgentSelf)
+        assert control.team.peer_messaging(own) is (participation == "on")
+        return 0
+
+    monkeypatch.setattr(main, "_headless", headless)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--peer-messaging",
+        participation,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    del script
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opened_by_default_starts_and_links_this_machine_s_daemon(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(flags, given=(), interactive=False, user=None) as o:
+        offline_daemon.assert_awaited_once_with(
+            ServeDirs(
+                secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+                state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+            ),
+        )
+        assert [link.where for link in o.links] == ["local"]
+        assert [e.where for e in o.remote.endpoints().values()] == ["local"]
+    del script
+
+
+@pytest.mark.asyncio
+async def test_opening_an_agent_moves_each_claude_login_into_its_own_directory(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    """``claude`` renews a named login only in its own ``CLAUDE_CONFIG_DIR``."""
+    beside = AnthropicCLI.default_login_path().with_name(".credentials-work.json")
+    beside.parent.mkdir(parents=True)
+    beside.write_text("{}")
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        use_daemon=False,
+    ):
+        pass
+    assert not beside.exists()
+    named = Logins(AnthropicCLI.default_login_path(), own_directory=True).path("work")
+    assert named.read_text() == "{}"
+    del script, offline_daemon
+
+
+def test_a_command_moves_each_claude_login_into_its_own_directory(
+    script: _Script,
+) -> None:
+    """``sagent login`` signs in where ``claude`` renews, as a session does."""
+    beside = AnthropicCLI.default_login_path().with_name(".credentials-work.json")
+    beside.parent.mkdir(parents=True)
+    beside.write_text("{}")
+    assert asyncio.run(main._agent_action(["login", "--provider", "signing"])) == 0
+    assert not beside.exists()
+    named = Logins(AnthropicCLI.default_login_path(), own_directory=True).path("work")
+    assert named.read_text() == "{}"
+    del script
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opened_without_the_daemon_starts_and_links_none(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    """Its tools are what the flags ask for, as with the daemon."""
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        use_daemon=False,
+    ) as o:
+        offline_daemon.assert_not_awaited()
+        assert list(o.links) == []
+        assert o.remote.endpoints() == {}
+        assert list(o.agent.tools) == ["Read"]
+    del script
+
+
+# Sagent holds a model login and no identity of the person: whoever opens it and
+# knows who that is says so, and the model is told with the window's settings.
+@pytest.mark.parametrize("user", ["ada@example.com", None])
+@pytest.mark.asyncio
+async def test_an_agent_is_told_whose_session_it_is_only_when_its_opener_says(
+    script: _Script,
+    user: str | None,
+) -> None:
+    script.replies.append(reply("done"))
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(flags, given=(), interactive=False, user=user) as o:
+        _ = await o.agent.send("go")
+        (stated,) = (r for r in o.agent.session if isinstance(r, SessionContext))
+    assert stated.user == user
+    assert ("User: ada@example.com" in stated.text()) is (user is not None)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Echo:
+    """A tool's function as a program gives it: says back what it is given."""
+
+    given: list[str] = field(default_factory=list[str])
+    """What each call was given, in order."""
+
+    def __call__(self, text: str) -> str:
+        """Say ``text`` back.
+
+        Args:
+          text: What to say.
+
+        """
+        self.given.append(text)
+        return text
+
+
+@pytest.mark.asyncio
+async def test_a_tool_the_caller_gives_is_called_by_the_model(script: _Script) -> None:
+    """``--tools`` names it before the session starts, as a built-in."""
+    echo = _Echo()
+    given = tool(echo, name="Echo")
+    script.replies.extend([reply(calls=[call("Echo", text="hi")]), reply("done")])
+    flags = _flags("--ephemeral", "--tools", "Echo")
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        tools=[given],
+    ) as o:
+        assert list(o.agent.tools) == ["Echo"]
+        assert o.agent.tools["Echo"] is given
+        assert await o.agent.send("go") == "done"
+    assert echo.given == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_shares_the_given_tool_its_parent_holds(script: _Script) -> None:
+    """The child calls the parent's object, so what the tool keeps is one for both."""
+    echo = _Echo()
+    given = tool(echo, name="Echo")
+    script.replies.extend([reply(calls=[call("Echo", text="kid")]), reply("done")])
+    async with main.opened(
+        _flags("--ephemeral"),
+        given=(),
+        interactive=False,
+        user=None,
+        tools=[given],
+    ) as o:
+        spawn = o.agent.tools["AgentSpawn"]
+        assert isinstance(spawn, AgentSpawn)
+        result = await settled(
+            spawn.call(
+                o.agent.runtime.tool_context,
+                {"prompt": "go", "tools": ["Echo"], "label": "kid"},
+            ),
+        )
+        assert result.text() == "done"
+        kid = o.team["kid"]
+        assert kid.tools["Echo"] is given
+        assert kid.allowed == {"Echo", "AgentSend"}
+    assert echo.given == ["kid"]
+
+
+@pytest.mark.asyncio
+async def test_every_listing_of_the_agent_s_tools_shows_a_given_one(
+    script: _Script,
+) -> None:
+    given = tool(lambda: "x", name="Echo")
+    flags = _flags("--ephemeral", "--tools", "Echo", "AgentSpawn")
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        user=None,
+        tools=[given],
+    ) as o:
+        commands = Commands(
+            o.agent,
+            catalog=o.catalog,
+            print_output=main._dropped,
+            screen=o.screen,
+            panes=Panes(),
+        )
+        reachable = commands.reachable()
+        assert ("tool", "Echo", "display", "output", "lines") in [
+            s.name for s in reachable
+        ]
+        assert slash.help_text(reachable, "tool.Echo").startswith(
+            "tool.Echo commands\n  /tool.Echo.display.command.lines ",
+        )
+        spawn = o.agent.tools["AgentSpawn"]
+        assert isinstance(spawn, AgentSpawn)
+        watcher = await spawn.watch("Agent")
+        assert o.team[watcher].tools["Echo"] is given
+    del script
+
+
+@pytest.mark.asyncio
+async def test_a_given_tool_named_as_a_built_in_is_refused_before_a_session_is_made(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    flags = _flags()
+    with pytest.raises(
+        main.StartError,
+        match=r"^ValueError: tool Read is given twice: by sagent's built-ins and by"
+        r" opened\(tools=\.\.\.\)$",
+    ):
+        async with main.opened(
+            flags,
+            given=(),
+            interactive=False,
+            user=None,
+            tools=[tool(lambda: "x", name="Read")],
+        ):
+            pass
+    assert not project_dir(tmp_path).exists()
+    del script
+
+
+def test_the_agent_has_its_servers_tools_where_sagent_started(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "away").mkdir()
+    seen: list[object] = []
+
+    class _Moving(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            del servers
+            super().__init__([])
+
+        @override
+        async def aopen(self) -> None:
+            os.chdir(tmp_path / "away")
+
+        @override
+        def tools(self) -> list[Tool]:
+            return [tool(lambda: "x", name="mcp__srv__echo")]
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        seen.extend(
+            ["mcp__srv__echo" in agent.runtime.tools, agent.runtime.tool_context.cwd],
+        )
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "McpSession", _Moving)
+    monkeypatch.setattr(main, "_headless", headless)
+    _argv(monkeypatch, "--provider", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert seen == [True, tmp_path]
+    del script
+
+
+def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    ran: list[tuple[bool, bool, Path | None, str]] = []
+
+    async def run(
+        agent: Agent,
+        *,
+        catalog: ModelCatalog,
+        team: Team,
+        history: Path | None,
+        show_thinking: bool,
+        theme: ThemeState,
+    ) -> None:
+        del catalog, show_thinking
+        ran.append(
+            (
+                agent.runtime.persistent_retry,
+                team["lead"] is agent,
+                history,
+                theme.current.name,
+            ),
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "run", run)
+    monkeypatch.setattr(main, "print_welcome", _no_welcome)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--account",
+        "work",
+        "--ephemeral",
+        "--name",
+        "lead",
+        "--history",
+        str(tmp_path / "h"),
+        "--screen.theme",
+        "light",
+    )
+    _stdin(monkeypatch, tty=True)
+    assert main.main() == 0
+    # It draws in the theme the session opened with.
+    assert ran == [(True, True, tmp_path / "h", "light")]
+    assert capsys.readouterr().err.startswith("[/model] work@scripted/scripted+")
+    del script, logs
+
+
+def test_an_action_a_flag_names_runs_before_the_session_and_says_nothing(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    signed: list[str] = []
+
+    async def sign_in(
+        server: McpServer,
+        *,
+        show: Callable[[str], object],
+        headless: bool,
+    ) -> None:
+        del headless
+        show("visit")
+        signed.append(server.name)
+
+    class _Unopened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            del servers
+            super().__init__([])
+
+    monkeypatch.chdir(tmp_path)
+    project = project_dir(tmp_path) / "mcp.json"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(json_dumps({"mcpServers": {"web": {"url": "https://h/mcp"}}}))
+    monkeypatch.setattr(mcp_settings, "login", sign_in)
+    monkeypatch.setattr(main, "McpSession", _Unopened)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "signing",
+        "--ephemeral",
+        "--mcp.login",
+        "web",
+        "--login",
+        "",
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert signed == ["web"]
+    signing = script.providers["signing"]
+    assert isinstance(signing, _Signing)
+    assert signing.signed_in == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("model", "owned"),
+    [
+        ("scripted/x", True),
+        ("work@scripted/x", True),
+        ("scripted/x/y", True),
+        ("scripted", False),
+        ("nope/x", False),
+    ],
+)
+def test_a_model_names_its_own_provider_before_its_first_slash(
+    model: str,
+    owned: bool,
+) -> None:
+    assert main._owned(_Script().catalog(), model) is owned
+
+
+_WIDE_PRICES = PriceCatalog(window=1_000_000)
+_WIDE = ModelCapability(
+    model_id="wide-1.0",
+    limits=ModelLimits(max_request_tokens=1_000_000),
+    prices=_WIDE_PRICES,
+    thinking_effort=frozenset({"none", "high"}),
+    thinking_budget=frozenset({"none", "auto"}),
+    thinking_output=frozenset({"none", "text"}),
+    default=ModelSettings(context_size=_WIDE_PRICES["fullcontext"]),
+)
+_SLIM_PRICES = PriceCatalog(window=100_000)
+_SLIM = ModelCapability(
+    model_id="slim-1.0",
+    limits=ModelLimits(max_request_tokens=100_000),
+    prices=_SLIM_PRICES,
+    thinking_effort=frozenset({"none", "low"}),
+    default=ModelSettings(context_size=_SLIM_PRICES["fullcontext"]),
+)
+
+
+async def _set(*argv: str) -> tuple[main._Screen, Agent]:
+    """Apply the setting flags ``argv`` to an agent of ``wide``; ``slim`` serves others."""
+    catalog = ModelCatalog(
+        factories={
+            "wide": partial(ScriptedProvider, models=ModelTable(rows=(_WIDE,))),
+            "slim": partial(
+                ScriptedProvider,
+                models=ModelTable(rows=(_SLIM,), roles={"default": "slim-1.0"}),
+            ),
+        },
+    )
+    agent = Agent(model=catalog["wide"]["wide"], tools=[Read()])
+    screen = main._Screen()
+    _, given = flags(argv, static=frozenset())
+    commands = Commands(
+        agent,
+        catalog=catalog,
+        print_output=main._dropped,
+        screen=screen,
+        panes=Panes(),
+    )
+    await main._configure(harvest(commands.owners()), catalog=catalog, given=given)
+    return screen, agent
+
+
+@pytest.mark.asyncio
+async def test_each_setting_flag_applies_as_its_slash_command_would() -> None:
+    screen, agent = await _set(
+        "--context",
+        "200k",
+        "--effort",
+        "high",
+        "--thinking",
+        "budget=auto",
+        "--screen.thinking",
+        "hide",
+        "--Read.output.lines",
+        "1,1",
+    )
+    settings = agent.model.settings
+    assert screen.show_thinking is False
+    assert (
+        settings.context_size.tokens,
+        settings.thinking_effort,
+        settings.thinking_budget,
+    ) == (200_000, "high", "auto")
+    assert agent.tools["Read"].display.output.lines == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_what_the_model_s_name_says_wins_over_a_flag_given_after_it() -> None:
+    _, agent = await _set(
+        "--model",
+        "wide+258k+high",
+        "--context",
+        "200k",
+        "--effort",
+        "none",
+    )
+    settings = agent.model.settings
+    assert (settings.context_size.tokens, settings.thinking_effort) == (258_000, "high")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("--model", "slim/slim-1.0", "--effort", "low"),
+        ("--effort", "low", "--model", "slim/slim-1.0"),
+        ("--provider", "slim", "--effort", "low"),
+        ("--effort", "low", "--provider", "slim"),
+        ("--provider", "slim", "--model", "slim-1.0", "--effort", "low"),
+        ("--model", "slim-1.0", "--effort", "low", "--provider", "slim"),
+    ],
+)
+async def test_a_flag_is_checked_against_the_model_named_not_the_one_started_on(
+    argv: tuple[str, ...],
+) -> None:
+    _, agent = await _set(*argv)
+    assert (agent.model.capability.model_id, agent.model.settings.thinking_effort) == (
+        "slim-1.0",
+        "low",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_named_model_s_tags_win_over_a_flag_it_alone_offers() -> None:
+    _, agent = await _set("--model", "slim/slim-1.0+none", "--effort", "low")
+    assert agent.model.settings.thinking_effort == "none"
+
+
+@pytest.mark.asyncio
+async def test_no_setting_flag_leaves_the_model_s_own_and_hides_reasoning() -> None:
+    screen, agent = await _set()
+    assert screen.show_thinking is False
+    settings = agent.model.settings
+    assert (settings.context_size.tokens, settings.thinking_budget) == (
+        1_000_000,
+        "none",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (
+            ("--thinking", "budget=fixed"),
+            "[--model.thinking] budget: 'fixed' is not one of: none, auto",
+        ),
+        (("--compactness", "x"), "--compactness names no setting; see /help"),
+    ],
+)
+async def test_a_refused_setting_flag_says_why(
+    argv: tuple[str, ...],
+    message: str,
+) -> None:
+    with pytest.raises(SettingError, match=f"^{re.escape(message)}$"):
+        await _set(*argv)
+
+
+def _tools(*argv: str, cwd: Path = Path("/w")) -> dict[str, object]:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    tools = main._tools(
+        _flags(*argv),
+        cwd=cwd,
+        team=team,
+        remote=RemoteSession([]),
+        mcp=(),
+    )
+    return {tool.name: tool for tool in tools}
+
+
+_DEFAULT_TOOLS = [
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Grep",
+    "Glob",
+    "List",
+    "WebSearch",
+    "WebFetch",
+    "WebBrowser",
+    "PaperSearch",
+    "PaperDetails",
+    "PaperAuthor",
+    "PaperFetch",
+    "Memory",
+    "PlayAudio",
+    "Plan",
+    "AgentSpawn",
+    "AgentSend",
+    "AgentSelf",
+    "AgentSession",
+    "Recall",
+    "Skill",
+    "BackgroundTask",
+    "RemoteTool",
+]
+
+
+def test_every_tool_loads_by_default() -> None:
+    tools = _tools()
+    assert list(tools) == _DEFAULT_TOOLS
+    assert [type(t).__name__ for t in tools.values()] == _DEFAULT_TOOLS
+
+
+def test_an_ephemeral_session_keeps_no_memories() -> None:
+    assert "Memory" not in _tools("--ephemeral")
+    with pytest.raises(ValueError, match="--ephemeral saves no memories"):
+        _tools("--ephemeral", "--tools", "Memory")
+
+
+def test_tools_loads_only_the_ones_named_or_none() -> None:
+    assert list(_tools("--tools", "Read", "Bash")) == ["Read", "Bash"]
+    assert _tools("--tools", "none") == {}
+
+
+def test_an_unknown_tool_lists_the_known_ones() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^unknown tools Nope, Zed; known: Bash, Read, ",
+    ) as error:
+        _tools("--tools", "Zed", "Read", "Nope")
+    assert str(error.value).endswith(", Skill, BackgroundTask, RemoteTool")
+
+
+def test_the_team_s_tools_share_the_team_and_bash_knows_its_peers() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    remote = RemoteSession([])
+    tools = {
+        t.name: t
+        for t in main._tools(_flags(), cwd=Path("/w"), team=team, remote=remote, mcp=())
+    }
+    remote_tool = tools["RemoteTool"]
+    assert isinstance(remote_tool, RemoteTool)
+    assert remote_tool.remote is remote
+    assert "Bash" in remote_tool.local
+    web = [WebFetch, WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch]
+    for kind in web:
+        assert isinstance(tools[kind.__name__], kind)
+    for kind in (AgentSpawn, AgentSend, AgentSelf, AgentSession):
+        tool = tools[kind.__name__]
+        assert isinstance(tool, kind)
+        assert tool.team is team
+    bash = tools["Bash"]
+    assert isinstance(bash, Bash)
+    assert [p.name for p in bash.peers] == [
+        "Read",
+        "Edit",
+        "Grep",
+        "Glob",
+        "List",
+        "WebFetch",
+    ]
+    assert all(peer is tools[peer.name] for peer in bash.peers)
+
+
+def test_mcp_tools_join_the_built_in_ones_and_tools_can_name_them() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    extra = [tool(lambda: "x", name="mcp__srv__echo")]
+
+    def names(*argv: str) -> list[str]:
+        return [
+            t.name
+            for t in main._tools(
+                _flags(*argv),
+                cwd=Path("/w"),
+                team=team,
+                remote=RemoteSession([]),
+                mcp=extra,
+            )
+        ]
+
+    assert names() == [*_DEFAULT_TOOLS, "mcp__srv__echo"]
+    assert names("--tools", "Read", "mcp__srv__echo") == ["Read", "mcp__srv__echo"]
+    assert names("--tools", "Read") == ["Read"]
+
+
+def test_given_tools_follow_the_servers_and_tools_names_them_as_any_other() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    served, given = (
+        tool(lambda: "x", name="mcp__srv__echo"),
+        tool(lambda: "y", name="Echo"),
+    )
+
+    def chosen(*argv: str) -> list[Tool]:
+        return main._tools(
+            _flags(*argv),
+            cwd=Path("/w"),
+            team=team,
+            remote=RemoteSession([]),
+            mcp=[served],
+            tools=[given],
+        )
+
+    assert [t.name for t in chosen()] == [*_DEFAULT_TOOLS, "mcp__srv__echo", "Echo"]
+    assert chosen()[-1] is given
+    assert chosen("--tools", "Echo", "mcp__srv__echo") == [given, served]
+    assert [t.name for t in chosen("--tools", "Read")] == ["Read"]
+    assert chosen("--tools", "none") == []
+    with pytest.raises(
+        ValueError,
+        match=r"^unknown tools Nope; known: Bash, .*, RemoteTool, mcp__srv__echo, Echo$",
+    ):
+        chosen("--tools", "Echo", "Nope")
+
+
+@pytest.mark.parametrize(
+    ("served", "given", "sources"),
+    [
+        ((), ("Read",), "sagent's built-ins and by opened(tools=...)"),
+        (
+            ("mcp__srv__echo",),
+            ("mcp__srv__echo",),
+            "an MCP server and by opened(tools=...)",
+        ),
+        ((), ("Echo", "Echo"), "opened(tools=...) and by opened(tools=...)"),
+    ],
+)
+def test_a_given_tool_whose_name_another_holds_is_refused_naming_both(
+    served: tuple[str, ...],
+    given: tuple[str, ...],
+    sources: str,
+) -> None:
+    catalog = _Script().catalog()
+    message = f"tool {given[-1]} is given twice: by {sources}"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        main._tools(
+            _flags(),
+            cwd=Path("/w"),
+            team=Team(catalog=catalog),
+            remote=RemoteSession([]),
+            mcp=[tool(lambda: "x", name=name) for name in served],
+            tools=[tool(lambda: "y", name=name) for name in given],
+        )
+
+
+def test_mcp_config_flags_parse() -> None:
+    parsed = _flags(
+        "--mcp-config",
+        "a.json",
+        "--mcp-config",
+        "{}",
+        "--strict-mcp-config",
+    )
+    assert parsed.mcp_config == ["a.json", "{}"]
+    assert parsed.strict_mcp_config is True
+    plain = _flags()
+    assert (plain.mcp_config, plain.strict_mcp_config) == ([], False)
+
+
+def test_memories_live_in_the_project_directory(tmp_path: Path) -> None:
+    memory = _tools("--tools", "Memory", cwd=tmp_path)["Memory"]
+    assert isinstance(memory, Memory)
+    assert memory.directory == project_dir(tmp_path) / "memory"
+
+
+def test_an_ephemeral_session_has_no_journal() -> None:
+    assert (
+        main._journal_path(_flags("--ephemeral"), cwd=Path("/w"), interactive=True)
+        is None
+    )
+
+
+def test_session_names_the_journal(tmp_path: Path) -> None:
+    path = tmp_path / "mine.jsonl"
+    assert (
+        main._journal_path(
+            _flags("--session", str(path)),
+            cwd=Path("/w"),
+            interactive=True,
+        )
+        == path
+    )
+
+
+def test_help_without_a_docstring_has_no_description(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``python -OO`` there is no docstring; help still opens."""
+    monkeypatch.setattr(main, "__doc__", None)
+    _argv(monkeypatch, "--help")
+    with pytest.raises(SystemExit):
+        _ = main.main()
+    assert capsys.readouterr().out.split("\n\n", 1)[1].startswith("options:")
+
+
+def test_an_abbreviated_flag_is_a_setting_not_the_flag_it_abbreviates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--resume-l`` never reaches argparse, which would expand it."""
+    _argv(monkeypatch, "--resume-l", "3")
+    assert main.main() == 1
+    assert capsys.readouterr().err == "Error: --resume-l names no setting; see /help\n"
+
+
+def test_a_hosted_session_runs_the_journal_its_terminal_picked(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "picked.jsonl"
+    flags = _flags("--resume", "ab", "--hosted-session", str(path))
+    assert main._journal_path(flags, cwd=tmp_path, interactive=True) == path
+
+
+def test_a_session_at_a_terminal_attaches_to_its_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    offline_daemon: AsyncMock,
+) -> None:
+    """The terminal picks the journal once; the host's session is told it."""
+    path = tmp_path / "mine.jsonl"
+    attached: list[tuple[Path, list[str]]] = []
+    dirs = ServeDirs(
+        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+    )
+
+    def resume(journal: Path, *, command: list[str]) -> int:
+        offline_daemon.assert_awaited_once_with(dirs)
+        attached.append((journal, command))
+        return 7
+
+    monkeypatch.setattr(main, "_resume", resume)
+    _argv(monkeypatch, "--session", str(path), "--effort", "max")
+    leader, follower = pty.openpty()
+    try:
+        with os.fdopen(follower, "r") as terminal:
+            monkeypatch.setattr(sys, "stdin", terminal)
+            assert main.main() == 7
+    finally:
+        os.close(leader)
+    assert attached == [
+        (
+            path,
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "sagent",
+                "--session",
+                str(path),
+                "--effort",
+                "max",
+                "--hosted-session",
+                str(path),
+            ],
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--ephemeral"], ["--hosted-session", "s.jsonl"]],
+    ids=["ephemeral", "hosted"],
+)
+def test_a_session_with_nothing_to_attach_to_runs_here(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """Nothing could resume an ephemeral session; a hosted one is already hosted."""
+    leader, follower = pty.openpty()
+    try:
+        with os.fdopen(follower, "r") as terminal:
+            monkeypatch.setattr(sys, "stdin", terminal)
+            assert main._hosted_journal(_flags(*argv)) is None
+    finally:
+        os.close(leader)
+
+
+def test_a_stand_in_terminal_runs_the_session_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stdin(monkeypatch, tty=True)
+    assert main._hosted_journal(_flags()) is None
+
+
+def test_a_fresh_session_gets_a_new_journal_in_the_project(tmp_path: Path) -> None:
+    path = main._journal_path(_flags(), cwd=tmp_path, interactive=False)
+    assert path is not None
+    assert path.parent.parent == project_dir(tmp_path)
+    assert path.read_bytes() == b""
+
+
+def _said(text: str) -> tuple[SessionRecord, ...]:
+    return (UserMessage(content=text), AssistantMessage(content="ok"))
+
+
+def test_continue_resumes_this_directory_s_latest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    here = project_dir(tmp_path)
+    _journal(here / "000000000001", *_said("a"), mtime=1)
+    latest = _journal(here / "000000000002", *_said("b"), mtime=2)
+    _journal(project_dir(tmp_path / "other") / "000000000003", *_said("c"), mtime=3)
+    assert (
+        main._journal_path(_flags("--continue"), cwd=tmp_path, interactive=False)
+        == latest
+    )
+    assert capsys.readouterr().err == f"[resume] {latest}\n"
+
+
+def test_continue_all_resumes_the_latest_anywhere_reading_one_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for i in range(30):
+        _journal(
+            project_dir(tmp_path / f"p{i % 3}") / f"{i:012}",
+            *_said(str(i)),
+            mtime=1_000 + i,
+        )
+    peeked: list[Path] = []
+
+    peek = projects._peek
+
+    def counting(path: Path, *, mtime: float) -> projects.SessionInfo | None:
+        peeked.append(path)
+        return peek(path, mtime=mtime)
+
+    monkeypatch.setattr(projects, "_peek", counting)
+    found = main._journal_path(
+        _flags("--continue-all"),
+        cwd=tmp_path,
+        interactive=False,
+    )
+    assert found is not None
+    assert found.parent.name == "000000000029"
+    assert len(peeked) == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--continue"], ["--continue-all"], ["--resume"], ["--resume-all"]],
+)
+def test_nothing_to_resume_starts_fresh_and_says_so(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    path = main._journal_path(_flags(*argv), cwd=tmp_path, interactive=True)
+    assert path is not None
+    assert path.parent.parent == project_dir(tmp_path)
+    assert capsys.readouterr().err == "[resume] nothing to resume; starting fresh.\n"
+
+
+def test_resume_by_prefix_prefers_this_directory(tmp_path: Path) -> None:
+    here = _journal(project_dir(tmp_path) / "ab1200000000", *_said("here"))
+    _journal(project_dir(tmp_path / "other") / "ab3400000000", *_said("there"))
+    assert (
+        main._journal_path(_flags("--resume", "ab"), cwd=tmp_path, interactive=False)
+        == here
+    )
+
+
+def test_an_old_session_elsewhere_does_not_blur_a_prefix_unique_here(
+    tmp_path: Path,
+) -> None:
+    here = _journal(project_dir(tmp_path) / "ef1200000000", *_said("here"))
+    _old_session(project_dir(tmp_path / "other") / "ef3400000000", "there")
+    assert (
+        main._journal_path(_flags("--resume", "ef"), cwd=tmp_path, interactive=False)
+        == here
+    )
+
+
+def test_resume_by_prefix_looks_in_every_project_next(tmp_path: Path) -> None:
+    there = _journal(
+        project_dir(tmp_path / "other") / "cd3400000000",
+        *_said("there"),
+    )
+    assert (
+        main._journal_path(_flags("--resume", "cd"), cwd=tmp_path, interactive=False)
+        == there
+    )
+
+
+@pytest.mark.parametrize(
+    ("layout", "error"),
+    [
+        (
+            ("here/ab1000000000", "here/ab2000000000"),
+            (
+                "[resume] 'ab' is ambiguous in this directory:"
+                " ab1000000000, ab2000000000.\n"
+            ),
+        ),
+        (
+            ("x/ab1000000000", "y/ab2000000000"),
+            "[resume] 'ab' is ambiguous in all projects: ab1000000000, ab2000000000.\n",
+        ),
+        (
+            ("here/ab1000000000", "old:here/ab2000000000"),
+            (
+                "[resume] 'ab' is ambiguous in this directory:"
+                " ab1000000000, ab2000000000.\n"
+            ),
+        ),
+        ((), "[resume] no session matching 'ab'.\n"),
+    ],
+)
+def test_resume_by_prefix_refuses_to_guess(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    layout: tuple[str, ...],
+    error: str,
+) -> None:
+    for entry in layout:
+        kind, _, place = entry.rpartition(":")
+        where, _, stem = place.partition("/")
+        cwd = tmp_path if where == "here" else tmp_path / where
+        if kind == "old":
+            _old_session(project_dir(cwd) / stem, stem)
+        else:
+            _journal(project_dir(cwd) / f"{stem}", *_said(stem))
+    with pytest.raises(SystemExit) as exit_info:
+        main._journal_path(_flags("--resume", "ab"), cwd=tmp_path, interactive=False)
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == error
+
+
+def test_resume_picks_from_this_directory_when_interactive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    here = project_dir(tmp_path)
+    _journal(here / "00000000000a", *_said("first"), mtime=1)
+    chosen = _journal(here / "00000000000b", *_said("second"), mtime=2)
+    _journal(project_dir(tmp_path / "x") / "00000000000c", *_said("elsewhere"), mtime=3)
+    _stdin(monkeypatch, "\n")
+    assert (
+        main._journal_path(_flags("--resume"), cwd=tmp_path, interactive=True) == chosen
+    )
+
+
+def test_resume_does_not_pick_when_piped(tmp_path: Path) -> None:
+    _journal(project_dir(tmp_path) / "00000000000a", *_said("first"))
+    path = main._journal_path(_flags("--resume"), cwd=tmp_path, interactive=False)
+    assert path is not None
+    assert path.parent.name != "00000000000a"
+
+
+def test_resume_all_picks_from_every_project_reading_only_the_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for i in range(6):
+        _journal(
+            project_dir(tmp_path / f"p{i}") / f"{i:012}",
+            *_said(f"title {i}"),
+            mtime=1_000 + i,
+        )
+    _stdin(monkeypatch, "2\n")
+    path = main._journal_path(
+        _flags("--resume-all", "--resume-limit", "3"),
+        cwd=tmp_path,
+        interactive=True,
+    )
+    assert path is not None
+    assert path.parent.name == "000000000004"
+    err = capsys.readouterr().err
+    assert "(showing 3 sessions; older ones hidden)" in err
+    assert "title 5" in err
+    assert "title 2" not in err
+
+
+def _infos(tmp_path: Path, *titles: str) -> list[projects.SessionInfo]:
+
+    for i, title in enumerate(titles):
+        records: tuple[SessionRecord, ...] = (UserMessage(content=title or None),)
+        _journal(tmp_path / f"{i:012}", *records, mtime=1_800_000_000 - i)
+    return list_sessions(tmp_path)
+
+
+def test_the_picker_lists_age_size_and_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sessions = _infos(tmp_path, "short", "x" * 61, "", "y" * 60)
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0 + 3 * 86_400)
+    _stdin(monkeypatch, "1\n")
+    assert main._pick(sessions, cap=5) is sessions[0]
+    rows = capsys.readouterr().err.split("\n")
+    assert rows[0] == "  [ 1]  3d ago ·    1 records · short"
+    assert rows[1] == f"  [ 2]  3d ago ·    1 records · {'x' * 59}…"
+    assert rows[2] == "  [ 3]  3d ago ·    1 records · (no user messages)"
+    assert rows[3] == f"  [ 4]  3d ago ·    1 records · {'y' * 60}"
+    assert rows[4] == "Resume which? [1] "
+
+
+@pytest.mark.parametrize(
+    ("typed", "picked"),
+    [
+        ("\n", 0),
+        ("2\n", 1),
+        ("  2 \n", 1),
+        ("0\n", None),
+        ("3\n", None),
+        ("", None),
+        ("abc\n", None),
+        ("abc\n2\n", 1),
+    ],
+)
+def test_the_picker_reads_a_number_or_takes_the_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    typed: str,
+    picked: int | None,
+) -> None:
+    sessions = _infos(tmp_path, "a", "b")
+    _stdin(monkeypatch, typed)
+    chosen = main._pick(sessions, cap=5)
+    assert chosen is (None if picked is None else sessions[picked])
+    if "abc" in typed:
+        assert "  not a number: 'abc'\n" in capsys.readouterr().err
+
+
+def test_the_picker_with_nothing_asks_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main._pick([], cap=5) is None
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (-5, "0s ago"),
+        (12, "12s ago"),
+        (60, "1m ago"),
+        (3_599, "59m ago"),
+        (3_600, "1h ago"),
+        (86_399, "23h ago"),
+        (86_400, "1d ago"),
+    ],
+)
+def test_ago_rounds_down_to_its_largest_unit(seconds: float, text: str) -> None:
+    assert main._ago(seconds) == text
+
+
+def test_piped_logging_goes_to_stderr_only_when_asked(logs: logging.Logger) -> None:
+    ours = logging.getLogger("sagent")
+    before = ours.level
+    main._logging(None, path=None, interactive=False)
+    assert ours.level == before
+    main._logging("ERROR", path=None, interactive=False)
+    assert ours.level == logging.ERROR
+    del logs
+
+
+def test_interactive_logging_goes_to_the_session_s_file_never_stderr(
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    logs.addHandler(logging.StreamHandler(io.StringIO()))
+    kept = logging.FileHandler(tmp_path / "kept.log")
+    logs.addHandler(kept)
+    (tmp_path / "s.log").write_text("")
+    (tmp_path / "s.log").chmod(0o664)
+    main._logging(None, path=tmp_path / "s.jsonl", interactive=True)
+    assert stat.S_IMODE((tmp_path / "s.log").stat().st_mode) == 0o600
+    streams: list[logging.Handler] = [
+        h for h in logs.handlers if type(h) is logging.StreamHandler
+    ]
+    files = [h for h in logs.handlers if isinstance(h, logging.FileHandler)]
+    assert streams == []
+    assert kept in files
+    assert any(h.baseFilename == str(tmp_path / "s.log") for h in files)
+    assert isinstance(logging.lastResort, logging.NullHandler)
+    assert logging.getLogger("sagent").level == logging.DEBUG
+    logging.getLogger("sagent.test").warning("recorded")
+    for handler in files:
+        handler.flush()
+    assert "WARNING sagent.test: recorded" in (tmp_path / "s.log").read_text()
+
+
+def test_interactive_logging_without_a_journal_uses_the_shared_file(
+    logs: logging.Logger,
+) -> None:
+    main._logging("WARNING", path=None, interactive=True)
+    log = data_dir() / "rekursiv-ai" / "sagent" / "repl.log"
+    assert any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == str(log)
+        for h in logs.handlers
+    )
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert stat.S_IMODE(log.parent.stat().st_mode) == 0o700
+    assert logging.getLogger("sagent").level == logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_the_first_signal_cancels_the_run_and_the_second_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exits: list[int] = []
+    monkeypatch.setattr(os, "_exit", exits.append)
+
+    async def guarded() -> None:
+        with main.signals():
+            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(signal.SIGINT)
+            _ = await asyncio.Event().wait()
+
+    task = asyncio.create_task(guarded())
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    assert exits == [1]
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+async def _headless(
+    stdin: str,
+    *argv: str,
+    replies: Sequence[Reply] = (),
+    monkeypatch: pytest.MonkeyPatch,
+) -> int:
+    _stdin(monkeypatch, stdin)
+    provider = ScriptedProvider(replies=replies)
+    async with Agent(model=provider["scripted"], tools=[Read()]) as agent:
+        before = list(agent.runtime.observers)
+        code = await main._headless(agent, _flags(*argv))
+        assert agent.runtime.observers == before
+    return code
+
+
+@pytest.mark.asyncio
+async def test_headless_text_prints_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        await _headless("question", replies=[reply("answer")], monkeypatch=monkeypatch)
+        == 0
+    )
+    assert capsys.readouterr() == ("answer\n", "")
+
+
+@pytest.mark.asyncio
+async def test_headless_json_prints_the_reply_as_one_record(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = await _headless(
+        "q",
+        "--output-format",
+        "json",
+        replies=[reply("answer")],
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    assert json_loads(capsys.readouterr().out) == {"content": "answer"}
+
+
+@pytest.mark.asyncio
+async def test_headless_stream_json_prints_every_event_then_the_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    monkeypatch.chdir(tmp_path)
+    replies = [
+        reply(
+            "looking",
+            calls=[call("Read", "c1", file_path="a.txt"), call("Gone", "c2")],
+        ),
+        reply("done"),
+    ]
+    code = await _headless(
+        "q",
+        "--output-format",
+        "stream-json",
+        replies=replies,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    records = [
+        json_loads(line, dict[str, object])
+        for line in capsys.readouterr().out.splitlines()
+    ]
+    assert records[0] == {"descriptor": "text/plain", "content": "looking"}
+    assert records[1]["descriptor"] == "text/x-tool-label"
+    assert records[1]["call_id"] == "c1"
+    assert records[2] == {
+        "descriptor": "text/x-tool-label",
+        "call_id": "c2",
+        "content": "Gone",
+    }
+    results = {
+        r["call_id"]: r
+        for r in records
+        if r.get("descriptor") == "application/x-tool-result"
+    }
+    assert results["c1"]["is_error"] in (None, False)
+    assert "alpha" in str(results["c1"]["content"])
+    assert results["c2"]["is_error"] is True
+    assert records[-2] == {"descriptor": "text/plain", "content": "done"}
+    assert records[-1] == {"content": "done", "descriptor": "result"}
+
+
+@pytest.mark.asyncio
+async def test_headless_stream_json_input_joins_the_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[list[str | None]] = []
+
+    def answer(request: Request) -> Response:
+        seen.append([r.content for r in request.records if isinstance(r, UserMessage)])
+        return reply("ok")
+
+    stdin = '{"prompt": "one"}\n\n{}\n{"prompt": ""}\n{"prompt": "two", "x": 1}\n'
+    code = await _headless(
+        stdin,
+        "--input-format",
+        "stream-json",
+        replies=[answer],
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    assert seen == [["one\n\ntwo"]]
+    assert capsys.readouterr().out == "ok\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line", ["not json", "[1, 2]", '"text"', '{"prompt": 3}'])
+async def test_headless_stream_json_rejects_a_line_that_is_no_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    line: str,
+) -> None:
+    assert (
+        await _headless(line, "--input-format", "stream-json", monkeypatch=monkeypatch)
+        == 1
+    )
+    assert capsys.readouterr().err.startswith("Error: invalid stream-json input: ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdin", "argv"),
+    [("", ()), ("  \n", ()), ("{}\n", ("--input-format", "stream-json"))],
+)
+async def test_headless_with_nothing_to_answer_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stdin: str,
+    argv: tuple[str, ...],
+) -> None:
+    assert await _headless(stdin, *argv, monkeypatch=monkeypatch) == 1
+    assert capsys.readouterr() == ("", "Error: no input on stdin.\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "out", "err"),
+    [
+        ((), "", "Error: AuthError: expired\n"),
+        (("--output-format", "json"), '{"error": "AuthError: expired"}\n', ""),
+    ],
+)
+async def test_a_failed_turn_is_reported_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+    out: str,
+    err: str,
+) -> None:
+    assert (
+        await _headless(
+            "q",
+            *argv,
+            replies=[AuthError("expired")],
+            monkeypatch=monkeypatch,
+        )
+        == 1
+    )
+    assert capsys.readouterr() == (out, err)
+
+
+@pytest.mark.asyncio
+async def test_a_polished_failure_has_no_class_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    budget = BudgetExhaustedError(total_cost_usd=2.0, max_budget_usd=1.0)
+    assert await _headless("q", replies=[budget], monkeypatch=monkeypatch) == 1
+    assert capsys.readouterr().err == "Error: Budget exhausted: $2.00 >= $1.00\n"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_while_streaming_is_its_own_record(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = await _headless(
+        "q",
+        "--output-format",
+        "stream-json",
+        replies=[AuthError("expired")],
+        monkeypatch=monkeypatch,
+    )
+    assert code == 1
+    records = [
+        json_loads(line, dict[str, object])
+        for line in capsys.readouterr().out.splitlines()
+    ]
+    assert {
+        "descriptor": "application/x-error",
+        "content": "AuthError: expired",
+    } in records
+    assert records[-1] == {"error": "AuthError: expired"}
+
+
+def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
+    tools = {"Read": Read()}
+    assert main._records(
+        types.ModelResponseThinkingStreamed(text="hm"),
+        tools=tools,
+    ) == [
+        {"descriptor": "text/x-thinking", "content": "hm"},
+    ]
+    suspended = types.ModelResponseSuspended(
+        exception=RateLimitedError("spent", limit="weekly"),
+        retry_at=datetime.fromtimestamp(time.time() + 30.0, UTC),
+        failures_in_a_row=1,
+    )
+    ((record,),) = [main._records(suspended, tools=tools)]
+    assert record["descriptor"] == "text/x-notice"
+    assert str(record["content"]).startswith("Weekly limit reached. Resumes ")
+    switched = types.LoginSwitched(
+        provider="acli",
+        from_login="work",
+        to_login="default",
+        first_login_in_order="default",
+    )
+    assert main._records(switched, tools=tools) == [
+        {"descriptor": "text/x-notice", "content": "[on default, first in order]"},
+    ]
+    spent = replace(
+        suspended,
+        provider="acli",
+        reset_at_by_login={"work": datetime.fromtimestamp(time.time() + 60, UTC)},
+    )
+    notice, resumes = main._records(spent, tools=tools)
+    assert (notice["descriptor"], resumes["descriptor"]) == ("text/x-notice",) * 2
+    assert str(notice["content"]).startswith("[no acli login has quota: work ")
+    result = ToolMessage(
+        call_id="1",
+        state="done",
+        stdout=("out",),
+        stderr=("bad",),
+        result=UncategorizedToolResult(exit_code=2),
+    )
+    assert main._records(result, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "outbad",
+            "is_error": True,
+        },
+    ]
+    # A shell command's ``[exit N]`` follows its output, and is no error.
+    exited = ToolMessage(
+        call_id="1",
+        state="done",
+        stdout=("out",),
+        result=BashResult(exit_code=2),
+    )
+    assert main._records(exited, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "out\n[exit 2]",
+            "is_error": None,
+        },
+    ]
+    assert main._records(AgentIdle(), tools=tools) == []
+    assert main._records(UserMessage(content="x"), tools=tools) == []
+
+
+def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
+    """A reader can tell the stand-in from the result that replaces it."""
+    tools = {"Read": Read()}
+    stub = ToolMessage(call_id="1", state="pending", shown="[detached]")
+    # What a call run apart wrote since: pending too, but no stand-in.
+    news = ToolMessage(call_id="1", state="pending", stdout=("half way",))
+    real = ToolMessage(
+        call_id="1",
+        state="done",
+        stdout=("done",),
+        result=UncategorizedToolResult(),
+    )
+    assert main._records(stub, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "[detached]",
+            "is_error": None,
+            "stub": "pending",
+        },
+    ]
+    assert main._records(news, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "half way",
+            "is_error": None,
+        },
+    ]
+    assert main._records(real, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "done",
+            "is_error": None,
+        },
+    ]
+    killed = ToolMessage(call_id="1", state="cancelled", shown="[cancelled]")
+    assert main._records(killed, tools=tools) == [
+        {
+            "descriptor": "application/x-tool-result",
+            "call_id": "1",
+            "content": "[cancelled]",
+            "is_error": True,
+            "stub": "cancelled",
+        },
+    ]
+    assert (
+        main._records(
+            types.ModelResponseCompleted(
+                outcome=Succeeded(value=reply("no calls")),
+            ),
+            tools=tools,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_logs_what_stalls_the_prompt_for_a_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stall longer than a frame shows as a jerk at the prompt."""
+    watched: list[float] = []
+
+    @contextlib.contextmanager
+    def watch_stalls(*, threshold_sec: float) -> Generator[None]:
+        watched.append(threshold_sec)
+        yield
+
+    monkeypatch.setattr(main, "watch_stalls", watch_stalls)
+    provider = ScriptedProvider(replies=[])
+    async with Agent(model=provider["scripted"], journal=RecordingJournal()) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "history",
+                    print_batch_sec=0,
+                ),
+            )
+            pipe.send_text("/quit\r")
+            await asyncio.wait_for(running, timeout=5)
+    assert watched == [0.05]
+
+
+@pytest.mark.asyncio
+async def test_run_redraws_the_session_then_answers_what_is_typed(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    journal.append(UserMessage(content="earlier"), AssistantMessage(content="before"))
+    provider = ScriptedProvider(replies=[reply("hi there")])
+    screen = io.StringIO()
+    async with Agent(model=provider["scripted"], journal=journal) as agent:
+        before = list(agent.runtime.observers)
+        hook = agent.runtime.before_tool_spawn
+        answered = asyncio.Event()
+
+        def watch(event: types.RuntimeEvent) -> None:
+            if isinstance(event, AgentIdle) and provider.requests:
+                answered.set()
+
+        agent.runtime.observers.append(watch)
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "new" / "history",
+                    print_batch_sec=0,
+                ),
+            )
+            pipe.send_text("hello\r")
+            await asyncio.wait_for(answered.wait(), timeout=5)
+            pipe.send_text("/quit\r")
+            await asyncio.wait_for(running, timeout=5)
+        agent.runtime.observers.remove(watch)
+        assert agent.runtime.observers == before
+        assert agent.runtime.before_tool_spawn is hook
+    shown = screen.getvalue()
+    for text in ("earlier", "before", "resumed · 2 messages", "> hello", "hi there"):
+        assert text in shown
+    assert shown.index("earlier") < shown.index("> hello") < shown.index("hi there")
+    assert "Resume this session with" not in shown
+    assert "hello" in (tmp_path / "new" / "history").read_text()
+
+
+@pytest.mark.asyncio
+async def test_run_says_how_to_resume_a_journaled_session(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "abc123" / "journal.jsonl"
+    screen = io.StringIO()
+    async with (
+        JsonlJournal(path) as journal,
+        Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
+    ):
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(agent, catalog=_Script().catalog(), print_batch_sec=0),
+                timeout=5,
+            )
+    assert capsys.readouterr().err.split("\n")[:2] == [
+        "Resume this session with:",
+        "sagent --resume abc123   # this session",
+    ]
+    assert (state_dir() / "rekursiv-ai" / "sagent").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_write_to_stderr_during_a_session_names_the_call_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[ConsolePrinter] = []
+    labels: list[str] = []
+
+    class _Kept(ConsolePrinter):
+        def __init__(
+            self,
+            console: Console,
+            *,
+            show_thinking: bool = False,
+            theme: ThemeState | None = None,
+        ) -> None:
+            super().__init__(console, show_thinking=show_thinking, theme=theme)
+            made.append(self)
+
+        @override
+        def call(self, header: Header) -> None:
+            super().call(header)
+            labels.append(header.label)
+
+    class _Warns(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            if line == "/warn":
+                read = Header(key="1", label="Read a.py", display=ToolDisplay())
+                made[0].call(read)
+                sys.stderr.write("a library warning\n")
+                made[0].failed("gone", header=read)
+                return False
+            return await super().__call__(line)
+
+    monkeypatch.setattr(main, "ConsolePrinter", _Kept)
+    monkeypatch.setattr(main, "Commands", _Warns)
+    screen = io.StringIO()
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("/warn\r/exit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    assert labels == ["Read a.py", "Read a.py"]
+    shown = screen.getvalue()
+    first = shown.index("Read a.py")
+    warned = shown.index("a library warning", first)
+    again = shown.index("Read a.py", warned)
+    assert shown.index("✗ gone", again) > again
+
+
+@pytest.mark.asyncio
+async def test_run_reports_a_failing_command_and_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+
+    class _Broken(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            if line == "/boom":
+                # Leaves run's observers gone too: its cleanup must not trip.
+                self.agent.runtime.observers.clear()
+                raise RuntimeError(f"kaboom {words}")
+            return await super().__call__(line)
+
+    monkeypatch.setattr(main, "Commands", _Broken)
+    # Narrow, so the sentence wraps: between words, never inside one.
+    monkeypatch.setenv("COLUMNS", "30")
+    screen = io.StringIO()
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("/boom\r/exit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    shown = screen.getvalue()
+    assert "✗ RuntimeError: kaboom" in shown
+    assert set(words.split()) <= set(shown.split())
+
+
+@pytest.mark.asyncio
+async def test_a_quit_with_words_after_it_still_quits(tmp_path: Path) -> None:
+    screen = io.StringIO()
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("/quit now\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+
+
+@pytest.mark.asyncio
+async def test_run_builds_each_view_s_commands_with_what_it_is_handed(
+    tmp_path: Path,
+) -> None:
+    typed: list[str] = []
+
+    class _Heard(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            typed.append(line)
+            return await super().__call__(line)
+
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(io.StringIO())),
+        ):
+            pipe.send_text("/tasks\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                    commands=_Heard,
+                ),
+                timeout=5,
+            )
+
+    # The prompt itself ends at ``/quit``; every other line runs on the commands.
+    assert typed == ["/tasks"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "system"),
+    [
+        ((), None),
+        (("--system-prompt", "Be terse."), "Be terse."),
+        (
+            ("--system-prompt", "Be terse.", "--append-system-prompt", "Use tabs."),
+            "Be terse.\n\nUse tabs.",
+        ),
+    ],
+)
+def test_the_system_prompt_is_replaced_or_extended(
+    argv: tuple[str, ...],
+    system: str | None,
+) -> None:
+    agent = main._agent(
+        _flags(*argv),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    assert agent.system_prompt == system
+
+
+def test_an_appended_prompt_extends_the_default_one() -> None:
+    agent = main._agent(
+        _flags("--append-system-prompt", "Use tabs."),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    assert agent.system_prompt == f"{default_system_prompt()}\n\nUse tabs."
+
+
+@pytest.mark.parametrize(
+    ("argv", "compactor"),
+    [((), SummaryCompactor), (("--no-compact",), NoShrinker)],
+)
+def test_compact_picks_the_compactor(argv: tuple[str, ...], compactor: type) -> None:
+    agent = main._agent(
+        _flags(*argv),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    assert type(agent.session.compactor) is compactor
+
+
+@pytest.mark.parametrize(
+    ("argv", "pruner"),
+    [((), Pruner), (("--no-prune",), NoShrinker)],
+)
+def test_prune_picks_the_pruner(argv: tuple[str, ...], pruner: type) -> None:
+    agent = main._agent(
+        _flags(*argv),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    assert type(agent.session.pruner) is pruner
+
+
+def test_the_compactor_is_one_of_two_and_compacting_is_a_switch() -> None:
+    assert (_flags().compactor, _flags().prune) == ("summary", True)
+    assert _flags("--compact").compact is True
+    with pytest.raises(SystemExit):
+        _flags("--compactor", "lossy")
+
+
+@pytest.mark.parametrize(
+    ("argv", "style"),
+    [
+        ((), "summary"),
+        (("--compactor", "summary"), "summary"),
+        (("--compactor", "session-audit"), "session-audit"),
+    ],
+)
+def test_compactor_picks_how_it_compacts(argv: tuple[str, ...], style: str) -> None:
+    agent = main._agent(
+        _flags(*argv),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    compactor = agent.session.compactor
+    assert isinstance(compactor, SummaryCompactor)
+    assert compactor.style == style
+
+
+def test_the_caps_reach_the_agent() -> None:
+    agent = main._agent(
+        _flags("--max-tool-call-rounds", "3", "--max-budget-usd", "1.5"),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+        user=None,
+    )
+    assert (agent.max_rounds, agent.max_spend_usd) == (3, 1.5)
+
+
+def test_the_usage_names_each_flag_s_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "2000")
+    parser = argparse.ArgumentParser()
+    main._add_arguments(parser)
+    usage = parser.format_usage()
+    for shown in (
+        "--allow-providers LIST",
+        "--tools NAME [NAME ...]",
+        "--max-budget-usd USD",
+        "--max-tool-call-rounds N",
+        "--resume [ID]",
+        "--resume-limit N",
+        "--add-dir DIR [DIR ...]",
+        "--history PATH",
+        "--output-format {text,json,stream-json}",
+        "--input-format {text,stream-json}",
+        "--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}",
+    ):
+        assert shown in usage
+
+
+def test_help_opens_with_the_module_s_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--help")
+    with pytest.raises(SystemExit) as exit_info:
+        main.main()
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert (
+        "Run a coding agent: interactively on a terminal, or once on piped input."
+        in out
+    )
+    assert "python -m sagent login" in out
+    assert "python -m sagent mcp list" in out
+    assert "python -m sagent mcp login linear --headless" in out
+    assert "``sagent mcp add ARGS``, each with ``--help``" in " ".join(out.split())
+    assert "Every setting ``/help`` lists is a flag too" in out
+    # Set only by the terminal that starts a host, never typed.
+    assert "--hosted-session" not in out
+
+
+@pytest.mark.parametrize("tool", _DEFAULT_TOOLS)
+def test_each_tool_loads_by_its_own_name(tool: str) -> None:
+    assert list(_tools("--tools", tool)) == [tool]
+
+
+def test_the_ephemeral_refusal_says_what_to_drop() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^--ephemeral saves no memories; drop Memory from --tools\.$",
+    ):
+        _tools("--ephemeral", "--tools", "Memory")
+
+
+def test_no_provider_named_anywhere_means_the_default_provider(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("SAGENT_PROVIDER")
+    _argv(monkeypatch, "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        f"Error: UnknownProviderError: unknown provider {default_provider()!r};"
+        " known: scripted, deep, signing\n"
+    )
+    del script
+
+
+def test_every_unknown_allowed_provider_is_named(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--allow-providers", "zed,ghost,deep", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(
+        "Error: UnknownProviderError: unknown providers ghost, zed; known:",
+    )
+    del script
+
+
+def test_the_run_s_tools_and_team_share_its_session_and_catalog(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[FetchSession] = []
+
+    def make() -> FetchSession:
+        made.append(FetchSession())
+        return made[-1]
+
+    seen: list[bool] = []
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        spawn = agent.tools["AgentSpawn"]
+        assert isinstance(spawn, AgentSpawn)
+        seen.append(agent.runtime.tool_context.fetch_session is made[0])
+        seen.append(spawn.team.catalog is script.catalogs[0])
+        seen.append(agent.runtime.tool_context.cwd == Path.cwd())
+        return 0
+
+    monkeypatch.setattr(main, "FetchSession", make)
+    monkeypatch.setattr(main, "_headless", headless)
+    _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert seen == [True, True, True]
+
+
+def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    earlier = _journal(
+        project_dir(tmp_path) / "000000000001",
+        UserMessage(content="before"),
+        Thinking(content="deliberating"),
+        AssistantMessage(content="ok"),
+    )
+    screen = io.StringIO()
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--resume",
+        "--log-level",
+        "INFO",
+        "--screen.thinking",
+        "show",
+        "--history",
+        str(tmp_path / "h"),
+    )
+    _stdin(monkeypatch, "1\n", tty=True)
+    _quick_prints(monkeypatch)
+    welcomed: list[Path] = []
+
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        del theme
+        welcomed.append(folder)
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=PlainTextOutput(screen)),
+    ):
+        pipe.send_text("/model deep/deep\r/quit\r")
+        assert main.main() == 0
+    assert welcomed == [tmp_path]
+    assert f"[resume] {earlier}\n" in capsys.readouterr().err
+    assert logging.getLogger("sagent").level == logging.INFO
+    shown = screen.getvalue()
+    assert "deliberating" in shown
+    assert (
+        "[/model] deep/deep+fullcontext+nothink\n" in shown  # codespell:ignore nothink
+    )
+    assert "/model deep/deep" in (tmp_path / "h").read_text()
+    del script, logs
+
+
+def test_piped_logging_sets_a_warning_root_with_a_timestamped_format(
+    logs: logging.Logger,
+) -> None:
+    logs.handlers = []
+    logs.setLevel(logging.DEBUG)
+    main._logging("DEBUG", path=None, interactive=False)
+    (handler,) = logs.handlers
+    assert logs.level == logging.WARNING
+    assert handler.formatter is not None
+    assert handler.formatter._fmt == "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    assert logging.getLogger("sagent").level == logging.DEBUG
+
+
+def test_a_session_log_line_has_time_level_and_logger(
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    main._logging(None, path=tmp_path / "s.jsonl", interactive=True)
+    name = "sagent.test"
+    logging.getLogger(name).info("hello")
+    for handler in logs.handlers:
+        handler.flush()
+    (row,) = (tmp_path / "s.log").read_text().splitlines()
+    assert re.fullmatch(
+        rf"\d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d,\d{{3}} INFO {re.escape(name)}: hello",
+        row,
+    )
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+def test_every_log_level_is_accepted(level: str) -> None:
+    assert _flags("--log-level", level).log_level == level
+
+
+def test_text_is_a_format_on_both_ends() -> None:
+    flags = _flags("--output-format", "text", "--input-format", "text")
+    assert (flags.output_format, flags.input_format) == ("text", "text")
+    assert _flags("--output-format", "json").output_format == "json"
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_session_wears_the_screen_s_settings_for_the_agent_shown(
+    tmp_path: Path,
+) -> None:
+    team = Team(catalog=_Script().catalog())
+    root = Agent(model=ScriptedProvider()["scripted"])
+    child = Agent(model=ScriptedProvider()["scripted"])
+    _ = team.join(root)
+    _ = team.join(child, label="kid", parent="Agent")
+    printer = RecordingPrinter()
+    views = Views(root, team=team, printer=printer, catalog=_Script().catalog())
+    entry = Input()
+    session = main._prompt_session(views, entry=entry, history=tmp_path / "h")
+    assert (
+        session.multiline,
+        session.app.erase_when_done,
+        session.enable_open_in_editor,
+    ) == (True, True, False)
+    assert session.refresh_interval == 0
+    assert isinstance(session.auto_suggest, AutoSuggestFromHistory)
+    assert isinstance(session.history, FileHistory)
+    assert session.history.filename == str(tmp_path / "h")
+    assert session.style is not None
+    assert session.style.style_rules == views.theme.current.prompt_style().style_rules
+    assert session.style.get_attrs_for_style_str("class:bottom-toolbar").bgcolor in (
+        "",
+        "default",
+    )
+    keys, message = session.key_bindings, session.message
+    assert keys is not None
+    assert callable(message)
+    for label in ("Agent", "kid"):
+        views.focus(label)
+        shown = views.current
+        shown.panes.stage(f"waiting on {label}", deferred=False)
+        (enter,) = [b for b in keys.bindings if tuple(b.keys) == (Keys.ControlM,)]
+        handler = enter.handler
+        assert isinstance(handler, functools.partial)
+        assert handler.args[:2] == (shown.agent.runtime, shown.panes)
+        assert session.bottom_toolbar == views.toolbar
+        assert message() == prompt_text(shown.deferred, entry)
+    await views.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_wires_the_catalog_team_and_printer_into_its_commands(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    catalog = _Script().catalog()
+    screen = io.StringIO()
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+    ):
+        team.join(agent)
+        child = Agent(model=ScriptedProvider()["scripted"])
+        team.join(child, label="kid", parent="Agent")
+        agent.spend_usd = 1.25
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("/model deep/deep\r/halt kid\r/help model\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+        assert agent.model.capability.model_id == "deep"
+        assert child.runtime.inbox.drain_nowait() == [types.ModelHalt()]
+    shown = screen.getvalue()
+    assert (
+        "[/model] deep/deep+fullcontext+nothink\n" in shown  # codespell:ignore nothink
+    )
+    assert "[/halt] halted kid" in shown
+    assert "the model, by name, family, or role, with any tags" in shown
+    assert "$1.25" in shown
+    del caplog
+
+
+_LEFT, _DOWN, _RIGHT = "\x1b[D", "\x1b[B", "\x1b[C"
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_repaints_and_queues_for_the_view_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources: list[PromptSource] = []
+    entries: list[Input] = []
+    watched: list[Views] = []
+    repaints: list[tuple[Callable[[], None], Callable[[], object]]] = []
+
+    def source(
+        session: PromptSession[str],
+        *,
+        panes: Panes,
+        notice: Callable[[str], None],
+    ) -> PromptSource:
+        sources.append(PromptSource(session, panes=panes, notice=notice))
+        return sources[-1]
+
+    def entry() -> Input:
+        entries.append(Input())
+        return entries[-1]
+
+    started = asyncio.Barrier(3)
+
+    class _Views(Views):
+        @override
+        async def watch(self, interval_sec: float = 0.2) -> None:
+            watched.append(self)
+            await started.wait()
+            await super().watch(interval_sec)
+
+    async def repaint(
+        invalidate: Callable[[], None],
+        frame: Callable[[], object],
+    ) -> None:
+        repaints.append((invalidate, frame))
+        await started.wait()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "PromptSource", source)
+    monkeypatch.setattr(main, "Input", entry)
+    monkeypatch.setattr(main, "Views", _Views)
+    monkeypatch.setattr(main, "repaint_on_change", repaint)
+    catalog = _Script().catalog()
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+        Agent(model=ScriptedProvider()["scripted"]) as kid,
+    ):
+        team.join(agent)
+        team.join(kid, label="kid", parent="Agent")
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            (views,) = watched
+            ((invalidate, frame),) = repaints
+            views.focus("kid")
+            (prompt,), (typed,) = sources, entries
+            shown = views.current
+            assert prompt.panes is shown.panes
+            assert invalidate == prompt.session.app.invalidate
+            assert frame() == Frame(
+                deferred=shown.deferred.frame(),
+                input=typed.frame(),
+                status=shown.status.frame(),
+            )
+            pipe.send_text("/quit\r")
+            await asyncio.wait_for(running, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_left_opens_the_tree_and_enter_shows_the_agent_picked(
+    tmp_path: Path,
+) -> None:
+    """Keys the prompt leaves unread reach the tree, and the prompt after it."""
+    catalog = _Script().catalog()
+    screen = io.StringIO()
+    kid_provider = ScriptedProvider(replies=[reply("kid answers")])
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+        Agent(model=kid_provider["scripted"]) as kid,
+    ):
+        team.join(agent)
+        team.join(kid, label="kid", parent="Agent")
+        kid.session.append(AssistantMessage(content="kid earlier"))
+        answered = asyncio.Event()
+        kid.runtime.observers.append(
+            lambda e: answered.set() if isinstance(e, AgentIdle) else None,
+        )
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text(f"{_LEFT}{_RIGHT}{_LEFT}{_DOWN}\rhi kid\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+        await asyncio.wait_for(answered.wait(), timeout=5)
+        assert UserMessage(content="hi kid") in kid_provider.requests[0].records
+        # What was typed went to the kid alone; its parent hears only that it stopped.
+        assert agent.runtime.inbox.drain_nowait() == [
+            AgentMessage(
+                sender="kid",
+                recipient="Agent",
+                content="[kid is idle] kid answers",
+            ),
+        ]
+    shown = screen.getvalue()
+    assert "Enter focus" in shown
+    assert shown.index("── kid ──") < shown.index("kid earlier")
+
+
+@pytest.mark.asyncio
+async def test_what_the_shown_agent_did_under_the_tree_prints_once_it_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(replies=[reply("said under the tree")])
+    printer = RecordingPrinter()
+    async with Agent(model=provider["scripted"]) as agent:
+        views = Views(agent, team=None, printer=printer, catalog=_Script().catalog())
+        idle = asyncio.Event()
+        agent.runtime.observers.append(
+            lambda e: idle.set() if isinstance(e, AgentIdle) else None,
+        )
+
+        async def busy(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            agent.runtime.push(UserMessage(content="go"))
+            await asyncio.wait_for(idle.wait(), timeout=5)
+            assert "said under the tree" not in printer.text
+
+        monkeypatch.setattr(main, "pick", busy)
+        await main._tree(views)
+        await views.aclose()
+    assert "said under the tree" in printer.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("show", "shown"),
+    [(None, False), (True, True), (False, False)],
+)
+async def test_run_hides_reasoning_unless_told_to_show_it(
+    tmp_path: Path,
+    show: bool | None,
+    shown: bool,
+) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        UserMessage(content="q"),
+        Thinking(content="secret reasoning"),
+        AssistantMessage(content="a"),
+    )
+    screen = io.StringIO()
+    async with Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("\x04")
+            running = (
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                )
+                if show is None
+                else main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    show_thinking=show,
+                    print_batch_sec=0,
+                )
+            )
+            await asyncio.wait_for(running, timeout=5)
+    assert ("secret reasoning" in screen.getvalue()) is shown
+
+
+@pytest.mark.asyncio
+async def test_run_labels_calls_by_their_tool_and_quits_by_command(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "a.txt").write_text("alpha")
+    provider = ScriptedProvider(
+        replies=[
+            reply(calls=[call("Read", "c1", file_path="a.txt")]),
+            reply("read it"),
+        ],
+    )
+    screen = io.StringIO()
+    async with (
+        JsonlJournal(tmp_path / "abc" / "journal.jsonl") as journal,
+        Agent(
+            model=provider["scripted"],
+            tools=[Read()],
+            journal=journal,
+            tool_context=ToolContext(cwd=tmp_path),
+        ) as agent,
+    ):
+        answered = asyncio.Event()
+
+        def watch(event: types.RuntimeEvent) -> None:
+            if isinstance(event, AgentIdle) and len(provider.requests) == 2:
+                answered.set()
+
+        agent.runtime.observers.append(watch)
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+            )
+            pipe.send_text("read it\r")
+            await asyncio.wait_for(answered.wait(), timeout=5)
+            pipe.send_text("/kill all\r/quit now\r")
+            await asyncio.wait_for(running, timeout=5)
+    shown = screen.getvalue()
+    assert Read().summary(call("Read", file_path="a.txt").arguments) in shown
+    assert "[/kill] cancelled all tool calls" in shown
+    assert "sagent --resume abc     # this session" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_run_says_every_way_to_resume(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The hint wraps at the terminal's width, so a narrow one splits its lines.
+    monkeypatch.setenv("COLUMNS", "200")
+    async with (
+        JsonlJournal(tmp_path / "abc" / "journal.jsonl") as journal,
+        Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
+    ):
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    assert capsys.readouterr().err.split("\n")[:6] == [
+        "Resume this session with:",
+        "sagent --resume abc     # this session",
+        "sagent --continue       # the latest in this directory",
+        "sagent --resume         # pick one in this directory",
+        "sagent --continue-all   # the latest anywhere",
+        "sagent --resume-all     # pick one anywhere",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_gives_every_agent_s_commands_the_width_output_shows_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLUMNS", "100")
+    catalog = _Script().catalog()
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+    ):
+        team.join(agent)
+        resumed = Agent(model=ScriptedProvider()["scripted"])
+        team.join(resumed, label="kid", parent="Agent")
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+        for member in (agent, resumed):
+            columns = member.runtime.tool_context.columns
+            assert callable(columns)
+            assert columns() == 96
+
+
+@pytest.mark.asyncio
+async def test_a_long_session_id_pushes_every_resume_comment_out(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    async with (
+        JsonlJournal(tmp_path / "5c67e618b5cb" / "journal.jsonl") as journal,
+        Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
+    ):
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    rows = capsys.readouterr().err.split("\n")[1:6]
+    assert rows[0] == "sagent --resume 5c67e618b5cb   # this session"
+    assert {row.index("#") for row in rows} == {31}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("given", "batch_sec"), [(None, 0.2), (0.01, 0.01)])
+async def test_run_prints_above_the_prompt_in_batches_as_long_as_told(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    given: float | None,
+    batch_sec: float,
+) -> None:
+    proxies: list[StdoutProxy] = []
+
+    class _Kept(StdoutProxy):
+        @override
+        def __enter__(self) -> StdoutProxy:
+            proxies.append(self)
+            return super().__enter__()
+
+    monkeypatch.setattr(main, "StdoutProxy", _Kept)
+    stdout, stderr = sys.stdout, sys.stderr
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            running = (
+                main.run(agent, catalog=_Script().catalog(), history=tmp_path / "h")
+                if given is None
+                else main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=given,
+                )
+            )
+            await asyncio.wait_for(running, timeout=5)
+    (proxy,) = proxies
+    assert (proxy.sleep_between_writes, proxy.raw, proxy.closed) == (
+        batch_sec,
+        True,
+        True,
+    )
+    assert (sys.stdout, sys.stderr) == (stdout, stderr)
+
+
+@pytest.mark.asyncio
+async def test_run_logs_a_failing_command_with_its_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _Broken(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            if line == "/boom":
+                raise RuntimeError("kaboom")
+            return await super().__call__(line)
+
+    monkeypatch.setattr(main, "Commands", _Broken)
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("/boom\r/exit\r")
+            with caplog.at_level(logging.WARNING, logger=main.__name__):
+                await asyncio.wait_for(
+                    main.run(
+                        agent,
+                        catalog=_Script().catalog(),
+                        history=tmp_path / "h",
+                        print_batch_sec=0,
+                    ),
+                    timeout=5,
+                )
+    (record,) = [r for r in caplog.records if r.name == main.__name__]
+    assert record.getMessage() == "command '/boom' failed"
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[0] is RuntimeError
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_history_in_the_per_user_file_by_default() -> None:
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("/help\r\x04")
+            await asyncio.wait_for(
+                main.run(agent, catalog=_Script().catalog(), print_batch_sec=0),
+                timeout=5,
+            )
+    history = state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
+    assert "/help" in history.read_text()
+    assert stat.S_IMODE(history.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_history_an_older_version_left_open_is_made_private() -> None:
+    history = state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
+    history.parent.mkdir(parents=True)
+    history.write_text("")
+    history.chmod(0o664)
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(agent, catalog=_Script().catalog(), print_batch_sec=0),
+                timeout=5,
+            )
+    assert stat.S_IMODE(history.stat().st_mode) == 0o600
+
+
+def test_a_listing_exactly_at_the_cap_hides_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sessions = _infos(tmp_path, "a", "b")
+    _stdin(monkeypatch, "\n")
+    main._pick(sessions, cap=2)
+    assert "older ones hidden" not in capsys.readouterr().err
+    main._pick(sessions, cap=1)
+    assert capsys.readouterr().err.startswith(
+        "  (showing 1 sessions; older ones hidden)\n",
+    )
+
+
+def test_a_tool_label_record_is_the_tool_s_summary_in_field_order() -> None:
+    read = call("Read", "c1", file_path="a.txt")
+    (record,) = main._records(
+        types.ModelResponseCompleted(
+            outcome=Succeeded(value=reply(calls=[read])),
+        ),
+        tools={"Read": Read()},
+    )
+    assert record == {
+        "descriptor": "text/x-tool-label",
+        "call_id": "c1",
+        "content": Read().summary(read.arguments),
+    }
+    assert record["content"] != "Read"
+    assert list(record) == ["descriptor", "call_id", "content"]
+
+
+@pytest.mark.asyncio
+async def test_stream_json_keeps_each_record_s_fields_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = await _headless(
+        "q",
+        "--output-format",
+        "stream-json",
+        replies=[reply(calls=[call("Gone", "c9")]), reply("done")],
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        lines[0]
+        == '{"descriptor": "text/x-tool-label", "call_id": "c9", "content": "Gone"}'
+    )
+
+
+@pytest.mark.parametrize("argv", [("--resume",), ("--resume-all",)])
+def test_a_picker_reads_one_journal_past_its_limit_and_no_more(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+
+    for i in range(8):
+        _journal(
+            project_dir(tmp_path) / f"{i:012}",
+            *_said(f"title {i}"),
+            mtime=1_000 + i,
+        )
+    peeked: list[str] = []
+    peek = projects._peek
+
+    def counting(path: Path, *, mtime: float) -> projects.SessionInfo | None:
+        peeked.append(path.parent.name)
+        return peek(path, mtime=mtime)
+
+    monkeypatch.setattr(projects, "_peek", counting)
+    _stdin(monkeypatch, "3\n")
+    path = main._journal_path(
+        _flags(*argv, "--resume-limit", "3"),
+        cwd=tmp_path,
+        interactive=True,
+    )
+    assert path is not None
+    assert path.parent.name == f"{5:012}"
+    assert peeked == [f"{i:012}" for i in (7, 6, 5, 4)]
+    assert capsys.readouterr().err.count(" records · title ") == 3
+
+
+def test_the_agent_works_where_it_was_told_through_the_session_s_fetches() -> None:
+    fetches = FetchSession()
+    agent = main._agent(
+        _flags(),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w"), fetch_session=fetches),
+        interactive=False,
+        user=None,
+    )
+    context = agent.runtime.tool_context
+    assert (context.cwd, context.fetch_session) == (Path("/w"), fetches)
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_a_terminal_waits_out_a_rate_limit_and_a_pipe_does_not(
+    interactive: bool,
+) -> None:
+    agent = main._agent(
+        _flags(),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=interactive,
+        user=None,
+    )
+    assert agent.runtime.persistent_retry is interactive
+
+
+def test_an_interactive_run_hides_reasoning_when_the_flag_says_so(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    journal = _journal(
+        project_dir(tmp_path) / "s",
+        UserMessage(content="q"),
+        Thinking(content="deliberating"),
+        AssistantMessage(content="ok"),
+    )
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--session",
+        str(journal),
+        "--screen.thinking",
+        "hide",
+        "--history",
+        str(tmp_path / "h"),
+    )
+    _stdin(monkeypatch, tty=True)
+    _quick_prints(monkeypatch)
+    screen = io.StringIO()
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=PlainTextOutput(screen)),
+    ):
+        pipe.send_text("\x04")
+        assert main.main() == 0
+    assert "deliberating" not in screen.getvalue()
+    del script, logs
+
+
+@dataclass(slots=True, kw_only=True)
+class _Slow:
+    """A tool that runs until ``release`` is set."""
+
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    name: str = "Slow"
+    description: str = "Take a while."
+    schema: Mapping[str, PlainTree] = field(default_factory=dict[str, PlainTree])
+    display: ToolDisplay = field(default_factory=ToolDisplay)
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return "Slow"
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
+
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, object, object]:
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, object, object]:
+        del context, arguments
+        self.started.set()
+        await self.release.wait()
+        return ToolOutput(stdout=("done",), result=UncategorizedToolResult())
+
+
+@pytest.mark.asyncio
+async def test_quitting_with_a_message_waiting_says_it_is_discarded(
+    tmp_path: Path,
+) -> None:
+    slow = _Slow()
+    provider = ScriptedProvider(
+        replies=[reply(calls=[call("Slow", "c1")]), reply("finished")],
+    )
+    screen = io.StringIO()
+    async with Agent(model=provider["scripted"], tools=[slow]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+            )
+            pipe.send_text("go\r")
+            await asyncio.wait_for(slow.started.wait(), timeout=5)
+            pipe.send_text("after the tools\t\x04")
+            await asyncio.wait_for(running, timeout=5)
+        slow.release.set()
+    assert "[discarding 1 queued message: after the tools]" in screen.getvalue()
+
+
+def test_one_journal_has_one_private_host_however_it_is_spelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    journal = tmp_path / "a" / "session.jsonl"
+    address = main._host_address(journal)
+    assert main._host_address(Path("a/../a/session.jsonl")) == address
+    assert main._host_address(tmp_path / "b" / "session.jsonl") != address
+    # Short: every byte of the name counts against ``sun_path``'s 104.
+    assert re.fullmatch(r"[0-9a-f]{16}\.sock", address.name)
+    hosts = state_dir() / "rekursiv-ai" / "sagent" / "hosts"
+    assert address.resolve().parent == hosts.resolve()
+    assert stat.S_IMODE(hosts.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_a_second_terminal_attaches_to_the_running_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second takes it over and the first detaches; one session ever started."""
+    # The host imports the code under test, not the venv's install of another checkout.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(sys.path))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    asked: list[str] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
+    journal = tmp_path / "000000000001" / "session.jsonl"
+    journal.parent.mkdir()
+    starts = tmp_path / "starts"
+    script = (
+        "import signal, sys;"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(3));"
+        "signal.signal(signal.SIGHUP, lambda *_: sys.exit(3));"
+        f"open({str(starts)!r}, 'a').write('s');"
+        "sys.stdin.readline()"
+    )
+    command = [sys.executable, "-I", "-S", "-c", script]
+    # The host in this process: its own interpreter is ``launch``'s to test.
+    monkeypatch.setattr(main, "launch", _launch_here)
+    first = asyncio.create_task(_resume(journal, command=command))
+    await _once(lambda: _text(starts) == "s")
+    # The second is asked about the first only once the first has attached: the
+    # host starts its command before any terminal is attached to it.
+    await _once(lambda: asyncio.run(viewers(main._host_address(journal))) == 1)
+    second = asyncio.create_task(_resume(journal, command=command))
+    # The first detaches when the second has taken the session over.
+    assert await asyncio.wait_for(asyncio.shield(first), 30) == 0
+
+    # Ended from outside: a typed line waits out the host's paste-to-Enter delay.
+    assert await stop(main._host_address(journal)) == 3
+
+    assert await asyncio.wait_for(second, 30) == 3
+    assert _text(starts) == "s"
+    assert asked == [
+        (
+            "Session 000000000001 is attached in 1 other terminal."
+            " [A]ttach here / [R]ead-only / [Q]uit: "
+        ),
+    ]
+    assert not accepts(main._host_address(journal))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ready", "why"),
+    [(False, "failed to start"), (None, "did not start in time")],
+)
+async def test_a_host_that_does_not_start_says_where_to_look(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ready: bool | None,
+    why: str,
+) -> None:
+    launched: list[tuple[Path, tuple[int, int]]] = []
+    measured: list[int] = []
+
+    def launch(
+        address: Path,
+        command: Sequence[str],
+        *,
+        log: Path,
+        winsize: tuple[int, int],
+        timeout_sec: float,
+    ) -> bool | None:
+        del address, command, timeout_sec
+        launched.append((log, winsize))
+        return ready
+
+    def terminal_size(fd: int) -> tuple[int, int]:
+        measured.append(fd)
+        return (33, 99)
+
+    monkeypatch.setattr(main, "launch", launch)
+    monkeypatch.setattr(main, "terminal_size", terminal_size)
+    # The host's terminal takes the size of the one stdin is.
+    monkeypatch.setattr(sys, "stdin", _Terminal(9))
+    journal = tmp_path / "000000000002" / "session.jsonl"
+
+    assert await _resume(journal, command=["unused"]) == 1
+    log = main._host_address(journal).with_suffix(".log")
+    assert capsys.readouterr().err == f"Error: the session's host {why}; see {log}\n"
+    assert (launched, measured) == ([(log, (33, 99))], [9])
+
+
+# Without ``/proc/locks``, as on macOS, the kernel names no holder, so ``main`` is told
+# this process holds the lock and its forked command runs under it.
+@contextlib.contextmanager
+def _holder(
+    journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stubborn: bool = False,
+) -> Generator[Popen[bytes]]:
+    """Yield a process with no terminal that holds ``journal``, running one command."""
+    # Fork only the small interpreter, not the fully collected pytest heap.
+    script = journal.parent / "holder.py"
+    script.write_text(
+        "import fcntl, os, signal, sys\n"
+        "os.setsid()\n"
+        "if sys.argv[2] == 'True':\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    while True:\n"
+        "        signal.pause()\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "os.write(1, b'held%d\\n' % pid)\n"
+        "while True:\n"
+        "    signal.pause()\n",
+    )
+    with subprocess.Popen(  # noqa: S603 -- Fixed interpreter and test-owned script.
+        [sys.executable, "-I", "-S", str(script), str(journal), str(stubborn)],
+        stdout=subprocess.PIPE,
+    ) as holder:
+        try:
+            assert holder.stdout is not None
+            out: IO[bytes] = holder.stdout
+            assert out.read(4) == b"held"
+            command = int(out.readline())
+            if not Path("/proc/locks").exists():
+                monkeypatch.setattr(main, "lock_holder", partial(_named, holder.pid))
+                monkeypatch.setattr(main, "children", partial(_named, [command]))
+            yield holder
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(holder.pid, signal.SIGKILL)
+            _ = holder.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stubborn", "answer"),
+    [(False, " Kill\n"), (True, "k")],
+    ids=["term", "kill"],
+)
+async def test_kill_ends_the_holder_and_resumes_here(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stubborn: bool,
+    answer: str,
+) -> None:
+    """A holder that ignores SIGTERM is killed once the wait runs out."""
+    journal = tmp_path / "abc123" / "session.jsonl"
+    journal.parent.mkdir()
+    launched: list[Path] = []
+    asked: list[str] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, answer))
+    monkeypatch.setattr(main, "launch", partial(_launched, launched))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "attach", _exited_7)
+    monkeypatch.setattr(main, "accepts", _never)
+    # A holder that heeds TERM frees the journal at once; one deaf to it waits out
+    # the whole grace, so the deaf one is given a short one.
+    grace = 0.005 if stubborn else 10.0
+    monkeypatch.setattr(main, "_take_over", partial(main._take_over, term_sec=grace))
+    with _holder(journal, monkeypatch, stubborn=stubborn) as holder:
+        status = await _resume(journal, command=["sagent"])
+        assert holder.wait(timeout=5) == -(9 if stubborn else 15)
+
+    assert status == 7
+    assert launched == [main._host_address(journal)]
+    assert asked == [
+        (
+            f"Session abc123 is open in pid {holder.pid} (no terminal, 1 command"
+            " running). [K]ill it and resume / [Q]uit: "
+        ),
+    ]
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+async def test_quit_leaves_the_holder_running_and_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "abc123" / "session.jsonl"
+    journal.parent.mkdir()
+    launched: list[Path] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "q"))
+    monkeypatch.setattr(main, "launch", partial(_launched, launched))
+    with _holder(journal, monkeypatch) as holder:
+        status = await _resume(journal, command=["sagent"])
+        assert holder.poll() is None
+
+    assert status == 0
+    assert launched == []
+
+
+def test_a_new_host_gets_half_a_minute_and_a_holder_ten_seconds_a_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    def launch(address: Path, command: Sequence[str], **kwargs: object) -> None:
+        del address, command
+        waits.append(cast(float, kwargs["timeout_sec"]))
+
+    def unlocked_within(path: Path, *, seconds: float) -> bool:
+        del path
+        waits.append(seconds)
+        return False
+
+    monkeypatch.setattr(main, "launch", launch)
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "k"))
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "unlocked_within", unlocked_within)
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert main._resume(journal, command=[]) == 1
+    assert main._take_over(journal) == 1
+    assert waits == [30.0, 10.0, 10.0]
+
+
+def test_a_holder_that_outlives_its_kill_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Another user's process ignores both signals; resume must not start a host."""
+    journal = tmp_path / "abc123" / "session.jsonl"
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "k"))
+    monkeypatch.setattr(main, "unlocked_within", _never_unlocked)
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+
+    assert main._take_over(journal, term_sec=0.01, kill_sec=0.01) == 1
+    assert capsys.readouterr().err == (
+        f"Error: pid {_NO_SUCH_PID} still holds session abc123.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("running", "said"),
+    [([], "0 commands"), ([5], "1 command"), ([5, 6], "2 commands")],
+)
+def test_the_kill_prompt_names_the_holder_s_terminal_and_its_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running: list[int],
+    said: str,
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "q"))
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "controlling_terminal", _fake_terminal)
+    monkeypatch.setattr(main, "children", partial(_fake_children, running))
+
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 0
+    assert asked == [
+        (
+            f"Session abc123 is open in pid {_NO_SUCH_PID}"
+            f" (/dev/pts/{_NO_SUCH_PID}, {said} running). [K]ill it and resume /"
+            " [Q]uit: "
+        ),
+    ]
+
+
+def _fake_terminal(pid: int) -> str:
+    return f"/dev/pts/{pid}"
+
+
+def _fake_children(running: list[int], pid: int) -> list[int]:
+    assert pid == _NO_SUCH_PID
+    return running
+
+
+def test_a_holder_the_kernel_does_not_name_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``/proc/locks``, as on macOS, there is no pid to offer to kill."""
+    monkeypatch.setattr(main, "lock_holder", _unnamed)
+
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 1
+    assert capsys.readouterr().err == (
+        "Error: session abc123 is open in another process,"
+        " which has no host to attach to.\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status", "attached"),
+    [
+        (" Attach\n", 7, [(False, True)]),
+        ("read-only", 7, [(True, False)]),
+        ("q", 0, []),
+    ],
+    ids=["take-over", "read-only", "quit"],
+)
+async def test_a_session_another_terminal_drives_asks_how_to_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    status: int,
+    attached: list[tuple[bool, bool]],
+) -> None:
+    asked: list[str] = []
+    joined: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, answer))
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 2))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == status
+    assert asked == [
+        (
+            "Session abc123 is attached in 2 other terminals."
+            " [A]ttach here / [R]ead-only / [Q]uit: "
+        ),
+    ]
+    assert joined == attached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, None], ids=["none-attached", "host-gone"])
+async def test_a_session_no_terminal_drives_is_attached_without_asking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int | None,
+) -> None:
+    joined: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "q"))
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, count))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 7
+    assert joined == [(False, True)]
+
+
+@pytest.mark.asyncio
+async def test_detaching_leaves_the_session_running_and_says_how_to_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "attach", _detached)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 0))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 0
+    assert capsys.readouterr().err == (
+        "\n[sagent] Detached; the session runs on. Attach again with:"
+        " sagent --resume abc123\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_session_gone_before_the_attach_says_where_to_look(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "attach", _refused)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 0))
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert await _resume(journal, command=[]) == 1
+    assert capsys.readouterr().err == (
+        "Error: the session ended before it could attach;"
+        f" see {main._host_address(journal).with_suffix('.log')}\n"
+    )
+
+
+def test_ctrl_d_at_the_join_prompt_quits_quietly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 2))
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert main._join(journal, main._host_address(journal)) is None
+
+
+def test_ctrl_d_at_the_kill_prompt_quits_quietly_and_kills_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "unlocked_within", _never_unlocked)
+
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 0
+
+
+def test_a_new_session_at_a_terminal_makes_nothing_before_it_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flag the session refuses, or a host that never starts, leaves no session."""
+    monkeypatch.chdir(tmp_path)
+    launched: list[Path] = []
+    monkeypatch.setattr(main, "launch", partial(_launched, launched, ready=False))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    _argv(monkeypatch, "--tools", "Nope")
+    with _at_a_terminal(monkeypatch):
+        assert main.main() == 1
+    assert len(launched) == 1
+    assert not project_dir(tmp_path).exists()
+
+
+def test_a_host_another_terminal_started_meanwhile_is_joined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two terminals launch at once; the one whose host lost joins the winner's."""
+    asked: list[str] = []
+    joined: list[tuple[bool, bool]] = []
+    probed: list[Path] = []
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        main,
+        "accepts",
+        partial(_in_turn, answers=answers, probed=probed),
+    )
+    monkeypatch.setattr(main, "launch", partial(_launched, [], ready=False))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 1))
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    journal = tmp_path / "abc123" / "session.jsonl"
+    assert main._resume(journal, command=[]) == 7
+    assert len(asked) == 1
+    assert joined == [(False, True)]
+    assert probed == [main._host_address(journal)] * 2
+
+
+def _in_turn(address: Path, *, answers: Iterator[bool], probed: list[Path]) -> bool:
+    probed.append(address)
+    return next(answers)
+
+
+class _Terminal(io.StringIO):
+    """A terminal whose user presses Ctrl+C at the first prompt read from it."""
+
+    def __init__(self, fd: int) -> None:
+        super().__init__()
+        self._fd = fd
+
+    @override
+    def fileno(self) -> int:
+        return self._fd
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
+    @override
+    def readline(self, size: int | None = -1, /) -> str:
+        raise KeyboardInterrupt
+
+
+@contextlib.contextmanager
+def _at_a_terminal(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Make stdin a real terminal whose user presses Ctrl+C at any prompt."""
+    leader, follower = pty.openpty()
+    try:
+        monkeypatch.setattr(sys, "stdin", _Terminal(follower))
+        yield
+    finally:
+        os.close(leader)
+        os.close(follower)
+
+
+def test_ctrl_c_at_the_session_picker_quits_quietly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for i in (1, 2):
+        _journal(project_dir(tmp_path) / f"00000000000{i}", *_said(f"hello {i}"))
+    _argv(monkeypatch, "--resume")
+    with _at_a_terminal(monkeypatch):
+        assert main.main() == 130
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_ctrl_c_at_the_kill_prompt_quits_quietly_and_spares_the_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    journal = _journal(project_dir(tmp_path) / "000000000001", *_said("hello"))
+    _argv(monkeypatch, "--resume", "000000000001")
+    with _holder(journal, monkeypatch) as holder, _at_a_terminal(monkeypatch):
+        assert main.main() == 130
+        assert holder.poll() is None
+    assert "Traceback" not in capsys.readouterr().err
+
+
+_NO_SUCH_PID = 2**22 + 1
+"""Past Linux's largest pid, so no process has it."""
+
+
+async def _resume(journal: Path, **kwargs: object) -> int:
+    """Run ``main._resume`` off the loop, as ``main`` runs it before any loop."""
+    return await asyncio.to_thread(partial(main._resume, journal, **kwargs))
+
+
+def _launch_here(
+    address: Path,
+    command: Sequence[str],
+    *,
+    log: Path,
+    winsize: tuple[int, int],
+    timeout_sec: float,
+) -> bool | None:
+    """Serve ``command`` as ``launch`` does, from a thread of this process."""
+    del log
+    rows, cols = winsize
+    read_fd, write_fd = os.pipe()
+    argv = [str(address), str(write_fd), str(rows), str(cols), "--", *command]
+    threading.Thread(target=serve_command, args=(argv,), daemon=True).start()
+    return await_ready(read_fd, timeout_sec=timeout_sec)
+
+
+def _no_such_pid(journal: Path) -> int:
+    del journal
+    return _NO_SUCH_PID
+
+
+def _named[T](answer: T, ignored: object) -> T:
+    del ignored
+    return answer
+
+
+def _unnamed(journal: Path) -> None:
+    del journal
+
+
+def _never_unlocked(path: Path, *, seconds: float) -> bool:
+    del path, seconds
+    return False
+
+
+def _always(address: Path) -> bool:
+    del address
+    return True
+
+
+def _never(address: Path) -> bool:
+    del address
+    return False
+
+
+def _answer(asked: list[str], answer: str, prompt: str) -> str:
+    asked.append(prompt)
+    return answer
+
+
+def _rows_cols(fd: int) -> tuple[int, int]:
+    del fd
+    return (24, 80)
+
+
+def _launched(
+    launched: list[Path],
+    address: Path,
+    command: Sequence[str],
+    *,
+    log: Path,
+    winsize: tuple[int, int],
+    timeout_sec: float,
+    ready: bool | None = True,
+) -> bool | None:
+    del command, log, winsize, timeout_sec
+    launched.append(address)
+    return ready
+
+
+async def _exited_7(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del address, read_only, take_over
+    return 7
+
+
+async def _detached(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del address, read_only, take_over
+    return None
+
+
+async def _refused(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del read_only, take_over
+    raise ConnectionRefusedError(f"nothing at {address}")
+
+
+async def _viewers(count: int | None, address: Path) -> int | None:
+    del address
+    return count
+
+
+async def _joined(
+    joined: list[tuple[bool, bool]],
+    address: Path,
+    *,
+    read_only: bool,
+    take_over: bool,
+) -> int | None:
+    del address
+    joined.append((read_only, take_over))
+    return 7
+
+
+async def _once(ready: Callable[[], bool], *, timeout_sec: float = 30.0) -> None:
+    """Wait until ``ready()`` is true, off the loop the attaches run on."""
+    assert await asyncio.to_thread(_poll, ready, timeout_sec=timeout_sec)
+
+
+def _poll(ready: Callable[[], bool], *, timeout_sec: float) -> bool:
+    """Return once ``ready()`` is true, or False after ``timeout_sec``."""
+    deadline = time.monotonic() + timeout_sec
+    while not ready():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)  # house-ignore[sleep] -- Another loop's thread: no event.
+    return True
+
+
+def _text(path: Path) -> str:
+    """Return ``path``'s text; empty until it is written."""
+    return path.read_text() if path.exists() else ""
+
+
+def test_private_daemon_entry_bypasses_session_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def entry(argv: list[str]) -> int:
+        seen.append(argv)
+        return 7
+
+    monkeypatch.setattr(daemon, "main", entry)
+    assert main._run(["daemon", "--state", "/state"]) == 7
+    assert seen == [["--state", "/state"]]
+
+
+@pytest.mark.asyncio
+async def test_peer_setting_validates_and_inherits_without_pinning_a_choice() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    agent = Agent(model=catalog["scripted"]["scripted"])
+    team.join(agent)
+    commands = Commands(
+        agent,
+        catalog=catalog,
+        print_output=main._dropped,
+        screen=main._Screen(),
+        panes=Panes(),
+        team=team,
+    )
+    (setting,) = commands._peer_messaging()
+    with pytest.raises(SettingError, match="not one of"):
+        _ = await setting.apply("invalid")
+    assert setting.inherit is not None
+    assert await setting.inherit("off") == "on"
+    assert team.choices == {}
+    await commands.aclose()
+
+
+def test_theme_flag_reaches_the_welcome_and_live_slash_setting(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    welcomed: list[tuple[Path, str]] = []
+
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        assert theme is not None
+        welcomed.append((folder, theme.name))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "print_welcome", welcome)
+    _argv(
+        monkeypatch,
+        "--ephemeral",
+        "--screen.theme",
+        "light",
+        "--history",
+        str(tmp_path / "history"),
+    )
+    _stdin(monkeypatch, tty=True)
+    _quick_prints(monkeypatch)
+    screen = io.StringIO()
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=PlainTextOutput(screen)),
+    ):
+        pipe.send_text(
+            "/screen.theme\r/screen.theme dark\r/screen.theme default\r/quit\r",
+        )
+        assert main.main() == 0
+    assert welcomed == [(tmp_path, "light")]
+    shown = screen.getvalue()
+    assert "[/screen.theme] light   (" in shown
+    assert "[/screen.theme] dark" in shown
+    assert "[/screen.theme] default" in shown
+    del script
+
+
+def test_invalid_theme_flag_is_a_setting_error_without_running_the_model(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--ephemeral", "--screen.theme", "../elsewhere")
+    _stdin(monkeypatch, "not sent")
+    assert main.main() == 1
+    assert "[--screen.theme]" in capsys.readouterr().err
+    assert script.providers["scripted"].requests == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_styles_follow_slash_changes_without_rebuilding_the_session(
+    tmp_path: Path,
+) -> None:
+    root = Agent(model=ScriptedProvider()["scripted"])
+    theme = ThemeState()
+    views = Views(
+        root,
+        team=None,
+        printer=RecordingPrinter(),
+        catalog=_Script().catalog(),
+        theme=theme,
+    )
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=DummyOutput()),
+    ):
+        session = main._prompt_session(views, entry=Input(), history=tmp_path / "h")
+        assert session.style is not None
+        before = session.style.get_attrs_for_style_str("")
+        await views.current.commands("/screen.theme light")
+        after = session.style.get_attrs_for_style_str("")
+        assert after != before
+        assert after == theme.current.prompt_style().get_attrs_for_style_str("")
+        await views.current.commands("/screen.theme default")
+        assert session.style.get_attrs_for_style_str("") == before
+    await views.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_run_shares_the_theme_and_terminal_with_the_printer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    explicit: bool,
+) -> None:
+    theme = ThemeState() if explicit else None
+    seen: list[Views] = []
+    prompt_session = main._prompt_session
+
+    def capture(views: Views, *, entry: Input, history: Path) -> PromptSession[str]:
+        seen.append(views)
+        return prompt_session(views, entry=entry, history=history)
+
+    def console(file: TextIO) -> Console:
+        assert isinstance(file, Screen)
+        assert file is sys.stdout
+        return terminal_console(file)
+
+    monkeypatch.setattr(main, "_prompt_session", capture)
+    monkeypatch.setattr(main, "terminal_console", console)
+    async with Agent(
+        model=ScriptedProvider()["scripted"],
+        journal=RecordingJournal(),
+    ) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("/quit\r")
+            await main.run(
+                agent,
+                catalog=_Script().catalog(),
+                history=tmp_path / "history",
+                print_batch_sec=0,
+                theme=theme,
+            )
+    (views,) = seen
+    assert isinstance(views.printer, ConsolePrinter)
+    assert isinstance(views.theme, ThemeState)
+    assert views.printer.theme is views.theme
+    if explicit:
+        assert views.theme is theme
+
+
+@pytest.mark.asyncio
+async def test_tool_details_returns_to_the_same_prompt_draft(tmp_path: Path) -> None:
+    provider = ScriptedProvider(replies=[reply("done")])
+    catalog = _Script().catalog()
+    screen = io.StringIO()
+    async with Agent(model=provider["scripted"], tools=[Bash()]) as agent:
+        agent.session.append(
+            ToolCall(name="Bash", call_id="a", arguments={"command": "echo hello"})
+        )
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
+        ):
+            pipe.send_text("ac" + _LEFT + "\x0fq" + "b\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent, catalog=catalog, history=tmp_path / "h", print_batch_sec=0
+                ),
+                timeout=5,
+            )
+        assert any(
+            isinstance(r, UserMessage) and r.content == "abc"
+            for req in provider.requests
+            for r in req.records
+        )
+        assert "Ctrl+F search" in screen.getvalue()
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

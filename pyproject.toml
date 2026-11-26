@@ -1,9 +1,19 @@
 # NEVER EDIT THIS FILE!
-# uv sync --all-groups --all-extras --frozen
+# Example Installation:
+#
+# Typical:
+#   uv sync --all-groups --frozen  # cu132 aka "default-cuda"
+#
+# No GPU:
+#   uv sync --all-groups --frozen --no-group default-cuda --extra cpu
+#   export UV_NO_SYNC=1
+#
+# Old GPU (eg sm_5x):
+#   uv sync --all-groups --frozen --no-group default-cuda --extra cu126
+#   export UV_NO_SYNC=1
 
 [project]
 name = "sagent"
-version = "0.1.20"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,100 +33,143 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.1",
-    # media
-    "imagesize>=1.4",
-    "pillow",
-    # On 24.04 LTS, package libturbojpeg is too old.
-    #   R=libjpeg-turbo/libjpeg-turbo/releases
-    #   V=$(curl -fsSL https://api.github.com/repos/$R/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-    #   F=libjpeg-turbo-official_${V}_amd64.deb
-    #   cd "$(mktemp -d)"
-    #   curl -fsSL https://github.com/$R/download/$V/$F && sudo dpkg -i $F
-    #   sudo ln -sf {/opt/libjpeg-turbo/lib64,/usr/local/lib}/libturbojpeg.so.0 && sudo ldconfig
-    "pyturbojpeg>=1.8.2",
-    "webp>=0.4.0",
-    # data
-    "numpy>=2.1",
     # nlp
-    "tiktoken>=0.12.0",
-    # web client / scraping
-    "httpx2>=2.12",
-    # 0.1.11 for the WebFetch/WebSearch parameter schemas (now
-    # `wesearch.mcp.types`) and `wesearch.search.render`.
-    "wesearch>=0.1.11",
-    # web server / api
-    "uvicorn>=0.30.0",
+    "tiktoken>=0.14.0",
+    # web client
+    "httpx2>=2.16.0",
     # mcp
-    "mcp>=2.0.0",
-    "starlette>=0.40",
-    # llm
-    "anthropic>=0.72.0",
-    "openai>=2.20",
-    # serialization
-    "fastjsonschema>=2.22.2",
+    "mcp>=2.3.0",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
     # config
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.3",
     # text / docs
-    "pypdfium2",
+    "pypdfium2>=5.14.0",
     # markdown
-    # repl/tight_markdown.py wraps the private ``list_block`` rule and swaps
-    # ``state.parentType``; 4.2 is the version those internals were verified
-    # against. An older release has a different rule body.
     "markdown-it-py>=4.2",
-    "prompt-toolkit",
-    "pygments",
-    "rich",
+    "prompt-toolkit>=3.0.53",
+    "pygments>=2.21.0",
+    "rich>=15.0.0",
     # containers
-    "cachetools",
-    "wrapt",
-    # misc
+    "cachetools>=7.2.7",
+    "wrapt>=2.5.2",
+    # typing: TypeVar defaults
+    "typing_extensions>=4.16.0",
+    # json
+    # 0.4.1 leaves dataclass fields at their defaults out of trees. 0.4.10 writes a
+    # class named in ``classes`` as ``py/type`` by that name, as records store it.
+    "treekle>=0.4.10",
+    # bash
     "bashlex>=0.18",
-    # gitignore-aware tree walks: the `ignore` crate behind ripgrep and fd
+    # media
+    "pillow>=11.3.0",
+    # web search/fetch; 0.1.15 is the wesearch this release is validated against.
+    "wesearch>=0.1.15",
+    # grep (rg fallback needs gitignore-aware tree walks)
     "rignore>=0.8.1",
+    # remote tools: the tool server's self-signed certificate
+    "cryptography>=50.0.2",
 ]
+dynamic = ["version"]
 
 [project.scripts]
-sagent = "sagent.bin.cli:main"
-sagent-slack = "sagent.bin.slack:main"
+sagent = "sagent.tui.main:main"
 
 [dependency-groups]
-# NEVER ADD MORE DEPENDENCIES!
 
-debug = [
-    "ipython",
-    "tqdm",
+# Requirements are floors; uv.lock fixes versions. Never cap a dependency.
+# Public package deltas replace project.dependencies; these groups are monorepo-only.
+
+default-cuda = [
+    "torch",
+    "torchao",
+    "torchvision",
 ]
+
 lint = [
-    "codespell>=2.2.4",
-    "ruff",
+    "codespell>=2.4.3",
+    "ruff>=0.17.3",
 ]
 test = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "pytest>=7.0",
-    "hypothesis>=6.155.1",
-    "pytest-cov",
-    "pytest-asyncio>=1.3.0",
+    "pytest>=9.2.0",
+    "hypothesis>=6.170.14",
+    "pytest-cov>=7.1.0",
+    "pytest-asyncio>=1.4.1",
+    "sagent[selfhosted]",
 ]
 typecheck = [
-    "basedpyright>=1.40.1",
+    "basedpyright>=1.40.2",
     "pyrefly>=1.4.0",
-    "ty>=0.0.84",
-    "rekursiv-ai-typings>=0.1.6",
+    "ty>=0.0.104",
+    "rekursiv-ai-typings>=0.1.11",
 ]
 "pre-commit" = [
-    "pre-commit>=4.6",
+    "pre-commit>=4.7.0",
+    "ruamel-yaml>=0.18.6",
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
+    "codedoctor[coverage,mutation,notebook]",
 ]
 dev = [
     {include-group = "debug"},
     {include-group = "pre-commit"},
 ]
+debug = [
+    "ipython>=9.18.0",
+    "tqdm>=4.70.1",
+]
 
-# NEVER ADD MORE DEPENDENCY GROUPS!
+[project.optional-dependencies]
+cpu = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+cu126 = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+# cu128 Not Recommended: download.pytorch.org/whl/cu128 stops at torch 2.11.0, so the
+# extra locked to a stale torch. Its builds also lack sm_5x kernels which is likely the
+# reason you'd want older CUDA; use cu126.
+cu128 = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+cu130 = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+cu132 = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+cu134 = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+selfhosted = [
+    "accelerate>=1.15.0",
+    "auto-round>=0.16.1",
+    "compressed-tensors>=0.20.1",
+    "kernels>=0.18.0",
+    "nvidia-cudnn-cu13>=9.19.0.56 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend>=1.32.1 ; sys_platform == 'linux'",
+    "protobuf>=6.33.6",
+    "safetensors>=0.8.0",
+    "sentencepiece>=0.2.2",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=5.22.1",
+]
 
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
@@ -126,52 +179,21 @@ Source = "https://github.com/rekursiv-ai/sagent"
 Issues = "https://github.com/rekursiv-ai/sagent/issues"
 Changelog = "https://github.com/rekursiv-ai/sagent/releases"
 
-[project.optional-dependencies]
-# The `sagent-slack` entrypoint (bin/slack.py) is the only slack_sdk consumer
-# and is not reached by `import sagent` or the main CLI, so its deps are opt-in.
-# aiohttp is required transitively by slack_sdk.socket_mode.aiohttp. Install via
-# `pip install sagent[slack]`; the bin/slack.py shebang passes `--extra slack`.
-slack = [
-    "slack-sdk>=3.33.0",
-    "aiohttp>=3.13.5",
-]
-selfhosted = [
-    "accelerate>=1.13.0",
-    "auto-round>=0.12.3",
-    "compressed-tensors",
-    "kernels>=0.13.0",
-    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
-    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
-    "protobuf",
-    "safetensors",
-    "sentencepiece",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
-    "transformers>=5.8.0",
-]
-
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
-
-# Tool settings: single source of truth.
-# Preferred location for any tool setting, in order:
-#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/ci.yml
-# Put a setting as high in this chain as the tool allows. Only drop to a lower
-# file when the higher one cannot express it (e.g. a CLI-only flag with no
-# config key). pyproject.toml holds tool config; .pre-commit-config.yaml is the
-# sole source for how hooks run (thread/worker counts, heap caps);
-# .github/workflows/ci.yml only invokes the hooks and must not redefine any
-# of these.
 
 [tool.hatch.build.targets.wheel]
 packages = ["sagent"]
-# The vendored pytest harness imports pytest, a test-group dependency, and the
-# Ctrl+D repro drives agent_test's stub model, which the wheel never ships.
-exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/scripts/repro_ctrld_hang.py"]
+# The vendored pytest harness imports pytest, a test-group dependency; the
+# provider helpers serve only sign-in tests.
+exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/providers/testing.py"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.pytest.ini_options]
 python_files = ["*_test.py", "test_*.py"]
@@ -232,11 +254,13 @@ markers = [
     "network_searxng: reaches a SearXNG service over the network",
     "network_gpu_cloud: reaches a GPU cloud provider over the network",
     "network_slack: reaches Slack over the network",
-    "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal -p no:py_pglite"
-timeout = 60
+# `-p no:py_pglite`: its auto-loaded plugin marks any test whose PATH contains
+# "benchmark"/"performance"/"integration", and the filter above then silently
+# deselected 82 unit tests. PGlite fixtures come from a conftest-registered plugin.
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=0 --durations-min=0.250 --dist=worksteal -p no:py_pglite"
+timeout = 20
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
 filterwarnings = [
@@ -244,6 +268,15 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
+    "ignore:.*invalid escape sequence:SyntaxWarning",  # torchao 0.17.0 FqnToConfig docstring.
+    "ignore:.*torch\\.jit\\.script_method.*:DeprecationWarning",
+    "ignore:.*should not be instantiated.*:DeprecationWarning:torch._dynamo.side_effects",
+    # Dynamo probes `hasattr(t, "grad")` while TRACING (builder.py:345), which
+    # warns for a non-leaf tensor. Torch already wraps that probe in
+    # `hide_warnings(safe_grad_filter)`, but `error` above outranks the filter
+    # and the warning becomes an InternalTorchDynamoError. The warning is
+    # raised from C++, so no module scope can narrow it further.
+    "ignore:The .grad attribute of a Tensor that is not a leaf Tensor:UserWarning",
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",  # starlette 1.6.0 issue.
     "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning:zendriver.core.connection",
@@ -265,6 +298,7 @@ norecursedirs = [
     # Copied tests require mutmut trampolines and must not join normal collection.
     "mutants",
 ]
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mutmut]
 # Uncovered lines cannot produce assertion failures; measure them with coverage.
@@ -279,6 +313,34 @@ do_not_mutate_patterns = [
     '^\s*(description|formatter_class)=[\w.]+,?\s*$',
 ]
 
+[tool.codedoctor.lint]
+# Each key defaults the `codedoctor lint` flag of that name;
+# the command line overrides it. Globs are relative to this file's directory, and a
+# glob without `/` names a basename in any directory. `GLOBS = RULES` is ruff's
+# per-file-ignores; a bare glob skips the file for every rule unopened.
+select = "ALL"
+fix = "ALL"
+# Each export sets its own package and directory policy.
+set = ["import-alias.first-party=sagent", "test-footer.runner=sagent.lib.testing.runner", "xdg-literal.helper=sagent.lib.userdirs", "userdirs-namespace.namespace=rekursiv-ai"]
+exclude = [
+    "**/third_party/** typings/** **/.export/typings/** **/torch-types/shed/**",
+    """*_test.py **/tests/test*.py =
+    args-section assert cache-kwarg def-order final-inline globals
+    lazy-import-cost mkdir-mode module-side-effects nested-def returns-named
+    returns-section single-use-helper tempfile-prefix tensor-value-guard
+    tmp-literal xdg-literal""",
+    """conftest.py =
+    args-section def-order lazy-import-cost module-side-effects returns-section""",
+    "experiments.py experiments_*.py = returns-section",
+    "**/private/testdata/** = globals",
+]
+
+[tool.coverage-floor]
+# Each key defaults the `coverage_floor` flag of that name. A
+# changed source under a prefix must be covered to PERCENT by its own sidecar
+# tests; `=PERCENT`, with no prefix, floors every path. Each export sets its own.
+floor = ["=100"]
+
 [tool.coverage.run]
 # sys.monitoring, the default from Python 3.14 on. 3.12's default, ctrace,
 # traces every line a test runs, Numba's pure-Python compiler included: a cold
@@ -292,9 +354,9 @@ omit = [
     "*/tests/*",
     "*/.venv/*",
     "*/typings/*",
-    "*/scripts/*",
     "*/testdata/*",
     "*/__main__.py",
+    "*/conftest.py",
 ]
 
 [tool.coverage.report]
@@ -315,9 +377,9 @@ exclude_lines = [
     # callers' results, not by line coverage.
     "^def \\w+_numba\\(",
 ]
-# fail_under = 90
 show_missing = true
 skip_covered = true
+fail_under = 100
 
 [tool.ruff]
 show-fixes = true
@@ -538,8 +600,9 @@ extend-safe-fixes = [
 #   - configgle Fig/Makes/Maker: resolves Config fields and owner __init__ hints.
 #   - dataclasses.dataclass: codec.from_plain, cli_override, and
 #     tool_spec.coerce_kwargs call get_type_hints on any dataclass. This pins
-#     every dataclass field type eager; a heavy one (torch.Tensor) that the
-#     house `annotation-import` rule then flags takes an inline house-ignore.
+#     every bare name in a dataclass field type eager. A heavy type stays lazy
+#     spelled through a lazy module, `torch.Tensor` with `torch = lazy_import(...)`;
+#     the house `lazy-dataclass-field` rule rejects a bare-name proxy there.
 #   - MCPServer.tool, APIRouter.*: build schemas from handler signatures.
 #
 # With these set, TC004 flags an import that IS needed at runtime but sits
@@ -640,7 +703,7 @@ ignore = [
     # NEVER ADD MORE IGNORES! SUPPRESS IN FILE!
     "**/typings/",
 ]
-pythonPlatform = "Linux"
+pythonPlatform = "All"
 pythonVersion = "3.12"  # Intentional; test at 3.12 for exports.
 
 reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
@@ -662,7 +725,9 @@ reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-on
 
 [tool.ty.environment]
 python-version = "3.12"  # Intentional; test at 3.12 for exports.
-extra-paths = ["typings"]
+extra-paths = [
+    "typings",
+]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
 # (`.ipynb`, `node_modules/`). `typings/` is resolved via `extra-paths` and is
@@ -686,13 +751,13 @@ all = "warn"
 # https://github.com/astral-sh/ty/issues/4711 (fix: astral-sh/ruff#29346).
 # Re-enable once a ty release includes the fix; pyrefly's bad-override still
 # checks overrides meanwhile.
-invalid-attribute-override = "ignore"
+incompatible-attribute-override = "ignore"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
 
 [tool.ty.overrides.rules]
-invalid-key = "ignore"
+invalid-typed-dict-key = "ignore"
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -714,7 +779,6 @@ project-excludes = [
     "**/third_party/",
     "typings/",
     "**/.export/typings/",
-    "website/rekursiv-ai.github.io/_site/",
 ]
 search-path = ["typings"]
 # Pinned beside the config: an interpreter found through a symlinked home splits
@@ -751,6 +815,22 @@ formats = "ipynb,py:percent"
 
 [tool.uv]
 package = true
+default-groups = ["dev", "default-cuda"]
+conflicts = [[
+    {extra = "cpu"},
+    {extra = "cu126"},
+    # {extra = "cu128"},  # Retired in the root pyproject.toml.
+    {extra = "cu130"},
+    {extra = "cu132"},
+    {extra = "cu134"},
+], [
+    {group = "default-cuda"},
+    {extra = "cpu"},
+    {extra = "cu126"},
+    # {extra = "cu128"},  # Retired in the root pyproject.toml.
+    {extra = "cu130"},
+    {extra = "cu134"},
+]]
 environments = [
     "sys_platform == 'linux'",
     "sys_platform == 'darwin'",
@@ -777,6 +857,7 @@ name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
+# Not Recommended; see project.optional-dependencies.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -787,6 +868,20 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu134"
+url = "https://download.pytorch.org/whl/cu134"
+explicit = true
+
+# [[tool.uv.index]]
+# url = "https://pypi.together.ai/"
+
 [tool.uv.sources]
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
+codedoctor = { git = "https://github.com/rekursiv-ai/codedoctor", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }

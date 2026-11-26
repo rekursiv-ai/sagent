@@ -1,20 +1,42 @@
-"""Export-root pytest setup for sagent: marker rollups and math-thread caps.
+"""Export-root pytest setup for sagent: resource markers, user dirs, thread caps.
 
-Binds the resource-marker hook at the repository root so it reaches tests
-living OUTSIDE the ``sagent`` package -- ``examples/`` in particular. A
-conftest hook applies to its own directory and below, so ``sagent/conftest.py``
-alone would leave an ``examples`` test's resource marker with no timeout, no CI
-skip policy, and no error to say so.
+Binds the resource-marker hook and the per-user-directory isolation at the
+repository root so they reach tests living OUTSIDE the ``sagent`` package --
+the pre-commit gates' tests under ``tools/`` in particular. A conftest hook
+applies to its own directory and below, so a package-level conftest alone
+would leave a ``tools`` test's resource marker with no timeout, no CI skip
+policy, and no error to say so. In the monorepo the repo-root conftest does
+all of this; the public tree has no such root, so without it a session test
+reads and writes the real per-user directories.
 
 The math-thread caps run here, at the root, because this conftest loads before
-any test or package conftest imports NumPy or torch. In the monorepo the
-repo-root conftest applies them; the public tree has no such root.
+any test or package conftest imports NumPy or torch. The Hypothesis budgets the
+monorepo's root conftest loads are loaded here too, before any property test draws.
 """
 
-from sagent.lib.testing.resources import cap_math_threads, pytest_collection_modifyitems
+from __future__ import annotations
+
+from typing import Final
+
+from sagent.lib.testing.hypothesis_profiles import configure_hypothesis
+from sagent.lib.testing.resources import (
+    cap_math_threads,
+    isolate_user_dirs,
+    pytest_collection_modifyitems,
+    pytest_configure,
+)
 
 
-__all__ = ["pytest_collection_modifyitems"]
+# Honored only in the rootdir conftest: each invocation claims its own basetemp,
+# so concurrent sessions never clean up one another's directories.
+pytest_plugins: Final = ("sagent.lib.testing.basetemp",)
+
+__all__ = [
+    "isolate_user_dirs",
+    "pytest_collection_modifyitems",
+    "pytest_configure",
+]
 
 
 cap_math_threads()
+configure_hypothesis()

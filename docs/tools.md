@@ -6,101 +6,142 @@ Pass only the tools an agent needs. File, shell, and network tools act with the 
 
 ## Tool protocol
 
-A tool exposes:
+A tool (`sagent.tools.types.Tool`) exposes:
 
-- `name`: human-readable tool name.
-- `tool_id`: MIME-style identifier such as `application/x-tool-bash`.
-- `description`: model-facing description.
-- `directive_schema`: JSON Schema for input directives.
-- `supports_microcompaction`: whether old results may be shortened.
-- `summary(msg)`: short label for UI/status output.
-- `prompt()`: optional per-request system prompt section.
-- `run(msg)`: async execution.
+- `name`: what the model calls it by.
+- `description`: what the model reads about when and how to call it.
+- `schema`: JSON Schema of its arguments.
+- `display`: how its calls show in the terminal, a `ToolDisplay`.
+- `summary(arguments)`: short label for a call, such as `Edit foo.py`.
+- `serialize_key(context, arguments)`: which calls this one must not overlap; `None` runs beside anything; `"*"` waits for every keyed call before it, and every later call waits for it.
+- `call(context, arguments)`: start the tool and return a `ToolStreamingResult` at once: the tool's output streams (`stdout`, `stderr`) and a future of its result (`result`), a dataclass with an `exit_code`, `0` for success. A tool whose call ends only when it is stopped, as `Recall`'s does, says so with `runs_until_stopped`: run in the background, such a call does not keep its agent from going idle, and it wakes the model when it has news (`Runtime.wake`). A call run in the background says when its result is read with `due_after`: `None` (the default) at the model's next round, which it starts; `ModelIdle` or `AgentIdle` once the model, or the agent, rests, as a message sent to wait is.
 
-Batch tools return one `Message`. Streaming tools set `streaming = True` and make `run(msg)` an async generator; yielded messages before the last are intermediate events, and the last yield is the final tool result.
+A tool writes each item as it has it: Bash each line as printed, Grep each match, Glob each path, List each row, PaperFetch each download, AgentSpawn what its child says and calls, an MCP tool each progress report, RemoteTool the other machine's items. Grep and Glob search in parallel, so they write in the order found, no set order. An order that needs every item, such as a `keep_last` tail or a Glob `sort`, and the note counting what was cut, come at the end. A tool whose items are too much for the model, as a long Bash output is, puts the bounded view on its result's `shown`.
 
-Expected operational errors should return `TextMessage(..., "text/x-error")`. Unexpected bugs should raise.
+Whoever ran the call reads the streams and saves the session record, a `ToolMessage`; a tool never builds one. The record keeps every item, and the view, if any, as `shown`. A call that raises is saved as `failed`, a call killed as `cancelled`, each with what it had written. `settled(tool.call(context, arguments))` does this for one call; its `on_item` sees each item, and its stream, as it is read.
+
+A tool holds no agent's state. Each call gets the calling agent's `ToolContext`: its working directory, the files it has seen, and its result size limit. Arguments that do not fit the schema raise `ValueError`; the model reads the message as the call's error.
+
+Optional protocols add standing context: `Briefing` (a system prompt section, read once a window) and `Reminding` (a note each round).
 
 ## Function tools
 
-Use the decorator path for deterministic functions.
+Use the decorator for plain functions. The signature is the schema; the docstring is the description, and its `Args:` lines describe each parameter.
 
 ```python
-from sagent.tools import tool
+from sagent.tools.function import tool
 
 
 @tool
-def add(a: int, b: int) -> int:
-    return a + b
+def add(a: int, b: int) -> str:
+    """Add two numbers.
+
+    Args:
+      a: The first number.
+      b: The second number.
+
+    """
+    return str(a + b)
 ```
 
-Sagent infers the JSON Schema from type hints. Decorated functions get `tool_id = "application/x-tool-<name>"` and default to `supports_microcompaction = False`.
+A `str` return is cut to what one result holds. A parameter named `context` receives the `ToolContext` instead of an argument. `tool(fn, name="Add")` renames it.
 
 ## Class-based tools
 
-Use a class when the tool needs state, custom schema, a prompt section, custom summaries, or direct `Message` control.
+Use a class when the tool needs state, a custom summary, or typed output. Declare the arguments once, as a dataclass whose fields are `Annotated[T, "description"]`; `json_schema` builds the schema from it and `parse` checks the model's arguments against it.
 
 ```python
 from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Annotated
 
-from sagent.custom_types import Message, TextMessage
-from sagent.lib.codec import PlainTree, immutable
-from sagent.lib.message import get_directive
+from sagent.journal.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import (
+    Arg,
+    ToolContext,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
+)
+from treekle import PlainTree
 
 
-class EchoTool:
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Echo:
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        text: Annotated[str, "What to say back."]
+        times: Annotated[int, "How many times to say it.", Arg(minimum=1)] = 1
+
     name = "Echo"
-    tool_id = "application/x-tool-echo"
-    description = "Echo text back to the caller."
-    supports_microcompaction = True
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-            "additionalProperties": False,
-        }
-    )
+    description = "Say the text back."
+    schema = json_schema(Arguments)
+    display = ToolDisplay()
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         return "Echo"
 
-    def prompt(self) -> str | None:
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
         return None
 
-    async def run(self, msg: Message) -> Message:
-        directive = get_directive(msg)
-        return TextMessage(str(directive["text"]), "text/plain")
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[UncategorizedToolResult, str, str]:
+        return whole_output(self._run(arguments))
+
+    async def _run(
+        self,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[UncategorizedToolResult, str, str]:
+        a = parse(arguments, Echo.Arguments)
+        return ToolOutput(
+            stdout=(" ".join([a.text] * a.times),),
+            result=UncategorizedToolResult(),
+        )
 ```
 
-## Exported built-ins
+`whole_output` suits a tool with nothing to write until it is done: it starts the work and writes the output it returns. A tool whose answer is at hand, such as a refusal, passes the `ToolOutput` itself. A tool that writes as it runs, as `Bash` does, returns its own `Stream`s and closes each when it has written its last item; one left open ends when the tool's `result` is done. A tool names the item type of each stream: text for most, and records for some, as `Edit` writes each `Splice`.
 
-`sagent.tools.__all__` is the authoritative public export list.
+`result` is a class that carries the exit code as `exit_code`, `0` for success. A tool with more to report defines its own result class: `Read` returns a `ReadResult` (the resolved `path`, and a `status` when it showed no lines), so `Read` is a `Tool[ReadResult, Attachment | LineSpan | str, str]`. Every built-in has its own (`BashResult`, `GrepResult`, `EditResult`, and so on, all in `sagent.journal.types`), so a reader tells which tool a result came from by the class of its `result`; a tool of yours with nothing more to report returns an `UncategorizedToolResult`. A bare `Tool` is a tool of any result class and item types.
+
+## Built-ins
+
+Each built-in lives in its own module under `sagent.tools`, such as `sagent.tools.read.Read` and `sagent.tools.glob_tool.Glob`. `AgentSpawn`, `AgentSend`, `AgentSelf`, `AgentSession`, and `Recall` take the session's `Team`: `AgentSpawn(team=team)`.
 
 | Tool | Purpose | Key inputs |
 | --- | --- | --- |
 | `Read` | Read text, images, PDFs, notebooks. | `file_path`; optional `offset`, `limit`, `last_lines`, `pages`. |
 | `Write` | Create or overwrite files. | `file_path`, `content`. Existing files must have been read first. |
 | `Edit` | Exact string replacement. | `file_path`, `old_string`, `new_string`; optional `replace_all`. |
-| `Glob` | Find files by filename pattern. | `pattern`; optional `path`, `max_results`. |
-| `Grep` | Search file contents with ripgrep. | `pattern`; filters and output controls. |
-| `List` | List directory entries. | `path`; optional `show_hidden`, `long`, `max_results`. |
-| `Bash` | Run shell commands. | `command`; optional `timeout`, `description`. |
-| `WebSearch` | Query web search backends. | `query`; optional domain filters and `backend`. |
-| `WebFetch` | Fetch and extract readable URL content. | `url`. |
-| `PaperSearch` | Search scholarly papers. | `query`; optional source, year, OA, limit filters. |
-| `PaperDetails` | Paper metadata, references, citations. | `id`; optional `operation`. |
-| `PaperAuthor` | Author search and author papers. | `query` or `id`; optional `operation="papers"`. |
-| `PaperFetch` | Download paper PDFs. | `id`. |
-| `AgentSelf` | Let an agent inspect/mutate itself. | Flat patch object; all fields optional. |
-| `AgentSpawn` | Run child agents. | `prompt`; optional model/tools/depth/session controls. |
+| `Glob` | Find files by filename pattern. | `pattern`; optional `path`, `sort`, `long`, `max_results`, `offset`. |
+| `Grep` | Search file contents with ripgrep. | `pattern`; optional `path`, filters (`glob`, `type`, `exclude`), and output controls (`output_mode`, context, paging). |
+| `List` | List directory entries. | `path`; optional `show_hidden`, `long`, `sort`, `max_results`, `keep_last`. |
+| `Bash` | Run shell commands. | `command`, `description`; optional `timeout` (ms). |
+| `WebSearch` | Query web search backends. | `query`; optional `backend`, `categories`, `transport`, `allowed_domains`, `blocked_domains`. |
+| `WebFetch` | Fetch and extract readable URL content. | `url`; optional `method`, `transport`, `extractor`, `json`, `form`. |
+| `PaperSearch` | Search scholarly papers. | `query`; optional `source`, `limit`, `year_from`, `year_to`, `open_access_only`, `abstract_chars`. |
+| `PaperDetails` | Paper metadata, references, citations. | `ids`; optional `operation`, `source`, `influential_only`, `year_from`, `limit`, `abstract_chars`. |
+| `PaperAuthor` | Author search and author papers. | `query` or `ids`; optional `operation="papers"`, `limit`, year bounds, `abstract_chars`. |
+| `PaperFetch` | Download paper PDFs. | `ids`. |
+| `Memory` | Save or forget a project memory, keeping `MEMORY.md` in step. | `action`, `name`; a save also `type`, `description`, `content`. |
+| `AgentSelf` | Inspect or patch yourself or a descendant. | Flat patch object; optional `agent` label or relation. |
+| `AgentSpawn` | Run child agents. | `prompt`; optional `system`, `provider`, `model`, `account`, reasoning settings, `tools`, `max_tool_call_rounds`, `max_depth`, `label`, `watch`. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
-| `Slack` | Slack Web API operations. | `operation`. |
-| `Linear` | Linear issue/comment operations. | `operation`. |
-| `Wiki` | Query an initialized llm-wiki. | `operation`. |
+| `AgentSession` | List, read, search, queue prunes, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
+| `Recall` | Name stored sessions like this one, as each is found, and wake the model. | Optional `limit`. Set `/tool.Recall.url` and `/tool.Recall.session`, or `TRACKINIZER_URL` and `TRAX_SESSION`; the key is `TRACKINIZER_TOKEN`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
+| `Plan` | Say the steps of the work in hand and where each stands; viewers draw it as a checklist. | `plan` (each `step`, `status`: `pending`, `in_progress` or `completed`); optional `explanation`. |
 
 ## File tools
 
@@ -114,7 +155,7 @@ class EchoTool:
 
 ## Bash
 
-`Bash` runs `/bin/bash -c <command>` with the agent process permissions. The default timeout is 120 seconds and the maximum is 600 seconds.
+`Bash` runs `/bin/bash -c <command>` with the agent process permissions. `timeout` is in milliseconds; with none, the command runs until it ends or is cancelled.
 
 When `Bash` is constructed with peer tools, it can warn the model when a dedicated tool should be used instead of a shell command.
 
@@ -125,7 +166,7 @@ as another user or in a container, and can give the spawned process an explicit
 environment. Both options are off by default and cannot be set from the command line.
 
 ```python
-from sagent.tools import Bash
+from sagent.tools.bash import Bash
 
 shell = Bash(
     exec_prefix=("/usr/local/bin/run-isolated",),
@@ -143,8 +184,8 @@ shell = Bash(
   environment. A mapping replaces it entirely, so a variable that is not in it, such
   as a provider key, is not passed to the wrapper. The shell sees whatever the
   wrapper carries across.
-- Working directory: the wrapper starts in `/`. The shell enters the tool's
-  directory itself, falling back to the directory Sagent started in and then to `/`.
+- Working directory: the wrapper starts in `/`. The shell enters the agent's
+  directory itself, falling back to `/` when it cannot.
   Sagent takes the directory the shell reports without checking that it exists,
   because the shell may run where Sagent cannot look.
 - The shell's standard input is empty, as it is without a wrapper.
@@ -155,13 +196,13 @@ the Sagent process.
 
 ## Web tools
 
-`WebSearch` tries Google, DuckDuckGo, SearXNG (when `SEARXNG_URL` is set),
-then Brave (when `BRAVE_API_KEY` is set), skipping a blocked, unconfigured,
-or empty backend. Answers are cached host-wide for an hour.
+`WebSearch` tries each backend in turn -- DuckDuckGo, SearXNG (when
+`SEARXNG_URL` is set), then Brave (when `BRAVE_API_KEY` is set) -- skipping a
+blocked, unconfigured, or empty backend. Answers are cached host-wide for an hour.
 
 Use `allowed_domains` and `blocked_domains` to scope results.
 
-`WebFetch` fetches HTTP(S) URLs, extracts main content, and caches results for
+`WebFetch` fetches HTTP(S) URLs, extracts main content, and caches GET results for
 15 minutes. Retrieval itself -- site-specific rewrites, the bot-wall fallback
 ladder, and transport selection -- belongs to `wesearch`, which treats an
 agent-supplied URL as untrusted: every host, including each redirect target,
@@ -173,54 +214,59 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 
 `PaperSearch`:
 
-- `source="s2"` queries Semantic Scholar. This is the default.
-- `source="openalex"` queries OpenAlex.
-- `source="fused"` merges both, deduplicating by DOI.
+- `source="fused"` reciprocal-rank-fuses Semantic Scholar and OpenAlex. This is the default.
+- `source="s2"` queries Semantic Scholar only.
+- `source="openalex"` queries OpenAlex only.
+- `source="searxng"` queries a self-hosted SearXNG science metasearch.
 - Optional filters: `year_from`, `year_to`, `open_access_only`, `limit`, `abstract_chars`.
 
-`PaperDetails` accepts DOI or arXiv IDs. Omit `operation` for metadata, use `operation="references"` for cited papers, and `operation="citations"` for citing papers. Citation mode also supports `influential_only` and `year_from`.
+`PaperDetails` takes `ids`, DOIs or arXiv IDs, one string or a list. Omit `operation` for metadata, use `operation="references"` for cited papers, and `operation="citations"` for citing papers, each with exactly one id. `source` picks the citation backend (`s2` by default, or `openalex`). Citation mode also supports `influential_only` and `year_from`.
 
-`PaperAuthor` searches authors by `query`, returns metadata by `id`, or lists publications with `id` plus `operation="papers"`.
+`PaperAuthor` searches authors by `query`, returns metadata by `ids`, or lists publications with one id plus `operation="papers"`.
 
-`PaperFetch` downloads PDFs from arXiv first, then open-access URLs. PDF bytes are cached under `~/.sagent/papers`.
+`PaperFetch` downloads PDFs from arXiv first, then open-access URLs. PDF bytes are cached under `<cache-dir>/rekursiv-ai/wesearch/papers`, such as `~/.cache/rekursiv-ai/wesearch/papers` on Linux.
 
 ## Agent coordination tools
 
 `AgentSelf` accepts a single patch object. All fields are optional; omitted fields are unchanged:
 
 - `status`: update visible status text.
-- `diagnostics`: set `true` to include token/cost/model/provider state in the result.
-- `context`: `"compact"`, `"recompact"`, or `"clear"`.
-- `context_prompt`: guidance for compact/recompact, or reason for clear.
-- `model_id`, `provider`, `auth`, `account`: switch model/provider.
-- `max_request_tokens`, `max_response_tokens`: adjust token limits.
-- `model_options`: provider-specific settings (`thinking`, `effort`, `cache_ttl`).
-- `catalog`: `"providers"` or `"models"` for read-only discovery.
+- `provider`, `model`: switch model; `model` takes a name or role with tags such as `+200k` or `+highthink`.
+- `effort`, `budget`, `output`, `service_tier`: reasoning and serving settings, checked against the model.
+- `diagnostics`: set `true` to report model, settings, limits, and directory.
+- `catalog`, `catalog_provider`: `"providers"` or `"models"` for read-only discovery.
 
-`AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.
+`AgentSession` lists, reads, searches, queues prunes for, compacts, or clears a context.
 
-By default (`hot=false`, "cold"), a child rebuilds its own system prompt from its own tools each request -- it auto-gains `BackgroundTask` alongside `AgentSpawn` and shows its own spawn-depth text, both of which differ from the parent's prompt from the first request and defeat provider prompt caching. Pass `hot=true` to instead freeze the child's system prompt to a byte-identical snapshot of the parent's current one, letting the child's first request land on the same cached prefix the parent already warmed. Trade-off: a hot child's prompt won't reflect its own live depth budget or a freshly bundled tool. Prefer hot for cheap, frequent, or parallel children (lookups, reviews) that don't need that dynamism.
+Both tools accept `agent`, a label or single-agent relation, defaulting to
+self: `AgentSelf(agent="helper", effort="high")` and
+`AgentSession(agent="helper", action="list")`. The caller's permissions and
+tool implementation apply; the target need not possess the tool.
+Mutations and estimates reach self or descendants, including grandchildren.
+AgentSession list, read, and search may reach any agent in the team.
+`RemoteTool` remains the router for machine endpoints.
 
-Persistent subagents have a durable lifecycle. The parent session
-records each child's `kind=persistent_subagent` entry with a stable
-`run_id` and `session_dir`. Terminal states (`completed`, `failed`,
-`cancelled`) are written as new lifecycle records so a future resume
-knows which children should restart and which stay archived. Explicit
-cancellation via `BackgroundTask cancel persistent:<label>` or
-`/kill <label>` writes a `cancelled` record before shutting the child
-down; the implicit `Ctrl-D` / `/quit` path leaves running children
-resumeable. See [CLI](cli.md) for the slash target grammar.
+`AgentSpawn` creates child agents. Children inherit the parent's model, settings, tools, system prompt, and directory, or override provider, model, account, effort, tools, max tool-call rounds, and max depth. A child runs its prompt to idle, returns its last text, then stays alive, receiving messages through `AgentSend`, until the team stops it.
+
+A child with its parent's tools builds its system blocks from its parent's settings, so its first request reads the prefix the parent already cached -- unless what the blocks render changed since the parent last built them (its directory, an `AGENTS.md`, a saved memory). What differs per agent -- its spawn depth, its label, the agents it can message, a persistent child's reply rule -- is told as a reminder with its first turn and retold when it changes, never in the system blocks.
+
+A child of a parent with a journal file stands in that journal, with its own journal path, until it is stopped. Resuming the parent's session starts such children again, each from its own journal. Closing the session, as `Ctrl-D` / `/quit` does, leaves them standing. See [CLI](cli.md) for the slash target grammar.
 
 `AgentSend` sends text to a live named agent inbox, optionally after a delay.
+Every child, watcher, and resumed child receives it, even with `tools=[]` or
+inherited restrictions. All other tools remain bounded by the parent's permissions.
 
 ## Background tasks
 
-If `BackgroundTask` is available to an agent, Sagent injects `background` and `delay` fields into other tool schemas.
+If `BackgroundTask` is available to an agent, Sagent injects `background`, `delay` and `wake_every` fields into other tool schemas.
 
 ```json
-{"command": "long-running command", "background": true}
-{"command": "remind me", "delay": 60}
+{"command": "make", "description": "Build it", "background": true}
+{"command": "echo done", "description": "Remind me", "delay": 60}
+{"command": "python train.py", "description": "Train", "wake_every": 600}
 ```
+
+`wake_every` is how often, in seconds, the agent is told what a long call wrote since it last looked, or that it wrote nothing. It replaces, for that call, the agent's schedule for the tool (`detach`), which every call of the tool shares.
 
 A backgrounded tool immediately returns a placeholder result. When the tool completes, its real result is delivered to the agent inbox. Use:
 
@@ -230,50 +276,18 @@ A backgrounded tool immediately returns a placeholder result. When the tool comp
 
 `delay` implies backgrounding.
 
-## Service tools
-
-`Slack` uses a bot token and supports:
-
-- `send`
-- `list_channels`
-- `list_messages`
-- `read_thread`
-- `list_users`
-- `create_channel`
-
-`Linear` uses `LINEAR_API_KEY` and supports:
-
-- `list_issues`
-- `get_issue`
-- `create_issue`
-- `update_issue`
-- `add_comment`
-
-These tools mutate external services when asked. Give them only to agents that need them.
-
-## Wiki, skills, and audio
-
-`Wiki` operates on an initialized llm-wiki with `SCHEMA.md`. Operations are `locate`, `list`, `read_page`, `read_index`, and `lint`.
+## Skills and audio
 
 `Skill` loads a user-authored skill by name and returns its full body so the agent can follow it. Skill invocations are tracked across compaction.
 
 `PlayAudio` plays `.wav` files using host audio tools when available and silently no-ops on headless systems.
 
-## Microcompaction
+## Pruning
 
-`supports_microcompaction` tells the compactor whether old tool results can be shortened after they are safely outside the prompt-cache hot path. Use `True` for large, reproducible, or low-value historical output. Use `False` when exact prior output must remain in context.
+`Pruner` (`sagent.agent.pruner`) notes old tool results for the model once keeping them has cost more than fetching them again, and replaces those the model queues with a stub once that pays. `agent.model.settings.pruning`, a `PruningPolicy`, says which may go: the newest `keep_recent` results and tools in `keep_tools` (`Skill` by default) are never pruned. See [Compaction](compaction.md#pruning).
 
-Sagent preserves recent clearable tool results, clears only cold results, and invalidates `Read` cache entries when old `Read` outputs are cleared.
+## Result size
 
-## Tool-result storage
+Each result is cut to fit `ToolContext.max_result_chars`, 50,000 characters by default. A tool may hold its own to less: `Bash` keeps 30,000, `Grep` 20,000. A cut keeps whole lines, matches, or paths, so the model can ask for the rest.
 
-Sagent bounds large tool outputs before sending the next model request.
-
-- Plain tool output is truncated at 400,000 characters by the generic tool wrapper.
-- Non-exempt oversized tool results above 50,000 characters are persisted to disk.
-- Persisted previews include the path and the first 2,000 characters.
-- Aggregate tool output in one message is bounded to 200,000 characters.
-- Session runs store persisted results under `session_dir/tool-results`; no-session runs fall back to `/tmp/sagent_results`.
-- Persisted files are written with owner-only permissions.
-
-`Read` is exempt from persistence because it already has line/page limits.
+When the agent has a journal file, `Bash` writes a cut command's whole output beside it and names the file in the result.

@@ -1,0 +1,636 @@
+"""Tests for the agent's model as settings: ``model`` and every choice under it."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from functools import partial
+from typing import TYPE_CHECKING
+
+import math
+import re
+
+import pytest
+
+from sagent.agent.agent import Agent
+from sagent.lib.userdirs import config_dir
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
+from sagent.model.exceptions import UnknownModelError
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.providers.login import Logins
+from sagent.providers.table import ModelTable, ModelTags, tag_words
+from sagent.settings.harvest import harvest
+from sagent.tui.settings import model as model_settings
+from sagent.tui.settings.model import AgentModel
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from sagent.providers.types import ProviderFactory
+    from sagent.settings.types import Setting
+
+
+@pytest.fixture(autouse=True)
+def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+
+def _windowed(model_id: str, window: int) -> ModelCapability:
+    """Return a model with only a window, at its defaults."""
+    prices = PriceCatalog(window=window)
+    return ModelCapability(
+        model_id=model_id,
+        limits=ModelLimits(max_request_tokens=window),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+
+
+_WIDE_PRICES = PriceCatalog(
+    prices={
+        PriceCondition(token_size_range=(0, 200_001)): TokenPrice(),
+        PriceCondition(token_size_range=(200_001, math.inf)): TokenPrice(),
+    },
+    window=1_000_000,
+)
+
+_WIDE = ModelCapability(
+    model_id="wide-1.0",
+    limits=ModelLimits(max_request_tokens=1_000_000),
+    prices=_WIDE_PRICES,
+    thinking_effort=frozenset({"none", "low", "high", "max"}),
+    thinking_budget=frozenset({"none", "auto"}),
+    thinking_output=frozenset({"none", "text"}),
+    service_tier=frozenset({"auto", "priority"}),
+    cache_ttl_sec=frozenset({300.0, 3600.0}),
+    manage_context_server_side=frozenset({False, True}),
+    compaction=frozenset({"bespoke", "provider"}),
+    default=ModelSettings(
+        thinking_effort="high",
+        cache_ttl_sec=300.0,
+        context_size=_WIDE_PRICES["fullcontext"],
+    ),
+)
+
+_NARROW = _windowed("narrow-1.0", 200_000)
+
+_OTHER = _windowed("other-1.0", 128_000)
+
+
+def _per_account(account: str | None) -> dict[str, ProviderFactory]:
+    """Return the providers; every account is served the same models."""
+    del account
+    return {
+        "vendor": partial(
+            ScriptedProvider,
+            models=ModelTable(rows=(_WIDE, _NARROW), roles={"default": "narrow"}),
+        ),
+        "other": partial(
+            ScriptedProvider,
+            models=ModelTable(rows=(_OTHER,), roles={"default": "other"}),
+        ),
+    }
+
+
+def _model(name: str = "wide") -> tuple[AgentModel, Agent, ModelCatalog]:
+    catalog = ModelCatalog(factories=_per_account)
+    agent = Agent(model=catalog["vendor"][name])
+    return AgentModel(agent=agent, catalog=catalog), agent, catalog
+
+
+def _setting(owner: AgentModel, name: str) -> Setting:
+    settings = {".".join(s.name): s for s in harvest([(("model",), owner)])}
+    return settings[name]
+
+
+async def _apply(owner: AgentModel, name: str, args: str) -> str:
+    return await _setting(owner, name).apply(args)
+
+
+def _value(owner: AgentModel, name: str) -> str:
+    value = _setting(owner, name).value
+    assert value is not None
+    return value()
+
+
+def test_the_model_exports_each_choice_under_it_for_the_command_line() -> None:
+    owner, _, _ = _model()
+    settings = harvest([(("model",), owner)])
+    assert [".".join(s.name) for s in settings] == [
+        "model",
+        "model.provider",
+        "model.provider.account",
+        "model.context",
+        "model.thinking",
+        "model.thinking.effort",
+        "model.thinking.budget",
+        "model.thinking.output",
+        "model.service_tier",
+        "model.cache_ttl_sec",
+        "model.manage_context_server_side",
+        "model.compaction",
+    ]
+    assert all(s.cli and s.value is not None for s in settings)
+
+
+def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
+    owner, _, _ = _model()
+    assert [
+        (".".join(s.name), s.usage, s.help_short)
+        for s in harvest([(("model",), owner)])
+    ] == [
+        (
+            "model",
+            "[ACCOUNT@][PROVIDER/]MODEL[+TAG...]",
+            "the model, by name, family, or role, with any tags",
+        ),
+        (
+            "model.provider",
+            "NAME",
+            "the provider serving this model, else the model in its role there",
+        ),
+        (
+            "model.provider.account",
+            "NAME",
+            "the login providers sign in as; default: each one's own",
+        ),
+        (
+            "model.context",
+            "SIZE",
+            "how much the context may fill before it is compacted",
+        ),
+        (
+            "model.thinking",
+            "AXIS=VALUE ...",
+            "the reasoning's effort, budget, and output at once",
+        ),
+        ("model.thinking.effort", "VALUE", "how hard the model reasons"),
+        ("model.thinking.budget", "VALUE", "how its reasoning budget is set"),
+        ("model.thinking.output", "VALUE", "what of its reasoning comes back"),
+        ("model.service_tier", "VALUE", "the serving tier: speed against price"),
+        ("model.cache_ttl_sec", "VALUE", "how long the prompt cache lives"),
+        (
+            "model.manage_context_server_side",
+            "VALUE",
+            "whether the server rolls the history",
+        ),
+        (
+            "model.compaction",
+            "VALUE",
+            "who summarizes a full context: sagent, or the provider",
+        ),
+    ]
+
+
+def test_the_model_s_help_names_every_tag_a_line_reads() -> None:
+    """The words come from the table that reads them, so neither can drift."""
+    owner, _, _ = _model()
+    words = {kind: ", ".join(listed) for kind, listed in tag_words().items()}
+    assert _setting(owner, "model").help_long == (
+        "  ACCOUNT@   the login to sign in as\n"
+        "  PROVIDER/  the provider; default: this one, else the first that serves it\n"
+        "  MODEL      a name, a family (neon), or a role (default, best, everyday,"
+        " utility)\n"
+        "  +TAG       any of, in any order:\n"
+        f"    size     {words['size']}, or a count (258k)\n"
+        f"    effort   {words['effort']}\n"
+        f"    tier     {words['tier']}\n"
+        "  What the line leaves out is kept from the model before."
+    )
+    for kind_words in tag_words().values():
+        for word in kind_words:
+            tags = ModelTags.parse(f"opus+{word}")
+            assert tags.model == "opus", word
+    assert "default" in tag_words()["tier"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_switch_keeps_the_account_chosen_before() -> None:
+    owner, _, catalog = _model()
+    assert await _apply(owner, "model.provider.account", "work") == "work"
+    with pytest.raises(UnknownModelError):
+        await _apply(owner, "model", "home@vendor/nope")
+    assert catalog.account == "work"
+    with pytest.raises(UnknownModelError):
+        await _apply(owner, "model", "vendor/nope")
+    assert catalog.account == "work"
+    with pytest.raises(ValueError, match="is not a name"):
+        await _apply(owner, "model.provider.account", "../x")
+    assert catalog.account == "work"
+    assert await _apply(owner, "model.provider.account", "default") == "default"
+
+
+@pytest.mark.asyncio
+async def test_each_thinking_axis_is_set_by_its_name() -> None:
+    owner, agent, _ = _model()
+    said = await _apply(owner, "model.thinking", "output=text")
+    assert said == "effort=high budget=none output=text"
+    assert agent.model.settings.thinking_output == "text"
+    with pytest.raises(ValueError, match=r"^effort: "):
+        await _apply(owner, "model.thinking", "effort==high")
+
+
+@pytest.mark.asyncio
+async def test_a_model_switched_back_to_has_its_choices_again() -> None:
+    owner, agent, _ = _model()
+    await _apply(owner, "model.thinking.effort", "low")
+    await _apply(owner, "model", "narrow")
+    await _apply(owner, "model", "wide")
+    assert agent.model.settings.thinking_effort == "low"
+
+
+def test_an_unordered_axis_has_no_closest_value() -> None:
+    capability = _WIDE
+    assert model_settings._closest(capability, "service_tier", "high") is None
+    assert model_settings._closest(capability, "service_tier", "5") is None
+    assert model_settings._closest(capability, "cache_ttl_sec", "1000") == 300.0
+
+
+def test_each_setting_shows_its_value_and_what_it_may_take() -> None:
+    owner, _, _ = _model()
+    shown = {
+        ".".join(s.name): (s.value() if s.value else "", tuple(s.options()))
+        for s in harvest([(("model",), owner)])
+    }
+    assert shown == {
+        "model": ("vendor/wide-1.0+fullcontext+highthink", ("wide-1.0", "narrow-1.0")),
+        "model.provider": ("vendor", ("vendor", "other")),
+        "model.provider.account": ("default", ("default",)),
+        "model.context": ("1m (default)", ("default", "smallcontext", "fullcontext")),
+        "model.thinking": ("effort=high budget=none output=none", ()),
+        "model.thinking.effort": (
+            "high (default)",
+            ("default", "none", "low", "high", "max"),
+        ),
+        "model.thinking.budget": ("none (default)", ("default", "none", "auto")),
+        "model.thinking.output": ("none (default)", ("default", "none", "text")),
+        "model.service_tier": ("auto (default)", ("default", "auto", "priority")),
+        "model.cache_ttl_sec": ("300 (default)", ("default", "300", "3600")),
+        "model.manage_context_server_side": (
+            "false (default)",
+            ("default", "false", "true"),
+        ),
+        "model.compaction": (
+            "bespoke (default)",
+            ("default", "bespoke", "provider"),
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_default_sets_what_a_fresh_model_starts_with_and_says_so() -> None:
+    owner, agent, catalog = _model()
+    await _apply(owner, "model", "work@vendor/wide+smallcontext+low+fast")
+    await _apply(owner, "model.cache_ttl_sec", "3600")
+    assert _value(owner, "model.thinking.effort") == "low"
+    for name in (
+        "model.context",
+        "model.thinking.effort",
+        "model.service_tier",
+        "model.cache_ttl_sec",
+        "model.provider.account",
+    ):
+        await _apply(owner, name, "default")
+    settings = agent.model.settings
+    assert (
+        settings.context_size.tokens,
+        settings.thinking_effort,
+        settings.service_tier,
+        settings.cache_ttl_sec,
+        catalog.account,
+    ) == (1_000_000, "high", "auto", 300.0, None)
+    assert _value(owner, "model.thinking.effort") == "high (default)"
+    said = await _apply(owner, "model.thinking", "effort=low budget=default")
+    assert said == "effort=low budget=none output=none"
+
+
+@pytest.mark.asyncio
+async def test_model_takes_an_account_and_tags_in_any_order() -> None:
+    owner, agent, catalog = _model()
+    said = await _apply(owner, "model", "work@vendor/wide+fast+258k+lowthink")
+    assert said == "work@vendor/wide-1.0+258k+lowthink+priority"
+    assert (catalog.account, agent.account) == ("work", "work")
+    assert agent.model.settings.context_size.tokens == 258_000
+
+
+@pytest.mark.asyncio
+async def test_a_bare_model_keeps_every_choice_it_does_not_name() -> None:
+    owner, agent, _ = _model()
+    await _apply(owner, "model.context", "smallcontext")
+    await _apply(owner, "model.thinking.effort", "low")
+    await _apply(owner, "model", "wide")
+    assert (
+        agent.model.settings.context_size.tokens,
+        agent.model.settings.thinking_effort,
+    ) == (
+        200_000,
+        "low",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_model_refused_leaves_the_model_and_account_as_they_were() -> None:
+    owner, agent, catalog = _model()
+    before = agent.model
+    with pytest.raises(UnknownModelError):
+        await _apply(owner, "model", "work@vendor/nope")
+    assert (agent.model, catalog.account) == (before, None)
+
+
+@pytest.mark.asyncio
+async def test_provider_keeps_the_model_or_takes_its_role_there() -> None:
+    owner, agent, _ = _model("narrow")
+    await _apply(owner, "model.provider", "vendor")
+    assert agent.model.capability.model_id == "narrow-1.0"
+    # ``other`` lacks ``narrow``, the vendor's default, so serves its own.
+    await _apply(owner, "model.provider", "other")
+    assert agent.model.capability.model_id == "other-1.0"
+
+
+@pytest.mark.asyncio
+async def test_account_offers_the_saved_logins_and_the_one_in_use() -> None:
+    saved = config_dir() / "rekursiv-ai" / "secrets" / "saving-home.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("{}")
+    catalog = ModelCatalog(factories=_signing_in)
+    owner = AgentModel(
+        agent=Agent(model=catalog["openai-sub"]["wide"]),
+        catalog=catalog,
+    )
+    setting = _setting(owner, "model.provider.account")
+    assert tuple(setting.options()) == ("default", "home")
+    await setting.apply("work")
+    assert tuple(setting.options()) == ("default", "home", "work")
+    # Another provider's logins are its own: ``vendor`` keeps none.
+    await _apply(owner, "model", "vendor/wide")
+    assert tuple(setting.options()) == ("default", "work")
+
+
+async def _inherit(owner: AgentModel, name: str, args: str) -> str:
+    inherit = _setting(owner, name).inherit
+    assert inherit is not None
+    return await inherit(args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "given", "taken"),
+    [
+        ("model.thinking.effort", "max", "max"),
+        ("model.thinking.effort", "xhigh", "high"),
+        ("model.thinking.effort", "medium", "low"),
+        ("model.cache_ttl_sec", "1000", "300"),
+        ("model.cache_ttl_sec", "3000", "3600"),
+        ("model.thinking.budget", "fixed", "none"),
+        ("model.service_tier", "flex", "auto"),
+    ],
+)
+async def test_an_inherited_choice_takes_the_closest_this_model_offers(
+    name: str,
+    given: str,
+    taken: str,
+) -> None:
+    owner, _, _ = _model()
+
+    said = await _inherit(owner, name, given)
+
+    assert said.removesuffix(" (default)") == taken
+
+
+def _owner(capability: ModelCapability) -> AgentModel:
+    """Return the settings of an agent on ``capability``, its only model."""
+    catalog = ModelCatalog(
+        factories={
+            "one": partial(
+                ScriptedProvider,
+                models=ModelTable(
+                    rows=(capability,),
+                    roles={"default": capability.model_id},
+                ),
+            ),
+        },
+    )
+    return AgentModel(
+        agent=Agent(model=catalog["one"][capability.model_id]),
+        catalog=catalog,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unordered_choice_this_model_lacks_takes_its_default() -> None:
+    """Not its lowest value: the default a fresh model of it starts with."""
+    windowed = _windowed("auto-first", 200_000)
+    owner = _owner(
+        replace(
+            windowed,
+            thinking_effort=frozenset({"none", "high"}),
+            thinking_budget=frozenset({"none", "auto"}),
+            default=replace(windowed.default, thinking_budget="auto"),
+        ),
+    )
+
+    said = await _inherit(owner, "model.thinking.budget", "fixed")
+
+    assert said == "auto (default)"
+
+
+@pytest.mark.asyncio
+async def test_an_inherited_thinking_takes_the_closest_on_each_axis() -> None:
+    owner, agent, _ = _model()
+
+    said = await _inherit(owner, "model.thinking", "effort=xhigh budget=fixed")
+
+    assert said == "effort=high budget=none output=none"
+    assert agent.model.settings.thinking_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_an_effort_too_high_for_thinking_off_turns_thinking_on() -> None:
+    capped = replace(
+        _WIDE,
+        thinking_off_max_effort="high",
+        default=replace(_WIDE.default, thinking_budget="auto"),
+    )
+    owner = _owner(capped)
+    await _apply(owner, "model.thinking.budget", "none")
+    assert await _apply(owner, "model.thinking.effort", "max") == "max"
+    assert _value(owner, "model.thinking") == "effort=max budget=auto output=none"
+    await _apply(owner, "model.thinking", "effort=high budget=none")
+    said = await _inherit(owner, "model.thinking.effort", "max")
+    assert (said, _value(owner, "model.thinking.budget")) == ("max", "auto (default)")
+    with pytest.raises(ValueError, match="allowed: thinking_effort up to 'high'"):
+        await _apply(owner, "model.thinking", "effort=max budget=none")
+
+
+@pytest.mark.asyncio
+async def test_a_model_without_reasoning_inherits_none() -> None:
+    owner, _, _ = _model("narrow")
+    assert (await _inherit(owner, "model.thinking.effort", "max")).startswith("none")
+
+
+class _Saving(ScriptedProvider):
+    """A provider keeping its logins with the user's secrets, as ``saving.json``."""
+
+    async def login(self, *, headless: bool = False) -> None:
+        del headless
+
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "saving.json")
+
+
+def _signing_in(account: str | None) -> dict[str, ProviderFactory]:
+    """Return ``openai-sub``, which keeps named logins, and ``vendor``, which does not."""
+    del account
+    table = ModelTable(rows=(_WIDE,), roles={"default": "wide"})
+    return {
+        "openai-sub": partial(_Saving, models=table),
+        "vendor": partial(ScriptedProvider, models=table),
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_moves_the_model_onto_it_or_changes_nothing() -> None:
+    owner, agent, catalog = _model()
+    before = agent.model
+    assert await _apply(owner, "model.provider.account", "work") == "work"
+    assert (catalog.account, agent.account, agent.model is before) == (
+        "work",
+        "work",
+        False,
+    )
+    with pytest.raises(ValueError, match="is not a name"):
+        await _apply(owner, "model.provider.account", "../x")
+    assert catalog.account == "work"
+
+
+@pytest.mark.asyncio
+async def test_an_account_whose_provider_lacks_the_model_changes_nothing() -> None:
+    """The account ``spare`` serves no ``wide``; the switch fails, the account stays."""
+
+    def per_account(account: str | None) -> dict[str, ProviderFactory]:
+        rows = (_NARROW,) if account == "spare" else (_WIDE, _NARROW)
+        table = ModelTable(rows=rows, roles={"default": "narrow"})
+        return {"vendor": partial(ScriptedProvider, models=table)}
+
+    catalog = ModelCatalog(factories=per_account)
+    agent = Agent(model=catalog["vendor"]["wide"])
+    owner = AgentModel(agent=agent, catalog=catalog)
+    before = agent.model
+
+    with pytest.raises(ValueError, match="wide"):
+        await _apply(owner, "model.provider.account", "spare")
+
+    assert (catalog.account, agent.model) == (None, before)
+    await _apply(owner, "model.provider.account", "work")
+    with pytest.raises(ValueError, match="wide"):
+        await _apply(owner, "model.provider.account", "spare")
+    assert catalog.account == "work"
+
+
+@pytest.mark.asyncio
+async def test_context_takes_a_price_band_or_a_count() -> None:
+    owner, agent, _ = _model()
+    assert await _apply(owner, "model.context", "+258k") == "258k"
+    assert agent.model.settings.context_size.tokens == 258_000
+    assert await _apply(owner, "model.context", "smallcontext") == "200k"
+    assert agent.model.settings.context_size.tokens == 200_000
+    assert await _apply(owner, "model.context", "fullcontext") == "1m (default)"
+    assert await _apply(owner, "model.context", "small") == "200k"
+    assert await _apply(owner, "model.context", "default") == "1m (default)"
+    assert agent.model.settings.context_size.tokens == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_thinking_sets_its_axes_together_or_not_at_all() -> None:
+    owner, agent, _ = _model()
+    said = await _apply(owner, "model.thinking", "effort=low budget=auto")
+    assert said == "effort=low budget=auto output=none"
+    message = "'fixed' is not one of: none, auto"
+    with pytest.raises(ValueError, match=f"^budget: {re.escape(message)}$"):
+        await _apply(owner, "model.thinking", "effort=max budget=fixed")
+    assert agent.model.settings.thinking_effort == "low"
+    with pytest.raises(
+        ValueError,
+        match=r"^give AXIS=VALUE for effort, budget, output",
+    ):
+        await _apply(owner, "model.thinking", "speed=fast")
+    with pytest.raises(
+        ValueError,
+        match=r"^give AXIS=VALUE for effort, budget, output$",
+    ):
+        await _apply(owner, "model.thinking", "")
+
+
+@pytest.mark.asyncio
+async def test_an_axis_takes_only_what_the_model_offers() -> None:
+    owner, agent, _ = _model()
+    assert await _apply(owner, "model.thinking.effort", "MAX") == "max"
+    assert await _apply(owner, "model.cache_ttl_sec", "3600") == "3600"
+    assert await _apply(owner, "model.manage_context_server_side", "true") == "true"
+    assert await _apply(owner, "model.service_tier", "priority") == "priority"
+    assert await _apply(owner, "model.compaction", "provider") == "provider"
+    settings = agent.model.settings
+    assert (
+        settings.cache_ttl_sec,
+        settings.manage_context_server_side,
+        settings.compaction,
+    ) == (3600.0, True, "provider")
+    message = "'xhigh' is not one of: none, low, high, max"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        await _apply(owner, "model.thinking.effort", "xhigh")
+
+
+@pytest.mark.asyncio
+async def test_an_effort_or_tier_takes_its_tag_too() -> None:
+    owner, _, _ = _model()
+    assert await _apply(owner, "model.thinking.effort", "LowThink") == "low"
+    assert await _apply(owner, "model.service_tier", "fast") == "priority"
+    said = await _apply(owner, "model.thinking", "effort=maxthink")
+    assert said == "effort=max budget=none output=none"
+    assert await _inherit(owner, "model.thinking.effort", "xhighthink") == (
+        "high (default)"
+    )
+
+
+def test_every_effort_is_a_tag() -> None:
+    _, agent, _ = _model()
+    model = agent.model
+    model.settings = replace(model.settings, thinking_effort="max")
+    assert (
+        str(
+            ModelTags.from_settings(
+                model.capability,
+                model.settings,
+                provider="vendor",
+                account="work",
+            ),
+        )
+        == "work@vendor/wide-1.0+fullcontext+maxthink"
+    )
+
+
+def test_model_shows_only_the_choices_that_differ_from_the_default() -> None:
+    _, agent, _ = _model()
+    model = agent.model
+    model.settings = replace(
+        model.settings,
+        thinking_budget="auto",
+        thinking_output="text",
+        cache_ttl_sec=3600.0,
+        manage_context_server_side=True,
+    )
+    assert str(
+        ModelTags.from_settings(model.capability, model.settings, provider="vendor"),
+    ) == (
+        "vendor/wide-1.0+fullcontext+highthink budget=auto output=text cache_ttl_sec=3600"
+        " manage_context_server_side=true"
+    )
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

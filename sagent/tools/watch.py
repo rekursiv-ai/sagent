@@ -1,0 +1,243 @@
+"""What a watcher sees of the agent it watches: what the user sees, record numbers on.
+
+The feed carries what the user typed, what the agent said, and each tool call,
+by the tool's own summary. Everything else is a one-line stub: a compaction, a
+clear, a settings change, a system note, each with the record number that
+AgentSession opens with ``agent=label``, ``action="read"``, and ``records=[n]``.
+Tool results and reasoning are left out; their record numbers follow their call's.
+
+It goes when the watched agent idles, and at once when it compacts, clears,
+fails, or is halted; a halt names who asked, ``[halted by user]`` or
+``[halted by <label>]``. An idle after work ends it ``[idle: <label> does nothing
+until messaged]``; an idle the agent is woken from at once, as by a nudge,
+sends what is new without that line.
+
+Typical usage example:
+
+  feed = Feed(team=team, watched="Agent", watcher="watcher")
+  team["Agent"].runtime.observers.append(feed)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from sagent.agent.team import Team
+from sagent.journal.types import (
+    AgentIdle,
+    AgentMessage,
+    AssistantMessage,
+    Cancelled,
+    ContextClear,
+    ContextCompaction,
+    Failed,
+    ModelIdle,
+    SessionContext,
+    Succeeded,
+    SystemMessage,
+    ToolCall,
+    UserMessage,
+)
+from sagent.runtime import types
+from sagent.runtime.exceptions import describe, local_time
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from sagent.journal.types import SessionRecord
+    from sagent.tools.types import Tool
+
+
+__all__ = [
+    "Feed",
+    "lines",
+]
+
+
+def lines(
+    records: Sequence[SessionRecord],
+    *,
+    start: int,
+    label: str,
+    tools: Mapping[str, Tool],
+) -> list[str]:
+    """Return what a watcher reads of ``records``, the first numbered ``start``.
+
+    Args:
+      records: The watched agent's records, oldest first.
+      start: The record number of the first.
+      label: The watched agent, who says what it says.
+      tools: Its tools, whose summaries name its calls.
+
+    Returns:
+      lines: One per message or call, or stub; none for results or reasoning.
+
+    """
+    out: list[str] = []
+    for n, record in enumerate(records, start):
+        match record:
+            case UserMessage(sender=None, content=content):
+                out.append(f"> user: {content or ''}")
+            case (
+                UserMessage(sender=sender, content=content)
+                | AgentMessage(
+                    sender=sender,
+                    content=content,
+                )
+            ):
+                out.append(f"> {sender}: {content or ''}")
+            case AssistantMessage(content=str() as content) if content:
+                out.append(f"{label}: {content}")
+            case ToolCall(name=name, arguments=arguments):
+                tool = tools.get(name)
+                out.append(
+                    f"  r{n} {tool.summary(arguments) if tool is not None else name}",
+                )
+            case ContextCompaction():
+                out.append(f"r{n} [compact]")
+            # Record 0 opens every session; it changes nothing.
+            case ContextClear(summary=summary) if n > 0:
+                out.append(f"r{n} [{'clear' if summary is None else 'summary'}]")
+            case SessionContext():
+                out.append(f"r{n} [settings: {_settings(record)}]")
+            case SystemMessage(subtype=subtype, content=content):
+                out.append(f"r{n} [{subtype or 'system'}] {_short(content)}")
+            case _:
+                continue
+    return out
+
+
+@dataclass(slots=True, kw_only=True, eq=False)
+class Feed:
+    """Sends a watcher what is new of the agent it watches; an observer of that agent."""
+
+    team: Team
+    watched: str
+    watcher: str
+    sent: int = 0
+    """How many of the watched agent's records have gone."""
+
+    pending: list[str] = field(default_factory=list[str])
+    """What the runtime said that its records do not, held for the next send."""
+
+    worked: bool = False
+    """Whether the model answered since the last idle the agent stayed in."""
+
+    halter: str | None = None
+    """Who asked for the halt being heard; ``None`` for the user, or no halt."""
+
+    cut_short: bool = False
+    """Whether the turn ended cancelled, its cause, a halt or a clear, still untold."""
+
+    # Observers run in order, the team's first: one that wakes the agent as it
+    # idles has queued the wake by now.
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Send what is new when ``event`` calls for it."""
+        ended = (
+            event.outcome if isinstance(event, types.ModelResponseCompleted) else None
+        )
+        if isinstance(ended, Succeeded):
+            self.worked = True
+            return
+        if isinstance(event, types.ModelHalt):
+            self.halter = event.sender
+            return
+        stopped = event.outcome if isinstance(event, ModelIdle) else None
+        # A turn ends cancelled before the runtime says what cancelled it: a halt's
+        # end, or a clear's, which its ``[clear]`` record tells.
+        if isinstance(stopped, Cancelled):
+            self.cut_short = True
+            return
+        if isinstance(event, types.ModelHaltCompleted):
+            halter, self.halter = self.halter, None
+            if not self.cut_short:
+                return
+            self.cut_short = False  # pragma: no mutate[truthiness] -- Only the halt check reads it, as truth.
+            self.pending.append(f"[halted by {halter or 'user'}]")
+        elif isinstance(stopped, Failed):
+            self.pending.append(f"[failed] {describe(stopped.exception)}")
+        elif isinstance(event, types.ModelResponseSuspended):
+            if not event.opens_a_quota_wait:
+                return
+            self.pending.append(
+                f"[waiting until {local_time(event.retry_at)}]"
+                f" {describe(event.exception)}",
+            )
+        elif isinstance(event, AgentIdle):
+            agent = self.team.get(self.watched)
+            # Woken again at once, as by a nudge: what it did goes, not the idle.
+            if agent is not None and not agent.runtime.inbox.empty():
+                self.send()
+                return
+            if self.worked:
+                self.worked = False  # pragma: no mutate[truthiness] -- Only the idle check reads it, as truth.
+                self.pending.append(
+                    f"[idle: {self.watched} does nothing until messaged]",
+                )
+        elif isinstance(event, types.SessionClearCompleted):
+            self.cut_short = False  # pragma: no mutate[truthiness] -- Only the halt check reads it, as truth.
+        elif not (
+            isinstance(event, types.SessionCompactCompleted)
+            and isinstance(event.outcome, Succeeded)
+        ):
+            return
+        self.send()
+
+    def send(self, before: str = "") -> None:
+        """Send ``before``, then what the watcher has not yet seen, if anything.
+
+        Args:
+          before: Text that leads the message, such as the instructions.
+
+        """
+        team = self.team
+        if (
+            not team.watching.get(self.watcher, False)
+            or self.watcher not in team
+            or self.watched not in team
+        ):
+            return
+        agent = team[self.watched]
+        records = list(agent.session.history(self.sent))
+        new = [
+            *lines(
+                records,
+                start=self.sent,
+                label=self.watched,
+                tools=agent.tools,
+            ),
+            *self.pending,
+        ]
+        self.sent += len(records)
+        self.pending.clear()
+        if not new and not before:
+            return
+        watched = f"[watch]\n{chr(10).join(new)}" if new else ""
+        team[self.watcher].runtime.push(
+            AgentMessage(
+                sender=self.watched,
+                recipient=self.watcher,
+                content="\n\n".join(p for p in (before, watched) if p),
+            ),
+        )
+
+
+def _settings(record: SessionContext) -> str:
+    """Return what ``record`` set, such as ``model=opus, effort=high``."""
+    named = {
+        "user": record.user,
+        "model": record.model,
+        "effort": record.effort,
+        "cwd": record.cwd,
+        "tools": ", ".join(record.tools) if record.tools is not None else None,
+        "AGENTS.md": "changed" if record.agents_md is not None else None,
+    }
+    return ", ".join(f"{k}={v}" for k, v in named.items() if v is not None)
+
+
+def _short(text: str | None, chars: int = 80) -> str:
+    """Return ``text`` on one line, cut to ``chars``."""
+    one = " ".join((text or "").split())
+    return one if len(one) <= chars else f"{one[: chars - 1]}…"

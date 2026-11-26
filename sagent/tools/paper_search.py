@@ -1,263 +1,250 @@
-"""PaperSearch tool - text search across scholarly backends.
+"""PaperSearch: text search across scholarly backends.
 
-Thin adapter over :func:`wesearch.paper.search`: the tool owns schema,
-arg validation, the process result cache, and text rendering; the library owns
-every backend, reciprocal-rank fusion, and per-source cross-process rate
-limiting.
+The tool owns its arguments, a result cache, and rendering; ``wesearch``
+owns every backend, rank fusion, and per-source rate limits.
+
+Typical usage example:
+
+  result = await settled(PaperSearch().call(context, {"query": "diffusion models"}))
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 
-from treekle import PlainTree, from_plain, immutable
-from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
-from wesearch.paper.render import (
-    format_record,
-    truncation_notice,
-)
+from wesearch.paper.render import format_record, truncation_notice
 from wesearch.paper.search import Source, search
+from wesearch.types.errors import BotDetectionError
 
 import cachetools
 
-from sagent.tools.core import load_tool_description, opt_int
-from sagent.tools.paper_common import (
-    validate_abstract_chars,
-    validate_limit,
-    validate_year_range,
+from sagent.journal.types import PaperSearchResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import (
+    Arg,
+    ToolOutput,
+    ToolStreamingResult,
+    json_schema,
+    parse,
+    whole_output,
 )
-from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from wesearch.paper.types import PaperRecord
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-_VALID_SOURCES: Final[tuple[Source, ...]] = (
-    "s2",
-    "openalex",
-    "searxng",
-    "fused",
-)
-
-# Search results are stable on an agent's timescale; the cache collapses
-# duplicate queries within a process (sparing the shared gates), bounded by
-# capacity rather than a staleness window.
-_cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
+__all__ = [
+    "PaperSearch",
+]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PaperSearch:
-    """Text search over scholarly literature."""
+    """Search the scholarly literature by text."""
 
-    name: str = "PaperSearch"
-    tool_id: str = "application/x-tool-papersearch"
-    clearable_results: bool = True
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
 
-    @property
-    def description(self) -> str:
-        """Return the tool description, re-evaluating ``{{NOW}}`` each access."""
-        return load_tool_description("PaperSearch")
+        query: Annotated[
+            str,
+            "Free-form text. Every backend matches title/abstract text, NOT author"
+            " names -- an author surname in the query can yield zero hits. To"
+            " search by author, use the PaperAuthor tool.",
+        ]
+        source: Annotated[
+            Source,
+            "'fused' (default): reciprocal-rank-fuse Semantic Scholar + OpenAlex,"
+            " resilient to either being down. 's2': Semantic Scholar only (precise"
+            " ranking, but rate-limited and no author-name matching). 'openalex':"
+            " OpenAlex only (no key, broad coverage, author search). 'searxng':"
+            " self-hosted SearXNG science metasearch (adds PubMed, Crossref, arXiv"
+            " breadth; no citation graph, best-effort year/OA filtering).",
+        ] = "fused"
+        limit: Annotated[
+            int | None,
+            "Max hits. Omit to let the backend decide its default page. In fused"
+            " mode, applies to the merged set.",
+            Arg(minimum=1),
+        ] = None
+        year_from: Annotated[
+            int | None,
+            "Inclusive lower bound on publication year.",
+            Arg(minimum=0),
+        ] = None
+        year_to: Annotated[
+            int | None,
+            "Inclusive upper bound on publication year.",
+            Arg(minimum=0),
+        ] = None
+        open_access_only: Annotated[
+            bool,
+            "Restrict to papers with a known open-access PDF.",
+        ] = False
+        abstract_chars: Annotated[
+            int | None,
+            "Truncate every abstract to this many characters. Omit for full abstracts.",
+            Arg(minimum=1),
+        ] = None
 
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Free-form text. Every backend matches title/abstract "
-                        "text, NOT author names -- an author surname in the "
-                        "query can yield zero hits. To search by author, use "
-                        "the PaperAuthor tool."
-                    ),
-                },
-                "source": {
-                    "type": "string",
-                    "enum": list(_VALID_SOURCES),
-                    "description": (
-                        "'fused' (default): reciprocal-rank-fuse Semantic "
-                        "Scholar + OpenAlex, resilient to either being down. "
-                        "'s2': Semantic Scholar only (precise ranking, but "
-                        "rate-limited and no author-name matching). 'openalex': "
-                        "OpenAlex only (no key, broad coverage, author search). "
-                        "'searxng': self-hosted SearXNG science metasearch "
-                        "(adds PubMed, Crossref, arXiv breadth; no citation "
-                        "graph, best-effort year/OA filtering)."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Max hits. Omit to let the backend decide its default "
-                        "page. In fused mode, applies to the merged set."
-                    ),
-                },
-                "year_from": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Inclusive lower bound on publication year.",
-                },
-                "year_to": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Inclusive upper bound on publication year.",
-                },
-                "open_access_only": {
-                    "type": "boolean",
-                    "description": ("Restrict to papers with a known open-access PDF."),
-                },
-                "abstract_chars": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Truncate every abstract to this many characters. "
-                        "Must be ≥ 1. Omit for full abstracts."
-                    ),
-                },
-            },
-            "required": ["query"],
-        },
+    name = "PaperSearch"
+    description = (files(__package__) / "assets" / "papersearch.md").read_text(
+        encoding="utf-8",
     )
+    schema = json_schema(Arguments)
 
-    def __init__(self, *, session: FetchSession | None = None) -> None:
-        self.session = FetchSession() if session is None else session
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation.
+    # Results are stable on an agent's timescale; the cache spares the shared
+    # rate gates a repeated query.
+    cache: cachetools.LRUCache[tuple[object, ...], str] = field(
+        default_factory=lambda: cachetools.LRUCache[tuple[object, ...], str](
+            maxsize=1024,
+        ),
+        repr=False,
+    )
+    """Rendered results, by query and filters."""
 
-        Args:
-          args: Invocation arguments containing the query and source.
-
-        Returns:
-          label: Display label naming the query and non-default source.
-
-        """
-        query = str(args.get("query", "")).strip()
-        source = str(args.get("source", "") or "fused")
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``PaperSearch '<query>'``, and the source when not fused."""
+        query = str(arguments.get("query", "")).strip()
+        source = str(arguments.get("source") or "fused")
         label = f"PaperSearch {query!r}" if query else "PaperSearch"
-        if source != "fused":
-            label += f" ({source})"
-        return label
+        return label if source == "fused" else f"{label} ({source})"
 
-    def prompt(self) -> str:
-        """Return supplemental system-prompt text (none)."""
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: independent network fetch, no serialization."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: searches are independent."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute a paper search and return formatted results.
+    def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolStreamingResult[PaperSearchResult, str, str]:
+        """Search for ``query`` with the filters given.
 
         Args:
-          args: Search query and optional source, limits, and filters.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``PaperSearch.Arguments``.
 
         Returns:
-          result: Formatted search results or a validation error.
+          streaming_result: One paper per line, or why there are none.
+
+        Raises:
+          ValueError: The query is empty, or the years are inverted.
 
         """
-        query = str(args.get("query", ""))
-        source = str(args.get("source", "fused") or "fused")
-        limit = validate_limit(opt_int(args, "limit"))
-        if isinstance(limit, ToolResult):
-            return limit
-        year_from = opt_int(args, "year_from")
-        year_to = opt_int(args, "year_to")
-        year_error = validate_year_range(year_from, year_to)
-        if year_error is not None:
-            return year_error
-        open_access_only = from_plain(args.get("open_access_only"), bool, default=False)
-        cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
-        if isinstance(cap, ToolResult):
-            return cap
-        q = query.strip()
-        if not q:
-            return ToolResult(call_id="", content="'query' is required.", is_error=True)
-        src = source.strip().lower()
-        if src not in _VALID_SOURCES:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid source {source!r}. Valid: {', '.join(_VALID_SOURCES)}."
-                ),
-                is_error=True,
+        return whole_output(self._run(context, arguments))
+
+    async def _run(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> ToolOutput[PaperSearchResult, str, str]:
+        a = parse(arguments, PaperSearch.Arguments)
+        query = a.query.strip()
+        if not query:
+            raise ValueError("'query' is required.")
+        if (
+            a.year_from is not None
+            and a.year_to is not None
+            and a.year_from > a.year_to
+        ):
+            raise ValueError(
+                f"'year_from' ({a.year_from}) must not exceed 'year_to' ({a.year_to}).",
             )
-
-        cache_key = (
-            "search",
-            src,
-            q,
-            limit,
-            year_from,
-            year_to,
-            open_access_only,
-            cap,
+        key = (
+            a.source,
+            query,
+            a.limit,
+            a.year_from,
+            a.year_to,
+            a.open_access_only,
+            a.abstract_chars,
         )
-        cached = _cache.get(cache_key)
+        cached = self.cache.get(key)
         if cached is not None:
-            return ToolResult(call_id="", content=cached)
-
+            return ToolOutput(stdout=(cached,), result=PaperSearchResult(query=a.query))
         try:
-            result = await asyncio.to_thread(
+            found = await asyncio.to_thread(
                 search,
-                q,
-                source=src,
-                limit=limit,
-                year_from=year_from,
-                year_to=year_to,
-                open_access_only=open_access_only,
-                session=self.session,
+                query,
+                source=a.source,
+                limit=a.limit,
+                year_from=a.year_from,
+                year_to=a.year_to,
+                open_access_only=a.open_access_only,
+                session=context.fetch_session,
+            )
+        except BotDetectionError as e:
+            return ToolOutput(
+                stderr=(
+                    (
+                        f"{_named(a.source)} returned a CAPTCHA: {e}. The scraping IP"
+                        " is rate-limited; retry later, change egress IP, or use"
+                        " another source."
+                    ),
+                ),
+                result=PaperSearchResult(exit_code=1),
             )
         except PaperError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-
-        text = self._render(result.records, result.total, limit, cap)
-        text += _empty_hint(result.records, q)
-        if result.complete:
-            _cache[cache_key] = text
-        return ToolResult(call_id="", content=text)
-
-    def _render(
-        self,
-        hits: list[PaperRecord],
-        total: int,
-        limit: int | None,
-        abstract_chars: int | None,
-    ) -> str:
-        """Format search hits as newline-joined text with truncation notice."""
-        shown = hits if limit is None else hits[:limit]
-        if not shown:
-            return "(no results)"
-        lines = [format_record(r, abstract_chars=abstract_chars) for r in shown]
-        return "\n".join(lines) + truncation_notice(len(shown), total)
-
-
-def _empty_hint(hits: list[PaperRecord], query: str) -> str:
-    """Guidance appended when a search returned nothing."""
-    hint = ""
-    if not hits and len(query.split()) > 1:
-        # Every backend ANDs query terms against title/abstract, so a
-        # multi-term query zeroes out when one rare term has no co-occurring
-        # paper. Dropping terms is the only cross-backend way to broaden.
-        hint += (
-            "\nNote: every query term must appear in a paper's title/abstract "
-            "(terms are AND-ed). A zero result usually means one specific term "
-            "has no match -- drop the most specific term and retry to broaden."
+            return ToolOutput(stderr=(str(e),), result=PaperSearchResult(exit_code=1))
+        shown = found.records if a.limit is None else found.records[: a.limit]
+        text = (
+            "\n".join(format_record(r, abstract_chars=a.abstract_chars) for r in shown)
+            + truncation_notice(len(shown), found.total)
+            if shown
+            else "(no results)" + _empty_hint(query)
         )
-    if not hits:
-        # Every backend ranks against title/abstract tokens, not author names.
-        hint += (
-            "\nNote: paper search matches title/abstract text, not author names "
-            "(true for every source). If your query was an author name, use the "
-            "PaperAuthor tool instead."
-        )
-    return hint
+        if found.complete:
+            self.cache[key] = text
+        return ToolOutput(stdout=(text,), result=PaperSearchResult(query=a.query))
+
+
+# A source with no name here is named by its words: ``some_source`` is ``Some Source``.
+def _named(source: str) -> str:
+    """Return the name a user knows ``source`` by."""
+    match source:
+        case "s2":
+            return "Semantic Scholar"
+        case "openalex":
+            return "OpenAlex"
+        case "searxng":
+            return "SearXNG"
+        case "fused":
+            return "Semantic Scholar or OpenAlex"
+        case _:
+            return source.replace("_", " ").title()
+
+
+# Every backend ANDs the terms against title and abstract, so one rare term
+# zeroes a query; and none matches author names.
+def _empty_hint(query: str) -> str:
+    """Return the advice given with an empty result."""
+    hint = (
+        "\nNote: every query term must appear in a paper's title/abstract (terms are"
+        " AND-ed). A zero result usually means one specific term has no match --"
+        " drop the most specific term and retry to broaden."
+        if len(query.split()) > 1
+        else ""
+    )
+    return hint + (
+        "\nNote: paper search matches title/abstract text, not author names (true"
+        " for every source). If your query was an author name, use the PaperAuthor"
+        " tool instead."
+    )

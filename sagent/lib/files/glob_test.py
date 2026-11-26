@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
 
+import os
 import shutil
 import subprocess
+import threading
 
 import pytest
 
-from sagent.lib.files.glob import GlobError, fd_command, glob
+from sagent.lib.files import glob as files_glob
+from sagent.lib.files.glob import (
+    GlobError,
+    fd_command,
+    glob,
+    in_path_order,
+    streamed_paths,
+)
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
+    from collections.abc import Callable
 
 
 @pytest.fixture(autouse=True)
-def backend(fd: bool) -> Iterator[None]:
+def backend(fd: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide ``fd`` unless the test runs against it."""
     found = shutil.which("fd") or shutil.which("fdfind")
     if fd and found is None:
@@ -31,8 +39,8 @@ def backend(fd: bool) -> Iterator[None]:
     # A test for the fd backend must reach it, whatever the entry cap says;
     # without this the in-process walk answers every small tree and the ``fd``
     # parameter tests nothing.
-    with patch("shutil.which", which), patch("sagent.lib.files.glob._FD_ENTRIES", -1):
-        yield
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", -1)
 
 
 @pytest.fixture
@@ -138,6 +146,36 @@ def test_a_symlinked_prefix_is_never_descended(tmp_path: Path) -> None:
     assert glob(tmp_path, "real/*") == [tmp_path / "real" / "x.py"]
 
 
+@_BOTH
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("build/*", ["build/gen.py"]),
+        ("build/**/*.py", ["build/gen.py"]),
+        ("linked/*.py", ["linked/c.py"]),
+        (".venv/*.py", [".venv/site.py"]),
+        ("*.py", ["a.py", "link.py"]),
+        ("nosuch/*", []),
+    ],
+    ids=["ignored", "ignored-deep", "symlinked", "hidden", "the-root", "missing"],
+)
+def test_an_absolute_pattern_enters_its_directory_as_a_root_is_entered(
+    tmp_path: Path,
+    pattern: str,
+    expected: list[str],
+) -> None:
+    """The directory it spells out is named, as ``root`` is, not judged as a prefix.
+
+    The ``root`` given is passed over, even one that does not exist.
+    """
+    (tmp_path / "repo").mkdir()
+    root = _tree(tmp_path / "repo")
+    (root / "linked").symlink_to(root / "sub")
+    assert glob(tmp_path / "nowhere", f"{root}/{pattern}") == [
+        root / name for name in expected
+    ]
+
+
 def test_a_prefix_is_not_satisfied_by_a_root_sharing_its_name(
     tmp_path: Path,
 ) -> None:
@@ -150,24 +188,88 @@ def test_a_prefix_is_not_satisfied_by_a_root_sharing_its_name(
     assert glob(root, "build/*") == []
 
 
-def test_an_entry_that_vanished_since_the_walk_stays_listed(tmp_path: Path) -> None:
+def test_an_entry_that_vanished_since_the_walk_stays_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A failed ``lstat`` is a race, not a directory, so the name is still named."""
     (tmp_path / "gone.py").write_text("")
-    with patch("pathlib.Path.lstat", side_effect=OSError):
+
+    def vanished(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", vanished)
         assert glob(tmp_path, "*.py") == [tmp_path / "gone.py"]
 
 
+def test_the_walk_hands_off_to_fd_only_past_the_entry_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Up to ``_FD_ENTRIES`` entries below the root, the walk's answer stands."""
+    for i in range(3):
+        (tmp_path / f"{i}.py").write_text("")
+
+    def which(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    ran_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def ran(*args: object, **kwargs: object) -> object:
+        ran_calls.append((args, kwargs))
+        return list[Path]()
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 3)
+    monkeypatch.setattr(files_glob, "_glob_fd", ran)
+    assert glob(tmp_path, "**/*.py") == [tmp_path / f"{i}.py" for i in range(3)]
+    assert ran_calls == []
+    (tmp_path / "3.py").write_text("")
+    assert glob(tmp_path, "**/*.py") == []
+    assert len(ran_calls) == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_a_bounded_glob_never_reads_below_its_depth(tmp_path: Path) -> None:
+    """An unreadable directory past the pattern's depth cannot fail the glob."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.py").write_text("")
+    (tmp_path / "sub" / "b.py").write_text("")
+    locked = [tmp_path / "locked", tmp_path / "sub" / "locked"]
+    for directory in locked:
+        directory.mkdir()
+        directory.chmod(0)
+    try:
+        assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
+        assert glob(tmp_path, "sub/*.py") == [tmp_path / "sub" / "b.py"]
+    finally:
+        for directory in locked:
+            directory.chmod(0o700)
+
+
+def test_a_parent_segment_does_not_opt_into_hidden_entries(tmp_path: Path) -> None:
+    """``..`` starts with a dot but names a directory, not a hidden entry."""
+    root = _tree(tmp_path)
+    assert glob(root, f"{root}/sub/../*") == [
+        root / "sub" / ".." / name for name in ("a.py", "b.txt", "link.py")
+    ]
+
+
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_either_side_of_the_entry_limit_answers_alike(tmp_path: Path) -> None:
+def test_either_side_of_the_entry_limit_answers_alike(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Over ``_FD_ENTRIES`` the in-process walk gives up and fd finishes instead."""
     for i in range(6):
         (tmp_path / f"pkg{i}").mkdir()
         (tmp_path / f"pkg{i}" / f"mod{i}.py").write_text("")
     expected = [tmp_path / f"pkg{i}" / f"mod{i}.py" for i in range(6)]
-    with patch("sagent.lib.files.glob._FD_ENTRIES", 2):
-        assert glob(tmp_path, "**/*.py") == expected
-    with patch("sagent.lib.files.glob._FD_ENTRIES", 10_000):
-        assert glob(tmp_path, "**/*.py") == expected
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 2)
+    assert glob(tmp_path, "**/*.py") == expected
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", 10_000)
+    assert glob(tmp_path, "**/*.py") == expected
 
 
 @_BOTH
@@ -198,6 +300,7 @@ def test_a_root_reached_through_a_symlink_names_files_under_that_spelling(
         ("**/[ab].[pt]*", ["a.py", "b.txt"]),
         ("**/.venv/**/*.py", [".venv/site.py"]),
         ("*/**", ["sub/c.py"]),
+        ("**a.py", ["a.py"]),
     ],
     ids=[
         "braces",
@@ -211,6 +314,7 @@ def test_a_root_reached_through_a_symlink_names_files_under_that_spelling(
         "two-classes",
         "two-globstars",
         "globstar-after-a-wildcard",
+        "globstar-inside-a-name",
     ],
 )
 def test_every_glob_metacharacter_reads_as_fd_reads_it(
@@ -234,11 +338,23 @@ def test_a_leading_bracket_in_a_class_is_a_member_not_the_close(
 
 
 @_BOTH
-def test_a_negated_class_may_hold_the_bracket_itself(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bang", ["!", "^"])
+def test_a_negated_class_may_hold_the_bracket_itself(
+    tmp_path: Path,
+    bang: str,
+) -> None:
     """``[!]]`` is "anything but ``]``", so the close sits past the negation."""
     (tmp_path / "]").write_text("")
     (tmp_path / "x").write_text("")
-    assert glob(tmp_path, "**/[!]]") == [tmp_path / "x"]
+    assert glob(tmp_path, f"**/[{bang}]]") == [tmp_path / "x"]
+
+
+@_BOTH
+def test_a_backslash_in_a_class_is_a_member(tmp_path: Path) -> None:
+    r"""``[\]`` names ``\`` itself, as fd reads it."""
+    (tmp_path / "\\").write_text("")
+    (tmp_path / "X").write_text("")
+    assert glob(tmp_path, "**/[\\]") == [tmp_path / "\\"]
 
 
 @_BOTH
@@ -282,20 +398,110 @@ def test_paths_sort_by_component_not_as_plain_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
-def test_a_failed_fd_run_raises_rather_than_answering_empty(tmp_path: Path) -> None:
+def test_a_failed_fd_run_raises_rather_than_answering_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A non-zero exit is a fault to surface, not an empty answer to believe."""
     (tmp_path / "a.py").write_text("")
     argv = [shutil.which("fd") or "", "--not-a-real-flag"]
-    with (
-        patch("sagent.lib.files.glob.fd_command", return_value=argv),
-        pytest.raises(subprocess.CalledProcessError),
-    ):
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    with pytest.raises(subprocess.CalledProcessError):
         glob(tmp_path, "**/*.py")
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_the_default_fd_timeout_is_thirty_seconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.py").write_text("")
+    intervals: list[float] = []
+    real_timer = threading.Timer
+
+    def timer(interval: float, function: Callable[[], object]) -> threading.Timer:
+        intervals.append(interval)
+        return real_timer(interval, function)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading, "Timer", timer)
+        assert glob(tmp_path, "**/*.py") == [tmp_path / "a.py"]
+    assert intervals == [30]
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_paths_stream_as_fd_finds_them_and_list_sorted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fd walks in parallel, so it prints in no set order."""
+    found = [tmp_path.resolve() / name for name in ("b.py", "a.py")]
+    argv = ["/bin/sh", "-c", "".join(f"echo '{path}'; " for path in found)]
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    assert list(streamed_paths(tmp_path, "**/*.py")) == [
+        tmp_path / "b.py",
+        tmp_path / "a.py",
+    ]
+    assert glob(tmp_path, "**/*.py") == [tmp_path / "a.py", tmp_path / "b.py"]
+
+
+def test_paths_found_in_any_order_sort_as_glob_lists_them(tmp_path: Path) -> None:
+    found = [tmp_path / "a-b" / "z", tmp_path / "b", tmp_path / "a" / "z"]
+    assert in_path_order(found) == [found[2], found[0], found[1]]
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_a_caller_that_stops_reading_leaves_no_fd_behind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid = tmp_path / "fd.pid"
+    first = tmp_path.resolve() / "a.py"
+    argv = ["/bin/sh", "-c", f"echo $$ > '{pid}'; echo '{first}'; exec sleep 60"]
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    paths = streamed_paths(tmp_path, "**/*.py")
+    assert next(paths) == tmp_path / "a.py"
+    alive = Path(f"/proc/{pid.read_text().strip()}")
+    assert alive.exists()
+    paths.close()
+    assert not alive.exists()
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_an_fd_that_hangs_is_stopped_at_the_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A glob run in a thread cannot be cancelled, so only a limit bounds it."""
+    (tmp_path / "a.py").write_text("")
+    pid = tmp_path / "fd.pid"
+    argv = ["/bin/sh", "-c", f'echo $$ > "{pid}"; exec sleep 60']
+
+    def fd_command(*_args: object, **_kwargs: object) -> object:
+        return argv
+
+    monkeypatch.setattr(files_glob, "fd_command", fd_command)
+    with pytest.raises(GlobError, match=r"^fd timed out after 0\.05s; narrow"):
+        glob(tmp_path, "**/*.py", timeout_sec=0.05)
+    assert not Path(f"/proc/{pid.read_text().strip()}").exists()
 
 
 @pytest.mark.parametrize("name", ["fd", "fdfind"])
 def test_either_spelling_of_the_fd_executable_is_used(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
     """Debian ships fd as ``fdfind``, so a host with only one name still uses it."""
@@ -304,16 +510,20 @@ def test_either_spelling_of_the_fd_executable_is_used(
     def which(asked: str) -> str | None:
         return f"/usr/bin/{name}" if asked == name else None
 
-    with (
-        patch("shutil.which", which),
-        patch("sagent.lib.files.glob._FD_ENTRIES", -1),
-        patch("sagent.lib.files.glob._glob_fd", return_value=[]) as ran,
-    ):
-        assert glob(tmp_path, "**/*.py") == []
-        # A bounded pattern has no deep walk to hand off, so fd stays unused.
-        assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
-    assert ran.call_args.args[0] == f"/usr/bin/{name}"
-    assert ran.call_count == 1
+    ran_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def ran(*args: object, **kwargs: object) -> object:
+        ran_calls.append((args, kwargs))
+        return list[Path]()
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(files_glob, "_FD_ENTRIES", -1)
+    monkeypatch.setattr(files_glob, "_glob_fd", ran)
+    assert glob(tmp_path, "**/*.py") == []
+    # A bounded pattern has no deep walk to hand off, so fd stays unused.
+    assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
+    (call,) = ran_calls
+    assert call[0][0] == f"/usr/bin/{name}"
 
 
 @_BOTH
@@ -325,13 +535,15 @@ def test_dot_git_is_excluded_from_the_walk_itself(tmp_path: Path) -> None:
 
 
 @_BOTH
+@pytest.mark.parametrize("middle", ["*", "?", "[b]", "{b,x}"])
 def test_a_literal_prefix_ends_at_the_first_wildcard_segment(
     tmp_path: Path,
+    middle: str,
 ) -> None:
-    """``a/*/c.py`` walks from ``a``; taking only the first segment would not."""
+    """``a/?/c.py`` walks from ``a``; reading ``?`` as a name would find nothing."""
     (tmp_path / "a" / "b").mkdir(parents=True)
     (tmp_path / "a" / "b" / "c.py").write_text("")
-    assert glob(tmp_path, "a/*/c.py") == [tmp_path / "a" / "b" / "c.py"]
+    assert glob(tmp_path, f"a/{middle}/c.py") == [tmp_path / "a" / "b" / "c.py"]
 
 
 @pytest.mark.parametrize(("hidden", "flag"), [(False, []), (True, ["--hidden"])])
@@ -351,7 +563,7 @@ def test_fd_command_anchors_the_glob_at_the_root(
 @_BOTH
 def test_invalid_ranges_raise_the_public_error(tmp_path: Path) -> None:
     (tmp_path / "a").touch()
-    with pytest.raises(GlobError):
+    with pytest.raises(GlobError, match=r"^invalid glob '\*\*/\[z-a\]': bad"):
         glob(tmp_path, "**/[z-a]")
 
 
@@ -384,7 +596,7 @@ def test_class_members_are_not_regex_set_operations(
     member: str,
 ) -> None:
     (tmp_path / member).touch()
-    (tmp_path / "x").touch()
+    (tmp_path / "X").touch()
     assert glob(tmp_path, f"**/{pattern}") == [tmp_path / member]
 
 

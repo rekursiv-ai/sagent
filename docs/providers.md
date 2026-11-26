@@ -6,37 +6,60 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `opus-5.5` | `sonnet-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
-| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` | `luna-6.0` | OpenAI API provider. |
-| `Google` | `GOOGLE_API_KEY` | `gemini-pro-3.1` | `gemini-flash-lite-3.5` | Google Gemini provider. |
+| `Anthropic` | `ANTHROPIC_API_KEY`, or workload identity | `opus-5.5` | `haiku-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.2`. |
+| `OpenAI` | `OPENAI_API_KEY`, or workload identity | `sol-6.1` | `luna-6.0` | OpenAI API provider; `best` resolves to `astra-6.0`. |
+| `Google` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | `gemini-argon-4.0` | `gemini-flash-lite-3.5` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-3.0` | `kimi-2.6` | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` | `qwen-flash-3.8` | Alibaba DashScope provider. |
 | `MiniMax` | `MINIMAX_API_KEY` | `minimax-3.0` | `minimax-3.0` | MiniMax provider. |
-| `SelfHosted` | none | `Qwen/Qwen3.6-27B` | configured snapshot | Local HF transformers provider. |
-| `OpenAICompat` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
+| `SelfHosted` | none | `Qwen/Qwen3.6-27B` | same as default | Local HF transformers provider; `SelfHosted(model=...)` names what every role means. |
+| `OpenAICompatible` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
-The public package is designed around API-key providers.
+The public package is designed around API-key providers. With no key, `OpenAI` and `Anthropic`
+also sign in by workload identity: set `OPENAI_IDENTITY_TOKEN_COMMAND`, a command
+that prints an identity token, with `OPENAI_IDENTITY_PROVIDER_ID` and
+`OPENAI_SERVICE_ACCOUNT_ID`; or `ANTHROPIC_IDENTITY_TOKEN_COMMAND` with
+`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
+`ANTHROPIC_WORKSPACE_ID`. A key wins when both are set.
+
+An environment variable moves each provider's endpoint, to a proxy or a
+gateway; `base_url=` wins over it:
+
+| Provider class | Endpoint variable | Holds |
+| --- | --- | --- |
+| `Anthropic` | `ANTHROPIC_BASE_URL` | the origin, as for Claude Code: `https://api.anthropic.com` |
+| `OpenAI` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` |
+| `OpenAISub` | `OPENAI_SUB_BASE_URL` | `https://chatgpt.com/backend-api/codex` |
+| `Google` | `GOOGLE_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta`, its version included |
+| `Moonshot` | `MOONSHOT_BASE_URL` | `https://api.moonshot.ai/v1` |
+| `DashScope` | `DASHSCOPE_COMPATIBLE_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| `MiniMax` | `MINIMAX_BASE_URL` | `https://api.minimax.io/v1` |
+
+Each other API provider names its own in its class's `base_url_variable`, such
+as `GROQ_BASE_URL` or `VERTEX_BASE_URL`.
 
 ## Basic usage
 
-```python
-from sagent.providers import Google
-
-provider = Google.from_env()
-model = provider.model("gemini-pro-3.1")
-utility = provider.model("utility")
-```
-
-All public API-key providers support:
+A `ModelCatalog` offers every provider by name, sharing one HTTP client and process pool:
 
 ```python
-ProviderClass.from_env()
-ProviderClass.from_key("...")
-ProviderClass.from_env().model("model-id")
-ProviderClass.from_env().model("utility")
+from sagent.providers.catalog import ModelCatalog
+
+async with ModelCatalog() as catalog:
+    model = catalog["google"]["gemini-pro-3.1"]
+    utility = catalog["google"]["utility"]
 ```
 
-`model(None)` uses the provider's default model. Unknown model IDs raise with the provider's known model list.
+A provider also works alone. API-key providers read their key from the environment when a request is made:
+
+```python
+from sagent.providers.google.api import Google
+
+async with Google() as google:
+    model = google["gemini-pro-3.1"]
+```
+
+Looking a model up does no I/O. An unknown model ID raises `UnknownModelError`.
 
 Catalog keys are exact names of the form `family-major.minor`, such as
 `sol-6.1`, `luna-6.0`, and `opus-5.5`. A prefix names the newest model it
@@ -57,31 +80,25 @@ reasoning and image-bearing tool results. Existing sessions need no conversion.
 ## CLI dispatch
 
 ```bash
-sagent --provider Google --auth env --model gemini-pro-3.1
+sagent --provider google --model gemini-pro-3.1
 ```
 
-`--provider` is the provider class name from `sagent.providers`. `--auth env` calls `Google.from_env()`.
+`--provider` takes the name `ModelCatalog` offers the provider under, in any case and with or without separators (`Google`, `openai_sub`), or an alias (`gapi`, `acli`).
 
-If the named factory does not exist, Sagent reports an error. Use `--auth env`
-for API keys so secrets do not land in shell history.
+If no provider answers to the name, Sagent reports an error. Keep API keys in
+the environment so secrets do not land in shell history.
 
 ## Provider inference
 
-Agent tools first infer a provider from catalog membership, so short IDs such
-as `opus-4.8` and `luna-6.0` can switch providers without a separate provider
-argument. Vendor prefixes remain as compatibility fallbacks:
+`ModelCatalog.model(name, current=...)` finds the provider that serves a model
+name: it asks the current provider first, then each other provider in the order
+offered. Short IDs such as `opus-4.8` and `luna-6.0`, and vendor wire IDs such
+as `claude-sonnet-4-6`, switch providers without a separate provider argument.
+`PROVIDER/MODEL` asks only that provider. `SelfHosted` answers to any name with
+a `/`, a Hugging Face repo or a local path; a repo whose org names a provider
+is `selfhosted/ORG/NAME`.
 
-| Prefix | Provider |
-| --- | --- |
-| `claude` | `Anthropic` |
-| `gemini` | `Google` |
-| `gpt`, `chatgpt`, `o1`, `o3`, `o4`, `codex` | `OpenAI` |
-| `kimi`, `moonshot` | `Moonshot` |
-| `qwen` | `DashScope` |
-| `minimax` | `MiniMax` |
-| `/`, `./`, `../`, `~/` | `SelfHosted` |
-
-This is used by model-switching tools so callers can usually pass just `model_id`.
+`AgentSelf(model=...)` and `--model` resolve names this way.
 
 ## Context-window tags
 
@@ -96,20 +113,28 @@ The provider strips the tag for API calls and uses it to select the request-toke
 
 ## OpenAI-compatible endpoints
 
-Subclass `OpenAICompat` for endpoints that implement OpenAI chat completions.
+Subclass `OpenAICompatible` (`sagent.providers.openai.compat`) for endpoints that implement OpenAI chat completions.
 
-Set the subclass's `ENV_VAR`, `BASE_URL`, and `catalog`. The catalog must map
-the `default` and `utility` roles to capability rows alongside its model IDs.
-
-Use it like any other provider:
+Set the subclass's `package` and `section` (where its model catalog lives), `url`, and `key_variable`. Override `encode` for whatever its server reads differently.
 
 ```python
-model = LocalProvider.from_env().model("local-model")
+from sagent.providers import moonshot
+from sagent.providers.openai.compat import OpenAICompatible
+
+
+class Kimi(OpenAICompatible):
+    package, section = moonshot, "moonshot"
+    url = "https://api.moonshot.ai/v1"
+    key_variable = "MOONSHOT_API_KEY"
+    reasoning_field = "reasoning_content"
+
+
+async with Kimi() as kimi:
+    model = kimi["default"]
 ```
 
-`OpenAICompat.from_env(base_url=...)` and `from_key(api_key, base_url=...)` can override the class `BASE_URL` at construction time.
-
-See `examples/openai_compatible_provider.py` for a runnable version.
+`Kimi(api_key=..., base_url=...)` overrides the key and the class `url` at construction time.
+Set `base_url_variable` to name an environment variable read between the two.
 
 ## Self-hosted HuggingFace models
 
@@ -128,13 +153,13 @@ sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
 Python API:
 
 ```python
-from sagent.providers import SelfHosted, SelfHostedModel
+from sagent.providers.selfhosted.server import SelfHosted
 
-provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
-model: SelfHostedModel = provider.model()
+async with SelfHosted() as local:
+    model = local["Qwen/Qwen3.6-27B+bfloat16+cuda"]
 ```
 
-Pass a local snapshot path to `from_key` or `--model` when you want to use an
+Pass a local snapshot path as the model name or `--model` when you want to use an
 already-populated cache. SelfHosted options such as `+cuda`, `+bfloat16`, and
 `+compile` can appear in any order. Cloud Qwen IDs continue to infer
 `DashScope`; select `SelfHosted` explicitly for local model paths.
@@ -167,12 +192,13 @@ explicit `trust_remote_code=True` load.
 
 A model exposes:
 
-- `buffer(request)`: send one request and return a complete response.
-- `stream(request, on_text=None)`: stream text chunks through `on_text` while returning a complete response.
-- `is_context_overflow(error)`: classify provider context-window errors.
+- `capability`: every setting it offers, its limits, and its prices.
+- `settings`: the settings chosen; assign to change them.
+- `count(request)`: tokens a request would send, exact where the vendor says.
+- `stream(request)`: yields `TextChunk`s as the reply is written, then the finished `Response`.
 
-`ModelResponse` includes content, stop reason, token counts, response identifiers, cache counts, and cost fields.
+A transient failure raises a `RetryableError` subclass such as `RateLimitedError`; others raise errors such as `AuthError` and `ContextOverflowError`. `Response` holds the reply's records, token counts, spend, and stop reason.
 
 ## Pricing and costs
 
-Provider model profiles include token limits and per-million-token pricing. Sagent records request, response, cache-write, and cache-read tokens for every response. `Agent.total_cost_usd` and CLI `--max-budget-usd` use these costs.
+Provider model profiles include token limits and per-million-token pricing. Sagent records request, response, cache-write, and cache-read tokens for every response. `Agent.spend_usd` and CLI `--max-budget-usd` use these costs.

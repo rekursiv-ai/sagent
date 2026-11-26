@@ -1,0 +1,836 @@
+"""A login's credentials files: the lock held while renewing one, and its accounts.
+
+A refresh token works once, so two processes renewing one login at once leave
+one of them signed out. Each holds ``file_lock`` across the whole read, renew
+and write, and the one that waited reads the token the other just wrote.
+
+A named account keeps its login beside the default one, ``-<account>`` added
+to its stem, or to its directory's name where each has a directory of its own
+(``~/.claude-work``). ``Logins`` owns every account kept beside one default file: their
+files, the order they were added in, the order the user prefers, and which
+have spent a quota window. What is not a file, it keeps in one ledger every
+process shares.
+
+Typical usage example:
+
+  async with file_lock(credentials.with_suffix(".json.lock")):
+      ...  # Read the file, renew if still stale, write it.
+
+  logins = Logins(CodexLogin.default_path())
+  logins.path("work")                            # ~/.codex/auth-work.json
+  logins.order()                                 # ("default", "home", "work")
+  await logins.spend("home", Spent(window="5-hour", model="sol-6.1", until=t))
+  logins.ranked("sol-6.1", now=time.time())      # (("default", None), ("home", Spent(...)))
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import parse_qs, urlparse
+
+import asyncio
+import fcntl
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+import webbrowser
+
+from treekle import from_plain, json_dumps, json_loads, to_plain
+from wrapt import lazy_import
+
+from sagent.lib.files.owner_only import open_private, write_private
+from sagent.lib.userdirs import state_dir
+from sagent.model.exceptions import AuthError
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+    from pathlib import Path
+
+    from prompt_toolkit import PromptSession
+else:
+    PromptSession = lazy_import("prompt_toolkit", "PromptSession")
+
+
+__all__ = [
+    "SIGN_IN_ERRORS",
+    "Logins",
+    "Spent",
+    "check_account",
+    "dir_lock",
+    "file_lock",
+    "headless_wanted",
+    "login_flow",
+    "open_browser",
+    "pasted_code",
+    "read_login_input",
+    "read_pasted_code",
+    "redirected",
+]
+
+
+logger = logging.getLogger(__name__)
+
+
+SIGN_IN_ERRORS = (AuthError, EOFError, OSError, RuntimeError, ValueError)
+"""What stops a sign-in that the user should read, not a traceback: a refusal, a
+paste of another sign-in's address, no answer at the prompt, a dead connection."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Spent:
+    """One quota window of an account, spent until it resets."""
+
+    window: str
+    """The window, as ``5-hour``, ``weekly`` or ``weekly Opus``; ``""`` unnamed."""
+
+    model: str
+    """The model the window was spent by."""
+
+    until: float
+    """When it resets, in seconds since the epoch."""
+
+    def covers(self, model: str) -> bool:
+        """Return whether ``model`` is refused until the reset.
+
+        A window named for a family (``weekly Opus``) covers that family's
+        models; one named for a span alone, every model; an unnamed one, only
+        the model that spent it. A second word that is no family of the model
+        that spent it (``weekly Oauth_apps``) names none: the window covers
+        every model, since a guess that covers too little never moves on.
+
+        Args:
+          model: A model id, as ``opus-5.5``.
+
+        Returns:
+          covered: Whether the window refuses it.
+
+        """
+        if not self.window:
+            return model == self.model
+        family = self.window.partition(" ")[2].lower()
+        return not self.model.startswith(family) or model.startswith(family)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Family:
+    """What the ledger keeps for every account beside one default file."""
+
+    added: tuple[str, ...] = ()
+    precedence: tuple[str, ...] | None = None
+    signed_out_at: dict[str, float] = field(default_factory=dict[str, float])
+    """When each account was found signed out, in seconds since the epoch."""
+
+    spent: dict[str, tuple[Spent, ...]] = field(
+        default_factory=dict[str, tuple[Spent, ...]],
+    )
+
+
+class Logins:
+    """Every account whose login is kept beside ``default``.
+
+    Args:
+      default: The default login's file; a named one sits beside it.
+      own_directory: Keep a named login in a directory of its own beside the
+        default's, under the same name, as ``claude`` keeps a second login in
+        ``~/.claude-work``. ``move_in`` moves one kept beside the default there.
+
+    """
+
+    signed_out_sec: ClassVar[float] = 86_400.0
+    """How long a login found signed out is passed over, unless signed in again."""
+
+    def __init__(self, default: Path, *, own_directory: bool = False) -> None:
+        self.default = default
+        self.own_directory = own_directory
+
+    def path(self, account: str | None) -> Path:
+        """Return the file ``account`` keeps its login in.
+
+        Args:
+          account: A named account; ``None`` or ``default`` for the default.
+
+        Returns:
+          path: ``default`` for the default; else it, ``-<account>`` added to
+            its stem, or to its directory's name when each has its own.
+
+        Raises:
+          ValueError: ``account`` is no name.
+
+        """
+        if account is None or account == "default":
+            return self.default
+        check_account(account)
+        if self.own_directory:
+            folder = self.default.parent
+            return folder.with_name(f"{folder.name}-{account}") / self.default.name
+        stem, suffix = self.default.stem, self.default.suffix
+        return self.default.with_name(f"{stem}-{account}{suffix}")
+
+    def accounts(self) -> tuple[str, ...]:
+        """Return each named account with a login saved.
+
+        Returns:
+          accounts: Those added, in the order they were; then the rest, sorted.
+
+        """
+        return self._accounts(self._family())
+
+    def precedence(self) -> tuple[str, ...] | None:
+        """Return the order the user set; ``None`` when they set none."""
+        return self._family().precedence
+
+    def order(self) -> tuple[str, ...]:
+        """Return the accounts to sign in as, first preferred first.
+
+        Returns:
+          order: The user's order, less the accounts with no login saved;
+            else the default, then each named account as ``accounts`` orders
+            them. Either way, less those found signed out and not since signed
+            in again: their file rewritten, or ``signed_out_sec`` gone by.
+
+        """
+        return self._order(self._family(), now=time.time())
+
+    def ranked(
+        self,
+        model: str,
+        *,
+        now: float,
+        first: str | None = None,
+    ) -> tuple[tuple[str, Spent | None], ...]:
+        """Return each account in ``order`` at ``now``, and what keeps it from ``model``.
+
+        One read of the ledger answers every account at once.
+
+        Args:
+          model: The model to call, as ``opus-5.5``.
+          now: The time, in seconds since the epoch, for windows and sign-outs alike.
+          first: An account to put first, as one the user chose, even one
+            ``order`` would pass over.
+
+        Returns:
+          ranked: Each account, and its longest window yet to reset; ``None``
+            for an account that may call ``model``.
+
+        """
+        family = self._family()
+        order = self._order(family, now=now)
+        if first is not None:
+            order = (first, *(a for a in order if a != first))
+        return tuple((a, _spent(family, a, model, now=now)) for a in order)
+
+    def move_in(self) -> None:
+        """Move each login kept beside the default into a directory of its own.
+
+        Only with ``own_directory``. One whose directory already holds a login
+        stays where it is, and a warning names both: either may be the newer.
+        """
+        if not self.own_directory:
+            return
+        for name, found in self._beside().items():
+            _move_in(found, self.path(name))
+
+    def _beside(self) -> dict[str, Path]:
+        """Return each named login kept beside the default's file, by account."""
+        stem, suffix = self.default.stem, self.default.suffix
+        return {
+            name: found
+            for found in self.default.parent.glob(f"{stem}-*{suffix}")
+            if _ACCOUNT.fullmatch(
+                name := found.name.removeprefix(f"{stem}-").removesuffix(suffix),
+            )
+        }
+
+    def _accounts(self, family: _Family) -> tuple[str, ...]:
+        """Return ``accounts``, as ``family`` orders those added."""
+        if self.own_directory:
+            # A login the macOS Keychain holds leaves no file but a lock or its directory.
+            folder, lock = self.default.parent, self.default.with_suffix(".lock").name
+            names = {
+                found.parent.name.removeprefix(f"{folder.name}-")
+                for kept in (self.default.name, lock)
+                for found in folder.parent.glob(f"{folder.name}-*/{kept}")
+            } | {a for a in family.added if self.path(a).parent.is_dir()}
+        else:
+            names = set(self._beside())
+        saved = {n for n in names if _ACCOUNT.fullmatch(n)}
+        added = [a for a in family.added if a in saved]
+        return (*added, *sorted(saved - set(added)))
+
+    def _order(self, family: _Family, *, now: float) -> tuple[str, ...]:
+        """Return ``order``, as ``family`` has it at ``now``."""
+        known = ("default", *self._accounts(family))
+        chosen = family.precedence
+        order = known if chosen is None else tuple(a for a in chosen if a in known)
+        return tuple(
+            a
+            for a in order
+            if a not in family.signed_out_at
+            or now - family.signed_out_at[a] > self.signed_out_sec
+            or self._written_since(a, family.signed_out_at[a])
+        )
+
+    async def added(self, account: str | None) -> None:
+        """Note ``account`` signed in: ordered after those added before it, and in use.
+
+        Args:
+          account: The account; ``None`` or ``default`` for the default, which
+            is never ordered among the added.
+
+        """
+        name = account or "default"
+        check_account(name)
+
+        def signed_in(f: _Family) -> _Family:
+            added = (
+                f.added if name in f.added or name == "default" else (*f.added, name)
+            )
+            out = {a: at for a, at in f.signed_out_at.items() if a != name}
+            return replace(f, added=added, signed_out_at=out)
+
+        await self._edit(signed_in)
+
+    async def sign_out(self, account: str | None) -> None:
+        """Note that ``account``'s login was refused: ``order`` passes it over until signed in.
+
+        Args:
+          account: The account; ``None`` for the default.
+
+        """
+        name, at = account or "default", time.time()
+        await self._edit(
+            lambda f: replace(f, signed_out_at=f.signed_out_at | {name: at}),
+        )
+
+    async def spend(self, account: str | None, spent: Spent) -> None:
+        """Note that ``account`` spent a window, until it resets.
+
+        Args:
+          account: The account; ``None`` for the default.
+          spent: The window, and when it resets.
+
+        """
+        name = account or "default"
+        await self._edit(
+            lambda f: replace(
+                f,
+                spent=f.spent | {name: (*f.spent.get(name, ()), spent)},
+            ),
+        )
+
+    async def clear_spent(self, account: str | None, *, model: str) -> None:
+        """Forget this model's stale quota before explicitly retrying its account.
+
+        Args:
+          account: The account; ``None`` for the default.
+          model: The model whose covering quota marks are cleared.
+
+        """
+        name = account or "default"
+        await self._edit(
+            lambda f: replace(
+                f,
+                spent=f.spent
+                | {
+                    name: tuple(
+                        mark for mark in f.spent.get(name, ()) if not mark.covers(model)
+                    ),
+                },
+            ),
+        )
+
+    async def prefer(self, order: tuple[str, ...] | None) -> None:
+        """Set the order to sign in by.
+
+        Args:
+          order: The accounts, first preferred first; ``None`` goes back to
+            the default order.
+
+        Raises:
+          ValueError: An account in ``order`` is no name.
+
+        """
+        for account in order or ():
+            check_account(account)
+        await self._edit(lambda f: replace(f, precedence=order))
+
+    def _written_since(self, account: str, at: float) -> bool:
+        """Return whether ``account``'s file was written after ``at``; not with no file."""
+        try:
+            return self.path(account).stat().st_mtime > at
+        except OSError:
+            return False
+
+    def _family(self) -> _Family:
+        """Return what the ledger keeps for this default."""
+        return _family(_raw(_ledger_text()).get(str(self.default), {}))
+
+    async def _edit(self, change: Callable[[_Family], _Family]) -> None:
+        """Change what the ledger keeps for this default, dropping marks past reset."""
+        ledger = state_dir() / "rekursiv-ai" / "sagent" / "logins.json"
+        async with file_lock(ledger.with_name(f"{ledger.name}.lock")):
+            await asyncio.to_thread(
+                _rewrite,
+                ledger,
+                str(self.default),
+                change,
+                signed_out_sec=self.signed_out_sec,
+            )
+
+
+# A sidecar, not the credentials file itself: a write replaces the file's inode,
+# which would drop a lock held on it.
+@asynccontextmanager
+async def file_lock(path: Path) -> AsyncGenerator[None]:
+    """Hold an exclusive lock on ``path`` against every other holder, here or not.
+
+    Args:
+      path: The lock file; it and its directory are made private when created.
+
+    Yields:
+      nothing: The lock is held until the block ends.
+
+    """
+    fd = await asyncio.to_thread(_open, path)
+    try:
+        # Polled, not blocking in a thread: a thread in ``flock`` outlives a
+        # cancelled caller.
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+        yield
+    finally:
+        os.close(fd)
+
+
+@asynccontextmanager
+async def dir_lock(
+    path: Path,
+    *,
+    stale_sec: float = 60.0,
+    update_sec: float = 5.0,
+) -> AsyncGenerator[None]:
+    """Hold ``path`` as a lock directory, as Node's ``proper-lockfile`` does.
+
+    Whoever makes the directory holds the lock, and touches it every
+    ``update_sec`` while it does. One untouched for ``stale_sec`` lost its
+    holder, and is taken over.
+
+    Args:
+      path: The lock directory; its parent must exist.
+      stale_sec: How long untouched before the lock is taken over.
+      update_sec: How often the holder touches it.
+
+    Yields:
+      nothing: The lock is held until the block ends.
+
+    """
+    while True:
+        taking = asyncio.ensure_future(asyncio.to_thread(_take, path, stale_sec))
+        try:
+            # Shielded: a lock made as its taker is cancelled is still given back.
+            await asyncio.shield(taking)
+            break
+        except FileExistsError:
+            await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            with suppress(FileExistsError, FileNotFoundError):
+                await taking
+                await asyncio.to_thread(path.rmdir)
+            raise
+    released = asyncio.Event()
+    touching = asyncio.create_task(_keep_fresh(path, update_sec, released))
+    try:
+        yield
+    finally:
+        released.set()
+        with suppress(FileNotFoundError):
+            await asyncio.to_thread(path.rmdir)
+        await touching
+
+
+def check_account(account: str) -> None:
+    """Refuse ``account`` unless it is a name: letters, digits, ``_``, ``-``."""
+    if not _ACCOUNT.fullmatch(account):
+        raise ValueError(
+            f"account {account!r} is not a name: use letters, digits, '_', '-'",
+        )
+
+
+_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def headless_wanted(
+    environ: Mapping[str, str],
+    *,
+    platform: str = sys.platform,
+    given: bool | None = None,
+) -> bool:
+    """Return whether a sign-in should print its URL rather than open a browser.
+
+    Over ssh, a browser opens on the far machine's screen, not the user's; on
+    Linux with no display, there is none to open. macOS always has a screen.
+
+    Args:
+      environ: The environment, such as ``os.environ``.
+      platform: ``sys.platform``.
+      given: What ``--headless`` or ``--no-headless`` said; ``None`` for neither.
+
+    Returns:
+      headless: ``given`` when set; else whether no browser the user can see
+        would open.
+
+    """
+    if given is not None:
+        return given
+    if any(
+        environ.get(name, "") != ""
+        for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+    ):
+        return True
+    return platform.startswith("linux") and all(
+        environ.get(name, "") == "" for name in ("DISPLAY", "WAYLAND_DISPLAY")
+    )
+
+
+async def login_flow[T](
+    *,
+    headless: bool,
+    browser: Callable[[], Awaitable[T]],
+    remote: Callable[[], Awaitable[T]],
+) -> T:
+    """Run exactly one authorization flow, without starting the other.
+
+    Args:
+      headless: Use remote authorization without opening this host's browser.
+      browser: Authorize using a browser on this host.
+      remote: Authorize from another machine, by device code or manual paste.
+
+    Returns:
+      authorized: The selected flow's result.
+
+    """
+    return await (remote if headless else browser)()
+
+
+# ``webbrowser`` runs a command browser ($BROWSER, xdg-open) on the terminal's own
+# streams, so what it says lands in the scrollback past ``Screen``, under a call
+# whose result then prints unlabelled. Its other browsers already discard theirs.
+def open_browser(url: str) -> None:
+    """Open ``url`` in the user's browser, which never writes to the terminal.
+
+    Args:
+      url: The page; the caller has shown it too, in case no browser opens.
+
+    """
+    try:
+        browser = webbrowser.get()
+    except webbrowser.Error:
+        return
+    if not isinstance(browser, webbrowser.GenericBrowser):
+        browser.open(url)
+        return
+    # A shell starts the browser in the background and exits at once, so the browser
+    # is never our child: none is left to reap, nor found by another's ``os.wait()``.
+    # Its words go to ``"$@"``, never into the script.
+    with suppress(OSError):
+        _ = subprocess.run(  # noqa: S603 -- The user's own browser command; the script is fixed.
+            [
+                "/bin/sh",
+                "-c",
+                '"$@" &',
+                "sh",  # pragma: no mutate -- ``$0``, which the script never reads.
+                browser.name,
+                *(arg.replace("%s", url) for arg in browser.args),
+            ],
+            # No stdin: the script never reads it, and a background job gets
+            # ``/dev/null`` from the shell whatever the shell's own is.
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            check=False,  # pragma: no mutate -- the shell exits 0 once the job starts.
+        )
+
+
+async def redirected(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    path: str,
+    state: str,
+    code: asyncio.Future[str],
+) -> None:
+    """Answer a browser's sign-in redirect to ``path``, and take the code it carries.
+
+    Serve it with ``asyncio.start_server`` on loopback. A redirect elsewhere, or
+    with another sign-in's ``state``, or with no code, is refused and the wait
+    goes on; the first good one sets ``code``.
+
+    Args:
+      reader: The browser's request.
+      writer: Where the answer goes.
+      path: The redirect's path, as the sign-in URL names it.
+      state: The sign-in's own ``state``.
+      code: Set to the code of the first good redirect.
+
+    """
+    received = _redirect_code(
+        (await reader.readline()).decode(errors="replace"),
+        path=path,
+        state=state,
+    )
+    ok = received is not None
+    page = (
+        "Signed in; you can close this tab."
+        if ok
+        else "Sign-in failed; see the terminal."
+    )
+    writer.write(
+        f"HTTP/1.1 {200 if ok else 400} {'OK' if ok else 'Bad Request'}\r\n"
+        f"content-type: text/plain\r\ncontent-length: {len(page)}\r\n"
+        f"connection: close\r\n\r\n{page}".encode(),
+    )
+    await writer.drain()
+    writer.close()
+    if received is not None and not code.done():
+        code.set_result(received)
+
+
+def pasted_code(pasted: str, *, state: str) -> str:
+    """Return the code in what the user pasted: the address a sign-in landed on.
+
+    Over ssh, or with no browser, the sign-in page sends the browser to a
+    loopback address that fails to load, and the user pastes that address. A
+    page that shows the code itself gives ``code#state``, which is taken too.
+
+    Args:
+      pasted: What the user pasted, with or without the address's scheme.
+      state: The sign-in's own ``state``.
+
+    Returns:
+      code: The sign-in code.
+
+    Raises:
+      AuthError: What was pasted holds no code, or carries another sign-in's
+        ``state``.
+
+    """
+    params = parse_qs(urlparse(pasted.strip()).query)
+    if not params:
+        code, _, pasted_state = pasted.strip().partition("#")
+        params = {"state": [pasted_state]} | ({"code": [code]} if code else {})
+    # ``parse_qs`` drops a blank ``code=``, so a missing key is no code.
+    codes = params.get("code")
+    if codes is None:
+        raise AuthError("The pasted address holds no sign-in code.")
+    if params.get("state") != [state]:
+        raise AuthError("The pasted address belongs to another sign-in.")
+    return codes[0]
+
+
+async def read_login_input(prompt: str) -> str:
+    """Read a sign-in line, releasing the terminal when cancelled."""
+    session: PromptSession[str] = PromptSession()
+    return await session.prompt_async(prompt)
+
+
+async def read_pasted_code(
+    *,
+    state: str,
+    show: Callable[[str], object],
+    browser_tried: bool,
+    pkce: bool = False,
+) -> str:
+    """Ask for an authorization code or redirect address; return its code.
+
+    Args:
+      state: The sign-in's own ``state``.
+      show: Shows the user what to paste.
+      browser_tried: A browser was opened and never came back, as over ssh;
+        else none was, and the user opens the page anywhere.
+      pkce: Accept a plain hosted code bound to this sign-in's verifier.
+
+    Returns:
+      code: The sign-in code.
+
+    Raises:
+      AuthError: What was pasted holds no code, or is another sign-in's.
+      EOFError: Nothing was typed at all.
+
+    """
+    if pkce:
+        show(
+            "Open the link in your browser, then paste the authorization code or full redirect URL:\n",
+        )
+        pasted = (await read_login_input("Code: ")).strip()
+        if pasted and not any(c in pasted for c in "?#:"):
+            return pasted
+        return pasted_code(pasted, state=state)
+    show(
+        "No browser came back. Paste the address it was sent to, though it fails"
+        " to load:\n"
+        if browser_tried
+        else "Open it in a browser anywhere, then paste the address it was sent"
+        " to, though it fails to load:\n",
+    )
+    return pasted_code(await read_login_input("Address: "), state=state)
+
+
+def _open(path: Path) -> int:
+    """Open ``path`` to lock it, made private with its directory if new."""
+    return open_private(path, os.O_RDWR)
+
+
+def _ledger_text() -> str:
+    """Return the logins ledger's text; ``""`` when there is none."""
+    try:
+        return (state_dir() / "rekursiv-ai" / "sagent" / "logins.json").read_text()
+    except FileNotFoundError:
+        return ""
+
+
+# Every session shares the ledger, of whatever version: what this one cannot read
+# is passed over, never fatal, and what it does not know is written back as it was.
+def _raw(text: str) -> dict[str, dict[str, object]]:
+    """Return each family the ledger keeps, as plain data; none when it does not read."""
+    if not text:
+        return {}
+    try:
+        tree = json_loads(text, dict[str, object])
+    except ValueError:
+        logger.warning("the logins ledger does not read; starting it afresh")
+        return {}
+    return {
+        key: family
+        for key, value in tree.items()
+        if (family := _read(value, dict[str, object], default=None)) is not None
+    }
+
+
+def _family(raw: dict[str, object]) -> _Family:
+    """Return what ``raw`` keeps that this version knows; a part that does not read is dropped."""
+    marks = _read(raw.get("spent"), dict[str, object], default=None) or {}
+    return _Family(
+        added=_read(raw.get("added"), tuple[str, ...], default=None) or (),
+        precedence=_read(raw.get("precedence"), tuple[str, ...], default=None),
+        signed_out_at=_read(raw.get("signed_out_at"), dict[str, float], default=None)
+        or {},
+        spent={
+            account: tuple(
+                spent
+                for mark in _read(every, list[object], default=None) or ()
+                if (spent := _read(mark, Spent, default=None)) is not None
+            )
+            for account, every in marks.items()
+        },
+    )
+
+
+def _read[T, D](value: object, target: type[T], *, default: D) -> T | D:
+    """Return ``value`` as ``target``; ``default`` when it is absent or does not read."""
+    if value is None:
+        return default
+    try:
+        return from_plain(value, target)
+    except ValueError:
+        logger.warning("passing over a ledger entry that does not read: %r", value)
+        return default
+
+
+def _spent(
+    family: _Family,
+    account: str,
+    model: str,
+    *,
+    now: float,
+) -> Spent | None:
+    """Return the window keeping ``account`` from ``model`` longest; ``None`` if none."""
+    marks = family.spent.get(account, ())
+    live = [s for s in marks if s.until > now and s.covers(model)]
+    return max(live, key=lambda s: s.until) if live else None
+
+
+def _rewrite(
+    ledger: Path,
+    key: str,
+    change: Callable[[_Family], _Family],
+    *,
+    signed_out_sec: float,
+) -> None:
+    """Apply ``change`` to the family ``key``, keeping only marks yet to expire."""
+    families = _raw(_ledger_text())
+    kept = families.get(key, {})
+    now = time.time()
+    changed = change(_family(kept))
+    live = {
+        account: marks
+        for account, every in changed.spent.items()
+        if (marks := tuple(s for s in every if s.until > now))
+    }
+    out = {
+        account: at
+        for account, at in changed.signed_out_at.items()
+        if now - at <= signed_out_sec
+    }
+    known = from_plain(
+        to_plain(replace(changed, spent=live, signed_out_at=out), target=_Family),
+        dict[str, object],
+    )
+    # A field left at its default is not written; the old value must not survive.
+    theirs = {k: v for k, v in kept.items() if k not in _Family.__dataclass_fields__}
+    # It names the user's accounts and when each ran out.
+    write_private(ledger, json_dumps(families | {key: theirs | known}))
+
+
+def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:
+    """Return the code a redirect to ``path`` for ``state`` carries; ``None`` if refused."""
+    # ``GET <target> HTTP/1.1``; a line with no target has no path, so no code.
+    _, _, rest = request_line.partition(" ")
+    url = urlparse(rest.partition(" ")[0])
+    params = parse_qs(url.query)
+    received = params.get("code", [""])[0]
+    if url.path == path and params.get("state") == [state] and received:
+        return received
+    return None
+
+
+def _move_in(beside: Path, own: Path) -> None:
+    """Move a login kept at ``beside`` to ``own``, in a private directory."""
+    if own.exists():
+        logger.warning("%s was not moved: %s already holds a login", beside, own)
+        return
+    own.parent.mkdir(mode=0o700, exist_ok=True)
+    # Moved by another process meanwhile.
+    with suppress(FileNotFoundError):
+        beside.rename(own)
+
+
+def _take(path: Path, stale_sec: float) -> None:
+    """Make the lock directory ``path``, or remove it if its holder is gone."""
+    try:
+        path.mkdir()
+    except FileExistsError:
+        with suppress(FileNotFoundError):
+            if time.time() - path.stat().st_mtime > stale_sec:
+                path.rmdir()
+        raise
+
+
+async def _keep_fresh(path: Path, update_sec: float, released: asyncio.Event) -> None:
+    """Touch the lock directory ``path`` every ``update_sec`` until ``released``."""
+    while True:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(released.wait(), timeout=update_sec)
+            return
+        # Gone only if taken over as stale; nothing then is this holder's to touch.
+        with suppress(FileNotFoundError):
+            await asyncio.to_thread(os.utime, path)
