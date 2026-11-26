@@ -152,7 +152,7 @@ class AgentSend:
           streaming_result: Delivered or scheduled, or why not.
 
         Raises:
-          ValueError: ``to`` or ``content`` is empty, or ``to`` is no agent:
+          ValueError: ``to`` is empty, ``content`` is blank, or ``to`` is no agent:
             ``parent`` of a root that may not call ``AgentSpawn``.
 
         """
@@ -164,8 +164,11 @@ class AgentSend:
         arguments: Mapping[str, PlainTree],
     ) -> ToolOutput[AgentSendResult, str, str]:
         a = parse(arguments, AgentSend.Arguments)
-        if not a.to or not a.content:
-            raise ValueError("'to' and 'content' are required.")
+        if not a.to:
+            raise ValueError("'to' is required.")
+        # Spaces alone would settle a debt and show in Chat as an empty message.
+        if not a.content.strip():
+            raise ValueError("'content' is blank: write the message.")
         sender = context.label or "unknown"
         to = a.to
         started = ""
