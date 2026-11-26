@@ -12,7 +12,6 @@ import contextlib
 import functools
 import json
 import os
-import selectors
 import shutil
 import signal
 import stat
@@ -42,6 +41,7 @@ from sagent.lib.posix.host import (
 from sagent.lib.posix.relay import ThreadedRelay, terminal_size
 from sagent.lib.posix.sockets import accepts
 from sagent.lib.posix.terminal import Terminal
+from sagent.lib.testing.clock_fake import FakeClockLoop
 
 
 if TYPE_CHECKING:
@@ -1027,7 +1027,7 @@ class TestChildExit:
         async def run() -> int:
             return await asyncio.wait_for(host.serve(), 5.0)
 
-        assert asyncio.run(run(), loop_factory=_JumpingLoop) == 3
+        assert asyncio.run(run(), loop_factory=FakeClockLoop) == 3
         assert (short_dir / "log").read_bytes() == b"bye"
 
 
@@ -1042,7 +1042,7 @@ class TestUnattended:
             ):
                 return await asyncio.wait_for(serving, 5.0)
 
-        assert asyncio.run(run(), loop_factory=_JumpingLoop) != 0
+        assert asyncio.run(run(), loop_factory=FakeClockLoop) != 0
 
     def test_a_connected_client_keeps_it_and_its_leaving_starts_the_clock(
         self,
@@ -1059,7 +1059,7 @@ class TestUnattended:
                 writer.close()
                 return kept, await asyncio.wait_for(serving, 5.0)
 
-        kept, status = asyncio.run(run(), loop_factory=_JumpingLoop)
+        kept, status = asyncio.run(run(), loop_factory=FakeClockLoop)
         assert kept
         assert status != 0
 
@@ -1069,45 +1069,7 @@ class TestUnattended:
                 await asyncio.wait({serving}, timeout=3600)
                 return serving.done()
 
-        assert not asyncio.run(run(), loop_factory=_JumpingLoop)
-
-
-class _JumpingSelector(selectors.DefaultSelector):
-    """A selector that skips a wait no file can end, counting the time it skipped."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.skipped_sec = 0.0
-
-    @override
-    def select(
-        self,
-        timeout: float | None = None,
-    ) -> list[tuple[selectors.SelectorKey, int]]:
-        ready = super().select(0)
-        if ready or timeout == 0:
-            return ready
-        if timeout is None:
-            return super().select(None)
-        self.skipped_sec += timeout
-        return []
-
-
-class _JumpingLoop(asyncio.SelectorEventLoop):
-    """An event loop whose clock jumps to its next timer once nothing else can run.
-
-    Every file it watches is this process's own socket or pipe, ready the moment
-    the other end writes; so a wait no file ends is only a timer's, and it costs
-    no wall time. A real child's output would arrive late, so none may run here.
-    """
-
-    def __init__(self) -> None:
-        self._jumps = _JumpingSelector()
-        super().__init__(self._jumps)
-
-    @override
-    def time(self) -> float:
-        return super().time() + self._jumps.skipped_sec
+        assert not asyncio.run(run(), loop_factory=FakeClockLoop)
 
 
 class _RecordingTransport(asyncio.WriteTransport):

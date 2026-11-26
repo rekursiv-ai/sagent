@@ -21,7 +21,10 @@ from sagent.journal.types import (
     ContextClear,
     SessionContext,
     SystemMessage,
+    Thinking,
     TokenUsage,
+    ToolCall,
+    ToolMessage,
     UserMessage,
 )
 from sagent.model.capability import ModelLimits
@@ -133,6 +136,86 @@ def test_flatten_replaces_each_clear_with_its_summary_and_history() -> None:
         UserMessage(content="c"),
         UserMessage(content="d"),
     ]
+
+
+def test_what_is_said_while_calls_wait_follows_their_results() -> None:
+    held, late, early, nudge = (
+        UserMessage(content="held"),
+        UserMessage(content="late"),
+        UserMessage(content="early"),
+        SystemMessage(content="nudge", subtype="nudge"),
+    )
+    records = [
+        early,
+        ToolCall(call_id="a", name="Read"),
+        Thinking(content="hm"),
+        ToolCall(call_id="b", name="Read"),
+        held,
+        ToolMessage(call_id="a", state="done"),
+        TokenUsage(),
+        ToolMessage(call_id="b", state="done"),
+        nudge,
+        AssistantMessage(content="again"),
+        ToolCall(call_id="c", name="Read"),
+        late,
+    ]
+    assert list(wire.results_first(records)) == [
+        early,
+        records[1],
+        records[2],
+        records[3],
+        records[5],
+        records[6],
+        records[7],
+        held,
+        nudge,
+        records[9],
+        records[10],
+        late,
+    ]
+
+
+def test_a_turn_waits_for_each_of_its_calls_and_no_answered_one() -> None:
+    held, later = UserMessage(content="held"), UserMessage(content="later")
+    records = [
+        ToolCall(call_id="a", name="Read"),
+        Thinking(content="hm"),
+        ToolCall(call_id="b", name="Read"),
+        held,
+        ToolMessage(call_id="b", state="done"),
+        later,
+        ToolMessage(call_id="a", state="done"),
+    ]
+    assert list(wire.results_first(records)) == [
+        *records[:3],
+        *records[4::2],
+        held,
+        later,
+    ]
+
+
+def test_what_waited_is_said_once_its_turn_s_results_end_or_a_result_follows() -> None:
+    held, said = UserMessage(content="held"), UserMessage(content="said")
+    ended = [
+        ToolCall(call_id="a", name="Read"),
+        held,
+        ToolMessage(call_id="a", state="done"),
+        AssistantMessage(content="next"),
+    ]
+    assert list(wire.results_first(ended)) == [ended[0], ended[2], held, ended[3]]
+    stray = ToolMessage(call_id="z", state="done")
+    answered = [ToolCall(call_id="a", name="Read"), held, ended[2], said, stray]
+    assert list(wire.results_first(answered)) == [ended[0], ended[2], held, said, stray]
+
+
+def test_a_new_turn_says_what_waited_on_calls_it_never_answered() -> None:
+    held = UserMessage(content="held")
+    records = [
+        ToolCall(call_id="a", name="Read"),
+        held,
+        AssistantMessage(content="next"),
+    ]
+    assert list(wire.results_first(records)) == [records[0], held, records[2]]
 
 
 def test_user_content_is_what_each_record_says_on_the_users_side() -> None:

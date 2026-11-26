@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import asyncio
 import math
@@ -29,6 +29,7 @@ import torch
 from sagent.journal.types import (
     AssistantMessage,
     Attachment,
+    SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
@@ -45,6 +46,10 @@ from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
 from sagent.tools.read import Read
+
+
+if TYPE_CHECKING:
+    from sagent.model.context import ContextSizeName
 
 
 _REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
@@ -620,6 +625,29 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
     ]
 
 
+def test_what_is_said_among_a_turn_s_results_follows_them() -> None:
+    """A chat template takes a call's tool message right after the turn that made it."""
+    request = Request(
+        records=(
+            UserMessage(content="go"),
+            ToolCall(call_id="a", name="Read"),
+            ToolCall(call_id="b", name="Read"),
+            ToolMessage(call_id="a", state="done", stdout=("1",)),
+            SystemMessage(content="later", subtype="nudge"),
+            ToolMessage(call_id="b", state="done", stdout=("2",)),
+            UserMessage(content="and?"),
+        ),
+    )
+    assert [m["role"] for m in server._messages(request)] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+        "user",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_the_template_is_asked_for_thinking_and_the_tools(
     monkeypatch: pytest.MonkeyPatch,
@@ -968,6 +996,36 @@ def test_the_default_size_is_the_whole_window(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.parametrize(
+    ("size", "tokens"),
+    [("fullcontext", 40), ("smallcontext", 10)],
+)
+def test_the_size_asked_names_its_band_of_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+    size: ContextSizeName,
+    tokens: int,
+) -> None:
+    model = _served(monkeypatch, window=40)
+    sized = SelfHostedModel(
+        provider=model.provider,
+        spec=server._Spec(path="Org/M"),
+        size=size,
+    )
+    # A banded card, so ``smallcontext`` names a size short of the window.
+    sized._capability = replace(
+        sized.capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(token_size_range=(0, 11)): TokenPrice(),
+                PriceCondition(token_size_range=(11, math.inf)): TokenPrice(),
+            },
+            window=40,
+        ),
+    )
+
+    assert sized.settings.context_size.tokens == tokens
+
+
+@pytest.mark.parametrize(
     "device",
     [
         "cpu",
@@ -997,6 +1055,13 @@ def test_the_stop_says_done_for_every_row_once_set(device: str) -> None:
     assert after.device == ids.device
 
 
+def test_the_stop_answers_on_the_prompt_s_device() -> None:
+    """A meta tensor has no storage, so no kernel runs: only its device is read."""
+    ids = torch.zeros(3, 5, dtype=torch.long, device="meta")
+
+    assert server._Stopped(threading.Event())(ids, None).device == ids.device
+
+
 @pytest.mark.asyncio
 async def test_the_reply_is_the_tokens_after_the_prompt(
     monkeypatch: pytest.MonkeyPatch,
@@ -1012,13 +1077,29 @@ async def test_the_reply_is_the_tokens_after_the_prompt(
     assert response.tokens == TokenCount(request=5, response=4)
 
 
-@pytest.mark.gpu_torch_cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "where",
+    [
+        # No storage, so no kernel: only where the prompt was moved is read.
+        "meta",
+        pytest.param(
+            "cuda:0",
+            marks=[
+                pytest.mark.gpu_torch_cuda,
+                pytest.mark.skipif(
+                    not torch.cuda.is_available(),
+                    reason="requires CUDA",
+                ),
+            ],
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_the_prompt_is_moved_to_the_models_device(
     monkeypatch: pytest.MonkeyPatch,
+    where: str,
 ) -> None:
-    device = torch.device("cuda", 0)
+    device = torch.device(where)
     seen: list[torch.device] = []
 
     @dataclass(slots=True, kw_only=True)
@@ -1026,7 +1107,8 @@ async def test_the_prompt_is_moved_to_the_models_device(
         @override
         def generate(self, inputs: Tensor, **kwargs: object) -> Tensor:
             seen.append(inputs.device)
-            return _Generator.generate(self, inputs.cpu(), **kwargs)
+            prompt = torch.zeros(inputs.shape, dtype=inputs.dtype)
+            return _Generator.generate(self, prompt, **kwargs)
 
         @override
         def parameters(self) -> Iterator[nn.Parameter]:

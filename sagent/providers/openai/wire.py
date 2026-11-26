@@ -31,9 +31,13 @@ from treekle import ReadError, from_plain, json_loads
 
 from sagent.journal.types import (
     AgentMessage,
+    AssistantMessage,
     ContextClear,
     SessionContext,
     SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolMessage,
     UserMessage,
     labeled_text,
 )
@@ -66,6 +70,7 @@ __all__ = [
     "gpt_6",
     "image_url",
     "rate_limits",
+    "results_first",
     "to_exception",
     "user_content",
 ]
@@ -112,6 +117,49 @@ def flatten(records: Iterable[SessionRecord]) -> Iterator[SessionRecord]:
             yield from flatten(record.history)
         else:
             yield record
+
+
+def results_first(records: Iterable[SessionRecord]) -> Iterator[SessionRecord]:
+    """Yield ``records`` flattened, each user-side record moved after the results it interrupts.
+
+    Args:
+      records: A conversation.
+
+    Yields:
+      record: Each record; one on the user's side (``user_content``) that falls
+        between a turn's calls and their results comes after the last result.
+
+    """
+    held: list[SessionRecord] = []
+    waiting: set[str] = set()
+    in_turn = False  # pragma: no mutate[truthiness] -- Only truth is read.
+    for record in flatten(records):
+        if isinstance(record, AssistantMessage | Thinking | ToolCall):
+            if not in_turn:
+                yield from held
+                held.clear()
+                waiting.clear()
+                in_turn = True
+            if isinstance(record, ToolCall):
+                waiting.add(record.call_id)
+            yield record
+        elif user_content(record) is not None:
+            in_turn = False  # pragma: no mutate[truthiness] -- Only truth is read.
+            # Sent here, it splits a turn's calls from their tool messages, which
+            # Chat Completions rejects with a 400: "An assistant message with
+            # 'tool_calls' must be followed by tool messages".
+            if waiting:
+                held.append(record)
+                continue
+            yield from held
+            held.clear()
+            yield record
+        else:
+            if isinstance(record, ToolMessage):
+                in_turn = False  # pragma: no mutate[truthiness] -- Only truth is read.
+                waiting.discard(record.call_id)
+            yield record
+    yield from held
 
 
 def user_content(record: SessionRecord) -> tuple[str, tuple[Attachment, ...]] | None:

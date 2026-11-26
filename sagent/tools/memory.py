@@ -163,14 +163,13 @@ class Memory:
           streaming_result: What was saved or forgotten, or why nothing was.
 
         """
-        return whole_output(self._run(context, arguments))
+        del context
+        return whole_output(self._run(arguments))
 
     async def _run(
         self,
-        context: ToolContext,
         arguments: Mapping[str, PlainTree],
     ) -> ToolOutput[MemoryResult, str, str]:
-        del context
         a = parse(arguments, Memory.Arguments)
         try:
             text = await asyncio.to_thread(self._apply, a)
@@ -191,7 +190,7 @@ class Memory:
         name = " ".join(a.name.split())
         if "[" in name or "]" in name:
             raise ValueError("name must not contain [ or ].")
-        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        slug = "_".join(re.findall(r"[a-z0-9]+", name.lower()))
         if not slug:
             raise ValueError("name must contain a letter or digit.")
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -272,7 +271,8 @@ class Memory:
         data = text.encode()
         if len(data) > self.max_index_bytes:
             data = data[: self.max_index_bytes]
-            text = data[: max(0, data.rfind(b"\n"))].decode(errors="replace") + "\n"
+            # Cut at a newline, which ends a character, so the bytes decode.
+            text = data[: max(0, data.rfind(b"\n"))].decode() + "\n"
             cut.append(f"over {self.max_index_bytes} bytes")
         return text + (f"\n[MEMORY.md truncated: {'; '.join(cut)}]\n" if cut else "")
 
@@ -294,7 +294,7 @@ def _stored_name(path: Path) -> str | None:
     except (OSError, UnicodeDecodeError):
         return None
     try:
-        split = split_frontmatter(raw, source=str(path))
+        split = split_frontmatter(raw)
     except yaml.YAMLError:
         # Older writers left ``name: Deploy: staging`` unquoted: no YAML, but
         # still the owner's name, and skipping it would let another overwrite it.
@@ -307,12 +307,8 @@ def _stored_name(path: Path) -> str | None:
             None,
         )
     try:
-        meta = from_plain(
-            split[0] if split else None,
-            dict[str, object],
-            default=dict[str, object](),
-        )
-    except ReadError:  # A list or a scalar names nothing.
+        meta = from_plain(split[0] if split else None, dict[str, object])
+    except ReadError:  # No frontmatter, a list or a scalar names nothing.
         return None
     name = meta.get("name")
     return name if isinstance(name, str) else None
@@ -336,5 +332,5 @@ def _scalar(value: str) -> str:
     try:
         plain = yaml_parse(f"k: {value}") == {"k": value}
     except yaml.YAMLError:
-        plain = False
+        plain = False  # pragma: no mutate[truthiness] -- Only truth is read.
     return value if plain else json_dumps(value, ensure_ascii=False)

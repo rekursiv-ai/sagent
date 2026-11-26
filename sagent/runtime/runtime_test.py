@@ -844,7 +844,9 @@ async def test_a_context_pushed_is_taped_and_told_in_force() -> None:
 async def test_a_context_the_agent_layer_restates_is_in_force_for_the_call() -> None:
     context = SessionContext(cwd=Path("/w"))
     async with Harness(reply("ok")) as h:
-        h.runtime.context_updates = lambda: [SessionContextUpdate(context=context)]
+        h.runtime.context_updates.append(
+            lambda: [SessionContextUpdate(context=context)],
+        )
         h.push(_user("go"))
         await h.seen(_answered)
     assert h.history()[:2] == [_user("go"), context]
@@ -866,6 +868,7 @@ async def test_a_text_reply_ends_the_round() -> None:
         ModelResponseStarted,
         ModelResponseTextStreamed,
         ModelResponseCompleted,
+        ModelMessageCompleted,
         ModelIdle,
         UserMessageCompleted,
         SessionQuitCompleted,
@@ -1379,6 +1382,83 @@ def test_the_runtime_answers_with_the_stubs_it_was_given() -> None:
         if isinstance(e, ToolMessage) and e.state == "cancelled"
     ]
     assert settled.text() == "[gone]"
+
+
+@pytest.mark.asyncio
+async def test_a_resume_cancels_no_call_whose_result_a_foreground_took() -> None:
+    tool = Gated(hold=True, output="REAL")
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "b1", background=True),
+                call("BackgroundTask", "w1", operation="foreground", id="b1"),
+            ],
+        ),
+        reply("got it"),
+        tools=[tool, BackgroundTask()],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: _foreground_waited(h, "b1"))
+        tool.release.set()
+        await h.seen(_answered)
+    resumed = Runtime(model=ScriptedProvider()["scripted"])
+    for entry in h.runtime.tape.context().messages:
+        _ = resumed.tape.append_history(entry)
+
+    resumed.settle_detached()
+
+    assert _states(resumed, "b1") == ["pending"]
+
+
+def test_a_resume_cancels_a_call_a_foreground_only_looked_in_on() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    for record in (
+        _user("go"),
+        reply(calls=[call("echo", "b1", background=True)]),
+        ToolMessage(call_id="b1", state="pending", shown="[running]"),
+        reply(calls=[call("BackgroundTask", "w1", operation="foreground", id="b1")]),
+        ToolMessage(
+            call_id="w1",
+            state="done",
+            stdout=("half",),
+            result=BackgroundTaskResult(operation="foreground", job_id="b1"),
+        ),
+    ):
+        _ = rt.tape.append_history(record)
+
+    rt.settle_detached()
+
+    assert _states(rt, "b1") == ["pending", "cancelled"]
+
+
+def test_a_foreground_that_took_its_job_after_a_turn_or_two_still_answers_it() -> None:
+    """The waiting foreground was itself detached; its result came turns after its call."""
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    for record in (
+        _user("go"),
+        reply(calls=[call("echo", "b1", background=True)]),
+        ToolMessage(call_id="b1", state="pending", shown="[running]"),
+        reply(calls=[call("BackgroundTask", "w1", operation="foreground", id="b1")]),
+        ToolMessage(call_id="w1", state="pending", shown="[detached]"),
+        reply(calls=[call("BackgroundTask", "w2", operation="list")]),
+        ToolMessage(call_id="w2", state="done", stdout=("none",)),
+        reply("waiting"),
+        ToolMessage(call_id="w1", state="done", stdout=("REAL",)),
+    ):
+        _ = rt.tape.append_history(record)
+
+    rt.settle_detached()
+
+    assert _states(rt, "b1") == ["pending"]
+
+
+def _states(rt: Runtime, call_id: str) -> list[str]:
+    """Return the state of each message of ``call_id`` in ``rt``'s context."""
+    return [
+        e.state
+        for e in rt.tape.context().messages
+        if isinstance(e, ToolMessage) and e.call_id == call_id
+    ]
 
 
 def test_a_resume_cancels_each_pending_call_left_unanswered_past_an_answered_one() -> (
@@ -2231,6 +2311,19 @@ async def _laws_hold(actions: Sequence[str], replies: Sequence[Sequence[int]]) -
             violation = _wire_violation(request.records)
             assert violation is None, f"request {i} after {actions}: {violation}"
         assert h.runtime._requests == [], f"left owed after {actions}"
+        # Each reply recorded is a model message taken in, and told so once.
+        recorded = [
+            e
+            for e in h.events
+            if isinstance(e, ModelResponseCompleted)
+            and isinstance(e.outcome, Succeeded)
+        ]
+        taken = [
+            e
+            for e in h.events
+            if isinstance(e, ModelMessageCompleted) and isinstance(e.outcome, Succeeded)
+        ]
+        assert len(taken) == len(recorded), f"replies untold after {actions}"
 
 
 @pytest.mark.parametrize(
@@ -2301,8 +2394,10 @@ async def test_a_halt_detaches_the_running_cohort() -> None:
         h.push(_user("go"))
         await h.until(lambda: bool(tool.started))
         h.push(ModelHalt())
+        assert h.runtime.halt_queued
         await h.seen(ModelHalt)
         await spin()
+        assert not h.runtime.halt_queued
         assert h.runtime.running_tools == {}
         assert h.runtime.jobs["t1"].status == "detached"
         (stub,) = h.results("t1")
@@ -2313,6 +2408,38 @@ async def test_a_halt_detaches_the_running_cohort() -> None:
     assert h.user_texts(1) == ["go", "resume"]
     # The halt called the wait off.
     assert _waits(h) == [ToolCohortStarted(), ToolCohortCompleted(outcome=Cancelled())]
+
+
+@pytest.mark.asyncio
+async def test_what_is_taken_while_a_call_runs_is_saved_then() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("done"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(tool.started))
+        await spin()
+        saved = h.count(SessionSaveDue)
+        h.push(SystemMessage(content="note"))
+        await spin()
+        assert h.count(SessionSaveDue) == saved + 1
+        tool.release.set()
+        await h.seen(_answered)
+
+
+@pytest.mark.asyncio
+async def test_a_halt_stays_queued_until_each_one_pushed_is_taken() -> None:
+    rt = Runtime(model=ScriptedProvider()["scripted"])
+    rt.halt()
+    rt.halt()
+    first, second = rt.inbox.drain_nowait()
+
+    _ = await rt._dispatch(first, later=[second])
+    assert rt.halt_queued
+    _ = await rt._dispatch(second, later=[])
+    assert not rt.halt_queued
 
 
 def _replies(n: int) -> list[Response]:
@@ -4671,7 +4798,7 @@ async def test_context_updates_are_noted_before_each_round() -> None:
         reply("done"),
         tools=[Gated()],
     ) as h:
-        h.runtime.context_updates = updates
+        h.runtime.context_updates.append(updates)
         h.push(_user("go"))
         await h.seen(_answered)
         await spin()
@@ -4699,7 +4826,7 @@ async def test_a_message_given_at_the_model_gate_joins_the_round_running_calls_k
     ) as h:
         h.push(_user("go"))
         await h.until(lambda: bool(h.requests()))
-        h.runtime.context_updates = updates
+        h.runtime.context_updates.append(updates)
         await h.seen(_answered)
     assert h.texts() == ["go", "", "ok", "advice", "done"]
     assert [e.content for e in h.events if isinstance(e, AgentMessage)] == ["advice"]
@@ -4733,7 +4860,7 @@ async def test_context_updates_wait_while_compacting_first() -> None:
 
     async with Harness(reply("ok"), compactor=summarizer) as h:
         h.runtime.compact_due = lambda: due.pop() if due else False
-        h.runtime.context_updates = updates
+        h.runtime.context_updates.append(updates)
         h.push(_user("go"))
         await h.seen(_answered)
     assert asked == [True]
@@ -5683,9 +5810,10 @@ async def test_a_runtime_streaming_compacting_or_waiting_on_a_call_is_at_work() 
 def test_a_drop_is_one_splice_that_forgets_the_files_read(tmp_path: Path) -> None:
     h = Harness(cwd=tmp_path)
     for entry in (
-        reply(calls=[call("echo", c) for c in ("t1", "t2", "lost")]),
+        reply(calls=[call("echo", c) for c in ("t1", "t2", "t3", "lost")]),
         ToolMessage(call_id="t1", state="done", stdout=("x" * 400,)),
         ToolMessage(call_id="t2", state="done", stdout=("y" * 400,)),
+        ToolMessage(call_id="t3", state="done", stdout=("ok",)),
         _user("next"),
         reply("ok"),
     ):
@@ -5695,6 +5823,8 @@ def test_a_drop_is_one_splice_that_forgets_the_files_read(tmp_path: Path) -> Non
     h.runtime.tool_context.files.saw(seen)
 
     h.runtime.drop([])
+    # A stub would lengthen "ok", so nothing changes and no splice is written.
+    h.runtime.drop([3])
     assert [r for r in h.runtime.tape if isinstance(r, ContextSplice)] == []
     assert seen in h.runtime.tool_context.files
 
@@ -5706,9 +5836,9 @@ def test_a_drop_is_one_splice_that_forgets_the_files_read(tmp_path: Path) -> Non
     gone = Stubs().pruned
     assert [r.text() for c in ("t1", "t2") for r in h.results(c)] == [gone, gone]
     splices = [r for r in h.runtime.tape if isinstance(r, ContextSplice)]
-    assert [(s.strategy, s.paired_externally) for s in splices] == [
-        ("prune", frozenset({"lost"})),
-    ] * 2
+    assert [
+        (s.strategy, s.paired_externally, s.summary_fallback_reason) for s in splices
+    ] == [("prune", frozenset({"lost"}), "")] * 2
 
 
 def _messages_ended(h: Harness) -> list[type]:
@@ -9725,6 +9855,16 @@ async def test_a_suspension_keeps_the_input_that_came_with_it(
 
 
 @pytest.mark.asyncio
+async def test_a_reply_taken_in_ends_its_message_once_as_succeeded() -> None:
+    async with Harness(reply("hi")) as h:
+        h.push(_user("go"))
+        await h.seen(_answered)
+    assert [e for e in h.events if isinstance(e, ModelMessageCompleted)] == [
+        ModelMessageCompleted(outcome=Succeeded(value=None)),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_reply_not_taken_fails_once_and_keeps_what_came_with_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -9753,8 +9893,10 @@ async def test_a_reply_not_taken_fails_once_and_keeps_what_came_with_it(
     assert isinstance(record.exc_info, tuple)
     assert record.exc_info[1] is broke
     assert _failures(h.events) == [broke]
+    # The reply asked for once the input behind it was taken in is taken in itself.
     assert [e.outcome for e in h.events if isinstance(e, ModelMessageCompleted)] == [
         Failed(exception=broke),
+        Succeeded(value=None),
     ]
     assert h.texts() == ["go", "b", "c", "answered"]
     # The reply not taken was not asked for again before the input behind it.
@@ -10164,6 +10306,41 @@ async def test_a_first_wake_detaches_the_cohort_with_what_each_call_wrote(
     assert [r.text() for r in _arrival(h, "e1")] == ["ok"]
     # The first wake came at the schedule's first time.
     assert [wake.delay for wake in armed[:2]] == [15.0, 15.0]
+
+
+@dataclass(slots=True, kw_only=True)
+class _Crashing(Talking):
+    """A tool that writes each line the test says, then fails."""
+
+    @override
+    async def _run(self, stdout: Stream[str]) -> ToolOutput[BashResult, str, str]:
+        _ = await Talking._run(self, stdout)
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_a_detached_call_that_fails_after_its_wake_is_told_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why it failed is what the model needs, however much a wake showed."""
+    armed = _wakes(monkeypatch)
+    talk = _Crashing()
+    async with Harness(
+        reply(calls=[call("talk", "t1")]),
+        *_replies(3),
+        tools=[talk],
+    ) as h:
+        h.push(_user("go"))
+        await h.until(lambda: bool(armed))
+        talk.write("one\n")
+        await h.until(lambda: bool(_watch(h, "t1").items))
+        _fire(armed, "t1", forced=False)
+        await h.seen(_answered)
+        talk.end()
+        await h.until(lambda: bool(_arrival(h, "t1")))
+    (arrived,) = _arrival(h, "t1")
+    assert (arrived.state, arrived.shown) == ("failed", None)
+    assert "boom" in arrived.text()
 
 
 @pytest.mark.asyncio

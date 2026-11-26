@@ -396,10 +396,11 @@ class Scrollback:
                 show_result(p, record, header=header)
                 self.shown += 1
                 # A spawn another harness logged names no child, and says nothing of
-                # what it used.
+                # what it used; a watcher just started has used nothing yet.
                 if (
                     isinstance(spawned := record.result, AgentSpawnResult)
                     and spawned.agent_id is not None
+                    and spawned.state != "running"
                 ):
                     p.note(_spawn_done(spawned))
             case _:

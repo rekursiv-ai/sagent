@@ -503,7 +503,7 @@ def _takes_now(runtime: Runtime) -> bool:
         return True
     if runtime.model_call is None:
         return runtime.compact_task is None
-    return not runtime.inbox.empty()
+    return runtime.halt_queued
 
 
 # A pane's own stop emptied that pane when the cursor came, so staging the line back

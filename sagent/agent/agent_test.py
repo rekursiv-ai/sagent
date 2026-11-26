@@ -886,6 +886,31 @@ async def test_a_turn_stopped_at_its_cap_lets_the_next_one_run(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_cap_lowered_mid_turn_is_the_cap_the_error_names(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply(calls=[call("Nope", "b")]),
+        tools=[_Tool(name="Nope")],
+        max_rounds=3,
+    )
+    provider.replies.append(partial(_lowering_the_cap, agent))
+    async with agent:
+        with pytest.raises(RoundLimitError) as raised:
+            _ = await agent.send("go")
+
+    assert (raised.value.rounds, raised.value.max_rounds) == (2, 1)
+
+
+def _lowering_the_cap(agent: Agent, request: Request) -> Response:
+    del request
+    agent.max_rounds = 1
+    return reply(calls=[call("Nope", "c")])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("spends", "raises"),
     [((0.6, 0.6), True), ((0.5, 0.5), True), ((0.5, 0.4), False)],
@@ -3164,7 +3189,7 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
         ToolMessage(
             call_id="c1",
             state="done",
-            stdout=("long output",),
+            stdout=("long output " * 9,),
             result=UncategorizedToolResult(exit_code=1),
         ),
     )
@@ -3183,7 +3208,7 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     assert ToolMessage(
         call_id="c1",
         state="done",
-        stdout=("long output",),
+        stdout=("long output " * 9,),
         result=UncategorizedToolResult(exit_code=1),
         shown=types.Stubs().pruned,
     ) in list(session)
@@ -3274,7 +3299,7 @@ def test_a_call_s_news_pruned_alone_resumes_with_its_late_result_whole(
         UserMessage(content="go"),
         reply(calls=[call("Echo", "c1")]),
         ToolMessage(call_id="c1", state="pending", shown="[detached]"),
-        ToolMessage(call_id="c1", state="pending", stdout=("news",)),
+        ToolMessage(call_id="c1", state="pending", stdout=("[news]\n" + "x" * 80,)),
         ToolMessage(call_id="c1", state="done", stdout=("late",)),
     ):
         _ = agent.runtime.tape.append_history(entry)
@@ -3282,6 +3307,11 @@ def test_a_call_s_news_pruned_alone_resumes_with_its_late_result_whole(
 
     agent.runtime.drop([3])
     session.persist()
+    assert [m.text() for m in session if isinstance(m, ToolMessage)] == [
+        "[detached]",
+        f"[news]\n{types.Stubs().pruned}",
+        "late",
+    ]
 
     _, resumed = _agent(tmp_path, journal=journal)
     _session(resumed).resume()
@@ -3301,7 +3331,7 @@ def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
         ToolMessage(
             call_id=f"c{1}",
             state="done",
-            stdout=(f"output {1}",),
+            stdout=(f"output {1} " * 9,),
             result=UncategorizedToolResult(exit_code=1),
         ),
     )
@@ -3311,7 +3341,7 @@ def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
         ToolMessage(
             call_id=f"c{2}",
             state="done",
-            stdout=(f"output {2}",),
+            stdout=(f"output {2} " * 9,),
             result=UncategorizedToolResult(exit_code=1),
         ),
     )
@@ -3324,7 +3354,7 @@ def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
         ToolMessage(
             call_id=f"c{1}",
             state="done",
-            stdout=(f"output {1}",),
+            stdout=(f"output {1} " * 9,),
             result=UncategorizedToolResult(exit_code=1),
         )
         in kept
@@ -3333,7 +3363,7 @@ def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
         ToolMessage(
             call_id=f"c{2}",
             state="done",
-            stdout=(f"output {2}",),
+            stdout=(f"output {2} " * 9,),
             result=UncategorizedToolResult(exit_code=1),
         )
         in kept

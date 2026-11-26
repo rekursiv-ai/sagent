@@ -15,6 +15,7 @@ from sagent.journal.types import (
     AssistantMessage,
     ContextCompaction,
     Failed,
+    Pairing,
     SessionContext,
     Succeeded,
     SystemMessage,
@@ -121,6 +122,40 @@ def _texts(tape: Sequence[TapeRecord]) -> list[str]:
 def test_empty_tape_resolves_to_nothing() -> None:
     resolved = resolve_context([])
     assert (resolved.messages, resolved.origins, resolved.version) == ([], [], 0)
+    tape = Tape()
+    assert tape.context().messages == []
+    assert tape.mint_ref() == TapeRef(session_id="", ordinal=0)
+
+
+def _no_pairings(
+    entries: Sequence[ModelContextEvent],
+) -> tuple[list[Pairing], tuple[str, ...]]:
+    del entries
+    return [], ()
+
+
+def _valid(messages: Sequence[ModelContextEvent]) -> None:
+    del messages
+
+
+def test_a_pairing_for_every_entry_is_required_to_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(context, "pairings", _no_pairings)
+    with pytest.raises(ValueError, match="zip"):
+        validate_context([_user("go")])
+
+
+def test_a_pairing_for_every_entry_is_required_to_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    monkeypatch.setattr(context, "pairings", _no_pairings)
+    # Only the repair's own reading of the pairings is checked here.
+    monkeypatch.setattr(context, "validate_context", _valid)
+    with pytest.raises(ValueError, match="zip"):
+        _ = tape.repair()
 
 
 def test_events_render_in_tape_order_with_their_origins() -> None:
@@ -518,7 +553,20 @@ def test_valid_contexts_pass(messages: list[ModelContextEvent]) -> None:
             "^duplicate ToolMessage for call_id 't1'$",
         ),
         ([_user("go"), _calling("t1")], "without results at end"),
-        ([_user("go"), _calling("t1"), reply("oops")], "pending tool calls"),
+        (
+            [_user("go"), _calling("t1"), reply("oops")],
+            r"^assistant turn with pending tool calls: \['t1'\]$",
+        ),
+        # A peer's message while a call waits comes before its result.
+        (
+            [
+                _user("go"),
+                _calling("t1"),
+                AgentMessage(sender="peer", content="hi"),
+                ToolMessage(call_id="t1", state="done", stdout=("ok",)),
+            ],
+            r"^user message before tool results: pending \['t1'\]$",
+        ),
         (
             [
                 _user("go"),
@@ -689,6 +737,18 @@ def test_only_a_tool_s_output_may_be_stubbed() -> None:
     assert _output_texts(entries) == ["x" * 400]
 
 
+def test_a_stub_never_lengthens_an_output() -> None:
+    entries = [
+        reply(calls=[call("Read", "c0")]),
+        ToolMessage(call_id="c0", state="pending", shown=f"[detached]\n{'x' * 400}"),
+        ToolMessage(call_id="c0", state="done", stdout=("ok",)),
+    ]
+    assert _output_texts(context.stubbed(entries, [1, 2], stub="[gone]")) == [
+        "[detached]\n[gone]",
+        "ok",
+    ]
+
+
 def test_a_stubbed_output_keeps_the_line_that_says_which_call_and_what_became_of_it() -> (
     None
 ):
@@ -713,7 +773,7 @@ def test_a_stubbed_output_keeps_the_line_that_says_which_call_and_what_became_of
         "[cancelled]\n[gone]",
         "[gone]",
         "[talk c0 still running after 15s]\n[gone]",
-        "\n[gone]",
+        "",
     ]
     states = [e.state for e in after if isinstance(e, ToolMessage)]
     assert states == ["pending", "cancelled", "done", "pending", "pending"]
@@ -845,6 +905,40 @@ def test_absorbing_a_splice_must_carry_its_text() -> None:
             ),
         )
     assert _texts(tape) == ["must survive", "b"]
+
+
+def test_an_absorbed_text_is_carried_whole_or_across_entries_and_an_empty_one_needs_none() -> (
+    None
+):
+    tape = Tape("s")
+    turn = Response(
+        records=(
+            AssistantMessage(content=None),
+            AssistantMessage(content="a"),
+            AssistantMessage(content="b"),
+        ),
+        stop_reason="end_turn",
+    )
+    empty = (ContextCompaction(summary=None), UserMessage(content=None))
+    barrier = _barrier(tape, turn, _user("x\ny"), *empty)
+    tape.append_splice(
+        mask=(MaskRange(session_id="s", lo=0, hi=barrier.ordinal),),
+        replacement=(reply("ab"), _user("x"), _user("y")),
+        strategy="merged",
+    )
+    assert _texts(tape) == ["ab", "x", "y"]
+
+
+def test_a_dropped_text_is_named_by_its_first_sixty_characters() -> None:
+    tape = Tape("s")
+    barrier = _barrier(tape, _user("x" * 60 + "TAIL"))
+    with pytest.raises(InvalidSpliceError) as raised:
+        _ = tape.append_splice(
+            mask=(MaskRange(session_id="s", lo=0, hi=barrier.ordinal),),
+            replacement=(_user("other"),),
+            strategy="careless",
+        )
+    assert f"(first: {'x' * 60!r});" in str(raised.value)
 
 
 def test_absorbing_a_vendor_s_summary_must_carry_its_text() -> None:
@@ -1180,6 +1274,10 @@ def test_a_recorded_call_left_open_is_answered_interrupted_beside_its_turn() -> 
     (repair,) = (r for r in tape if isinstance(r, ContextSplice))
     assert (repair.strategy, repair.insert_after) == ("orphan_tool_use_repair", turn)
     assert repair.paired_externally == frozenset({"c2"})
+    assert [m.state for m in repair.replacement if isinstance(m, ToolMessage)] == [
+        "failed",
+    ]
+    assert repair.summary_fallback_reason == ""
     assert _texts(tape) == ["go", "", "[interrupted]", "ok", "next"]
     validate_context(tape.context().messages)
 
@@ -1206,6 +1304,55 @@ def test_a_recorded_repeat_of_a_result_is_hidden() -> None:
 
     assert _strategies(tape) == ["orphan_tool_result_repair"]
     assert _texts(tape) == ["go", "", "ok"]
+
+
+def test_a_recorded_result_among_a_turn_s_that_answers_none_is_hidden() -> None:
+    tape = Tape("s")
+    tape.append_history(_user("go"))
+    tape.append_history(_calling("c1"))
+    tape.append_history(ToolMessage(call_id="c9", state="done", stdout=("stray",)))
+    tape.append_history(ToolMessage(call_id="c1", state="done", stdout=("ok",)))
+
+    assert tape.repair() is None
+
+    assert _strategies(tape) == ["orphan_tool_result_repair"]
+    assert _texts(tape) == ["go", "", "ok"]
+
+
+def test_a_rebuild_drops_a_repeat_another_splice_shows_and_says_why_it_rebuilt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tape = Tape("s")
+    first = tape.append_splice(
+        replacement=(
+            _user("go"),
+            _calling("c1"),
+            ToolMessage(call_id="c1", state="done", stdout=("ok",)),
+        ),
+        strategy="summary",
+    )
+    tape.append_splice(
+        insert_after=first,
+        replacement=(ToolMessage(call_id="c1", state="done", stdout=("dup",)),),
+        strategy="late",
+        paired_externally=frozenset({"c1"}),
+    )
+    with pytest.raises(InvalidContextError) as invalid:
+        validate_context(tape.context().messages)
+
+    with caplog.at_level(logging.WARNING, logger=context.__name__):
+        assert tape.repair() is None
+
+    (rescue,) = (r for r in tape if isinstance(r, ContextSplice) and r.ref.ordinal == 2)
+    assert rescue.strategy == "context_rescue"
+    assert "dup" not in _texts(tape)
+    validate_context(tape.context().messages)
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "context invariant still violated after repair; applying rescue barrier: "
+            f"{invalid.value}"
+        ),
+    ]
 
 
 def test_splices_that_leave_partners_unpaired_are_rebuilt_whole() -> None:

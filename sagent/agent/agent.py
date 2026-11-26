@@ -234,7 +234,7 @@ class Agent(AsyncResource):
         # What a child it spawns compacts and prunes with, so the child does as it does.
         self.compactor_factory: Factory[Shrinker] = compactor
         self.pruner_factory: Factory[Shrinker] = pruner
-        self.runtime.context_updates = self._session.updates
+        self.runtime.context_updates.append(self._session.updates)
         # A compactor the runtime can call compacts on ``SessionCompact``, and when due,
         # and sizes each reply to the room the window leaves.
         summarizer = self._session.compactor
@@ -594,7 +594,10 @@ class Agent(AsyncResource):
         if (over := self._over_budget()) is not None:
             self._limit = over
         elif called and self.max_rounds is not None and self._rounds >= self.max_rounds:
-            self._limit = RoundLimitError(rounds=self._rounds, max_rounds=self._rounds)
+            self._limit = RoundLimitError(
+                rounds=self._rounds,
+                max_rounds=self.max_rounds,
+            )
         elif called:
             self._rounds += 1
             self._gate_tools()
@@ -1062,11 +1065,7 @@ class RuntimeSession:
             skipped_instruction_files=skipped,
         )
         now = now_timestamp()
-        # A window's first context names skipped files only when there are some.
-        delta = replace(
-            current,
-            skipped_instruction_files=current.skipped_instruction_files or None,
-        )
+        delta = current
         if stated:
             last = _last_stated(stated, offered=offered)
             if (

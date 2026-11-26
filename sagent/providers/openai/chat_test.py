@@ -406,6 +406,8 @@ def test_the_tokens_split_the_cached_prompt_from_the_uncached_and_are_priced() -
         ("function_call", "", "tool_use", ""),
         ("content_filter", "", "refusal", "content_filter"),
         ("stop", "I can't.", "refusal", "I can't."),
+        # A refusal streamed in two chunks is one.
+        ("stop", "I can't.|Sorry.", "refusal", "I can't.Sorry."),
         ("eos", "", "eos", ""),
     ],
 )
@@ -416,8 +418,8 @@ def test_the_stop_reason_is_in_the_shared_vocabulary(
     details: str,
 ) -> None:
     reader = _reader()
-    if refusal:
-        assert reader.feed(_chunk(refusal=refusal)) == (TextChunk(text=refusal),)
+    for part in filter(None, refusal.split("|")):
+        assert reader.feed(_chunk(refusal=part)) == (TextChunk(text=part),)
     reader.feed(_chunk(finish))
     response = reader.response()
     assert response.stop_reason == stop_reason

@@ -96,7 +96,6 @@ from sagent.model.types import Request, Response, TextChunk
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
 from sagent.runtime.context import (
     Tape,
-    prunable,
     stubbed,
     widen_barrier_mask,
 )
@@ -503,10 +502,11 @@ class Runtime:
         a model call, when ``prune`` finds it pays, or at once with no ``prune``."""
 
         self.before_tool_spawn: Callable[[Response], UserMessage | None] | None = None
-        self.context_updates: (
+        self.context_updates: list[
             Callable[[], Sequence[SystemMessage | AgentMessage | SessionContextUpdate]]
-            | None
-        ) = None
+        ] = []
+        """What joins the context before each model call, each asked in turn: whoever
+        adds one removes only its own, so none undoes another's."""
         self.before_call: Callable[[bool], Awaitable[None]] | None = None
         self.after_failure: (
             Callable[[BaseException], Awaitable[Mapping[str, datetime]]] | None
@@ -544,6 +544,8 @@ class Runtime:
         self.turn_under_way = False
         # pragma: no mutate end
         self.has_quit = False  # pragma: no mutate[truthiness] -- Only truth is read.
+        # Halts pushed and not yet taken from the inbox.
+        self._halts_queued = 0
 
         self.model_call: (
             asyncio.Task[ModelMessage | ModelResponseCompleted | None] | None
@@ -678,7 +680,14 @@ class Runtime:
           event: An input, such as a ``UserMessage``, ``ModelHalt``, or ``SessionCompact``.
 
         """
+        if isinstance(event, ModelHalt):
+            self._halts_queued += 1
         self.inbox.push_back(event)
+
+    @property
+    def halt_queued(self) -> bool:
+        """True while a halt is pushed and not yet taken: the reply streaming stops."""
+        return self._halts_queued > 0
 
     def halt(self, *, sender: str | None = None) -> None:
         """Stop the model call; the calls it waited on are detached and keep running.
@@ -984,17 +993,28 @@ class Runtime:
 
     # A resumed context's detached calls ran in a process that has ended, so no
     # result will follow; and a clean quit's cancellations are never committed.
+    # A result ``foreground`` took is told under the ``BackgroundTask`` call that
+    # took it, never under its own call; that answers its own call too.
     def settle_detached(self) -> None:
         """Deliver a cancellation for each call answered only by a stub, running nowhere."""
         pending: list[str] = []
         answered: set[str] = set()
+        foregrounds: dict[str, str] = {}
         for entry in self.tape.context().messages:
+            if isinstance(entry, Response):
+                foregrounds |= _foregrounded(entry)
             if not isinstance(entry, ToolMessage):
                 continue
             if entry.state == "pending":
                 pending.append(entry.call_id)
-            else:
-                answered.add(entry.call_id)
+                continue
+            answered.add(entry.call_id)
+            # A wake it returned instead says only what the call wrote so far.
+            if entry.call_id in foregrounds and not isinstance(
+                entry.result,
+                BackgroundTaskResult,
+            ):
+                answered.add(foregrounds[entry.call_id])
         for cid in dict.fromkeys(pending):
             if cid in answered or cid in self.detached or cid in self.running_tools:
                 continue
@@ -1044,6 +1064,9 @@ class Runtime:
     def drop(self, indices: Sequence[int]) -> None:
         """Replace the context's tool outputs at ``indices`` with ``stubs.pruned``, in one splice.
 
+        An output the stub would not shorten stays; with none to replace, no
+        splice is written.
+
         Args:
           indices: Positions in ``context().messages``, each a tool's result or a
             wake's news.
@@ -1057,8 +1080,10 @@ class Runtime:
         before = self.tape.context().messages
         for i in indices:
             if isinstance(output := before[i], ToolMessage):
-                _ = self.queued.pop(output.call_id or "", None)
+                _ = self.queued.pop(output.call_id, None)
         context = stubbed(before, indices, stub=self.stubs.pruned)
+        if context == list(before):
+            return
         _ = self.tape.append_splice(
             mask=full_tape_mask(self.tape),
             replacement=tuple(context),
@@ -1173,6 +1198,7 @@ class Runtime:
                 await self._on_quit(later)
                 return True
             case ModelHalt():
+                self._halts_queued -= 1
                 return await self._on_halt(item, later=later)
             case SessionClear():
                 self._on_clear(item, later=later)
@@ -1255,7 +1281,9 @@ class Runtime:
         )
         self._awaited = None
         self.recheck_quota = True
-        self._compaction_failed = False
+        self._compaction_failed = (
+            False  # pragma: no mutate[truthiness] -- Only truth is read.
+        )
         self._end_suspension()
         self.publish(
             ModelRetryCompleted(
@@ -1704,7 +1732,7 @@ class Runtime:
         ):
             return result
         tail = self._look(watch) or "(no new output)"
-        shown = dataclasses.replace(result, shown=None, stdout=(tail,), stderr=())
+        shown = dataclasses.replace(result, stdout=(tail,), stderr=())
         return dataclasses.replace(result, shown=shown.text())
 
     # While one is under way, started and its ending not yet told, every reader that
@@ -1811,6 +1839,7 @@ class Runtime:
         self.tape.append_history(msg)
         # Observers see the turn as recorded, rewrites included.
         self.publish(ModelResponseCompleted(outcome=Succeeded(value=msg)))
+        self.publish(ModelMessageCompleted(outcome=Succeeded(value=None)))
         if cut_in is not None:
             self._stand(cut_in, "held", ModelResponseCompleted)
         return msg, refusals
@@ -1887,14 +1916,11 @@ class Runtime:
         here = {e.call_id for e in context if isinstance(e, ToolMessage)}
         self.queued = {c: why for c, why in self.queued.items() if c in here}
         if self.prune is None:
-            stub = self.stubs.pruned
             self.drop(
                 [
                     i
                     for i, e in enumerate(context)
-                    if isinstance(e, ToolMessage)
-                    and e.call_id in self.queued
-                    and prunable(e, stub=stub)
+                    if isinstance(e, ToolMessage) and e.call_id in self.queued
                 ],
             )
         waits = self.prune is not None and self.prune()
@@ -1916,16 +1942,15 @@ class Runtime:
 
     async def _call_model(self) -> None:
         """Start a model call; a context past repair waits for the user instead."""
-        if self.context_updates is not None:
-            for note in self.context_updates():
-                match note:
-                    case SessionContextUpdate():
-                        self._update_context(note)
-                    case AgentMessage():
-                        self.tape.append_history(note)
-                        self.publish(note)
-                    case SystemMessage():
-                        self.tape.append_history(note)
+        for note in (n for updates in self.context_updates for n in updates()):
+            match note:
+                case SessionContextUpdate():
+                    self._update_context(note)
+                case AgentMessage():
+                    self.tape.append_history(note)
+                    self.publish(note)
+                case SystemMessage():
+                    self.tape.append_history(note)
         exc = self.tape.repair()
         if exc is not None:
             # Raised, it would repeat every pass on the same tape; the user is told,
@@ -2014,7 +2039,9 @@ class Runtime:
         for earlier in self._take(ModelResponseStarted):
             self._commit_due(earlier)
         self.tape.append_history(message)
-        self._compaction_failed = False
+        self._compaction_failed = (
+            False  # pragma: no mutate[truthiness] -- Only truth is read.
+        )
         self._stand(message, "in_turn")
         self.publish(message)
 
@@ -2619,7 +2646,9 @@ class Runtime:
             await asyncio.sleep(
                 wake_at - time.time(),
             )  # house-ignore[sleep] -- The schedule.
+        # pragma: no mutate[truthiness] start -- Only truth is read.
         self._calls[call.call_id].sleeping = False
+        # pragma: no mutate end
         await self._run_tool_and_post(self._calls[call.call_id])
 
     # A failure or a cancellation is still a result, so every call is answered; the
@@ -2795,6 +2824,17 @@ def _message_ending(message: _Message, outcome: Outcome[None]) -> _Ending:
             return SystemMessageCompleted(outcome=outcome)
         case ToolMessage():
             return ToolMessageCompleted(outcome=outcome)
+
+
+def _foregrounded(turn: Response) -> dict[str, str]:
+    """Return the job each ``BackgroundTask`` foreground of ``turn`` waits on, by call id."""
+    return {
+        c.call_id: job
+        for c in calls(turn.records)
+        if c.name == BackgroundTask.name
+        and c.arguments.get("operation") == "foreground"
+        and isinstance(job := c.arguments.get("id"), str)
+    }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
