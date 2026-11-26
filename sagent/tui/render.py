@@ -131,6 +131,8 @@ class Scrollback:
         self.shown = 0
         """Messages, replies, and results drawn: what a replay's footer counts."""
 
+        # Per response record: characters shown, then the unfinished paragraph.
+        self._child_text: dict[str, dict[int, tuple[int, str]]] = {}
         self._printed = Printed()
         # The calls not yet answered, as labelled, by key: a result printed below
         # anything else names its call again.
@@ -420,16 +422,32 @@ class Scrollback:
         p = self.printer
         while isinstance(event, types.ChildEvent):
             label, event = event.label, event.event
+        if isinstance(event, types.ModelResponseTextStreamed):
+            streams = self._child_text.setdefault(label, {})
+            index = event.response_record_index
+            shown, tail = streams.get(index, (0, ""))
+            check_boundary = tail.endswith("\n") or "\n" in event.text
+            tail += event.text
+            cut = stable_boundary(tail) if check_boundary else 0
+            if not cut and len(tail) > self.flush_chars:
+                cut = tail.rfind("\n") + 1 or len(tail)
+            if cut:
+                if block := tail[:cut].strip():
+                    p.note(block, lead=f"{label}: ", prose=True)
+                shown += cut
+                tail = tail[cut:]
+            streams[index] = shown, tail
+            return
         ended = (
             event.outcome if isinstance(event, types.ModelResponseCompleted) else None
         )
+        streams = self._child_text.pop(label, {}) if ended is not None else {}
         if isinstance(ended, Succeeded):
-            for record in ended.value.records:
-                if (
-                    isinstance(record, AssistantMessage)
-                    and (text := record.content or "").strip()
-                ):
-                    p.note(text, lead=f"{label}: ", prose=True)
+            for index, record in enumerate(ended.value.records):
+                if isinstance(record, AssistantMessage):
+                    shown, _ = streams.get(index, (0, ""))
+                    if text := (record.content or "")[shown:].strip():
+                        p.note(text, lead=f"{label}: ", prose=True)
                 elif isinstance(record, ToolCall):
                     header = call_header(
                         record,
@@ -439,6 +457,10 @@ class Scrollback:
                     )
                     self._calls[header.key] = header
                     p.call(header)
+        elif ended is not None:
+            for _, tail in streams.values():
+                if tail.strip():
+                    p.note(tail.strip(), lead=f"{label}: ", prose=True)
         elif isinstance(event, ToolMessage) and event.state != "pending":
             header = self._calls.get(_key(event.call_id, label))
             if header is None:

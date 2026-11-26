@@ -880,7 +880,8 @@ class _Forward:
             # A child's halt, a call of its that failed while its turn went on, and a
             # compaction of its that did not happen, are its own.
             case (
-                types.ModelResponseCompleted(outcome=Succeeded())
+                types.ModelResponseCompleted()
+                | types.ModelResponseTextStreamed()
                 | ModelIdle(outcome=Failed())
                 | types.ModelResponseSuspended()
                 | types.LoginSwitched()

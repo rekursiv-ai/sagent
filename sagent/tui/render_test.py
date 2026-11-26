@@ -1885,6 +1885,60 @@ def test_an_error_that_is_a_sentence_breaks_between_words(given: Shown) -> None:
     assert printer.text.split()[: len(words)] == words
 
 
+def test_interleaved_workers_show_finished_paragraphs_before_completion() -> None:
+    render, printer = _renderer()
+    for label, text in [("a", "First paragraph.\n\nNext"), ("b", "Other")]:
+        render(
+            types.ChildEvent(
+                label=label,
+                event=types.ModelResponseTextStreamed(text=text),
+            ),
+        )
+    assert printer.printed == [("note", "a: First paragraph.")]
+    render(types.ChildEvent(label="b", event=_turn(text="Other")))
+    render(types.ChildEvent(label="a", event=_turn(text="First paragraph.\n\nNext")))
+    assert printer.printed == [
+        ("note", "a: First paragraph."),
+        ("note", "b: Other"),
+        ("note", "a: Next"),
+    ]
+
+
+def test_interrupted_worker_keeps_the_tail_without_repeating_the_paragraph() -> None:
+    render, printer = _renderer()
+    render(
+        types.ChildEvent(
+            label="a",
+            event=types.ModelResponseTextStreamed(text="One.\n\nPartial"),
+        ),
+    )
+    render(
+        types.ChildEvent(
+            label="a",
+            event=types.ModelResponseCompleted(outcome=Cancelled()),
+        ),
+    )
+    render(types.ChildEvent(label="a", event=_turn(text="Fresh.")))
+    assert printer.printed == [
+        ("note", "a: One."),
+        ("note", "a: Partial"),
+        ("note", "a: Fresh."),
+    ]
+
+
+def test_worker_with_a_long_unbroken_reply_flushes_before_completion() -> None:
+    draw, printer = _renderer(flush_chars=4)
+    draw(
+        types.ChildEvent(
+            label="a",
+            event=types.ModelResponseTextStreamed(text="12345"),
+        ),
+    )
+    assert printer.printed == [("note", "a: 12345")]
+    draw(types.ChildEvent(label="a", event=_turn(text="123456")))
+    assert printer.printed[-1] == ("note", "a: 6")
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

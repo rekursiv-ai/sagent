@@ -584,8 +584,10 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
     forwarded = [e for e in setup.seen if isinstance(e, types.ChildEvent)]
     assert {e.label for e in forwarded} == {"Agent_0"}
     assert [type(e.event) for e in forwarded] == [
+        types.ModelResponseTextStreamed,
         types.ModelResponseCompleted,
         ToolMessage,
+        types.ModelResponseTextStreamed,
         types.ModelResponseCompleted,
     ]
     # A child's move to another login is the parent's to show too.
