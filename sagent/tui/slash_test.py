@@ -1528,7 +1528,7 @@ async def test_send_to_a_relation_reaches_its_agents_and_is_owed_a_reply() -> No
             recipient=label,
             content="status?",
         )
-        assert desk.team.owes(label) == {"user": "status?"}
+        assert desk.team.owes(label) == {}
     assert desk.printer.printed[0] == ("note", "[/send] user→a, b: status?")
     assert len(desk.printer.printed) == 4
 

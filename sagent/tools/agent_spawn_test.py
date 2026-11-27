@@ -1771,7 +1771,7 @@ async def test_a_reply_owed_at_the_end_is_still_owed_on_resume(tmp_path: Path) -
         setup = _setup(tmp_path, reply("noted"), journal=journal)
         async with setup.team:
             _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "helper"})
-            setup.team.ask("helper", "still there?")
+            _ = setup.team.book("Agent", "helper", "still there?")
 
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
         setup = _setup(tmp_path, journal=journal)
@@ -1779,7 +1779,7 @@ async def test_a_reply_owed_at_the_end_is_still_owed_on_resume(tmp_path: Path) -
         async with setup.team:
             _ = await setup.spawn.resume("Agent")
 
-            assert setup.team.owes("helper") == {"user": "still there?"}
+            assert setup.team.owes("helper") == {"Agent": "still there?"}
 
 
 @pytest.mark.asyncio
