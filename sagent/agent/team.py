@@ -375,7 +375,9 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         for record in self._members[label].agent.session.standing():
             held = {k: v for k, v in record.payload.items() if isinstance(v, str)}
             if record.kind == "owed":
-                self._owed[label] = held
+                held.pop("user", None)
+                if held:
+                    self._owed[label] = held
             elif record.kind == "choices":
                 self.choices[label] = held
 
@@ -575,7 +577,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             del owed[recipient]
             self._book(sender)
             return "reply"
-        if recipient in ("user", sender):
+        if "user" in (sender, recipient) or recipient == sender:
             return "tell"
         self._request(recipient, creditor=sender, content=content)
         return "ask"

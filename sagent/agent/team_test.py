@@ -2534,11 +2534,38 @@ def test_peer_messaging_off_refuses_the_default_relay_both_ways(
     team, relay = _reaching(tmp_path)
     team.relay = relay
     team.set_peer_messaging("Agent", False)
-    with pytest.raises(ValueError, match="disabled"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Cross-session peer messaging is disabled for this agent\.$",
+    ):
         team.send("Agent", recipient="lead#412", content="blocked")
     with pytest.raises(ValueError, match="disabled"):
         team.receive(sender="lead#412", recipient="Agent", content="late", kind=kind)
     assert (relay.sent, _told(team["Agent"]), team.owes("lead#412")) == ([], [], {})
+
+
+def test_a_message_from_the_user_is_owed_no_reply(tmp_path: Path) -> None:
+    team = _family(tmp_path)
+    team.send("user", "a", "status?")
+
+    assert team.owes("a") == {}
+    _idle(team["a"], "all green")
+    assert _nudged(team["a"]) == 0
+
+
+def test_legacy_user_debt_is_dropped_on_restore(tmp_path: Path) -> None:
+    stood = UncategorizedRecord(
+        kind="owed",
+        payload={"user": "old", "Agent": "finish"},
+    )
+    only_user = UncategorizedRecord(kind="owed", payload={"user": "old"})
+    team = _team()
+    _ = team.join(_member(tmp_path))
+    _ = team.join(_member(tmp_path, standing=(stood,)), label="a", parent="Agent")
+    _ = team.join(_member(tmp_path, standing=(only_user,)), label="b", parent="Agent")
+
+    assert team.owes("a") == {"Agent": "finish"}
+    assert team.owes("b") == {}
 
 
 if __name__ == "__main__":
